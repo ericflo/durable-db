@@ -11,8 +11,8 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 # GitHub's published Ed25519 host key is checked into the project.
 cp scripts/github_known_hosts "$tmp/known_hosts"
-export GIT_SSH_COMMAND="ssh -i $tmp/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts -o StrictHostKeyChecking=yes"
-git clone --depth 1 git@github.com:ericflo/durable-db-site.git "$tmp/site"
+export GIT_SSH_COMMAND="ssh -i $tmp/key -o BatchMode=yes -o ConnectTimeout=15 -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts -o StrictHostKeyChecking=yes"
+git clone --depth 1 ssh://git@ssh.github.com:443/ericflo/durable-db-site.git "$tmp/site"
 # Generated docs-only checkout: replace its tracked public files, never source or private plans.
 git -C "$tmp/site" rm -r --ignore-unmatch . >/dev/null
 cp -a "$source_dir/." "$tmp/site/"
