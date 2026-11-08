@@ -3,12 +3,11 @@ use clap::{Parser, Subcommand};
 use durable_db::{
     api::{App, router},
     auth::Auth,
-    b2::native::Native,
     cache::Cache,
     engine::Engine,
-    storage::{Local, Remote, Storage},
+    providers::b2::Native,
+    storage::{Local, Storage},
 };
-use object_store::aws::AmazonS3Builder;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -151,14 +150,7 @@ async fn main() -> anyhow::Result<()> {
                         .context("initialize B2 authority")?,
                 )
             } else if let Some(bucket) = bucket {
-                let s3 = AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket)
-                    .build()?;
-                let remote = Remote::new(Arc::new(s3), &prefix)?;
-                remote.probe().await.context(
-                    "object provider must honor atomic conditional writes and fresh reads",
-                )?;
-                Arc::new(remote)
+                Arc::new(durable_db::providers::s3::S3::connect(&bucket, &prefix).await?)
             } else {
                 let local = Local::open(data.join("store"))?;
                 local.cleanup_temps()?;

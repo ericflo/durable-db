@@ -28,3 +28,12 @@ status=$?
 set -e
 [ "$status" = 12 ] && grep -q 'Invariant ReferencedManifestsExist is violated' "$tools/model-bucket-unsafe.log" || { cat "$tools/model-bucket-unsafe.log"; exit 1; }
 echo 'B2 negative control: missing bucket fence deletes a published manifest.'
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-read" -config ReadBarrier.cfg ReadBarrier.tla > "$tools/model-read.log" 2>&1
+tail -n 9 "$tools/model-read.log"
+set +e
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-read-unsafe" -config UnsafeRead.cfg ReadBarrier.tla > "$tools/model-read-unsafe.log" 2>&1
+status=$?
+set -e
+[ "$status" = 12 ] && grep -q 'Invariant ReadLinearizesAtValidation is violated' "$tools/model-read-unsafe.log" || { cat "$tools/model-read-unsafe.log"; exit 1; }
+echo 'Read negative control: skipping CAS validation returns a stale snapshot.'

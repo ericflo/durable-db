@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use durable_db::{
     Error,
-    b2::{Authority, B2, Bucket},
     cache::Cache,
     engine::*,
+    publication::{Authority, Bucket, Published},
     storage::{Remote, Storage},
 };
 use std::{
@@ -29,31 +29,40 @@ impl Authority for Metadata {
     async fn read(&self) -> anyhow::Result<Bucket> {
         Ok(self.state.lock().await.clone())
     }
-    async fn replace(&self, old: &Bucket, info: BTreeMap<String, String>) -> anyhow::Result<bool> {
-        if self.pause.swap(false, Ordering::SeqCst) {
+    async fn replace(
+        &self,
+        old: &Bucket,
+        info: BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<Bucket>> {
+        let is_publication =
+            info.get("durable-db-read-fence") == old.info.get("durable-db-read-fence");
+        if is_publication && self.pause.swap(false, Ordering::SeqCst) {
             self.paused.notify_one();
             self.resume.notified().await;
         }
         let mut state = self.state.lock().await;
         if state.revision != old.revision {
-            return Ok(false);
+            return Ok(None);
         }
+        let publication =
+            info.get("durable-db-read-fence") == old.info.get("durable-db-read-fence");
         state.revision += 1;
         state.info = info;
-        if self.lost_ack.swap(false, Ordering::SeqCst) {
+        if publication && self.lost_ack.swap(false, Ordering::SeqCst) {
             anyhow::bail!("injected lost response after bucket publication");
         }
-        Ok(true)
+        Ok(Some(state.clone()))
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
         self.files.delete(key).await
     }
 }
-async fn setup() -> (Arc<B2>, Arc<Metadata>) {
+async fn setup() -> (Arc<Published>, Arc<Metadata>) {
     let files =
         Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
     let metadata = Arc::new(Metadata {
         state: Mutex::new(Bucket {
+            version: None,
             revision: 0,
             info: BTreeMap::from([("unrelated".into(), "preserved".into())]),
         }),
@@ -64,11 +73,15 @@ async fn setup() -> (Arc<B2>, Arc<Metadata>) {
         resume: Notify::new(),
     });
     (
-        Arc::new(B2::open(files, metadata.clone(), "test").await.unwrap()),
+        Arc::new(
+            Published::open(files, metadata.clone(), "test")
+                .await
+                .unwrap(),
+        ),
         metadata,
     )
 }
-fn engine(b2: Arc<B2>) -> Engine {
+fn engine(b2: Arc<Published>) -> Engine {
     Engine::new(b2, Arc::new(Cache::new(0, None).unwrap()))
 }
 fn request(revision: u64) -> CommitRequest {
@@ -83,7 +96,7 @@ fn request(revision: u64) -> CommitRequest {
     }
 }
 #[tokio::test]
-async fn native_authority_preserves_metadata_and_fences_cross_database_updates() {
+async fn native_authority_preserves_metadata_and_compares_database_identity() {
     let (b2, metadata) = setup().await;
     assert!(
         b2.cas("heads/a.json", None, Bytes::from_static(b"one"))
@@ -97,24 +110,24 @@ async fn native_authority_preserves_metadata_and_fences_cross_database_updates()
             .unwrap()
     );
     assert!(
-        !b2.cas(
+        b2.cas(
             "heads/a.json",
             Some(&old.version),
-            Bytes::from_static(b"stale")
+            Bytes::from_static(b"two")
         )
         .await
         .unwrap()
     );
     assert_eq!(
         b2.get("heads/a.json", 100).await.unwrap().unwrap().bytes,
-        b"one"[..]
+        b"two"[..]
     );
     assert_eq!(
         metadata.read().await.unwrap().info["unrelated"],
         "preserved"
     );
     assert!(
-        B2::open(metadata.files.clone(), metadata.clone(), "wrong-prefix")
+        Published::open(metadata.files.clone(), metadata.clone(), "wrong-prefix")
             .await
             .is_err()
     );

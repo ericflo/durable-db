@@ -444,6 +444,7 @@ dependencies = [
  "object_store",
  "postcard",
  "proptest",
+ "quick-xml",
  "rand 0.9.5",
  "reqwest",
  "serde",

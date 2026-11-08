@@ -1,8 +1,9 @@
 pub mod api;
 pub mod auth;
-pub mod b2;
 pub mod cache;
 pub mod engine;
+pub mod providers;
+pub mod publication;
 pub mod storage;
 
 use axum::{

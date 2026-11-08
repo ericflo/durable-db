@@ -8,7 +8,7 @@ durable-db is an ordered key-value database written in Rust. Keep authoritative 
 
 | What you get | How it works |
 | --- | --- |
-| Atomic transactions | Immutable sorted pages, published through one conditional manifest write |
+| Atomic transactions | Immutable sorted pages and manifests, published through one conditional directory update |
 | Ordered scans | UTF-8 byte ordering, prefix/range filters, forward/reverse cursors |
 | Disposable servers | Every request reads the authoritative manifest; caches never decide ownership |
 | Local development | One executable, one directory, no additional service |
@@ -55,7 +55,7 @@ Values are base64-encoded arbitrary bytes: `d29ybGQ=` is `world`. Keys are UTF-8
 
 ```text
                   ┌── API pod · bounded cache ──┐
-clients ─ service ├── API pod · bounded cache ──┼── immutable pages + CAS manifest
+clients ─ service ├── API pod · bounded cache ──┼── immutable pages + shared directory
                   └── API pod · bounded cache ──┘          object storage
 ```
 
@@ -68,9 +68,9 @@ durable-db serve --listen 0.0.0.0:7654 --bucket my-private-bucket \
   --admin-key-file /run/secrets/admin.key --memory-cache-mib 64
 ```
 
-S3-compatible providers must guarantee atomic `If-Match`/`If-None-Match` writes and strongly consistent reads. Startup probes these capabilities and refuses to weaken the protocol. **B2 has a native backend:** run with `--b2-bucket NAME` and `B2_APPLICATION_KEY_ID` / `B2_APPLICATION_KEY`. It publishes immutable manifests through revision-checked bucket metadata (`ifRevisionIs`) and physically deletes obsolete file versions. The initial format supports at most 32 databases per dedicated bucket. Cloud qualification is pending; see [B2 design and limits](docs/b2.md).
+S3-compatible providers must guarantee atomic `If-Match`/`If-None-Match` writes and strongly consistent reads. Startup probes these capabilities and refuses to weaken the protocol. **B2 and S3 use one publication implementation.** For B2, run with `--b2-bucket NAME` and `B2_APPLICATION_KEY_ID` / `B2_APPLICATION_KEY`. It publishes immutable manifests through revision-checked bucket metadata (`ifRevisionIs`) and physically deletes obsolete file versions. The initial format supports at most 32 databases per dedicated bucket. Initial real-B2 and versioned/unversioned S3-compatible tests pass; broader cloud qualification continues; see [B2 design and limits](docs/b2.md).
 
-Autoscaling improves aggregate capacity across databases. Writes to one database serialize at its manifest. Object-store round trips set the write-latency floor; this is not an in-memory database with asynchronous backup. The initial format also caps a database at 256 MiB and 2,048 pages. [Limits and semantics](docs/api.md).
+Autoscaling improves aggregate capacity across databases. Directory publication serializes within a bucket. Object-store round trips set the write-latency floor; this is not an in-memory database with asynchronous backup. The common directory supports at most 32 databases and 9,000 metadata bytes. The initial format also caps a database at 256 MiB and 2,048 pages. [Limits and semantics](docs/api.md).
 
 ## Read more
 

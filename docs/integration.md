@@ -16,7 +16,7 @@ The intended host is the NeuralColumn API, with one or more database IDs associa
 
 ## Decisions still required
 
-- The existing platform uses B2. B2 is a required authority, using native bucket revision publication rather than S3 conditional file overwrites. Complete the model, implementation, and cloud qualification described in [the B2 design](b2.md) before platform rollout.
+- The existing platform uses B2. B2 is a required authority, using native bucket revision publication rather than S3 conditional file overwrites. The common B2/S3 protocol has passed its initial real-B2 test; complete scaling, abuse, and soak qualification before platform rollout. See [the B2 design](b2.md).
 - Pi Session execution has one owner even though database API pods are interchangeable. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
 - Browser identity, CORS, individual-user row authorization, and billing belong to the gateway. Per-database scoped credentials alone do not provide row-level access control.
 - The reference Pi adapter validates semantics but needs replacement with the indexed adapter before production onboarding.

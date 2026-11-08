@@ -1,5 +1,5 @@
 //! B2 native metadata and physical version deletion; S3 API carries immutable bytes.
-use super::{Authority, B2, Bucket};
+use crate::publication::{Authority, Bucket, Published};
 use crate::storage::Remote;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
@@ -43,7 +43,7 @@ pub struct Native {
     prefix: String,
 }
 impl Native {
-    pub async fn connect(bucket_name: &str, prefix: &str) -> anyhow::Result<B2> {
+    pub async fn connect(bucket_name: &str, prefix: &str) -> anyhow::Result<Published> {
         let key_id =
             std::env::var("B2_APPLICATION_KEY_ID").context("B2_APPLICATION_KEY_ID is required")?;
         let application_key =
@@ -121,14 +121,33 @@ impl Native {
             bucket_id,
             prefix: format!("{prefix}/"),
         });
-        // Exercise the real native precondition. A concurrent startup may win instead.
-        let before = native.read().await?;
-        let mut info = before.info.clone();
-        info.insert("durable-db-probe".into(), uuid::Uuid::new_v4().to_string());
-        if native.replace(&before, info.clone()).await? && native.replace(&before, info).await? {
-            bail!("B2 provider ignored bucket revision precondition");
+        Published::open(files, native, prefix).await
+    }
+    async fn update(
+        &self,
+        old: &Bucket,
+        info: BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<Bucket>> {
+        let account = self.auth.read().await.account_id.clone();
+        let (status, body) = self.call("b2_update_bucket", &json!({"accountId":account,"bucketId":self.bucket_id,"ifRevisionIs":old.revision,"bucketInfo":info})).await?;
+        if status == StatusCode::CONFLICT && body["code"] == "conflict" {
+            return Ok(None);
         }
-        B2::open(files, native, prefix).await
+        ensure_success(status, &body)?;
+        let revision = body["revision"].as_u64().context("missing B2 revision")?;
+        if revision <= old.revision {
+            bail!("B2 bucket revision did not advance");
+        }
+        let returned: BTreeMap<String, String> =
+            serde_json::from_value(body["bucketInfo"].clone())?;
+        if returned != info {
+            bail!("B2 publication response differs from requested metadata");
+        }
+        Ok(Some(Bucket {
+            version: None,
+            revision,
+            info: returned,
+        }))
     }
     async fn call(&self, operation: &str, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
         for attempt in 0..2 {
@@ -207,21 +226,17 @@ impl Authority for Native {
             .context("B2 bucket unavailable")?[0]
             .clone();
         Ok(Bucket {
+            version: None,
             revision: b["revision"].as_u64().context("missing bucket revision")?,
             info: serde_json::from_value(b["bucketInfo"].clone())?,
         })
     }
-    async fn replace(&self, old: &Bucket, info: BTreeMap<String, String>) -> anyhow::Result<bool> {
-        let account = self.auth.read().await.account_id.clone();
-        let (status,body)=self.call("b2_update_bucket",&json!({"accountId":account,"bucketId":self.bucket_id,"ifRevisionIs":old.revision,"bucketInfo":info})).await?;
-        if status == StatusCode::CONFLICT && body["code"] == "conflict" {
-            return Ok(false);
-        }
-        ensure_success(status, &body)?;
-        if body["revision"].as_u64().is_none_or(|r| r <= old.revision) {
-            bail!("B2 bucket revision did not advance");
-        }
-        Ok(true)
+    async fn replace(
+        &self,
+        old: &Bucket,
+        info: BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<Bucket>> {
+        self.update(old, info).await
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
         if !key.starts_with("blocks/") && !key.starts_with("manifests/") {
@@ -254,5 +269,115 @@ impl Authority for Native {
         }
         // If a pathological number of duplicate versions remains, later sweeps repeat safely.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, extract::State, routing::post};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct Mock {
+        stale: AtomicBool,
+        bucket: Mutex<Bucket>,
+        deleted: Mutex<Vec<String>>,
+    }
+    async fn listing(State(s): State<Arc<Mock>>) -> Json<Value> {
+        let b = s.bucket.lock().unwrap();
+        if s.stale.swap(false, Ordering::SeqCst) {
+            return Json(json!({"buckets":[{"revision":0,"bucketInfo":{"head":"obsolete"}}]}));
+        }
+        Json(json!({"buckets":[{"revision":b.revision,"bucketInfo":b.info}]}))
+    }
+    async fn update(State(s): State<Arc<Mock>>, Json(v): Json<Value>) -> (StatusCode, Json<Value>) {
+        assert_eq!(v["bucketId"], "test-bucket");
+        assert!(v.get("bucketType").is_none() && v.get("lifecycleRules").is_none());
+        let mut b = s.bucket.lock().unwrap();
+        if v["ifRevisionIs"] != b.revision {
+            return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
+        }
+        b.revision += 1;
+        b.info = serde_json::from_value(v["bucketInfo"].clone()).unwrap();
+        (
+            StatusCode::OK,
+            Json(json!({"revision":b.revision,"bucketInfo":b.info})),
+        )
+    }
+    async fn versions(Json(v): Json<Value>) -> Json<Value> {
+        assert_eq!(v["prefix"], "test/blocks/one");
+        Json(
+            json!({"files":[{"fileName":"test/blocks/one","fileId":"v1"},{"fileName":"test/blocks/one","fileId":"v2"},{"fileName":"test/blocks/one-other","fileId":"keep"}]}),
+        )
+    }
+    async fn delete(State(s): State<Arc<Mock>>, Json(v): Json<Value>) -> Json<Value> {
+        s.deleted
+            .lock()
+            .unwrap()
+            .push(v["fileId"].as_str().unwrap().to_owned());
+        Json(v)
+    }
+    #[tokio::test]
+    async fn native_http_barrier_rejects_stale_observation_and_deletes_exact_versions() {
+        let state = Arc::new(Mock {
+            stale: AtomicBool::new(true),
+            bucket: Mutex::new(Bucket {
+                version: None,
+                revision: 1,
+                info: BTreeMap::from([("head".into(), "current".into())]),
+            }),
+            deleted: Mutex::new(vec![]),
+        });
+        let app = Router::new()
+            .route("/b2api/v4/b2_list_buckets", post(listing))
+            .route("/b2api/v4/b2_update_bucket", post(update))
+            .route("/b2api/v4/b2_list_file_versions", post(versions))
+            .route("/b2api/v4/b2_delete_file_version", post(delete))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let native = Native {
+            client: Client::new(),
+            key_id: "test".into(),
+            application_key: "test".into(),
+            bucket_id: "test-bucket".into(),
+            prefix: "test/".into(),
+            auth: RwLock::new(Authorization {
+                account_id: "account".into(),
+                authorization_token: "token".into(),
+                api_info: ApiInfo {
+                    storage_api: StorageApi {
+                        api_url: format!("http://{address}"),
+                        s3_api_url: String::new(),
+                        allowed: Allowed {
+                            capabilities: vec![],
+                        },
+                    },
+                },
+            }),
+        };
+        let read = native.read_fresh().await.unwrap();
+        assert_eq!(read.revision, 2);
+        assert_eq!(read.info["head"], "current");
+        assert!(
+            native
+                .replace(
+                    &Bucket {
+                        version: None,
+                        revision: 0,
+                        info: BTreeMap::new()
+                    },
+                    BTreeMap::new()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        native.delete_versions("blocks/one").await.unwrap();
+        assert_eq!(*state.deleted.lock().unwrap(), vec!["v1", "v2"]);
+        server.abort();
     }
 }

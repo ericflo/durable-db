@@ -63,11 +63,13 @@ Scale(n) ==
 Partition(n) ==
   /\ connected' = IF n \in connected THEN connected \ {n} ELSE connected \cup {n}
   /\ UNCHANGED <<revision, heads, files, issued, online, writer, collector>>
-Next == \E n \in Nodes:
+ReadBarrier == /\ revision < MaxRevision /\ revision' = revision + 1
+               /\ UNCHANGED <<heads, files, issued, online, connected, writer, collector>>
+Next == ReadBarrier \/ (\E n \in Nodes:
   \/ (\E d \in Databases, a \in Attempts: Begin(n,d,a))
   \/ Upload(n) \/ Publish(n) \/ Abort(n) \/ List(n) \/ Read(n) \/ Fence(n)
   \/ (\E a \in Attempts \cup {0}: Delete(n,a))
-  \/ Finish(n) \/ Scale(n) \/ Partition(n)
+  \/ Finish(n) \/ Scale(n) \/ Partition(n))
 TypeOK == /\ revision \in 0..MaxRevision /\ heads \in [Databases -> Attempts \cup {0}]
           /\ files \subseteq Attempts \cup {0}
 ReferencedManifestsExist == {heads[d]: d \in Databases} \subseteq files

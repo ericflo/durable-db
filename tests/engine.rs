@@ -401,3 +401,72 @@ proptest::proptest! {
         });
     }
 }
+
+#[tokio::test]
+async fn compaction_preserves_logical_revision_and_snapshot_contents() {
+    let engine = Engine::new(remote(), cache());
+    engine.create("test", Limits::default()).await.unwrap();
+    let writes = (0..80)
+        .map(|n| Write {
+            key: format!("k{n:03}"),
+            value: Some(STANDARD.encode(vec![7; 4096])),
+        })
+        .collect();
+    engine
+        .commit(
+            "test",
+            &CommitRequest {
+                expected_revision: 0,
+                request_id: "seed".into(),
+                checks: vec![],
+                writes,
+            },
+        )
+        .await
+        .unwrap();
+    let writes = (0..80)
+        .filter(|n| n % 12 != 0)
+        .map(|n| Write {
+            key: format!("k{n:03}"),
+            value: None,
+        })
+        .collect();
+    engine
+        .commit(
+            "test",
+            &CommitRequest {
+                expected_revision: 1,
+                request_id: "shrink".into(),
+                checks: vec![],
+                writes,
+            },
+        )
+        .await
+        .unwrap();
+    let before = engine.info("test").await.unwrap();
+    assert!(before.pages > 1);
+    let req = ReadRequest {
+        scans: vec![Scan {
+            limit: 100,
+            prefix: String::new(),
+            start: None,
+            end: None,
+            after: None,
+            reverse: false,
+        }],
+        ..Default::default()
+    };
+    let snapshot = serde_json::to_value(engine.read("test", &req).await.unwrap()).unwrap();
+    for _ in 0..8 {
+        engine.compact("test").await.unwrap();
+    }
+    engine.gc("test").await.unwrap();
+    let after = engine.info("test").await.unwrap();
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.bytes, after.bytes);
+    assert_eq!(after.pages, 1);
+    assert_eq!(
+        snapshot,
+        serde_json::to_value(engine.read("test", &req).await.unwrap()).unwrap()
+    );
+}

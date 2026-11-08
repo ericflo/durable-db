@@ -354,6 +354,16 @@ impl Engine {
                 };
                 result.scans.push(ScanResult { items, next });
             }
+            // Escaped JSON keys and framing also consume the response budget.
+            if serde_json::to_vec(&result)
+                .context("serialize read response")?
+                .len()
+                > MAX_RESULT
+            {
+                return Err(Error::Limit(
+                    "encoded read result exceeds 1 MiB; reduce scan limit".into(),
+                ));
+            }
             return Ok(result);
         }
         Err(Error::Storage(anyhow::anyhow!(

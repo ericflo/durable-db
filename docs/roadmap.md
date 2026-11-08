@@ -2,7 +2,7 @@
 
 ## Initial experimental release — in progress
 
-Required B2 native backend with modeled revision publication and version-aware reclamation. Working single-node local service; S3 CAS backend with compatibility probe; ordered pages and atomic revision-checked writes; bounded caches; signed scoped credentials; logical quotas and admission limits; automatic fenced collection and incremental compaction; a checked TLA+ model with a negative control; Woodpecker CI; a public documentation site; and a bounded Pi reference adapter.
+One shared publication implementation on B2 and S3, with modeled conditional publication and version-aware reclamation. Working single-node local service; S3 CAS backend with compatibility probe; ordered pages and atomic revision-checked writes; bounded caches; signed scoped credentials; logical quotas and admission limits; automatic fenced collection and incremental compaction; a checked TLA+ model with a negative control; Woodpecker CI; a public documentation site; and a bounded Pi reference adapter.
 
 ## Before a hosted preview
 
