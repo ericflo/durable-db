@@ -41,7 +41,7 @@ Cluster mode requires fresh, strongly consistent GET, atomic conditional create 
 
 The startup probe checks create-if-absent, a successful conditional update, rejection of a stale ETag, and fresh reads. A probe cannot prove a provider's behavior under every failure; the documented provider contract remains an assumption.
 
-B2 uses a different authority primitive: native `b2_update_bucket` with `ifRevisionIs`, publishing pointers to immutable manifests through bucket metadata. This required backend is being implemented and modeled separately; see [B2 design](b2.md). It must not emulate CAS with a pod-local mutex. [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
+B2 uses a different authority primitive: native `b2_update_bucket` with `ifRevisionIs`, publishing pointers to immutable manifests through bucket metadata. This backend is implemented with a separate bounded model and fault tests; real-provider qualification is pending; see [B2 design](b2.md). It must not emulate CAS with a pod-local mutex. [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html).
 
 Use a dedicated unversioned bucket, or configure expiration of noncurrent versions and delete markers. Ordinary DELETE on a versioned bucket does not reclaim all billed bytes. Object lock and external retention rules can also prevent reclamation. The service must not share a prefix with unrelated writers.
 

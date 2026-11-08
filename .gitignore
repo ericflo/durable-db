@@ -9,3 +9,7 @@
 .env
 node_modules/
 ..kache.toml.lock
+
+/.site/
+
+/.artifacts/

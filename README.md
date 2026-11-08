@@ -81,6 +81,7 @@ Autoscaling improves aggregate capacity across databases. Writes to one database
 - [Formal model and verification evidence](docs/verification.md)
 - [Client and pi-durable integration](docs/clients.md)
 - [Development and Woodpecker CI](docs/development.md)
+- [Public documentation website](https://ericflo.github.io/durable-db-site/)
 - [Roadmap and release gates](docs/roadmap.md)
 
 ## Build and test
@@ -97,4 +98,4 @@ scripts/check-model.sh             # Java 11+; checksum-pinned TLC
 cd clients/javascript && npm ci && npm test # HTTP conformance requires test server env
 ```
 
-CI, release builds, and documentation publication are being configured in **Woodpecker**. No GitHub Actions workflows are used. Apache-2.0 licensed. Contributions will open when the repository becomes public.
+CI, static binary builds, container builds, and documentation publication use **Woodpecker**. No GitHub Actions workflows are used. Apache-2.0 licensed. Contributions will open when the repository becomes public.

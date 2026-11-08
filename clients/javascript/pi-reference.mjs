@@ -71,6 +71,7 @@ export async function openReferencePiStorage(client, { prefix = "pi/", maxLogByt
   const methods = {
     async mintId() { await pending; assertOpen(); const id=await memory.mintId(); maxMint=Math.max(maxMint,id); return id; },
     commit(batches,receive,ctx) {
+      batches=structuredClone(batches);
       const operation=pending.then(async () => {
         assertOpen();
         const staged=await reconstruct();

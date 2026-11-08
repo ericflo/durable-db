@@ -11,6 +11,8 @@ Results are for the initial development checkout on 2026-11-08. Exact final comm
 | B2 adapter fault tests | Five tests passed, including both collectors, metadata preservation, slot admission, and lost response recovery |
 | Unsafe collector negative control | Counterexample found: publish then delete a formerly unreferenced object |
 | Rust engine/HTTP initial suite | 10 tests passed, including 24 randomized reference-map cases |
+| pi-durable 1.5.0 reference adapter | All 32 upstream storage conformance tests passed over HTTP (65 seconds) |
+| Documentation site | Desktop/mobile rendering, no mobile overflow, 0→6 pod illustration controls passed |
 | Real S3-compatible endpoint | Disposable MinIO: conditional writes, retry receipts, collection, and cache-free reopen passed |
 
-The real B2 cloud test, compaction tests, client conformance, process scaling test, formatting/lint gate, and build artifact checks are tracked during development. No cloud latency numbers or Kubernetes production qualification are claimed from local tests.
+The real B2 cloud test, compaction tests, process scaling test, formatting/lint gate, and build artifact checks are tracked during development. No cloud latency numbers or Kubernetes production qualification are claimed from local tests.

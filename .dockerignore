@@ -1,0 +1,13 @@
+.git
+.tools
+.site
+.artifacts
+target
+node_modules
+**/node_modules
+..kache.toml.lock
+data
+.env
+*.log
+spec/states
+spec/*_TTrace_*
