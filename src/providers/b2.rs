@@ -205,6 +205,7 @@ async fn json_response(mut response: reqwest::Response) -> anyhow::Result<(Statu
 fn ensure_success(status: StatusCode, _body: &Value) -> anyhow::Result<()> {
     // Never print provider messages: they can contain sensitive names or request material.
     if !status.is_success() {
+        tracing::warn!(status = status.as_u16(), "B2 native API request rejected");
         bail!("B2 API returned HTTP {}", status.as_u16());
     }
     Ok(())

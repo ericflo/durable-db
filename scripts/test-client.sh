@@ -20,6 +20,7 @@ cd "$repo/clients/javascript"
 npm ci --no-audit --no-fund
 npm test
 cd "$repo"
+node scripts/test-benchmark.mjs
 node scripts/benchmark-http.mjs --urls "$DURABLE_DB_TEST_URL" \
   --token-file "$DURABLE_DB_TEST_TOKEN_FILE" --databases 4 --workers 1,4 --operations 4 \
   --binary "$binary" --output "$tmp/benchmark.json" \

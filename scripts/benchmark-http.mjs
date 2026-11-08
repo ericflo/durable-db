@@ -42,7 +42,8 @@ const report = {
     'Closed-loop load does not measure queue growth at a fixed arrival rate.',
     'Provider request counts, billed storage, and cost are not measured.',
     'Setup is excluded; retries, backoff, and failed operations are included in each measured phase.'],
-  setup:{databases_created:0,attempt_statuses:{}},phases:[],verification:{checked:0,failed:0},complete:false,
+  setup:{databases_created:0,attempt_statuses:{}},phases:[],
+  verification:{checked:0,failed:0,uncertain_write_observed:0,uncertain_write_not_observed:0},complete:false,
 };
 async function save() {
   await writeFile(args.output+'.tmp', JSON.stringify(report,null,2)+'\n');
@@ -79,7 +80,10 @@ async function request(url, path, token, body, counts, method='POST') {
     // A single worker owns each database; 409 is publication contention here.
     // Ambiguous writes retry the EXACT same revision, ID, and body.
     if (status && ![409,429,503].includes(status)) throw Error('nonretryable_http_'+status);
-    if (attempt<11) await sleep(Math.min(1000,50*2**attempt)*(0.5+Math.random()/2));
+    const delay=Math.min(1000,50*2**attempt)*(0.5+Math.random()/2);
+    const left=120_000-(performance.now()-started);
+    if (left<=0) break;
+    if (attempt<11) await sleep(Math.min(left,delay));
   }
   throw Error('retry_budget_exhausted');
 }
@@ -104,7 +108,8 @@ try {
     if ((n+1)%10===0) { console.log(JSON.stringify({setup_databases:n+1})); await save(); }
   }
   await save();
-  for (const concurrency of workers) {
+  let phaseFailed=false;
+  phases: for (const concurrency of workers) {
     for (const mode of ['write','read']) {
       const phase={mode,workers:concurrency,planned:concurrency*operations,started:0,succeeded:0,failed:0,
         attempt_statuses:{},failure_reasons:{},samples:[]};
@@ -119,10 +124,12 @@ try {
             const url=urls[(worker+n)%urls.length];
             if (mode==='write') {
               const value=payload(worker,db.revision);
+              db.pending={revision:db.revision+1,value};
               const r=await request(url,`/v1/databases/${db.name}/commit`,db.token,
                 {expected_revision:db.revision,request_id:randomUUID(),writes:[{key:'value',value}]},phase.attempt_statuses);
               if (r.revision!==db.revision+1) throw Error('incorrect_write_revision');
               db.revision=r.revision; db.value=value;
+              delete db.pending;
             } else {
               const r=await request(url,`/v1/databases/${db.name}/read`,db.token,{keys:['value']},phase.attempt_statuses);
               if (r.revision!==db.revision || r.values[0]!==db.value) throw Error('incorrect_read');
@@ -144,7 +151,7 @@ try {
       report.phases.push(phase);
       const {samples,...summary}=phase;
       console.log(JSON.stringify(summary)); await save();
-      if (phase.failed) throw Error('phase_failed');
+      if (phase.failed) { phaseFailed=true; break phases; }
     }
   }
   // Check every seeded database, including the idle population. Read through all endpoints.
@@ -152,9 +159,14 @@ try {
     const db=databases[n];
     const r=await request(urls[n%urls.length],`/v1/databases/${db.name}/read`,db.token,{keys:['value']},{});
     report.verification.checked++;
-    if (r.revision!==db.revision || r.values[0]!==db.value) report.verification.failed++;
+    if (r.revision===db.revision && r.values[0]===db.value) {
+      if (db.pending) report.verification.uncertain_write_not_observed++;
+    } else if (db.pending && r.revision===db.pending.revision && r.values[0]===db.pending.value) {
+      report.verification.uncertain_write_observed++;
+    } else report.verification.failed++;
   }
   if (report.verification.failed) throw Error('final_verification_failed');
+  if (phaseFailed) throw Error('phase_failed');
   report.complete=true;
 } catch (error) {
   // Messages are generated above; no HTTP bodies, credentials, or database payloads are logged.

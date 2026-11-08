@@ -25,6 +25,7 @@ COPY examples examples
 COPY clients clients
 COPY scripts/test-client.sh scripts/test-client.sh
 COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
+COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \

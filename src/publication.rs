@@ -40,6 +40,7 @@ pub trait Authority: Send + Sync {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
         }
+        tracing::warn!("publication read barrier contention budget exceeded");
         bail!("publication read barrier contention budget exceeded")
     }
     /// None only for a definite comparison mismatch. Errors may have committed.
