@@ -1,0 +1,11 @@
+/target/
+/.tools/
+/data/
+/.cache/
+/spec/states/
+/spec/*_TTrace_*
+/spec/*.out
+*.log
+.env
+node_modules/
+..kache.toml.lock

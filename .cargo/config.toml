@@ -1,0 +1,5 @@
+[build]
+rustc-wrapper = "kache"
+
+[env]
+CARGO_INCREMENTAL = "0"
