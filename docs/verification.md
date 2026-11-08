@@ -46,3 +46,9 @@ The JavaScript adapter runs Pi 1.5.0's own storage conformance suite over the HT
 - Independent security review and strict cluster-wide physical-storage/spend admission.
 
 The repository must keep these limitations visible until the corresponding evidence exists. “Proven in all situations” is not an accurate description of this initial release.
+
+## B2 authority refinement
+
+`Bucket.tla` models the immutable manifest layer selected by bucket metadata. `b2::B2::cas` implements Upload→Publish; `collect_manifests` implements List→Read→Fence→Delete. Native `ifRevisionIs` must implement atomic revision comparison; bucket reads must be fresh. Physical file deletion removes versions, not markers. A successful head read supplies both manifest identity and bucket revision to the engine. A bucket revision conflict is safe even when another database caused it.
+
+The five B2 adapter tests exercise injected revision authority, paused publication, lost acknowledgments, two-layer collection, empty-cache recovery, and bounded metadata admission. Real-provider qualification and a mechanized composition proof remain separate obligations.

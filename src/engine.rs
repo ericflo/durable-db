@@ -165,6 +165,10 @@ impl Engine {
     pub fn new(storage: Arc<dyn Storage>, cache: Arc<Cache>) -> Self {
         Self { storage, cache }
     }
+    pub async fn maintain_storage(&self) -> Result<()> {
+        self.storage.maintenance().await?;
+        Ok(())
+    }
     pub fn cache(&self) -> &Cache {
         &self.cache
     }

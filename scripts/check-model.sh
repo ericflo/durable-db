@@ -19,3 +19,12 @@ status=$?
 set -e
 [ "$status" = 12 ] && grep -q 'Invariant ReferencedObjectsExist is violated' "$tools/model-unsafe.log" || { cat "$tools/model-unsafe.log"; echo 'Negative control did not produce the expected counterexample' >&2; exit 1; }
 echo 'Negative control: missing collection fence produces the expected counterexample.'
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx2g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-bucket" -config Bucket.cfg Bucket.tla > "$tools/model-bucket.log" 2>&1
+tail -n 9 "$tools/model-bucket.log"
+set +e
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-bucket-unsafe" -config UnsafeBucket.cfg Bucket.tla > "$tools/model-bucket-unsafe.log" 2>&1
+status=$?
+set -e
+[ "$status" = 12 ] && grep -q 'Invariant ReferencedManifestsExist is violated' "$tools/model-bucket-unsafe.log" || { cat "$tools/model-bucket-unsafe.log"; exit 1; }
+echo 'B2 negative control: missing bucket fence deletes a published manifest.'

@@ -18,6 +18,9 @@ pub struct Object {
 
 #[async_trait]
 pub trait Storage: Send + Sync {
+    async fn maintenance(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn get(&self, key: &str, max_bytes: usize) -> anyhow::Result<Option<Object>>;
     /// None means create-if-absent. False is a definite conflict, Err is possibly ambiguous.
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool>;

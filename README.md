@@ -68,7 +68,7 @@ durable-db serve --listen 0.0.0.0:7654 --bucket my-private-bucket \
   --admin-key-file /run/secrets/admin.key --memory-cache-mib 64
 ```
 
-S3-compatible providers must guarantee atomic `If-Match`/`If-None-Match` writes and strongly consistent reads. Startup probes these capabilities and refuses to weaken the protocol. **B2 is a required backend and is under active implementation.** Its native bucket revision update (`ifRevisionIs`) offers a separate publication primitive; the B2 design will use immutable objects plus revision-checked bucket metadata, rather than assume S3 conditional overwrite support. The current executable supports local directories and S3. See [B2 design](docs/b2.md).
+S3-compatible providers must guarantee atomic `If-Match`/`If-None-Match` writes and strongly consistent reads. Startup probes these capabilities and refuses to weaken the protocol. **B2 has a native backend:** run with `--b2-bucket NAME` and `B2_APPLICATION_KEY_ID` / `B2_APPLICATION_KEY`. It publishes immutable manifests through revision-checked bucket metadata (`ifRevisionIs`) and physically deletes obsolete file versions. The initial format supports at most 32 databases per dedicated bucket. Cloud qualification is pending; see [B2 design and limits](docs/b2.md).
 
 Autoscaling improves aggregate capacity across databases. Writes to one database serialize at its manifest. Object-store round trips set the write-latency floor; this is not an in-memory database with asynchronous backup. The initial format also caps a database at 256 MiB and 2,048 pages. [Limits and semantics](docs/api.md).
 

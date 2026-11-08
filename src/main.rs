@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use durable_db::{
     api::{App, router},
     auth::Auth,
+    b2::native::Native,
     cache::Cache,
     engine::Engine,
     storage::{Local, Remote, Storage},
@@ -26,7 +27,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Start a local development database or a stateless S3-backed server.
+    /// Start a local development database or a stateless B2/S3-backed server.
     Serve {
         #[arg(long, default_value = "127.0.0.1:7654", env = "DURABLE_DB_LISTEN")]
         listen: SocketAddr,
@@ -34,6 +35,9 @@ enum Command {
         data: PathBuf,
         #[arg(long, env = "DURABLE_DB_BUCKET")]
         bucket: Option<String>,
+        /// Use B2 native bucket revision publication with B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY.
+        #[arg(long, env = "DURABLE_DB_B2_BUCKET", conflicts_with = "bucket")]
+        b2_bucket: Option<String>,
         #[arg(long, default_value = "durable-db", env = "DURABLE_DB_PREFIX")]
         prefix: String,
         #[arg(long, env = "DURABLE_DB_ADMIN_KEY_FILE")]
@@ -107,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
             listen,
             data,
             bucket,
+            b2_bucket,
             prefix,
             admin_key_file,
             memory_cache_mib,
@@ -123,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 bail!("invalid resource configuration");
             }
-            let cluster = bucket.is_some();
+            let cluster = bucket.is_some() || b2_bucket.is_some();
             let key_file = match admin_key_file {
                 Some(p) => p,
                 None if cluster => bail!(
@@ -139,7 +144,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let auth = Auth::new(&std::fs::read_to_string(&key_file).context("read signing key")?)?;
-            let storage: Arc<dyn Storage> = if let Some(bucket) = bucket {
+            let storage: Arc<dyn Storage> = if let Some(bucket) = b2_bucket {
+                Arc::new(
+                    Native::connect(&bucket, &prefix)
+                        .await
+                        .context("initialize B2 authority")?,
+                )
+            } else if let Some(bucket) = bucket {
                 let s3 = AmazonS3Builder::from_env()
                     .with_bucket_name(bucket)
                     .build()?;
@@ -204,6 +215,9 @@ async fn maintain(app: Arc<App>, seconds: u64) {
         let Ok(_permit) = app.permits.clone().try_acquire_owned() else {
             continue;
         };
+        if app.engine.maintain_storage().await.is_err() {
+            tracing::warn!("provider maintenance deferred; will retry on a later sweep");
+        }
         match app.engine.databases(after.as_deref()).await {
             Ok(dbs) => {
                 after = if dbs.len() == 64 {
