@@ -1,5 +1,9 @@
 //! Shared immutable-manifest publication protocol for B2 and S3.
-use crate::storage::{Object, Storage, Version};
+use crate::{
+    cache::Cache,
+    directory::{Directory, MissingNode, Pointer, Root, witness},
+    storage::{Object, Storage, Version},
+};
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -9,9 +13,9 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 
-const HEAD: &str = "durable-db-heads";
+const HEAD: &str = "durable-db-root";
 const CURSOR: &str = "durable-db-gc";
-const MAX_HEADS: usize = 32;
+const INDEX_CURSOR: &str = "durable-db-index-gc";
 const MAX_INFO: usize = 9000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,16 +54,11 @@ pub trait Authority: Send + Sync {
     /// Delete physical versions, not a hide marker.
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()>;
 }
-#[derive(Serialize, Deserialize)]
-struct Pointer {
-    key: String,
-    sha256: String,
-}
-/// One dedicated bucket per cluster, at most 32 databases in the initial format.
-/// The bounded slots avoid an extra mutable index and preserve unrelated metadata.
+/// One shared publication protocol with a persistent, paginated database directory.
 pub struct Published {
     files: Arc<dyn Storage>,
     authority: Arc<dyn Authority>,
+    directory: Directory,
 }
 impl Published {
     pub async fn open(
@@ -82,12 +81,16 @@ impl Published {
         for _ in 0..8 {
             let bucket = authority.read().await?;
             if let Some(format) = bucket.info.get("durable-db-format") {
-                if format != "2"
+                if format != "3"
                     || bucket.info.get("durable-db-prefix").map(String::as_str) != Some(prefix)
                 {
                     bail!("publication directory is initialized with a different format or prefix");
                 }
-                return Ok(Self { files, authority });
+                return Ok(Self {
+                    directory: Directory::new(files.clone()),
+                    files,
+                    authority,
+                });
             }
             if bucket
                 .info
@@ -97,48 +100,66 @@ impl Published {
                 bail!("unrecognized durable-db bucket metadata");
             }
             let mut info = bucket.info.clone();
-            info.insert("durable-db-format".into(), "2".into());
+            info.insert("durable-db-format".into(), "3".into());
             info.insert("durable-db-prefix".into(), prefix.into());
             budget(&info)?;
             if authority.replace(&bucket, info).await?.is_some() {
-                return Ok(Self { files, authority });
+                return Ok(Self {
+                    directory: Directory::new(files.clone()),
+                    files,
+                    authority,
+                });
             }
         }
         bail!("publication directory initialization is contended; retry startup")
     }
-    /// List first, then fence the complete bucket pointer set before deleting any manifest.
+    /// Shares the engine's bounded cache; no extra unaccounted index cache.
+    pub fn with_cache(mut self, cache: Arc<Cache>) -> Self {
+        self.directory = self.directory.with_cache(cache);
+        self
+    }
+    /// List before fencing. Test membership using bounded paths, never a full scan.
+    /// Returns manifests removed; obsolete directory pages are collected as well.
     pub async fn collect_manifests(&self) -> anyhow::Result<usize> {
         let before = self.authority.read().await?;
-        let after = before
-            .info
-            .get(CURSOR)
-            .filter(|v| !v.is_empty())
-            .map(String::as_str);
-        let candidates = self.files.list("manifests/", after, 128).await?;
+        let manifests = self
+            .files
+            .list("manifests/", cursor(&before, CURSOR), 128)
+            .await?;
+        let indexes = self
+            .files
+            .list("indexes/", cursor(&before, INDEX_CURSOR), 128)
+            .await?;
         let current = self.authority.read().await?;
-        let protected: Vec<String> = heads(&current.info)?
-            .values()
-            .map(|v| parse_pointer(v).map(|p| p.key))
-            .collect::<anyhow::Result<_>>()?;
+        let protected = root(&current.info)?;
         let mut info = current.info.clone();
-        info.insert(
-            CURSOR.into(),
-            if candidates.len() == 128 {
-                candidates.last().unwrap().clone()
-            } else {
-                String::new()
-            },
-        );
+        for (field, candidates) in [(CURSOR, &manifests), (INDEX_CURSOR, &indexes)] {
+            info.insert(
+                field.into(),
+                if candidates.len() == 128 {
+                    candidates.last().unwrap().clone()
+                } else {
+                    String::new()
+                },
+            );
+        }
         info.insert("durable-db-fence".into(), Uuid::new_v4().to_string());
         budget(&info)?;
         if self.authority.replace(&current, info).await?.is_none() {
             return Ok(0);
         }
         let mut deleted = 0;
-        for key in candidates {
-            if !protected.contains(&key) {
+        for key in manifests {
+            let db = witness(&key, "manifests/")?;
+            let pointer = self.directory.get(protected.as_ref(), db).await?;
+            if pointer.is_none_or(|p| p.key != key) {
                 self.authority.delete_versions(&key).await?;
                 deleted += 1;
+            }
+        }
+        for key in indexes {
+            if !self.directory.reachable(protected.as_ref(), &key).await? {
+                self.authority.delete_versions(&key).await?;
             }
         }
         Ok(deleted)
@@ -152,34 +173,42 @@ fn slot(key: &str) -> anyhow::Result<String> {
     crate::engine::validate_db(db)?;
     Ok(db.to_owned())
 }
-fn heads(info: &BTreeMap<String, String>) -> anyhow::Result<BTreeMap<String, String>> {
-    match info.get(HEAD) {
-        Some(value) => Ok(serde_json::from_str(value)?),
-        None => Ok(BTreeMap::new()),
-    }
+fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
+    info.get(HEAD)
+        .map(|value| {
+            let root: Root = serde_json::from_str(value)?;
+            root.validate()?;
+            Ok(root)
+        })
+        .transpose()
+}
+fn cursor<'a>(bucket: &'a Bucket, field: &str) -> Option<&'a str> {
+    bucket
+        .info
+        .get(field)
+        .filter(|v| !v.is_empty())
+        .map(String::as_str)
 }
 fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
-    if heads(info)?.len() > MAX_HEADS
-        || info.keys().any(|k| k.len() > 50)
-        || serde_json::to_vec(info)?.len() > MAX_INFO
-    {
-        bail!(
-            "publication directory metadata budget exceeded (initial format: 32 databases per bucket)"
-        );
+    // Admission must leave room for later reads and maintenance. Otherwise a valid
+    // create could fill the directory and prevent its own read/collection fences.
+    let mut reserved = info.clone();
+    for (field, size) in [
+        ("durable-db-probe", 36),
+        ("durable-db-read-fence", 36),
+        ("durable-db-fence", 36),
+        (CURSOR, 111),
+        (INDEX_CURSOR, 109),
+        (HEAD, 1024),
+    ] {
+        if reserved.get(field).is_none_or(|v| v.len() < size) {
+            reserved.insert(field.into(), "0".repeat(size));
+        }
+    }
+    if info.keys().any(|k| k.len() > 50) || serde_json::to_vec(&reserved)?.len() > MAX_INFO {
+        bail!("publication authority metadata budget exceeded");
     }
     Ok(())
-}
-fn parse_pointer(value: &str) -> anyhow::Result<Pointer> {
-    let p: Pointer = serde_json::from_str(value)?;
-    let id = p
-        .key
-        .strip_prefix("manifests/")
-        .context("invalid published manifest namespace")?;
-    Uuid::parse_str(id).context("invalid published manifest identity")?;
-    if p.sha256.len() != 64 || !p.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("invalid manifest digest");
-    }
-    Ok(p)
 }
 #[async_trait]
 impl Storage for Published {
@@ -190,11 +219,15 @@ impl Storage for Published {
         let slot = slot(key)?;
         for _ in 0..4 {
             let bucket = self.authority.read_fresh().await?;
-            let directory = heads(&bucket.info)?;
-            let Some(value) = directory.get(&slot) else {
+            let root = root(&bucket.info)?;
+            let pointer = match self.directory.get(root.as_ref(), &slot).await {
+                Err(e) if e.is::<MissingNode>() => continue,
+                other => other?,
+            };
+            let Some(pointer) = pointer else {
                 return Ok(None);
             };
-            let pointer = parse_pointer(value)?;
+            let value = serde_json::to_string(&pointer)?;
             // Collection may remove an old manifest after this pointer read. Restart wholly.
             let Some(object) = self.files.get(&pointer.key, max_bytes).await? else {
                 continue;
@@ -215,25 +248,32 @@ impl Storage for Published {
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool> {
         let slot = slot(key)?;
         let bucket = self.authority.read().await?;
-        let mut directory = heads(&bucket.info)?;
+        let root = root(&bucket.info)?;
+        let current = match self.directory.get(root.as_ref(), &slot).await {
+            Err(e) if e.is::<MissingNode>() => return Ok(false),
+            other => other?,
+        };
+        let identity = current.as_ref().map(serde_json::to_string).transpose()?;
         let matches = match old {
-            None => !directory.contains_key(&slot),
-            // The engine version is the unique manifest identity. Metadata read barriers
-            // and unrelated databases may advance the bucket without changing this head.
-            Some(v) => directory.get(&slot) == v.0.e_tag.as_ref(),
+            None => current.is_none(),
+            Some(v) => identity.as_ref() == v.0.e_tag.as_ref(),
         };
         if !matches {
             return Ok(false);
         }
         let pointer = Pointer {
-            key: format!("manifests/{}", Uuid::new_v4()),
+            key: format!("manifests/{slot}.{}", Uuid::new_v4()),
             sha256: hex::encode(Sha256::digest(&bytes)),
         };
         let mut info = bucket.info.clone();
-        directory.insert(slot, serde_json::to_string(&pointer)?);
-        info.insert(HEAD.into(), serde_json::to_string(&directory)?);
-        budget(&info)?; // Reject admission before allocating an immutable manifest.
+        budget(&info)?; // Reserve the bounded root and all maintenance fields before upload.
         self.files.put(&pointer.key, bytes).await?;
+        let updated = match self.directory.insert(root.as_ref(), &slot, pointer).await {
+            Err(e) if e.is::<MissingNode>() => return Ok(false),
+            other => other?,
+        };
+        info.insert(HEAD.into(), serde_json::to_string(&updated)?);
+        budget(&info)?;
         // Never retry this upload/pointer against a later revision: a collector may have deleted it.
         self.authority
             .replace(&bucket, info)
@@ -250,15 +290,21 @@ impl Storage for Published {
         limit: usize,
     ) -> anyhow::Result<Vec<String>> {
         if prefix == "heads/" {
-            let bucket = self.authority.read().await?;
-            let mut keys: Vec<_> = heads(&bucket.info)?
-                .into_keys()
-                .map(|d| format!("heads/{d}.json"))
-                .filter(|k| after.is_none_or(|a| k.as_str() > a))
-                .collect();
-            keys.sort();
-            keys.truncate(limit);
-            Ok(keys)
+            if limit > 128 {
+                bail!("directory list page exceeds 128 entries");
+            }
+            let after = after
+                .map(|s| s.strip_prefix("heads/").context("invalid directory cursor"))
+                .transpose()?;
+            for _ in 0..4 {
+                let bucket = self.authority.read_fresh().await?;
+                let root = root(&bucket.info)?;
+                match self.directory.list(root.as_ref(), after, limit).await {
+                    Err(e) if e.is::<MissingNode>() => continue,
+                    result => return result,
+                }
+            }
+            bail!("directory snapshot changed repeatedly or is unavailable")
         } else {
             self.files.list(prefix, after, limit).await
         }

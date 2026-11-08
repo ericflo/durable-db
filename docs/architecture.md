@@ -2,11 +2,11 @@
 
 ## Authority and transaction boundary
 
-One database is one transaction boundary. Each database has a logical head named `heads/<database>.json`. In cluster mode, a shared bounded directory maps that head to an immutable `manifests/<uuid>` file. It lists immutable sorted pages, logical usage, quotas, recent request receipts, a collection cursor, a user revision, and a fresh fence identifier. Pages live under `blocks/<database>.<uuid>`; the delimiter cannot occur in a database identifier.
+One database is one transaction boundary. Each database has a logical head named `heads/<database>.json`. In cluster mode, a shared immutable B+tree directory maps that head to an immutable `manifests/<database>.<uuid>` file. It lists immutable sorted pages, logical usage, quotas, recent request receipts, a collection cursor, a user revision, and a fresh fence identifier. Pages live under `blocks/<database>.<uuid>`; the delimiter cannot occur in a database identifier.
 
 Reads validate the authoritative directory through a conditional read barrier, then fetch the selected immutable manifest. They load only the pages needed for exact keys or ordered scans. Immutable page bytes can come from an optional disk cache or bounded memory cache and are verified with SHA-256. A fresh empty cache produces the same result. No full database hydration occurs at server startup.
 
-The initial index is a bounded flat manifest of page ranges. It is intentionally simple to audit. A persistent multilevel index is a future format, not a claimed capability of this release.
+The database directory is a multilevel B+tree. Within each individual database, the data-page index remains a bounded flat manifest of page ranges; lifting that per-database size limit is separate future work.
 
 ## Commit protocol
 
@@ -14,7 +14,7 @@ The initial index is a bounded flat manifest of page ranges. It is intentionally
 2. Resolve an existing identical request receipt before checking the expected user revision.
 3. Check the revision, predicates, request bounds, and resulting logical quotas. Read and copy only touched pages; split them near 128 KiB.
 4. Upload replacement pages under globally fresh names. Finish every upload before publication.
-5. Recheck the database head identity, upload a fresh immutable manifest, and conditionally publish the updated directory. The manifest contains the incremented user revision and request receipt.
+5. Recheck the database head identity, upload a fresh immutable manifest, copy the affected directory path, and conditionally publish its new root. The manifest contains the incremented user revision and request receipt.
 6. Acknowledge only after the conditional write succeeds.
 
 The conditional directory publication is the commit's linearization point. A definite precondition failure is a conflict. A timeout or broken connection may have committed: do not delete candidate pages and do not invent a rollback. The client retries the identical request. Recent receipts recover the original result; an evicted receipt still cannot cause an identical request to reapply because its old expected revision fails. Request IDs must never be recycled for new work.
@@ -46,11 +46,17 @@ Both B2 and S3 run `publication::Published`. It owns directory initialization an
 | Immutable bytes | S3-compatible GET/PUT/list | S3 GET/PUT/list |
 | Physical reclamation | Native list/delete file versions | S3 list/delete object versions |
 
-The directory is serialized into one `durable-db-heads` value, with at most 32 database entries and 9,000 serialized metadata bytes. The common format respects B2's 50-byte metadata field-name ceiling without shortening database names. Its publication format is version 2; earlier unpublished development formats are rejected, not silently reinterpreted.
+Bucket metadata stores one `durable-db-root` reference. Database entries live in immutable `indexes/<witness-database>.<uuid>` objects, with at most 64 entries/children and 64 KiB per page. A branch records each child's range, height, count, unique object name, and checksum. Insertion copies one path, splitting full pages. Lookup and update cost O(log N) index pages; listing is paginated without loading every database. Index and data pages share the configured cache budget. The metadata budget remains 9,000 bytes, including reserved root/cursor/fence space, independent of database count.
 
-A raw directory observation may be stale. The common read barrier conditionally publishes unchanged head pointers with a new unique fence. Only success permits a read to use that snapshot. This avoids relying on fresh bucket listings and deliberately adds a metadata write to every manifest read. It also means metadata contention limits a bucket's performance. No read-lease optimization is claimed.
+There is no fixed database-count admission ceiling. Counts use checked 64-bit arithmetic, and a height guard bounds corrupt input traversal; these are format bounds, not a tested capacity claim. The current stress qualification covers 10,005 databases. Publication format **3** rejects earlier experimental formats rather than silently interpreting them; there is no in-place migration yet.
 
-Manifest collection lists candidates, then conditionally fences the entire pointer set before deleting unreferenced manifests. The proof structure is the same as page collection, at the directory layer. S3 additionally retires obsolete physical versions of its control-register object using a list-before-barrier sequence. B2 manages bucket-metadata history internally.
+Directory collection lists at most 128 manifest candidates and 128 index candidates before conditionally fencing the root. Manifest filenames identify their database, so one lookup determines whether a manifest is current. Each index filename embeds its original first database key as a **witness**. A still-reachable immutable subtree still contains that key; looking it up from the protected root must visit that subtree. This makes each candidate's reachability check logarithmic, including when old nodes are reused under new parents. Missing index pages cause an error/restart, never a conclusion that a candidate is garbage. Concurrent collection can remove an old reader's path, so reads and listings restart as a whole.
+
+`Directory.tla` checks the witness reachability lemma over bounded immutable trees, including subtree reuse. `Bucket.tla` checks conditional publication and collection fencing at the abstract reference-set layer. Their composition into the tree implementation remains an explicit proof obligation.
+
+A raw directory observation may be stale. The common read barrier conditionally publishes the unchanged root pointer with a new unique fence. Only success permits a read to use that snapshot. This avoids relying on fresh bucket listings and deliberately adds a metadata write to every manifest read. It also means metadata contention limits a bucket's performance. No read-lease optimization is claimed.
+
+Manifest collection lists candidates, then conditionally fences the directory root before deleting unreferenced manifests. The proof structure is the same as page collection, at the directory layer. S3 additionally retires obsolete physical versions of its control-register object using a list-before-barrier sequence. B2 manages bucket-metadata history internally.
 
 Providers must implement atomic conditional publication and durable immutable uploads. The startup probe attempts a genuinely different stale update. Real B2 accepts an identical-metadata no-op with a stale revision; it rejects a conflicting replacement. Every protocol publication has fresh identities/fences, and no-op replay cannot introduce a different state.
 

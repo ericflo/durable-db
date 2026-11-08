@@ -37,3 +37,12 @@ status=$?
 set -e
 [ "$status" = 12 ] && grep -q 'Invariant ReadLinearizesAtValidation is violated' "$tools/model-read-unsafe.log" || { cat "$tools/model-read-unsafe.log"; exit 1; }
 echo 'Read negative control: skipping CAS validation returns a stale snapshot.'
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-directory" -config Directory.cfg Directory.tla > "$tools/model-directory.log" 2>&1
+tail -n 9 "$tools/model-directory.log"
+set +e
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-directory-unsafe" -config UnsafeDirectory.cfg Directory.tla > "$tools/model-directory-unsafe.log" 2>&1
+status=$?
+set -e
+[ "$status" = 12 ] && grep -q 'Invariant WitnessReachability is violated' "$tools/model-directory-unsafe.log" || { cat "$tools/model-directory-unsafe.log"; exit 1; }
+echo 'Directory negative control: a wrong witness can hide a reachable page.'

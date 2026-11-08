@@ -63,3 +63,52 @@ async fn real_b2_conditional_authority_versions_and_cache_free_recovery() {
     assert_eq!(result.values[0].as_deref(), Some("aGVsbG8="));
     eprintln!("B2 cloud test passed. Disposable database retained for inspection: {db}");
 }
+
+#[tokio::test]
+#[ignore = "requires a disposable real B2 bucket and scoped workload credentials"]
+async fn real_b2_directory_split_and_cache_free_reopen() {
+    use durable_db::storage::Storage;
+    let bucket = std::env::var("DURABLE_DB_TEST_B2_BUCKET").unwrap();
+    let storage = Arc::new(
+        Native::connect(&bucket, "durable-db-cloud-test")
+            .await
+            .unwrap()
+            .with_cache(Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap())),
+    );
+    let engine = Engine::new(storage.clone(), Arc::new(Cache::new(0, None).unwrap()));
+    let group = format!("directory-{}", uuid::Uuid::new_v4());
+    for n in 0..70 {
+        let name = format!("{group}-{n:03}");
+        engine.create(&name, Limits::default()).await.unwrap();
+    }
+    for _ in 0..3 {
+        storage.collect_manifests().await.unwrap();
+    }
+    let reopened = Native::connect(&bucket, "durable-db-cloud-test")
+        .await
+        .unwrap();
+    let mut names = Vec::new();
+    loop {
+        let page = reopened
+            .list("heads/", names.last().map(String::as_str), 32)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        names.extend(page);
+    }
+    assert_eq!(names.iter().filter(|s| s.contains(&group)).count(), 70);
+    for n in [0, 31, 32, 63, 69] {
+        assert!(
+            reopened
+                .get(&format!("heads/{group}-{n:03}.json"), 512 * 1024)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    eprintln!(
+        "Real B2 directory split, collection, pagination and empty-cache reopen passed with 70 databases."
+    );
+}

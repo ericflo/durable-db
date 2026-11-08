@@ -53,5 +53,35 @@ async fn real_s3_conditional_commits_gc_and_reopen() {
         .unwrap();
     assert_eq!(result.revision, 5);
     assert_eq!(result.values[0], Some(STANDARD.encode(b"persisted")));
+    for n in 0..70 {
+        a.create(&format!("site-{n:03}"), Limits::default())
+            .await
+            .unwrap();
+    }
+    for _ in 0..3 {
+        backend.maintenance().await.unwrap();
+    }
+    let reopened = S3::connect(&bucket, &prefix).await.unwrap();
+    let mut names = Vec::new();
+    loop {
+        let page = reopened
+            .list("heads/", names.last().map(String::as_str), 32)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        names.extend(page);
+    }
+    assert_eq!(names.len(), 71);
+    for n in [0, 31, 32, 63, 69] {
+        assert!(
+            reopened
+                .get(&format!("heads/site-{n:03}.json"), 512 * 1024)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
     eprintln!("Shared publication protocol passed against S3. Disposable prefix: {prefix}");
 }

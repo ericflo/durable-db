@@ -470,3 +470,46 @@ async fn compaction_preserves_logical_revision_and_snapshot_contents() {
         serde_json::to_value(engine.read("test", &req).await.unwrap()).unwrap()
     );
 }
+
+#[tokio::test]
+async fn response_budget_includes_json_key_escaping() {
+    let engine = Engine::new(remote(), cache());
+    engine.create("test", Limits::default()).await.unwrap();
+    for batch in 0..2 {
+        let writes = (0..50)
+            .map(|n| Write {
+                key: format!("{:03}{}", batch * 50 + n, "\u{0001}".repeat(900)),
+                value: Some(STANDARD.encode(vec![1; 5000])),
+            })
+            .collect();
+        engine
+            .commit(
+                "test",
+                &CommitRequest {
+                    expected_revision: batch,
+                    request_id: format!("batch{batch}"),
+                    checks: vec![],
+                    writes,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let result = engine
+        .read(
+            "test",
+            &ReadRequest {
+                scans: vec![Scan {
+                    prefix: String::new(),
+                    start: None,
+                    end: None,
+                    after: None,
+                    reverse: false,
+                    limit: 100,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(Error::Limit(_))));
+}

@@ -4,6 +4,8 @@ This is the sole service-specific integration document. The database protocol, c
 
 The intended host is the NeuralColumn API, with one or more database IDs associated with a site's stable ID. The API already owns user/site identity and capability links. It should provision databases as an administrator, enforce site membership and application rules, and issue short-lived database-scoped capabilities or proxy requests. Site visitors must never receive the database signing key or object-provider credentials.
 
+Each site may provision multiple databases. The bucket directory must support a large site population without per-site buckets or tiny metadata slot limits. Format 3 uses a persistent B+tree; database cardinality and aggregate publication throughput must be qualified separately. Provisioning quotas should be explicit service policy, not an incidental storage format ceiling.
+
 ## Acceptance scenario
 
 1. Create a site, provision a database, and persist the mapping in the service control plane.

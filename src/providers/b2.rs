@@ -239,7 +239,10 @@ impl Authority for Native {
         self.update(old, info).await
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
-        if !key.starts_with("blocks/") && !key.starts_with("manifests/") {
+        if !["blocks/", "manifests/", "indexes/"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        {
             bail!("invalid B2 collection namespace");
         }
         let name = format!("{}{key}", self.prefix);

@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod cache;
+mod directory;
 pub mod engine;
 pub mod providers;
 pub mod publication;

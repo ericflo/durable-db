@@ -143,23 +143,28 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let auth = Auth::new(&std::fs::read_to_string(&key_file).context("read signing key")?)?;
+            let cache = Arc::new(Cache::new(
+                memory_cache_mib * 1024 * 1024,
+                disk_cache.map(|p| (p, disk_cache_mib * 1024 * 1024)),
+            )?);
             let storage: Arc<dyn Storage> = if let Some(bucket) = b2_bucket {
                 Arc::new(
                     Native::connect(&bucket, &prefix)
                         .await
-                        .context("initialize B2 authority")?,
+                        .context("initialize B2 authority")?
+                        .with_cache(cache.clone()),
                 )
             } else if let Some(bucket) = bucket {
-                Arc::new(durable_db::providers::s3::S3::connect(&bucket, &prefix).await?)
+                Arc::new(
+                    durable_db::providers::s3::S3::connect(&bucket, &prefix)
+                        .await?
+                        .with_cache(cache.clone()),
+                )
             } else {
                 let local = Local::open(data.join("store"))?;
                 local.cleanup_temps()?;
                 Arc::new(local)
             };
-            let cache = Arc::new(Cache::new(
-                memory_cache_mib * 1024 * 1024,
-                disk_cache.map(|p| (p, disk_cache_mib * 1024 * 1024)),
-            )?);
             let engine = Arc::new(Engine::new(storage, cache));
             let app = Arc::new(App::new(engine, auth, concurrency));
             let listener = tokio::net::TcpListener::bind(listen).await?;

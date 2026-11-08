@@ -191,7 +191,10 @@ impl Authority for S3 {
         Ok(Some(next))
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
-        if !key.starts_with("blocks/") && !key.starts_with("manifests/") {
+        if !["blocks/", "manifests/", "indexes/"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        {
             bail!("invalid collection namespace");
         }
         for file in self.versions(&format!("{}{key}", self.prefix)).await? {

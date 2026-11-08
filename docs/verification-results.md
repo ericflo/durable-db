@@ -8,14 +8,16 @@ Results are for the initial development checkout on 2026-11-08. Exact final comm
 | Shared-page cluster model | 36,252,536 distinct states; 208,784,241 generated; depth 32; no invariant violations |
 | Shared directory publication model | 8,246,048 distinct states; 61,692,865 generated; depth 21; no invariant violations |
 | B2 missing-fence negative control | Missing-manifest counterexample at depth 8 |
-| Shared publication fault tests | Five tests passed, including both collectors, metadata preservation, slot admission, and lost response recovery |
+| Shared publication fault tests | Eight tests cover publication/collection races, concurrent database creation through splits, metadata admission, missing-index refusal, and lost response recovery |
 | Unsafe collector negative control | Counterexample found: publish then delete a formerly unreferenced object |
 | Rust engine/HTTP initial suite | 10 tests passed, including 24 randomized reference-map cases |
 | pi-durable 1.5.0 reference adapter | All 32 upstream storage conformance tests passed over HTTP (65 seconds) |
 | Documentation site | Desktop/mobile rendering, no mobile overflow, 0→6 pod illustration controls passed |
-| Independent HTTP processes | 1→3→1 servers, SIGKILL, all processes removed and reopened without caches; all 36 writes verified |
-| Real S3-compatible endpoint | Shared directory protocol on both versioned and unversioned MinIO: writes, receipts, both collection layers, and cache-free reopen passed |
-| Real B2 endpoint | Dedicated bucket and scoped key: five commits, replay receipts, physical reclamation, and fresh-client/cache-free recovery passed |
+| Independent HTTP processes | 1→3→1 servers, SIGKILL, all processes removed and reopened without caches; all 36 writes verified against both real B2 and versioned MinIO |
+| Real S3-compatible endpoint | Format 3 on versioned and unversioned MinIO: commits, receipts, three collection layers, 71 databases across leaf splits, pagination, and uncached reopen passed |
+| Real B2 endpoint | Format 3, dedicated bucket/scoped key: five commits, receipts, physical reclamation; 70 additional databases across leaf splits, pagination and uncached reopen; both tests passed in 92 seconds |
+| Persistent directory stress | 10,005 databases, three-level tree, ordered pagination, update, full index collection sweep, and every database reopened without caches; passed in 106 seconds in a debug build |
+| Directory witness model | 145,037 distinct/generated states, depth 6; wrong-witness negative control finds a counterexample |
 | Read barrier model | 39,332 distinct states; 276,019 generated; depth 13; negative control detects stale reads |
 | Native HTTP wire test | Stale observation rejected by read barrier; exact version deletion verified |
 
