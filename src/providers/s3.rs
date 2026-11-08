@@ -90,7 +90,7 @@ impl S3 {
             .body(HttpRequestBody::from(Bytes::new()))?;
         AwsAuthorizer::new(&credential, "s3", &self.region)
             .with_sign_payload(false)
-            .authorize(&mut signed, None);
+            .try_authorize(&mut signed, None)?;
         Ok(self
             .client
             .request(method, url)

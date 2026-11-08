@@ -1,7 +1,7 @@
 import {readFile,writeFile,mkdir,copyFile,rm} from 'node:fs/promises';
 import MarkdownIt from 'markdown-it';
 const out=new URL('../.site/',import.meta.url);
-const docs=['architecture','b2','api','deployment','security','verification','verification-results','clients','development','roadmap'];
+const docs=['architecture','b2','api','deployment','security','verification','verification-results','clients','development','production-readiness','roadmap'];
 await rm(out,{recursive:true,force:true});
 await mkdir(out,{recursive:true});
 const md=new MarkdownIt({html:false,linkify:false,typographer:true});

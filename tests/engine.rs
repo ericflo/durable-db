@@ -513,3 +513,166 @@ async fn response_budget_includes_json_key_escaping() {
         .await;
     assert!(matches!(result, Err(Error::Limit(_))));
 }
+
+#[tokio::test]
+async fn malformed_manifests_fail_closed_before_reads_writes_or_collection() {
+    let storage = remote();
+    let e = Engine::new(storage.clone(), cache());
+    e.create("test", Limits::default()).await.unwrap();
+    e.commit("test", &request(0, "initial", "a", Some(b"hello")))
+        .await
+        .unwrap();
+    let initial = storage
+        .get("heads/test.json", 512 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let good: serde_json::Value = serde_json::from_slice(&initial.bytes).unwrap();
+    let original_files = storage.list("blocks/", None, 128).await.unwrap();
+    let mut cases = Vec::new();
+    let mut bad = good.clone();
+    bad["bytes"] = 0.into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["limits"]["max_bytes"] = 0.into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["pages"][0]["object"] = format!("blocks/other.{}", uuid::Uuid::new_v4()).into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["pages"][0]["encoded"] = 0.into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["pages"][0]["digest"] = "bad".into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["gc_after"] = "blocks/other.cursor".into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["receipts"][0]["revision"] = 500.into();
+    cases.push(bad);
+    let mut bad = good.clone();
+    bad["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(good["pages"][0].clone());
+    cases.push(bad);
+    for bad in cases {
+        let old = storage
+            .get("heads/test.json", 512 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            storage
+                .cas(
+                    "heads/test.json",
+                    Some(&old.version),
+                    serde_json::to_vec(&bad).unwrap().into()
+                )
+                .await
+                .unwrap()
+        );
+        assert!(matches!(e.info("test").await, Err(Error::Storage(_))));
+        assert!(matches!(
+            e.read("test", &ReadRequest::default()).await,
+            Err(Error::Storage(_))
+        ));
+        assert!(matches!(
+            e.commit("test", &request(1, "write", "a", Some(b"new")))
+                .await,
+            Err(Error::Storage(_))
+        ));
+        assert!(matches!(e.gc("test").await, Err(Error::Storage(_))));
+        assert!(matches!(e.compact("test").await, Err(Error::Storage(_))));
+        assert_eq!(
+            storage.list("blocks/", None, 128).await.unwrap(),
+            original_files
+        );
+    }
+}
+
+#[tokio::test]
+async fn page_metadata_and_canonical_encoding_are_checked_even_with_valid_hashes() {
+    use sha2::{Digest, Sha256};
+    let storage = remote();
+    let e = Engine::new(storage.clone(), cache());
+    e.create("test", Limits::default()).await.unwrap();
+    e.commit("test", &request(0, "initial", "a", Some(b"hello")))
+        .await
+        .unwrap();
+    let obj = storage
+        .get("heads/test.json", 512 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let good: serde_json::Value = serde_json::from_slice(&obj.bytes).unwrap();
+    let page = storage
+        .get(good["pages"][0]["object"].as_str().unwrap(), 256 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut cases = Vec::new();
+    let mut bad = good.clone();
+    bad["pages"][0]["encoded"] = 1.into();
+    cases.push((bad, page.bytes.to_vec()));
+    let mut bad = good.clone();
+    bad["pages"][0]["first"] = "b".into();
+    bad["pages"][0]["last"] = "b".into();
+    cases.push((bad, page.bytes.to_vec()));
+    let mut bad = good.clone();
+    let mut trailing = page.bytes.to_vec();
+    trailing.push(0);
+    bad["pages"][0]["encoded"] = trailing.len().into();
+    cases.push((bad, trailing));
+    let duplicates = postcard::to_stdvec(&vec![("a", vec![1u8]), ("a", vec![2u8])]).unwrap();
+    let mut bad = good.clone();
+    bad["pages"][0]["encoded"] = duplicates.len().into();
+    bad["pages"][0]["bytes"] = 2.into();
+    bad["bytes"] = 2.into();
+    cases.push((bad, duplicates));
+    for (mut bad, bytes) in cases {
+        let name = format!("blocks/test.{}", uuid::Uuid::new_v4());
+        bad["pages"][0]["object"] = name.clone().into();
+        bad["pages"][0]["digest"] = hex::encode(Sha256::digest(&bytes)).into();
+        storage.put(&name, bytes.into()).await.unwrap();
+        let old = storage
+            .get("heads/test.json", 512 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        storage
+            .cas(
+                "heads/test.json",
+                Some(&old.version),
+                serde_json::to_vec(&bad).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            e.read(
+                "test",
+                &ReadRequest {
+                    keys: vec!["a".into()],
+                    ..Default::default()
+                }
+            )
+            .await,
+            Err(Error::Storage(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn memory_cache_does_not_ignore_the_requested_digest() {
+    use sha2::{Digest, Sha256};
+    let c = cache();
+    c.insert("immutable", Bytes::from_static(b"verified")).await;
+    assert!(c.get("immutable", &"0".repeat(64)).await.is_none());
+    assert_eq!(
+        c.get("immutable", &hex::encode(Sha256::digest(b"verified")))
+            .await
+            .unwrap(),
+        b"verified"[..]
+    );
+}

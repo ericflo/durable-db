@@ -78,7 +78,8 @@ Autoscaling improves aggregate capacity across databases. Directory publication 
 - [Client and pi-durable integration](docs/clients.md)
 - [Development and Woodpecker CI](docs/development.md)
 - [Public documentation website](https://ericflo.github.io/durable-db-site/)
-- [Roadmap and release gates](docs/roadmap.md)
+- [Production readiness and release gates](docs/production-readiness.md)
+- [Roadmap](docs/roadmap.md)
 
 ## Build and test
 

@@ -4,8 +4,17 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "exports": { ".": "./client.mjs", "./pi-reference": "./pi-reference.mjs" },
-  "scripts": { "test": "vitest run --testTimeout=30000 --hookTimeout=30000" },
-  "dependencies": { "@earendil-works/pi-durable": "1.5.0" },
-  "devDependencies": { "vitest": "3.2.4" }
+  "exports": {
+    ".": "./client.mjs",
+    "./pi-reference": "./pi-reference.mjs"
+  },
+  "scripts": {
+    "test": "vitest run --testTimeout=30000 --hookTimeout=30000"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.5.0"
+  },
+  "devDependencies": {
+    "vitest": "4.1.12"
+  }
 }

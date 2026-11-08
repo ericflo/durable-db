@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use fs2::FileExt;
 use futures::TryStreamExt;
-use object_store::{ObjectStore, PutMode, UpdateVersion, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, UpdateVersion, path::Path};
 use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;

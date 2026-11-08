@@ -3,7 +3,7 @@ use crate::{
     cache::Cache,
     storage::{Storage, Version},
 };
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,74 @@ pub struct Info {
     pub limits: Limits,
 }
 impl Manifest {
+    fn validate(&self, db: &str) -> anyhow::Result<()> {
+        ensure!(
+            self.format == 1 && self.pages.len() <= MAX_PAGES,
+            "unsupported manifest"
+        );
+        Uuid::parse_str(&self.fence).context("invalid manifest fence")?;
+        ensure!(
+            self.limits.max_bytes > 0
+                && self.limits.max_bytes <= 256 * 1024 * 1024
+                && self.limits.max_keys > 0
+                && self.limits.max_keys <= 1_000_000,
+            "invalid stored quotas"
+        );
+        let mut bytes = 0u64;
+        let mut keys = 0u64;
+        let mut objects = BTreeSet::new();
+        for page in &self.pages {
+            validate_key(&page.first).context("invalid stored first key")?;
+            validate_key(&page.last).context("invalid stored last key")?;
+            validate_object(db, &page.object)?;
+            ensure!(objects.insert(&page.object), "repeated page object");
+            ensure!(
+                page.first <= page.last
+                    && page.keys > 0
+                    && page.bytes >= page.keys
+                    && page.encoded > 0
+                    && page.encoded <= MAX_BLOCK
+                    && valid_digest(&page.digest),
+                "invalid page metadata"
+            );
+            bytes = bytes
+                .checked_add(page.bytes)
+                .context("page byte count overflow")?;
+            keys = keys
+                .checked_add(page.keys)
+                .context("page key count overflow")?;
+        }
+        ensure!(
+            !self.pages.windows(2).any(|p| p[0].last >= p[1].first),
+            "overlapping or unordered pages"
+        );
+        ensure!(
+            bytes == self.bytes
+                && keys == self.keys
+                && bytes <= self.limits.max_bytes
+                && keys <= self.limits.max_keys,
+            "manifest accounting does not match pages or quotas"
+        );
+        if let Some(cursor) = &self.gc_after {
+            validate_object(db, cursor)?;
+        }
+        ensure!(self.receipts.len() <= 128, "too many stored receipts");
+        let mut ids = BTreeSet::new();
+        let mut previous = 0;
+        for receipt in &self.receipts {
+            ensure!(
+                !receipt.id.is_empty()
+                    && receipt.id.len() <= 128
+                    && ids.insert(&receipt.id)
+                    && valid_digest(&receipt.digest)
+                    && receipt.revision > previous
+                    && receipt.revision <= self.revision,
+                "invalid stored receipt"
+            );
+            previous = receipt.revision;
+        }
+        Ok(())
+    }
     fn info(&self) -> Info {
         Info {
             revision: self.revision,
@@ -211,9 +279,7 @@ impl Engine {
             .await?
             .ok_or(Error::NotFound)?;
         let manifest: Manifest = serde_json::from_slice(&obj.bytes).context("invalid manifest")?;
-        if manifest.format != 1 || manifest.pages.len() > MAX_PAGES {
-            return Err(anyhow::anyhow!("unsupported manifest").into());
-        }
+        manifest.validate(db)?;
         Ok((manifest, obj.version))
     }
     pub async fn info(&self, db: &str) -> Result<Info> {
@@ -232,10 +298,9 @@ impl Engine {
             self.cache.insert(&page.object, object.bytes.clone()).await;
             object.bytes
         };
-        Ok(Some(
-            postcard::from_bytes(&bytes).context("invalid block encoding")?,
-        ))
+        Ok(Some(decode_block(page, &bytes)?))
     }
+
     async fn load(
         &self,
         m: &Manifest,
@@ -598,6 +663,52 @@ impl Engine {
 
 fn head(db: &str) -> String {
     format!("heads/{db}.json")
+}
+fn decode_block(page: &Page, bytes: &[u8]) -> anyhow::Result<Block> {
+    ensure!(
+        bytes.len() == page.encoded,
+        "page length differs from manifest"
+    );
+    // Checksums prove byte identity; validate the decoded structure too.
+    // A bad count must never let a request bypass MAX_WORK or its quota.
+    let (block, trailing): (Block, &[u8]) =
+        postcard::take_from_bytes(bytes).context("invalid block encoding")?;
+    ensure!(trailing.is_empty(), "trailing bytes in page");
+    let mut logical_bytes = 0u64;
+    for (key, value) in &block {
+        validate_key(key).context("invalid stored key")?;
+        ensure!(value.len() <= 64 * 1024, "invalid stored value size");
+        logical_bytes = logical_bytes
+            .checked_add((key.len() + value.len()) as u64)
+            .context("stored page byte count overflow")?;
+    }
+    ensure!(
+        block.len() as u64 == page.keys
+            && logical_bytes == page.bytes
+            && block
+                .first_key_value()
+                .is_some_and(|(k, _)| k == &page.first)
+            && block.last_key_value().is_some_and(|(k, _)| k == &page.last),
+        "page contents differ from manifest accounting or boundaries"
+    );
+    // Postcard's map decoder accepts duplicate/out-of-order entries. Our
+    // canonical BTreeMap encoding does not; reject ambiguous stored bytes.
+    ensure!(
+        postcard::to_stdvec(&block)? == bytes,
+        "noncanonical page encoding"
+    );
+    Ok(block)
+}
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+fn validate_object(db: &str, object: &str) -> anyhow::Result<()> {
+    let prefix = format!("blocks/{db}.");
+    let id = object
+        .strip_prefix(&prefix)
+        .context("page object outside database namespace")?;
+    Uuid::parse_str(id).context("invalid page object identity")?;
+    Ok(())
 }
 pub fn validate_db(db: &str) -> Result<()> {
     if db.is_empty()

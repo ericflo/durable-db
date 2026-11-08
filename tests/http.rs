@@ -105,3 +105,80 @@ async fn http_enforces_auth_scopes_body_limits_and_consistent_results() {
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[tokio::test]
+async fn a_database_cannot_hold_every_slot_and_cancelled_requests_release_capacity() {
+    use bytes::Bytes;
+    use std::convert::Infallible;
+    use tokio::sync::Notify;
+    let auth = Auth::new(&"cd".repeat(32)).unwrap();
+    let admin = auth.admin_token();
+    // This legal database name used to share the administrator's rate bucket.
+    let hostile = auth.issue("_admin".into(), false, 3600).unwrap();
+    let other = auth.issue("other".into(), false, 3600).unwrap();
+    let storage =
+        Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "fairness").unwrap());
+    let engine = Arc::new(Engine::new(storage, Arc::new(Cache::new(0, None).unwrap())));
+    engine.create("_admin", Limits::default()).await.unwrap();
+    engine.create("other", Limits::default()).await.unwrap();
+    let app = router(Arc::new(App::new(engine, auth, 8)));
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let entered = Arc::new(Notify::new());
+        let notify = entered.clone();
+        let body = Body::from_stream(futures::stream::once(async move {
+            notify.notify_one();
+            std::future::pending::<()>().await;
+            Ok::<_, Infallible>(Bytes::from_static(b"{}"))
+        }));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/databases/_admin/read")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {hostile}"))
+            .body(body)
+            .unwrap();
+        held.push(tokio::spawn(app.clone().oneshot(req)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+    }
+    async fn status(app: &axum::Router, token: &str, path: &str, method: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .method(method)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+    assert_eq!(
+        status(&app, &hostile, "/v1/databases/_admin/read", "POST").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        status(&app, &other, "/v1/databases/other/read", "POST").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&app, &admin, "/metrics", "GET").await,
+        StatusCode::OK
+    );
+    let task = held.pop().unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        status(&app, &hostile, "/v1/databases/_admin/read", "POST").await,
+        StatusCode::OK
+    );
+    for task in held {
+        task.abort();
+        let _ = task.await;
+    }
+}

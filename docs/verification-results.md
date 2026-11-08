@@ -24,6 +24,12 @@ The v0.1.0 binary was built from `f431d88c072cc924634126e4b2ba8f1ec30697b0` by W
 
 The static Linux x86_64 artifact passed checksum verification and standalone local create/commit/read with an empty environment and no Rust toolchain on PATH. Kubernetes HPA bounds 1→3→1 and forced last-pod deletion passed on real B2: all 36 keys and revision 36 were recovered. The phases reached revisions 12, 24, and 36 at 23:01:09, 23:02:13, and 23:02:50 UTC. The cluster lacked resource metrics, so this is not CPU-load-triggered autoscaling qualification. No cloud latency or Kubernetes production-readiness claim follows from these tests.
 
+## Production hardening audit (2026-11-08)
+
+The first hardening pass adds per-database concurrency admission, separate administrator admission, manifest/page structural validation, and expected-digest checks for memory-cache hits. All 27 Rust tests pass, including cancellation and adversarial stored-state cases. All 32 Pi 1.5.0 conformance tests pass with the updated test tooling. After updating the object-store/XML/TLS dependencies, versioned and unversioned MinIO qualification pass again. The publication algorithm and storage format are unchanged.
+
+RustSec found two `quick-xml` denial-of-service advisories in the previous lockfile ([RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html), [RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195.html)) and an unused default-feature path to unmaintained `atomic-polyfill`. Updating the object-store client and XML parser, and disabling unused postcard defaults, removes those findings. cargo-audit 0.22.2 reports zero vulnerabilities or warnings against advisory database commit `7a40350e1b8ba5b656d909f88222a8059a83d88d`. The client test tools and documentation builder also had npm audit findings; their updated lockfiles report zero vulnerabilities. Fresh Rust and npm audits are now required Woodpecker gates outside Docker build caching. This is an advisory-database result, not an independent security review.
+
 ## Initial local latency baseline
 
 One release-build run on an AMD Ryzen AI Max+ 395 laptop, local filesystem with fsync, 1 KiB values, sequential operations. Other development work was active. This is an initial microbenchmark, not cloud performance or a throughput claim.

@@ -37,6 +37,8 @@ The suite checks reference-map behavior for random mutations, ordered/paginated 
 
 The JavaScript adapter runs Pi 1.5.0's own storage conformance suite over the HTTP service. The adapter is explicitly a bounded reference implementation; its passing tests do not establish the performance of a future indexed adapter.
 
+The production hardening tests add malformed manifests, foreign object references, invalid accounting, page boundary/length mismatches, duplicate map entries, trailing bytes, and memory-cache digest mismatches. Rejected manifests must not allow reads, writes, compaction, or collection to proceed. A streaming-body HTTP test holds a database's full concurrency allowance, verifies that another database and the administrator can still work, and checks cancellation releases the allowance. These changes validate inputs and admission; they add no publication or collector transitions to the existing models. They do not prove arbitrary corruption recovery or strict global resource isolation.
+
 ## Remaining proof and qualification obligations
 
 - A mechanized inductive proof for arbitrary node/object counts; TLC's finite bounds are not that proof.

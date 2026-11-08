@@ -74,8 +74,13 @@ struct Disk {
     index: Lru<()>,
     _lock: std::fs::File,
 }
+#[derive(Clone)]
+struct MemoryValue {
+    bytes: Bytes,
+    digest: String,
+}
 pub struct Cache {
-    memory: Mutex<Lru<Bytes>>,
+    memory: Mutex<Lru<MemoryValue>>,
     disk: Option<Mutex<Disk>>,
 }
 impl Cache {
@@ -122,8 +127,10 @@ impl Cache {
         })
     }
     pub async fn get(&self, key: &str, digest: &str) -> Option<Bytes> {
-        if let Some(bytes) = self.memory.lock().await.get(key).cloned() {
-            return Some(bytes);
+        if let Some(value) = self.memory.lock().await.get(key).cloned()
+            && value.digest == digest
+        {
+            return Some(value.bytes);
         }
         if let Some(disk) = &self.disk {
             let mut disk = disk.lock().await;
@@ -151,19 +158,27 @@ impl Cache {
                 return None;
             }
             let bytes = Bytes::from(bytes);
-            self.memory
-                .lock()
-                .await
-                .insert(key.to_string(), bytes.clone(), bytes.len());
+            self.memory.lock().await.insert(
+                key.to_string(),
+                MemoryValue {
+                    bytes: bytes.clone(),
+                    digest: digest.into(),
+                },
+                bytes.len(),
+            );
             return Some(bytes);
         }
         None
     }
     pub async fn insert(&self, key: &str, bytes: Bytes) {
-        self.memory
-            .lock()
-            .await
-            .insert(key.to_string(), bytes.clone(), bytes.len());
+        self.memory.lock().await.insert(
+            key.to_string(),
+            MemoryValue {
+                digest: hex::encode(Sha256::digest(&bytes)),
+                bytes: bytes.clone(),
+            },
+            bytes.len(),
+        );
         if let Some(disk) = &self.disk {
             let mut disk = disk.lock().await;
             if bytes.len().saturating_add(320) > disk.index.limit {

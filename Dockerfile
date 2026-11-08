@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4 AS node
 FROM docker.io/library/rust:1.90-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS tools
-RUN apt-get update && apt-get install -y --no-install-recommends musl-tools openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools cmake openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl && rustup component add clippy rustfmt
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -24,6 +24,7 @@ COPY tests tests
 COPY examples examples
 COPY clients clients
 COPY scripts/test-client.sh scripts/test-client.sh
+COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \

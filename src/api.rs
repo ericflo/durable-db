@@ -25,13 +25,20 @@ use tokio::sync::{Mutex, Semaphore};
 struct Bucket {
     tokens: f64,
     time: Instant,
+    permits: Arc<Semaphore>,
+}
+#[derive(Hash, Eq, PartialEq)]
+enum Principal {
+    Administrator,
+    Database(String),
 }
 pub struct App {
     pub engine: Arc<Engine>,
     pub auth: Auth,
     pub ready: AtomicBool,
     pub permits: Arc<Semaphore>,
-    rates: Mutex<HashMap<String, Bucket>>,
+    rates: Mutex<HashMap<Principal, Bucket>>,
+    principal_concurrency: usize,
     pub requests: AtomicU64,
     pub rejected: AtomicU64,
 }
@@ -43,6 +50,7 @@ impl App {
             ready: AtomicBool::new(true),
             permits: Arc::new(Semaphore::new(concurrency)),
             rates: Mutex::new(HashMap::new()),
+            principal_concurrency: (concurrency / 4).max(1),
             requests: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
         }
@@ -82,10 +90,10 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
         Err(e) => return e.into_response(),
     };
     let bucket = if app.auth.is_admin(token) {
-        "_admin".to_string()
+        Principal::Administrator
     } else {
         match app.auth.claims(token) {
-            Ok(c) => c.database,
+            Ok(c) => Principal::Database(c.database),
             Err(e) => return e.into_response(),
         }
     };
@@ -95,10 +103,16 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
         1.0
     };
     let now = Instant::now();
-    {
+    // The owned permit survives every await and is returned on cancellation,
+    // timeout, extractor failure, or normal completion. All tokens for a
+    // database share one allowance; request paths cannot select another one.
+    let _principal_permit = {
         let mut rates = app.rates.lock().await;
         if rates.len() >= 4096 && !rates.contains_key(&bucket) {
-            rates.retain(|_, b| now.duration_since(b.time) < Duration::from_secs(60));
+            rates.retain(|_, b| {
+                now.duration_since(b.time) < Duration::from_secs(60)
+                    || Arc::strong_count(&b.permits) > 1
+            });
             if rates.len() >= 4096 {
                 return Error::Busy.into_response();
             }
@@ -106,7 +120,12 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
         let rate = rates.entry(bucket).or_insert(Bucket {
             tokens: 40.0,
             time: now,
+            permits: Arc::new(Semaphore::new(app.principal_concurrency)),
         });
+        let Ok(permit) = rate.permits.clone().try_acquire_owned() else {
+            app.rejected.fetch_add(1, Ordering::Relaxed);
+            return Error::Busy.into_response();
+        };
         rate.tokens = (rate.tokens + now.duration_since(rate.time).as_secs_f64() * 20.0).min(40.0);
         rate.time = now;
         if rate.tokens < weight {
@@ -114,7 +133,8 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
             return Error::Busy.into_response();
         }
         rate.tokens -= weight;
-    }
+        permit
+    };
     let Ok(_permit) = app.permits.clone().try_acquire_owned() else {
         app.rejected.fetch_add(1, Ordering::Relaxed);
         return Error::Busy.into_response();
