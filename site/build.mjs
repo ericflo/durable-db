@@ -1,7 +1,8 @@
-import {readFile,writeFile,mkdir,copyFile} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,copyFile,rm} from 'node:fs/promises';
 import MarkdownIt from 'markdown-it';
 const out=new URL('../.site/',import.meta.url);
 const docs=['architecture','b2','api','deployment','security','verification','verification-results','clients','development','roadmap'];
+await rm(out,{recursive:true,force:true});
 await mkdir(out,{recursive:true});
 const md=new MarkdownIt({html:false,linkify:false,typographer:true});
 const nav=`<a class="wordmark" href="index.html"><span class="mark" aria-hidden="true">▤</span> durable-db</a><nav aria-label="Main"><a href="architecture.html">Architecture</a><a href="api.html">API</a><a href="verification.html">Verification</a><a class="nav-button" href="development.html">Build it ↗</a></nav>`;
@@ -16,6 +17,7 @@ for(const doc of docs){
 const home=await readFile(new URL('home.html',import.meta.url),'utf8');
 await writeFile(new URL('index.html',out),layout('Storage that stays. Compute that scales.',home,true));
 for(const file of ['style.css','demo.js','icon.svg']) await copyFile(new URL(file,import.meta.url),new URL(file,out));
+await copyFile(new URL('../scripts/install.sh',import.meta.url),new URL('install.sh',out));
 await writeFile(new URL('.nojekyll',out),'');
 // Explicit whitelist: integration plans and private source never enter the public site.
 console.log(`Built ${docs.length+1} public pages into .site/`);

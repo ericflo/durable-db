@@ -36,6 +36,7 @@ FROM build AS assembled
 COPY --from=model /checks /out/checks
 COPY site site
 COPY docs docs
+COPY scripts/install.sh scripts/install.sh
 COPY LICENSE README.md ./
 RUN npm --prefix site ci --no-audit --no-fund && npm --prefix site run build \
     && cp -a .site /out/site && cp LICENSE /out/site/LICENSE \

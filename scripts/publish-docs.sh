@@ -7,6 +7,8 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 umask 077
 printf '%s\n' "$DOCS_DEPLOY_KEY" > "$tmp/key"
 unset DOCS_DEPLOY_KEY
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
 # GitHub's published Ed25519 host key is checked into the project.
 cp scripts/github_known_hosts "$tmp/known_hosts"
 export GIT_SSH_COMMAND="ssh -i $tmp/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts -o StrictHostKeyChecking=yes"

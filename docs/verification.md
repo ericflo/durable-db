@@ -42,7 +42,7 @@ The JavaScript adapter runs Pi 1.5.0's own storage conformance suite over the HT
 - A mechanized inductive proof for arbitrary node/object counts; TLC's finite bounds are not that proof.
 - Liveness under eventual provider availability, fair admission, and bounded competing maintenance. Availability is impossible during arbitrary permanent partitions or when all nodes remain down.
 - Implementation/model refinement, filesystem and network cancellation, malformed/corrupt object behavior, allocator/resource bounds, cryptographic assumptions, and schema upgrades.
-- Controlled Kubernetes HPA/drain/kill testing, long-duration soak, and AWS qualification. MinIO qualification is not AWS or B2 qualification.
+- CPU-load-triggered Kubernetes HPA, node-drain and network-partition testing, long-duration soak, and AWS qualification. HPA bound changes and forced pod replacement have passed on B2. MinIO qualification is not AWS or B2 qualification.
 - Independent security review and strict cluster-wide physical-storage/spend admission.
 
 The repository must keep these limitations visible until the corresponding evidence exists. “Proven in all situations” is not an accurate description of this initial release.
@@ -63,6 +63,6 @@ The Rust stress test creates 10,005 databases in permuted order, forces a three-
 
 ## Publication retries under read traffic
 
-The first format-3 multi-process B2 run exposed write starvation from maintenance read barriers: every barrier changed the register revision while a writer uploaded its path. `PublicationRetry.tla` was added before implementing bounded retries that compare both the original root and original collection fence. The model includes uploads, read barriers, publication, list/read/fence/delete interleavings, and abandoned attempts. With two attempts and four revision advances, it explores 44,354 distinct states. Omitting the fence comparison produces a deleted-manifest counterexample. The Rust tests pause a publisher, advance read barriers, and separately change a root or run collection to verify the retry boundary. This is a safety result within those bounds, not a general fairness/liveness proof.
+The first format-3 multi-process B2 run exposed write starvation from maintenance read barriers: every barrier changed the register revision while a writer uploaded its path. `PublicationRetry.tla` was added before implementing bounded retries that compare both the original root and original collection fence. The model includes uploads, read barriers, publication, list/read/fence/delete interleavings, and abandoned attempts. With one publisher, one collector, two attempts, and four revision advances, it explores 44,354 distinct states. Omitting the fence comparison produces a deleted-manifest counterexample. The Rust tests pause a publisher, advance read barriers, and separately change a root or run collection to verify the retry boundary. This is a safety result within those bounds, not a general fairness/liveness proof.
 
 Idle page collection now skips publication when it has neither deletions nor a cursor change. That is a stuttering step in the existing collection model; no object is removed without a successful fence.

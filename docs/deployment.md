@@ -1,6 +1,14 @@
 # Deployment and operations
 
-The service is experimental. Kubernetes qualification and cloud B2 tests are still in progress; do not treat current local tests as a production readiness certification.
+The service is experimental. Initial real-B2, S3-compatible, and Kubernetes replica-transition tests pass; they are not a production readiness certification.
+
+The [v0.1.0 release](https://github.com/ericflo/durable-db/releases/tag/v0.1.0) provides a static Linux x86_64 binary. While the repository is private, `gh` must be authenticated with repository access. Install without root or a Rust toolchain:
+
+```sh
+curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+durable-db serve --data ./data
+```
 
 For laptop use, run `durable-db serve --data ./data`. The process exclusively locks its store directory. Stop it before opening the same directory elsewhere. Local mode must not be shared across pods or placed on a network filesystem.
 
@@ -20,4 +28,8 @@ Build/pull the runtime image, then set its immutable digest in an overlay. The b
 
 Create namespace `durable-db`, a `durable-db-signing` Secret containing `admin.key`, and a `durable-db-storage` Secret containing either `DURABLE_DB_B2_BUCKET`, `B2_APPLICATION_KEY_ID`, `B2_APPLICATION_KEY`, or `DURABLE_DB_BUCKET` and the S3 provider settings. Keep secrets out of Git. Never mount a shared local store directory across pods. Apply the configured overlay with `kubectl apply -k`.
 
-The local multi-process integration test (`scripts/test-process-scaling.py`) exercised 1→3→1 servers, SIGKILL, and cache-free restart against MinIO: all 36 writes survived. This is process-level evidence, not yet a Kubernetes HPA qualification.
+The multi-process integration test (`scripts/test-process-scaling.py`) exercised 1→3→1 servers, SIGKILL, and cache-free restart against B2 and versioned MinIO: all 36 writes survived. The format-3 B2 rerun included more than 70 databases with concurrent maintenance.
+
+`scripts/test-kubernetes.py` passed against real B2 using the Woodpecker-built image: HPA bounds changed 1→3→1, all 36 writes were retained, and forced deletion of the last pod recovered with fresh disposable caches. This tests the HPA controller responding to bounds, not CPU load. The qualification cluster lacked a working resource-metrics API; CPU-triggered scaling, node drains, and partitions remain separate qualification work. The script records HPA conditions so that distinction stays visible.
+
+Use a registry address reachable by the **nodes' container runtime**, not just by pods. For example, a build may push through a cluster DNS service while the nodes pull the same registry through a configured NodePort alias. The qualification run used this arrangement; it did not modify cluster-wide registry or metrics settings.

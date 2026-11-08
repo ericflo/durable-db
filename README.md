@@ -18,19 +18,15 @@ durable-db is an ordered key-value database written in Rust. Keep authoritative 
 
 ## Start locally
 
-The initial source checkout is available now. Prebuilt releases are being prepared; build the current development version with Rust 1.90 and the pinned kache tools:
+[v0.1.0](https://github.com/ericflo/durable-db/releases/tag/v0.1.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
 
 ```sh
-git clone git@github.com:ericflo/durable-db.git
-cd durable-db
-scripts/install-kache.sh
-export PATH="$PWD/.tools/bin:$PATH"
-export KACHE_CONFIG="$PWD/.kache.toml"
-cargo build --locked --release
-./target/release/durable-db serve --data ./data
+curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+durable-db serve --data ./data
 ```
 
-In the examples below, put `target/release/durable-db` on your `PATH` or copy the single executable to your preferred location.
+The installer verifies the release checksum and installs one file into `~/.local/bin`. Set `DURABLE_DB_INSTALL_DIR` to choose another directory. For other platforms, [build from source](#build-and-test).
 
 The default address is `127.0.0.1:7654`. First startup generates `data/admin.key` with owner-only file permissions. Keep that signing key private. Generate an administrator token in another terminal:
 
@@ -89,6 +85,8 @@ Autoscaling improves aggregate capacity across databases. Directory publication 
 Rust is pinned in `rust-toolchain.toml`. All compiler invocations use [kache](https://github.com/kunobi-ninja/kache); keep its client and engine together.
 
 ```sh
+git clone git@github.com:ericflo/durable-db.git
+cd durable-db
 scripts/install-kache.sh
 export PATH="$PWD/.tools/bin:$PATH"
 export KACHE_CONFIG="$PWD/.kache.toml"

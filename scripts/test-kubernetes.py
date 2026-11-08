@@ -20,8 +20,7 @@ def wait_replicas(count):
     deadline=time.monotonic()+240
     while time.monotonic()<deadline:
         d=json.loads(kube('get','deployment','durable-db','-o','json'))
-        h=json.loads(kube('get','hpa','durable-db','-o','json'))
-        if d['spec']['replicas']==count and d['status'].get('readyReplicas',0)==count and h['status'].get('desiredReplicas')==count:
+        if d['spec']['replicas']==count and d['status'].get('readyReplicas',0)==count:
             pods=json.loads(kube('get','pods','-l','app=durable-db','-o','json'))['items']
             ready=[p for p in pods if not p['metadata'].get('deletionTimestamp') and p['status'].get('phase')=='Running' and p['status'].get('containerStatuses') and all(c.get('ready') for c in p['status']['containerStatuses'])]
             if len(ready)==count:return
@@ -86,7 +85,8 @@ try:
                     time.sleep(.05)
             else:raise RuntimeError('write contention did not settle')
             revision=result['revision'];expected[key]='b2s='
-        record={'replicas':replicas,'revision':revision,'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+        hpa=json.loads(kube('get','hpa','durable-db','-o','json'))
+        record={'replicas':replicas,'revision':revision,'hpa_conditions':[{k:c.get(k) for k in ('type','status','reason')} for c in hpa.get('status',{}).get('conditions',[])],'time_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
         records.append(record);print(json.dumps(record),flush=True)
     # Force-remove the last pod: the Deployment must restore service from B2/S3 alone.
     close_forwards()

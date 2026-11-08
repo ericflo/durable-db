@@ -1,6 +1,6 @@
 # Verification results
 
-Results are for the initial development checkout on 2026-11-08. Exact final commit IDs and updated model counts are added after the final gate. Commands and bounds are in [verification](verification.md).
+The v0.1.0 binary was built from `f431d88c072cc924634126e4b2ba8f1ec30697b0` by Woodpecker on 2026-11-08. The build gate passed Rust checks, all five bounded models and their negative controls, and Pi conformance. Commands and bounds are in [verification](verification.md).
 
 | Check | Result |
 | --- | --- |
@@ -10,7 +10,7 @@ Results are for the initial development checkout on 2026-11-08. Exact final comm
 | B2 missing-fence negative control | Missing-manifest counterexample at depth 8 |
 | Shared publication fault tests | Ten tests cover publication/collection races, concurrent database creation through splits, metadata admission, missing-index refusal, read-only barrier retries, idle collection, and lost response recovery |
 | Unsafe collector negative control | Counterexample found: publish then delete a formerly unreferenced object |
-| Rust engine/HTTP initial suite | 10 tests passed, including 24 randomized reference-map cases |
+| Full Rust suite | 23 tests passed, including 24 randomized reference-map cases; cloud tests run separately |
 | pi-durable 1.5.0 reference adapter | All 32 upstream storage conformance tests passed over HTTP (65 seconds) |
 | Documentation site | Desktop/mobile rendering, no mobile overflow, 0→6 pod illustration controls passed |
 | Independent HTTP processes | 1→3→1 servers, SIGKILL, all processes removed and reopened without caches; all 36 writes verified against both real B2 and versioned MinIO; format-3 B2 rerun passed with over 70 databases and concurrent maintenance after the retry fix |
@@ -22,7 +22,7 @@ Results are for the initial development checkout on 2026-11-08. Exact final comm
 | Read barrier model | 39,332 distinct states; 276,019 generated; depth 13; negative control detects stale reads |
 | Native HTTP wire test | Stale observation rejected by read barrier; exact version deletion verified |
 
-Compaction preservation and process scaling tests also pass; build artifact and Kubernetes qualification checks continue. No cloud latency numbers or Kubernetes production qualification are claimed from local tests.
+The static Linux x86_64 artifact passed checksum verification and standalone local create/commit/read with an empty environment and no Rust toolchain on PATH. Kubernetes HPA bounds 1→3→1 and forced last-pod deletion passed on real B2: all 36 keys and revision 36 were recovered. The phases reached revisions 12, 24, and 36 at 23:01:09, 23:02:13, and 23:02:50 UTC. The cluster lacked resource metrics, so this is not CPU-load-triggered autoscaling qualification. No cloud latency or Kubernetes production-readiness claim follows from these tests.
 
 ## Initial local latency baseline
 
