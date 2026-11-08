@@ -18,6 +18,12 @@ steps:
         --opt target=runtime --opt platform=linux/amd64
         --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
         --output type=image,name=registry.clouderic.svc.cluster.local:5000/durable-db:$${CI_COMMIT_SHA},push=true,registry.insecure=true
+      - >-
+        buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
+        --frontend dockerfile.v0 --local context=. --local dockerfile=.
+        --opt target=artifacts --opt platform=linux/amd64
+        --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
+        --output type=image,name=registry.clouderic.svc.cluster.local:5000/durable-db-artifacts:$${CI_COMMIT_SHA},push=true,registry.insecure=true
     backend_options:
       kubernetes:
         resources:

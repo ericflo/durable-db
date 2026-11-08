@@ -503,13 +503,28 @@ impl Engine {
             .storage
             .list(&prefix, before.gc_after.as_deref(), 256)
             .await?;
+        // No deletion and no cursor advance need no publication fence. This is
+        // a stuttering step in the collection model, even if a writer is active.
+        if candidates.is_empty() && before.gc_after.is_none() {
+            return Ok(GcResult {
+                examined: 0,
+                deleted: 0,
+            });
+        }
         let (mut m, version) = self.manifest(db).await?;
         let live: BTreeSet<_> = m.pages.iter().map(|p| p.object.clone()).collect();
-        m.gc_after = if candidates.len() == 256 {
+        let next_cursor = if candidates.len() == 256 {
             candidates.last().cloned()
         } else {
             None
         };
+        if next_cursor == m.gc_after && candidates.iter().all(|k| live.contains(k)) {
+            return Ok(GcResult {
+                examined: candidates.len(),
+                deleted: 0,
+            });
+        }
+        m.gc_after = next_cursor;
         m.fence = Uuid::new_v4().to_string();
         if !self
             .storage

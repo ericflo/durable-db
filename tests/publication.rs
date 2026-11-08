@@ -531,3 +531,80 @@ async fn distinct_databases_split_while_publishers_and_collectors_race() {
         }
     }
 }
+
+#[tokio::test]
+async fn idle_page_collection_does_not_rewrite_the_directory() {
+    let (store, metadata) = setup().await;
+    let e = engine(store.clone());
+    e.create("idle", Limits::default()).await.unwrap();
+    let empty_root = metadata.read().await.unwrap().info["durable-db-root"].clone();
+    assert_eq!(e.gc("idle").await.unwrap().deleted, 0);
+    assert_eq!(
+        metadata.read().await.unwrap().info["durable-db-root"],
+        empty_root
+    );
+    e.commit("idle", &request(0)).await.unwrap();
+    let live_root = metadata.read().await.unwrap().info["durable-db-root"].clone();
+    let result = e.gc("idle").await.unwrap();
+    assert_eq!(result.examined, 1);
+    assert_eq!(result.deleted, 0);
+    assert_eq!(
+        metadata.read().await.unwrap().info["durable-db-root"],
+        live_root
+    );
+}
+
+#[tokio::test]
+async fn publication_retries_read_barriers_but_never_a_changed_root() {
+    for change_root in [false, true] {
+        let (store, metadata) = setup().await;
+        store
+            .cas("heads/a.json", None, Bytes::from_static(b"one"))
+            .await
+            .unwrap();
+        let old = store.get("heads/a.json", 100).await.unwrap().unwrap();
+        metadata.pause.store(true, Ordering::SeqCst);
+        let writer = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas(
+                        "heads/a.json",
+                        Some(&old.version),
+                        Bytes::from_static(b"two"),
+                    )
+                    .await
+            }
+        });
+        metadata.paused.notified().await;
+        // Advance only the register revision while preserving all reachability.
+        for _ in 0..4 {
+            metadata.read_fresh().await.unwrap();
+        }
+        if change_root {
+            assert!(
+                store
+                    .cas("heads/b.json", None, Bytes::from_static(b"other"))
+                    .await
+                    .unwrap()
+            );
+        }
+        metadata.resume.notify_one();
+        assert_eq!(writer.await.unwrap().unwrap(), !change_root);
+        let value = store.get("heads/a.json", 100).await.unwrap().unwrap().bytes;
+        assert_eq!(
+            value,
+            if change_root {
+                &b"one"[..]
+            } else {
+                &b"two"[..]
+            }
+        );
+        if change_root {
+            assert_eq!(
+                store.get("heads/b.json", 100).await.unwrap().unwrap().bytes,
+                b"other"[..]
+            );
+        }
+    }
+}

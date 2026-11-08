@@ -274,11 +274,29 @@ impl Storage for Published {
         };
         info.insert(HEAD.into(), serde_json::to_string(&updated)?);
         budget(&info)?;
-        // Never retry this upload/pointer against a later revision: a collector may have deleted it.
-        self.authority
-            .replace(&bucket, info)
-            .await
-            .map(|v| v.is_some())
+        let mut observed = bucket.clone();
+        for attempt in 0..8 {
+            // An error has an unknown outcome and must go back to receipt recovery.
+            if self.authority.replace(&observed, info).await?.is_some() {
+                return Ok(true);
+            }
+            let latest = self.authority.read().await?;
+            // Read barriers and startup probes can advance the revision without
+            // changing reachability. Reuse uploads ONLY across those advances.
+            // A new root changes our snapshot; a collection fence may have made
+            // our uploads garbage. Neither identity is ever reused (no ABA).
+            if latest.info.get(HEAD) != bucket.info.get(HEAD)
+                || latest.info.get("durable-db-fence") != bucket.info.get("durable-db-fence")
+            {
+                return Ok(false);
+            }
+            info = latest.info.clone();
+            info.insert(HEAD.into(), serde_json::to_string(&updated)?);
+            budget(&info)?;
+            observed = latest;
+            tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
+        }
+        Ok(false)
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.files.put(key, bytes).await

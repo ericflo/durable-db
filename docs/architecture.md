@@ -17,7 +17,7 @@ The database directory is a multilevel B+tree. Within each individual database, 
 5. Recheck the database head identity, upload a fresh immutable manifest, copy the affected directory path, and conditionally publish its new root. The manifest contains the incremented user revision and request receipt.
 6. Acknowledge only after the conditional write succeeds.
 
-The conditional directory publication is the commit's linearization point. A definite precondition failure is a conflict. A timeout or broken connection may have committed: do not delete candidate pages and do not invent a rollback. The client retries the identical request. Recent receipts recover the original result; an evicted receipt still cannot cause an identical request to reapply because its old expected revision fails. Request IDs must never be recycled for new work.
+The conditional directory publication is the commit's linearization point. After a definite precondition failure, the publisher may reuse its uploaded path only when the root identity and collection-fence identity are both unchanged. This allows bounded retries across read barriers and startup probes. A changed root or collector fence abandons the attempt; it cannot reuse those uploads. A timeout or broken connection may have committed: do not delete candidate pages and do not invent a rollback. The client retries the identical request. Recent receipts recover the original result; an evicted receipt still cannot cause an identical request to reapply because its old expected revision fails. Request IDs must never be recycled for new work.
 
 Two transactions based on the same manifest cannot both publish. Cluster reads linearize at the directory read barrier. Together with expected-revision writes this gives database-scoped optimistic serializable transactions, provided clients recompute after conflicts and use one revision throughout a read/modify/write operation.
 
@@ -32,6 +32,8 @@ Why a fence is necessary: a paused writer might have uploaded an object that is 
 Collectors can stop at any instruction. A failed deletion leaves garbage for a later sweep. The collection cursor is stored with the fence and wraps after the end of the range. Objects created after a listing are collected in a later sweep. Successful writes never rely on a collector running.
 
 A reader that loses a page of an old snapshot restarts the **entire** read from a fresh manifest. It returns a conflict if an explicit expected revision has moved. No partial scan or missing value is returned as a successful substitute.
+
+A page-collection pass with no deletions and no cursor change does not publish a manifest; it needs no deletion fence. This avoids rewriting idle databases merely to examine them.
 
 Compaction replaces one adjacent pair of small pages without changing the logical revision. Its publication uses the same conditional-write discipline. Neither clocks nor Kubernetes termination hooks participate in data safety.
 

@@ -46,3 +46,12 @@ status=$?
 set -e
 [ "$status" = 12 ] && grep -q 'Invariant WitnessReachability is violated' "$tools/model-directory-unsafe.log" || { cat "$tools/model-directory-unsafe.log"; exit 1; }
 echo 'Directory negative control: a wrong witness can hide a reachable page.'
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-retry" -config PublicationRetry.cfg PublicationRetry.tla > "$tools/model-retry.log" 2>&1
+tail -n 9 "$tools/model-retry.log"
+set +e
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-retry-unsafe" -config UnsafePublicationRetry.cfg PublicationRetry.tla > "$tools/model-retry-unsafe.log" 2>&1
+status=$?
+set -e
+[ "$status" = 12 ] && grep -q 'Invariant ReferencedManifestExists is violated' "$tools/model-retry-unsafe.log" || { cat "$tools/model-retry-unsafe.log"; exit 1; }
+echo 'Retry negative control: ignoring a collection fence publishes a deleted manifest.'
