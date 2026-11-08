@@ -5,8 +5,11 @@ Creates a unique prefix and reports it for cleanup; use only a disposable bucket
 """
 import base64, json, os, pathlib, subprocess, tempfile, time, urllib.request, urllib.error, uuid
 binary = str(pathlib.Path(os.environ.get('DURABLE_DB_TEST_BINARY', 'target/debug/durable-db')).resolve())
-bucket = os.environ['DURABLE_DB_TEST_BUCKET']
-prefix = 'process-' + uuid.uuid4().hex
+b2_bucket = os.environ.get('DURABLE_DB_TEST_B2_BUCKET')
+bucket = b2_bucket or os.environ['DURABLE_DB_TEST_BUCKET']
+prefix = os.environ.get('DURABLE_DB_TEST_PREFIX', 'process-' + uuid.uuid4().hex)
+database = 'process-' + uuid.uuid4().hex
+maintenance = os.environ.get('DURABLE_DB_TEST_MAINTENANCE_SECONDS', '1')
 processes = {}
 with tempfile.TemporaryDirectory() as directory:
     root = pathlib.Path(directory)
@@ -24,7 +27,7 @@ with tempfile.TemporaryDirectory() as directory:
                 time.sleep(.25 * (attempt+1))
     def start(port):
         log = open(root / f'{port}.log', 'w')
-        p = subprocess.Popen([binary, 'serve', '--bucket', bucket, '--prefix', prefix, '--listen', f'127.0.0.1:{port}', '--admin-key-file', str(root / 'admin.key'), '--memory-cache-mib', '0', '--maintenance-seconds', '1'], stdout=log, stderr=log)
+        p = subprocess.Popen([binary, 'serve', '--b2-bucket' if b2_bucket else '--bucket', bucket, '--prefix', prefix, '--listen', f'127.0.0.1:{port}', '--admin-key-file', str(root / 'admin.key'), '--memory-cache-mib', '0', '--maintenance-seconds', maintenance], stdout=log, stderr=log)
         processes[port] = (p, log)
         for _ in range(100):
             if p.poll() is not None: raise RuntimeError((root / f'{port}.log').read_text())
@@ -38,7 +41,7 @@ with tempfile.TemporaryDirectory() as directory:
         p.wait(timeout=45); log.close()
     try:
         start(17661)
-        request(17661,'/v1/databases/test',{'max_bytes':1048576,'max_keys':1000})
+        request(17661,f'/v1/databases/{database}',{'max_bytes':1048576,'max_keys':1000})
         revision=0
         for phase, ports in [('one',[17661]),('three',[17661,17662,17663]),('one-again',[17663])]:
             if phase=='three': start(17662); start(17663)
@@ -46,7 +49,7 @@ with tempfile.TemporaryDirectory() as directory:
             for n in range(12):
                 body={'expected_revision':revision,'request_id':str(uuid.uuid4()),'writes':[{'key':f'{revision:04}','value':base64.b64encode(f'value-{revision}'.encode()).decode()}]}
                 for _ in range(30):
-                    try: result=request(ports[n%len(ports)],'/v1/databases/test/commit',body); break
+                    try: result=request(ports[n%len(ports)],f'/v1/databases/{database}/commit',body); break
                     except urllib.error.HTTPError as e:
                         if e.code!=409: raise
                 else: raise RuntimeError('maintenance contention never settled')
@@ -54,7 +57,7 @@ with tempfile.TemporaryDirectory() as directory:
             print(json.dumps({'phase':phase,'replicas':len(ports),'revision':revision}),flush=True)
         stop(17663,True)
         start(17664)
-        result=request(17664,'/v1/databases/test/read',{'scans':[{'limit':100}]})
+        result=request(17664,f'/v1/databases/{database}/read',{'scans':[{'limit':100}]})
         assert result['revision']==36 and len(result['scans'][0]['items'])==36,result
         for n,item in enumerate(result['scans'][0]['items']):
             assert item['key']==f'{n:04}' and base64.b64decode(item['value'])==f'value-{n}'.encode()
