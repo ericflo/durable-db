@@ -6,6 +6,8 @@ The intended host is the NeuralColumn API, with one or more database IDs associa
 
 Each site may provision multiple databases. The bucket directory must support a large site population without per-site buckets or tiny metadata slot limits. Format 3 uses a persistent B+tree; database cardinality and aggregate publication throughput must be qualified separately. Provisioning quotas should be explicit service policy, not an incidental storage format ceiling.
 
+**Rollout is blocked.** The first real-B2 test with four concurrent database writers exhausted retries under maintenance; delaying maintenance still left heavy publication contention. The 10,005-database directory test does not establish capacity for that many active sites. Resolve the [production gates](production-readiness.md), including the measured throughput failure, before onboarding production sites.
+
 ## Acceptance scenario
 
 1. Create a site, provision a database, and persist the mapping in the service control plane.
@@ -13,7 +15,7 @@ Each site may provision multiple databases. The bucket directory must support a 
 3. Start a Pi Harness with storage under a dedicated prefix and submit an idempotent request.
 4. Interrupt a tool/model turn, replace API pods, and explicitly transfer the Session owner after the harness host restarts.
 5. Reopen and resume with no cache state. Validate the transcript, task checkpoints, documents, and request deduplication.
-6. Scale API compute 1→3→1 while writers/readers continue; kill a pod during manifest publication and during collection. Resolve uncertain writes without duplicates.
+6. Scale API compute 1→3→1 while writers/readers across independent sites continue; kill a pod during manifest publication and during collection. Resolve uncertain writes without duplicates. Measure each site's latency and progress so aggregate throughput cannot hide starvation of one site.
 7. Revoke access, rotate keys, enforce provider spend/rate budgets, export a tenant, and delete it with a defined retention policy.
 
 ## Decisions still required
