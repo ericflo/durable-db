@@ -203,6 +203,7 @@ async fn ordered_scans_across_split_pages_have_stable_exclusive_cursors() {
 struct Faults {
     inner: Arc<dyn Storage>,
     pause: AtomicBool,
+    pause_list: AtomicBool,
     ambiguous: AtomicBool,
     reached: Notify,
     resume: Notify,
@@ -212,6 +213,7 @@ impl Faults {
         Self {
             inner,
             pause: AtomicBool::new(false),
+            pause_list: AtomicBool::new(false),
             ambiguous: AtomicBool::new(false),
             reached: Notify::new(),
             resume: Notify::new(),
@@ -238,11 +240,54 @@ impl Storage for Faults {
         self.inner.put(k, b).await
     }
     async fn list(&self, p: &str, a: Option<&str>, l: usize) -> anyhow::Result<Vec<String>> {
-        self.inner.list(p, a, l).await
+        let result = self.inner.list(p, a, l).await;
+        if self.pause_list.swap(false, Ordering::SeqCst) {
+            self.reached.notify_one();
+            self.resume.notified().await;
+        }
+        result
     }
     async fn delete(&self, k: &str) -> anyhow::Result<()> {
         self.inner.delete(k).await
     }
+}
+
+#[tokio::test]
+async fn idle_maintenance_may_defer_new_garbage_but_never_deletes_from_an_old_snapshot() {
+    let store = Arc::new(Faults::new(remote()));
+    let writer = Arc::new(Engine::new(store.clone(), cache()));
+    writer.create("test", Limits::default()).await.unwrap();
+    writer
+        .commit("test", &request(0, "old", "a", Some(b"old")))
+        .await
+        .unwrap();
+    store.pause_list.store(true, Ordering::SeqCst);
+    let maintenance = tokio::spawn({
+        let writer = writer.clone();
+        async move { writer.maintain_database("test").await.unwrap() }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), store.reached.notified())
+        .await
+        .unwrap();
+    writer
+        .commit("test", &request(1, "new", "a", Some(b"new")))
+        .await
+        .unwrap();
+    store.resume.notify_one();
+    // The listed object was live in the pre-list snapshot. It became garbage
+    // while this collector paused; skipping it now is safe and does no CAS.
+    assert_eq!(maintenance.await.unwrap().deleted, 0);
+    assert_eq!(
+        store.list("blocks/test.", None, 100).await.unwrap().len(),
+        2
+    );
+    assert_eq!(value(&writer, "a").await.unwrap(), b"new");
+    assert_eq!(writer.maintain_database("test").await.unwrap().deleted, 1);
+    assert_eq!(
+        store.list("blocks/test.", None, 100).await.unwrap().len(),
+        1
+    );
+    assert_eq!(value(&writer, "a").await.unwrap(), b"new");
 }
 
 #[tokio::test]

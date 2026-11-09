@@ -33,7 +33,7 @@ Collectors can stop at any instruction. A failed deletion leaves garbage for a l
 
 A reader that loses a page of an old snapshot restarts the **entire** read from a fresh manifest. It returns a conflict if an explicit expected revision has moved. No partial scan or missing value is returned as a successful substitute.
 
-A page-collection pass with no deletions and no cursor change does not publish a manifest; it needs no deletion fence. This avoids rewriting idle databases merely to examine them.
+A page-collection pass with no deletions and no cursor change does not publish a manifest; it needs no deletion fence. Automatic maintenance shares its initial manifest observation between compaction and this no-op check. If all listed candidates were live in that earlier snapshot and the cursor would stay unchanged, it may defer the pass without another read. A concurrent write can leave garbage for the next sweep, but this branch never deletes anything. Every actual deletion still reads after listing and conditionally publishes a fence. An idle database therefore needs one authoritative observation per maintenance pass instead of three.
 
 Compaction replaces one adjacent pair of small pages without changing the logical revision. Its publication uses the same conditional-write discipline. Neither clocks nor Kubernetes termination hooks participate in data safety.
 

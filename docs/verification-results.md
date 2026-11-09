@@ -62,3 +62,16 @@ The concurrent write phase received 68 HTTP `409` responses and 25 HTTP `503` re
 A diagnostic rerun delayed maintenance for 24 hours, retained the existing directory population, added four databases, and ran four workers for ten writes each. All 40 writes completed, but required 59 conflicts and one service-unavailable response. Successful throughput was 0.543 operations/second; write p50/p95/max were 2,259/22,217/22,534 ms. All 40 reads completed at 9.190 operations/second, and the four active databases verified afterward. Sanitized server logging identified one native B2 HTTP `503`; it does not retrospectively identify every `503` in the first run. See the [isolation-run JSON](evidence/b2-isolation-2026-11-08.json). Delaying maintenance is a diagnostic control, not a deployment recommendation.
 
 These runs establish a publication-progress/performance blocker. They do not isolate every source of latency or constitute a controlled attribution of all failures to maintenance. Three API processes did not achieve acceptable concurrent write performance in this workload; process count stayed fixed while writer concurrency changed. The next design must address competing publications, repeated uploads, and maintenance interference together, with a model before implementation. Increasing retry limits or removing the read barrier would not close this gate.
+
+## B2 rebase diagnostic
+
+A rebase-only candidate was tested with the same 70-database, three-process workload and 60-second maintenance interval in a new dedicated B2 `us-west-002` bucket on 2026-11-08. This candidate predates the grouped observations, immutable-manifest cache, and reduced idle-maintenance work. The [raw report](evidence/b2-rebase-2026-11-08.json) records its binary hash and source base. All measured operations completed and all 70 databases verified afterward, but latency and throughput remain unsuitable for a production performance claim.
+
+| Phase | Successful / planned | Successful ops/s | p50 / p95 / max |
+| --- | --- | --- | --- |
+| One writer | 20 / 20 | 0.256 | 3,607 / 7,989 / 9,575 ms |
+| One reader | 20 / 20 | 1.508 | 298 / 2,201 / 2,257 ms |
+| Four writers | 80 / 80 | 0.526 | 4,984 / 14,510 / 31,250 ms |
+| Four readers | 80 / 80 | 4.992 | 219 / 2,451 / 6,394 ms |
+
+The four-writer phase required 11 HTTP `409` and four HTTP `503` retries. This is improved completion in one short experiment, not a controlled demonstration of its cause, a statistical latency comparison, or closure of the performance gate. Sanitized logs again show native B2 `503` responses; their cause was not established. The task-owned bucket's 380 remaining physical versions were removed and its scoped workload key revoked after the run.

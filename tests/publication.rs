@@ -608,15 +608,19 @@ async fn idle_page_collection_does_not_rewrite_the_directory() {
     let (store, metadata) = setup().await;
     let e = engine(store.clone());
     e.create("idle", Limits::default()).await.unwrap();
-    let empty_root = metadata.read().await.unwrap().info["durable-db-root"].clone();
-    assert_eq!(e.gc("idle").await.unwrap().deleted, 0);
+    let before = metadata.read().await.unwrap();
+    let empty_root = before.info["durable-db-root"].clone();
+    assert_eq!(e.maintain_database("idle").await.unwrap().deleted, 0);
+    assert_eq!(metadata.read().await.unwrap().revision, before.revision + 1);
     assert_eq!(
         metadata.read().await.unwrap().info["durable-db-root"],
         empty_root
     );
     e.commit("idle", &request(0)).await.unwrap();
-    let live_root = metadata.read().await.unwrap().info["durable-db-root"].clone();
-    let result = e.gc("idle").await.unwrap();
+    let before = metadata.read().await.unwrap();
+    let live_root = before.info["durable-db-root"].clone();
+    let result = e.maintain_database("idle").await.unwrap();
+    assert_eq!(metadata.read().await.unwrap().revision, before.revision + 1);
     assert_eq!(result.examined, 1);
     assert_eq!(result.deleted, 0);
     assert_eq!(

@@ -562,27 +562,34 @@ impl Engine {
     }
     pub async fn gc(&self, db: &str) -> Result<GcResult> {
         let (before, _) = self.manifest(db).await?;
+        self.gc_from(db, before).await
+    }
+    async fn gc_from(&self, db: &str, before: Manifest) -> Result<GcResult> {
         let prefix = format!("blocks/{db}.");
         // Protocol order is essential: finish listing BEFORE reading/fencing the head.
         let candidates = self
             .storage
             .list(&prefix, before.gc_after.as_deref(), 256)
             .await?;
-        // No deletion and no cursor advance need no publication fence. This is
-        // a stuttering step in the collection model, even if a writer is active.
-        if candidates.is_empty() && before.gc_after.is_none() {
-            return Ok(GcResult {
-                examined: 0,
-                deleted: 0,
-            });
-        }
-        let (mut m, version) = self.manifest(db).await?;
-        let live: BTreeSet<_> = m.pages.iter().map(|p| p.object.clone()).collect();
         let next_cursor = if candidates.len() == 256 {
             candidates.last().cloned()
         } else {
             None
         };
+        let before_live: BTreeSet<_> = before.pages.iter().map(|p| &p.object).collect();
+        // An earlier snapshot can justify doing NO work. A concurrent write
+        // may leave new garbage for a later sweep, but this branch deletes
+        // nothing and publishes nothing. Never use this snapshot to delete.
+        if next_cursor == before.gc_after && candidates.iter().all(|k| before_live.contains(k)) {
+            return Ok(GcResult {
+                examined: candidates.len(),
+                deleted: 0,
+            });
+        }
+        // Any actual deletion/cursor change still reads AFTER listing and must
+        // publish a successful fence. Cached pre-list observations cannot do so.
+        let (mut m, version) = self.manifest(db).await?;
+        let live: BTreeSet<_> = m.pages.iter().map(|p| p.object.clone()).collect();
         if next_cursor == m.gc_after && candidates.iter().all(|k| live.contains(k)) {
             return Ok(GcResult {
                 examined: candidates.len(),
@@ -613,14 +620,28 @@ impl Engine {
     /// Merge one adjacent pair of small pages. Physical maintenance changes the CAS
     /// fence, but never the user-visible revision or the logical key/value state.
     pub async fn compact(&self, db: &str) -> Result<bool> {
-        let (mut m, version) = self.manifest(db).await?;
-        let Some(i) = m
+        let (m, version) = self.manifest(db).await?;
+        self.compact_from(db, &m, &version).await
+    }
+    /// Share the initial observation between compaction and no-op collection.
+    /// A real deletion always obtains its own post-list observation and fence.
+    pub async fn maintain_database(&self, db: &str) -> Result<GcResult> {
+        let (m, version) = self.manifest(db).await?;
+        if self.compact_from(db, &m, &version).await? {
+            self.gc(db).await
+        } else {
+            self.gc_from(db, m).await
+        }
+    }
+    async fn compact_from(&self, db: &str, before: &Manifest, version: &Version) -> Result<bool> {
+        let Some(i) = before
             .pages
             .windows(2)
             .position(|p| p[0].encoded + p[1].encoded <= TARGET_BLOCK)
         else {
             return Ok(false);
         };
+        let mut m = before.clone();
         let Some(mut block) = self.block(&m.pages[i]).await? else {
             return Err(Error::Conflict);
         };
@@ -641,7 +662,7 @@ impl Engine {
             self.storage.put(&key, bytes.clone()).await?;
             self.cache.insert(&key, bytes).await;
         }
-        if !self.storage.cas(&head(db), Some(&version), encoded).await? {
+        if !self.storage.cas(&head(db), Some(version), encoded).await? {
             return Err(Error::Conflict);
         }
         Ok(true)

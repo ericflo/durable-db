@@ -223,10 +223,7 @@ async fn maintain(app: Arc<App>, seconds: u64) {
                     None
                 };
                 for db in dbs {
-                    if app.engine.compact(&db).await.is_err() {
-                        tracing::warn!("compaction deferred; will retry on a later sweep");
-                    }
-                    if app.engine.gc(&db).await.is_err() {
+                    if app.engine.maintain_database(&db).await.is_err() {
                         tracing::warn!("maintenance deferred; will retry on a later sweep");
                     }
                 }
