@@ -33,17 +33,22 @@ def main():
     parser.add_argument('--token-file', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--context', required=True)
-    parser.add_argument('--provider-ip', help='Optional disposable provider IPv4 for a 40-second node egress partition')
+    partition = parser.add_mutually_exclusive_group()
+    partition.add_argument('--provider-ip', help='Optional disposable provider IPv4 for a 40-second node egress partition')
+    partition.add_argument('--partition-https', action='store_true', help='In the disposable kind node, block forwarded TCP/443 outside 10.0.0.0/8 (cluster Service traffic remains reachable)')
     parser.add_argument('--inject-oom', action='store_true', help='Temporarily lower one identified API container cgroup limit to trigger a real kernel OOM kill')
     parser.add_argument('--cpu-request', default='100m')
     parser.add_argument('--read-workers', type=int, default=32)
     parser.add_argument('--phase-timeout', type=int, default=600)
+    parser.add_argument('--maintenance-seconds', type=int, default=15)
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
     if not args.kind_cluster.startswith('durable-db-qualification') or not args.namespace.startswith('durable-db-qualification'):
         parser.error('Both cluster and namespace must start with durable-db-qualification')
     if args.read_workers not in range(1, 129) or args.phase_timeout not in range(60, 1801):
         parser.error('Read workers must be 1..128 and phase timeout 60..1800 seconds')
+    if args.maintenance_seconds not in range(1, 3601):
+        parser.error('Maintenance interval must be 1..3600 seconds')
     if args.provider_ip:
         address = ipaddress.ip_address(args.provider_ip)
         if address.version != 4 or not address.is_private or address.is_loopback:
@@ -56,8 +61,9 @@ def main():
                   source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   configuration=dict(image=args.image, cpu_request=args.cpu_request, cpu_limit='1',
                                      cpu_target_percent=70, read_workers=args.read_workers,
-                                     maintenance_seconds=15, memory_cache_mib=64, disk_cache_mib=128,
+                                     maintenance_seconds=args.maintenance_seconds, memory_cache_mib=64, disk_cache_mib=128,
                                      inject_oom=args.inject_oom,
+                                     partition_https=args.partition_https,
                                      hpa_down_stabilization_seconds=30, hpa_down_period_seconds=15),
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   phases=[], observations=[], http_attempt_statuses={}, writes_acknowledged=0,
@@ -267,7 +273,7 @@ def main():
             container['image'] = args.image
             container['resources']['requests']['cpu'] = args.cpu_request
             container['resources']['limits']['cpu'] = '1'
-            container['args'].append('--maintenance-seconds=15')
+            container['args'].append(f'--maintenance-seconds={args.maintenance_seconds}')
         if resource['kind'] == 'HorizontalPodAutoscaler':
             resource['spec']['maxReplicas'] = 1
             resource['spec']['behavior']['scaleDown'] = dict(stabilizationWindowSeconds=30, policies=[dict(type='Pods', value=8, periodSeconds=15)])
@@ -367,9 +373,11 @@ def main():
                       exit_code=terminated['exitCode'], forced_limit_bytes=1048576,
                       observed=wait_replicas(None, cpu=True))
 
-            if args.provider_ip:
+            if args.provider_ip or args.partition_https:
                 blocked_node = node
-                rule = ['FORWARD', '-d', args.provider_ip, '-p', 'tcp', '--dport', '9000', '-m', 'comment', '--comment', 'durable-db-qualification', '-j', 'DROP']
+                target = ['!', '-d', '10.0.0.0/8', '-p', 'tcp', '--dport', '443'] if args.partition_https else [
+                    '-d', args.provider_ip, '-p', 'tcp', '--dport', '9000']
+                rule = ['FORWARD', *target, '-m', 'comment', '--comment', 'durable-db-qualification', '-j', 'DROP']
                 docker('exec', blocked_node, 'iptables', '-I', *rule)
                 phase('provider-partition-start', node=blocked_node, duration_seconds=40)
                 time.sleep(40)

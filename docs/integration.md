@@ -20,7 +20,7 @@ Each site may provision multiple databases. The bucket directory must support a 
 
 ## Decisions still required
 
-- The existing platform uses B2. B2 is a required authority, using native bucket revision publication rather than S3 conditional file overwrites. The common B2/S3 protocol has passed its initial real-B2 test; complete scaling, abuse, and soak qualification before platform rollout. See [the B2 design](b2.md).
+- The existing platform uses B2. B2 is a required authority, using native bucket revision publication rather than S3 conditional file overwrites. The common B2/S3 protocol passes real-B2 integration and a short CPU-driven kind HPA/fault/cold-recovery campaign. Complete independent-node, abuse, latency, and soak qualification before platform rollout. See [the B2 design](b2.md).
 - Pi Session execution has one owner even though database API pods are interchangeable. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
 - Browser identity, CORS, individual-user row authorization, and billing belong to the gateway. Per-database scoped credentials alone do not provide row-level access control.
 - The indexed Pi adapter passes upstream conformance with scoped credentials and has direct record/index/document storage. B2 conformance and cache-free host restart with explicit takeover pass; complete full Harness and sustained-load qualification before production onboarding; the bounded journal remains a reference fixture.
