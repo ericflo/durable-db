@@ -1,6 +1,6 @@
 # Durable authorization lifecycle: working design
 
-Status: design work, not an implemented capability. Metrics-only credentials are implemented separately. Individual database-token revocation, overlapping signing-key rotation, and safe database creation retries remain production gates.
+Status: the modeled per-database lifecycle is implemented as an explicit format-2 activation: individual token revocation, credential generations, snapshot authorization, and bounded policy receipts. Metrics-only credentials are separate. Overlapping signing-key rotation, safe database creation retries, and the additional lifecycle work below remain production gates. See the public API and verification record for the qualified scope.
 
 ## State and linearization
 

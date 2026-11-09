@@ -12,6 +12,29 @@ pub struct Claims {
     pub database: String,
     pub write: bool,
     pub expires: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<TokenPolicy>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenPolicy {
+    pub token_id: String,
+    pub incarnation: String,
+    pub generation: u64,
+}
+/// Trusted embedded boundary. HTTP callers obtain this only after MAC and scope
+/// verification; constructing one directly requires the embedded engine's trust.
+pub enum Access {
+    Administrator,
+    Database(Claims),
+}
+impl Claims {
+    pub(crate) fn check_scope(&self, database: &str, write: bool) -> Result<()> {
+        if self.expires <= now() || self.database != database || (write && !self.write) {
+            return Err(Error::Unauthorized);
+        }
+        Ok(())
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +113,39 @@ impl Auth {
             .is_ok()
     }
     pub fn issue(&self, database: String, write: bool, ttl: u64) -> Result<String> {
+        self.issue_claims(database, write, ttl, None)
+    }
+    pub fn issue_for_policy(
+        &self,
+        database: String,
+        write: bool,
+        ttl: u64,
+        incarnation: String,
+        generation: u64,
+    ) -> Result<(String, String)> {
+        if !canonical_uuid(&incarnation) {
+            return Err(Error::Invalid("invalid policy incarnation".into()));
+        }
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let token = self.issue_claims(
+            database,
+            write,
+            ttl,
+            Some(TokenPolicy {
+                token_id: token_id.clone(),
+                incarnation,
+                generation,
+            }),
+        )?;
+        Ok((token, token_id))
+    }
+    fn issue_claims(
+        &self,
+        database: String,
+        write: bool,
+        ttl: u64,
+        policy: Option<TokenPolicy>,
+    ) -> Result<String> {
         validate_db(&database)?;
         if ttl == 0 || ttl > 86400 * 30 {
             return Err(Error::Invalid(
@@ -100,6 +156,7 @@ impl Auth {
             database,
             write,
             expires: now().saturating_add(ttl),
+            policy,
         };
         let payload =
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(anyhow::Error::from)?);
@@ -132,8 +189,25 @@ impl Auth {
             return Err(Error::Unauthorized);
         }
         validate_db(&claims.database).map_err(|_| Error::Unauthorized)?;
+        if claims
+            .policy
+            .as_ref()
+            .is_some_and(|p| !canonical_uuid(&p.token_id) || !canonical_uuid(&p.incarnation))
+        {
+            return Err(Error::Unauthorized);
+        }
         Ok(claims)
     }
+    pub fn access(&self, token: &str, db: &str, write: bool) -> Result<Access> {
+        if self.is_admin(token) {
+            return Ok(Access::Administrator);
+        }
+        let claims = self.claims(token)?;
+        claims.check_scope(db, write)?;
+        Ok(Access::Database(claims))
+    }
+    /// Signature/scope check only. Public data access must also enforce the
+    /// manifest policy through Engine::*_with_access.
     pub fn authorize(&self, token: &str, db: &str, write: bool) -> Result<()> {
         if self.is_admin(token) {
             return Ok(());
@@ -144,6 +218,9 @@ impl Auth {
         }
         Ok(())
     }
+}
+pub(crate) fn canonical_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value && !id.is_nil())
 }
 fn now() -> u64 {
     SystemTime::now()

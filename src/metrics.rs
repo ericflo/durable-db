@@ -17,6 +17,7 @@ pub enum Operation {
     HttpRead,
     HttpCommit,
     HttpGc,
+    HttpAccess,
     HttpToken,
     HttpOther,
     AuthorityRead,
@@ -36,12 +37,13 @@ pub enum Operation {
     NativeAuthorize,
     NativeOther,
 }
-const OPERATIONS: [&str; 23] = [
+const OPERATIONS: [&str; 24] = [
     "http_info",
     "http_create",
     "http_read",
     "http_commit",
     "http_gc",
+    "http_access",
     "http_token",
     "http_other",
     "authority_read",

@@ -128,6 +128,82 @@ async fn setup() -> (Arc<Published>, Arc<Metadata>) {
 fn engine(b2: Arc<Published>) -> Engine {
     Engine::new(b2, Arc::new(Cache::new(0, None).unwrap()))
 }
+
+#[tokio::test]
+async fn revocation_invalidates_an_abandoned_write_and_policy_receipts_survive_helping() {
+    use durable_db::auth::Auth;
+    let (published, metadata) = setup().await;
+    let db = engine(published);
+    db.create("test", Limits::default()).await.unwrap();
+    db.create("helper", Limits::default()).await.unwrap();
+    let enable = PolicyRequest {
+        request_id: "enable".into(),
+        expected_policy_revision: 0,
+        change: PolicyAction::Enable,
+    };
+    metadata.lost_proposal_ack.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        db.change_policy("test", &enable).await,
+        Err(Error::Storage(_))
+    ));
+    engine(replica(&metadata).await)
+        .commit("helper", &request(0))
+        .await
+        .unwrap();
+    let enabled = db.change_policy("test", &enable).await.unwrap();
+    assert!(
+        enabled.replayed,
+        "a different database's helper published the policy"
+    );
+    let auth = Auth::new(&"24".repeat(32)).unwrap();
+    let (token, id) = auth
+        .issue_for_policy(
+            "test".into(),
+            true,
+            3600,
+            enabled.policy.incarnation,
+            enabled.policy.generation,
+        )
+        .unwrap();
+    let access = auth.access(&token, "test", true).unwrap();
+    metadata.lost_proposal_ack.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        db.commit_with_access("test", &request(0), &access).await,
+        Err(Error::Storage(_))
+    ));
+    let revoke = PolicyRequest {
+        request_id: "revoke".into(),
+        expected_policy_revision: 1,
+        change: PolicyAction::Revoke { token_id: id },
+    };
+    engine(replica(&metadata).await)
+        .change_policy("test", &revoke)
+        .await
+        .unwrap();
+    // Later helpers still encounter the abandoned write but its expected
+    // manifest identity precedes revocation, so it can never publish now.
+    engine(replica(&metadata).await)
+        .commit("helper", &request(1))
+        .await
+        .unwrap();
+    assert_eq!(db.info("test").await.unwrap().revision, 0);
+    assert!(matches!(
+        db.commit_with_access("test", &request(0), &access).await,
+        Err(Error::Unauthorized)
+    ));
+    db.gc("test").await.unwrap();
+    db.maintain_storage().await.unwrap();
+    assert_eq!(
+        engine(replica(&metadata).await)
+            .info("test")
+            .await
+            .unwrap()
+            .policy
+            .unwrap()
+            .revoked_tokens,
+        1
+    );
+}
 async fn replica(metadata: &Arc<Metadata>) -> Arc<Published> {
     Arc::new(
         Published::open(metadata.files.clone(), metadata.clone(), "test")

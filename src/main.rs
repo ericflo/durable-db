@@ -67,6 +67,11 @@ enum Command {
         /// Mint a credential that can only scrape GET /metrics.
         #[arg(long, conflicts_with_all = ["database", "admin", "write"])]
         metrics: bool,
+        /// Current database policy incarnation (obtain from administrator info).
+        #[arg(long, requires_all = ["database", "generation"], conflicts_with_all = ["admin", "metrics"])]
+        incarnation: Option<String>,
+        #[arg(long, requires = "incarnation")]
+        generation: Option<u64>,
     },
     /// Generate a signing key file with restrictive permissions.
     Keygen {
@@ -95,12 +100,26 @@ async fn main() -> anyhow::Result<()> {
             ttl_seconds,
             admin,
             metrics,
+            incarnation,
+            generation,
         } => {
             let auth = Auth::new(&std::fs::read_to_string(key_file)?)?;
             if admin {
                 println!("{}", auth.admin_token());
             } else if metrics {
                 println!("{}", auth.metrics_token(ttl_seconds)?);
+            } else if let Some(incarnation) = incarnation {
+                println!(
+                    "{}",
+                    auth.issue_for_policy(
+                        database.context("--database required")?,
+                        write,
+                        ttl_seconds,
+                        incarnation,
+                        generation.context("--generation required")?
+                    )?
+                    .0
+                );
             } else {
                 println!(
                     "{}",

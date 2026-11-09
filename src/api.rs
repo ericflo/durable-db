@@ -1,7 +1,7 @@
 use crate::{
     Error, Result,
     auth::Auth,
-    engine::{CommitRequest, Engine, Limits, MAX_BODY, ReadRequest},
+    engine::{CommitRequest, Engine, Limits, MAX_BODY, PolicyRequest, PolicyResult, ReadRequest},
     metrics::{self as telemetry, Operation},
 };
 use axum::{
@@ -67,6 +67,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/databases/{db}/read", post(read))
         .route("/v1/databases/{db}/commit", post(commit))
         .route("/v1/databases/{db}/gc", post(gc))
+        .route("/v1/databases/{db}/access", post(access))
         .route("/v1/tokens", post(token))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(middleware::from_fn_with_state(app.clone(), admission))
@@ -93,6 +94,7 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
         Some("/v1/databases/{db}/read") => Operation::HttpRead,
         Some("/v1/databases/{db}/commit") => Operation::HttpCommit,
         Some("/v1/databases/{db}/gc") => Operation::HttpGc,
+        Some("/v1/databases/{db}/access") => Operation::HttpAccess,
         Some("/v1/databases/{db}") if request.method() == axum::http::Method::POST => {
             Operation::HttpCreate
         }
@@ -219,8 +221,8 @@ async fn info(
     Path(db): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<crate::engine::Info>> {
-    app.auth.authorize(bearer(&headers)?, &db, false)?;
-    Ok(Json(app.engine.info(&db).await?))
+    let access = app.auth.access(bearer(&headers)?, &db, false)?;
+    Ok(Json(app.engine.info_with_access(&db, &access).await?))
 }
 async fn read(
     State(app): State<Arc<App>>,
@@ -228,8 +230,10 @@ async fn read(
     headers: HeaderMap,
     Json(request): Json<ReadRequest>,
 ) -> Result<Json<crate::engine::ReadResult>> {
-    app.auth.authorize(bearer(&headers)?, &db, false)?;
-    Ok(Json(app.engine.read(&db, &request).await?))
+    let access = app.auth.access(bearer(&headers)?, &db, false)?;
+    Ok(Json(
+        app.engine.read_with_access(&db, &request, &access).await?,
+    ))
 }
 async fn commit(
     State(app): State<Arc<App>>,
@@ -237,8 +241,23 @@ async fn commit(
     headers: HeaderMap,
     Json(request): Json<CommitRequest>,
 ) -> Result<Json<crate::engine::CommitResult>> {
-    app.auth.authorize(bearer(&headers)?, &db, true)?;
-    Ok(Json(app.engine.commit(&db, &request).await?))
+    let access = app.auth.access(bearer(&headers)?, &db, true)?;
+    Ok(Json(
+        app.engine
+            .commit_with_access(&db, &request, &access)
+            .await?,
+    ))
+}
+async fn access(
+    State(app): State<Arc<App>>,
+    Path(db): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<PolicyRequest>,
+) -> Result<Json<PolicyResult>> {
+    if !app.auth.is_admin(bearer(&headers)?) {
+        return Err(Error::Unauthorized);
+    }
+    Ok(Json(app.engine.change_policy(&db, &request).await?))
 }
 async fn gc(
     State(app): State<Arc<App>>,
@@ -260,6 +279,8 @@ struct TokenRequest {
 #[derive(Serialize)]
 struct TokenResponse {
     token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_id: Option<String>,
 }
 async fn token(
     State(app): State<Arc<App>>,
@@ -269,10 +290,22 @@ async fn token(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    app.engine.info(&request.database).await?;
-    Ok(Json(TokenResponse {
-        token: app
-            .auth
-            .issue(request.database, request.write, request.ttl_seconds)?,
-    }))
+    let info = app.engine.info(&request.database).await?;
+    let (token, token_id) = if let Some(policy) = info.policy {
+        let (token, id) = app.auth.issue_for_policy(
+            request.database,
+            request.write,
+            request.ttl_seconds,
+            policy.incarnation,
+            policy.generation,
+        )?;
+        (token, Some(id))
+    } else {
+        (
+            app.auth
+                .issue(request.database, request.write, request.ttl_seconds)?,
+            None,
+        )
+    };
+    Ok(Json(TokenResponse { token, token_id }))
 }

@@ -1,5 +1,6 @@
 use crate::{
     Error, Result,
+    auth::Access,
     cache::Cache,
     storage::{Storage, Version},
 };
@@ -13,6 +14,8 @@ use std::{
     sync::Arc,
 };
 use uuid::Uuid;
+mod access;
+pub use access::{PolicyAction, PolicyInfo, PolicyRequest, PolicyResult};
 
 pub const MAX_BODY: usize = 1024 * 1024;
 const MAX_HEAD: usize = 512 * 1024;
@@ -66,6 +69,8 @@ struct Manifest {
     pages: Vec<Page>,
     receipts: Vec<Receipt>,
     gc_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<access::Policy>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
@@ -74,13 +79,20 @@ pub struct Info {
     pub keys: u64,
     pub pages: usize,
     pub limits: Limits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyInfo>,
 }
 impl Manifest {
     fn validate(&self, db: &str) -> anyhow::Result<()> {
         ensure!(
-            self.format == 1 && self.pages.len() <= MAX_PAGES,
+            ((self.format == 1 && self.policy.is_none())
+                || (self.format == 2 && self.policy.is_some()))
+                && self.pages.len() <= MAX_PAGES,
             "unsupported manifest"
         );
+        if let Some(policy) = &self.policy {
+            policy.validate()?;
+        }
         Uuid::parse_str(&self.fence).context("invalid manifest fence")?;
         ensure!(
             self.limits.max_bytes > 0
@@ -151,6 +163,7 @@ impl Manifest {
             keys: self.keys,
             pages: self.pages.len(),
             limits: self.limits.clone(),
+            policy: self.policy.as_ref().map(access::Policy::info),
         }
     }
 }
@@ -261,6 +274,7 @@ impl Engine {
             pages: Vec::new(),
             receipts: Vec::new(),
             gc_after: None,
+            policy: None,
         };
         if !self
             .storage
@@ -283,7 +297,12 @@ impl Engine {
         Ok((manifest, obj.version))
     }
     pub async fn info(&self, db: &str) -> Result<Info> {
-        Ok(self.manifest(db).await?.0.info())
+        self.info_with_access(db, &Access::Administrator).await
+    }
+    pub async fn info_with_access(&self, db: &str, access: &Access) -> Result<Info> {
+        let (manifest, _) = self.manifest(db).await?;
+        manifest.authorize(db, access, false)?;
+        Ok(manifest.info())
     }
     async fn block(&self, page: &Page) -> Result<Option<Block>> {
         let bytes = if let Some(bytes) = self.cache.get(&page.object, &page.digest).await {
@@ -324,6 +343,15 @@ impl Engine {
         Ok(true)
     }
     pub async fn read(&self, db: &str, request: &ReadRequest) -> Result<ReadResult> {
+        self.read_with_access(db, request, &Access::Administrator)
+            .await
+    }
+    pub async fn read_with_access(
+        &self,
+        db: &str,
+        request: &ReadRequest,
+        access: &Access,
+    ) -> Result<ReadResult> {
         validate_db(db)?;
         if request.keys.len() + request.scans.len() > MAX_OPS {
             return Err(Error::Limit("too many reads".into()));
@@ -345,6 +373,7 @@ impl Engine {
         // restart the ENTIRE read from a fresh manifest, or reject expected_revision.
         'retry: for _ in 0..4 {
             let (m, _) = self.manifest(db).await?;
+            m.authorize(db, access, false)?;
             if request.expected_revision.is_some_and(|v| v != m.revision) {
                 return Err(Error::Conflict);
             }
@@ -436,6 +465,15 @@ impl Engine {
         )))
     }
     pub async fn commit(&self, db: &str, request: &CommitRequest) -> Result<CommitResult> {
+        self.commit_with_access(db, request, &Access::Administrator)
+            .await
+    }
+    pub async fn commit_with_access(
+        &self,
+        db: &str,
+        request: &CommitRequest,
+        access: &Access,
+    ) -> Result<CommitResult> {
         validate_db(db)?;
         if request.request_id.is_empty()
             || request.request_id.len() > 128
@@ -452,6 +490,7 @@ impl Engine {
         }
         let digest = hex::encode(Sha256::digest(encoded));
         let (mut m, version) = self.manifest(db).await?;
+        m.authorize(db, access, true)?;
         if let Some(receipt) = m.receipts.iter().find(|r| r.id == request.request_id) {
             if receipt.digest != digest {
                 return Err(Error::Invalid(
