@@ -22,6 +22,6 @@ Manifest validation checks object namespaces, ordered/nonoverlapping page bounds
 
 ## Operations
 
-Use a private dedicated bucket and least-privilege permissions to one prefix. Enforce TLS, encryption at rest, and conditional writes with bucket policy where supported. Configure version-expiration lifecycle if the bucket is versioned. Never expose object credentials to database clients. The server emits control/error categories, not request keys, values, credentials, or provider error strings.
+Use a private dedicated bucket and least-privilege permissions to one prefix. Enforce TLS, encryption at rest, and conditional writes with bucket policy where supported. Do not configure external object/version expiration for the database prefix: the cluster performs physical version reclamation after its own reachability checks and fences, and an external lifecycle rule can delete live state. Never expose object credentials to database clients. The server emits control/error categories, not request keys, values, credentials, or provider error strings.
 
 Rotate the shared signing key by restarting all pods with the replacement; all existing tokens become invalid. Per-token revocation, overlapping key rotation, audit-event export, and tenant lifecycle deletion are planned. The initial release has not had an independent security review.

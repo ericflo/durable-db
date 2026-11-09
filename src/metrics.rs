@@ -167,7 +167,7 @@ impl Registry {
     }
     pub fn render(&self) -> String {
         let mut out = String::from(
-            "# TYPE durable_db_operations_total counter\n# TYPE durable_db_operation_duration_seconds histogram\n# TYPE durable_db_operations_inflight gauge\n",
+            "# HELP durable_db_operations_total Completed or cancelled attempts by fixed operation and outcome.\n# TYPE durable_db_operations_total counter\n# HELP durable_db_operation_duration_seconds Attempt latency including errors and cancellation.\n# TYPE durable_db_operation_duration_seconds histogram\n# HELP durable_db_operations_inflight Attempts currently awaiting completion.\n# TYPE durable_db_operations_inflight gauge\n",
         );
         for (operation, series) in OPERATIONS.iter().zip(&self.series) {
             for (outcome, count) in OUTCOMES.iter().zip(&series.outcomes) {
@@ -196,7 +196,7 @@ impl Registry {
             )
             .unwrap();
         }
-        out.push_str("# TYPE durable_db_events_total counter\n");
+        out.push_str("# HELP durable_db_events_total Fixed-cardinality protocol, cache, and collection events.\n# TYPE durable_db_events_total counter\n");
         for (event, count) in EVENTS.iter().zip(&self.events) {
             writeln!(
                 out,

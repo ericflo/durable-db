@@ -184,7 +184,7 @@ async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Stri
         return Err(Error::Unauthorized);
     }
     Ok(format!(
-        "# TYPE durable_db_requests_total counter\ndurable_db_requests_total {}\n# TYPE durable_db_rejected_total counter\ndurable_db_rejected_total {}\n# TYPE durable_db_cache_bytes gauge\ndurable_db_cache_bytes {}\n",
+        "# HELP durable_db_requests_total Requests admitted to handlers.\n# TYPE durable_db_requests_total counter\ndurable_db_requests_total {}\n# HELP durable_db_rejected_total Legacy rate and concurrency rejection count.\n# TYPE durable_db_rejected_total counter\ndurable_db_rejected_total {}\n# HELP durable_db_cache_bytes Accounted memory cache bytes including estimated entry overhead.\n# TYPE durable_db_cache_bytes gauge\ndurable_db_cache_bytes {}\n",
         app.requests.load(Ordering::Relaxed),
         app.rejected.load(Ordering::Relaxed),
         app.engine.cache().memory_bytes().await

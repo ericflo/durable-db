@@ -1,6 +1,22 @@
 //! Explicit opt-in: requires a DEDICATED disposable B2 bucket, never a production bucket.
 use durable_db::{Error, cache::Cache, engine::*, providers::b2::Native};
 use std::sync::Arc;
+
+// Both opt-in tests share a bucket and run concurrently. A collector in one
+// test can legitimately fence a create in the other. Retry only definite
+// conflicts; an unknown provider outcome still fails qualification visibly.
+async fn create(engine: &Engine, db: &str) {
+    for attempt in 0..12 {
+        match engine.create(db, Limits::default()).await {
+            Ok(_) => return,
+            Err(Error::Conflict) => {
+                tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
+            }
+            Err(error) => panic!("B2 create failed: {error}"),
+        }
+    }
+    panic!("B2 create contention did not settle within 12 attempts");
+}
 #[tokio::test]
 #[ignore = "requires DURABLE_DB_TEST_B2_BUCKET and B2_APPLICATION_KEY_ID/B2_APPLICATION_KEY"]
 async fn real_b2_conditional_authority_versions_and_cache_free_recovery() {
@@ -13,7 +29,7 @@ async fn real_b2_conditional_authority_versions_and_cache_free_recovery() {
             .unwrap(),
     );
     let engine = Engine::new(storage.clone(), Arc::new(Cache::new(0, None).unwrap()));
-    engine.create(&db, Limits::default()).await.unwrap();
+    create(&engine, &db).await;
     for n in 0..5 {
         let req = CommitRequest {
             expected_revision: n,
@@ -79,7 +95,7 @@ async fn real_b2_directory_split_and_cache_free_reopen() {
     let group = format!("directory-{}", uuid::Uuid::new_v4());
     for n in 0..70 {
         let name = format!("{group}-{n:03}");
-        engine.create(&name, Limits::default()).await.unwrap();
+        create(&engine, &name).await;
     }
     for _ in 0..3 {
         storage.collect_manifests().await.unwrap();
