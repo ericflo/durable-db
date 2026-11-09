@@ -7,7 +7,7 @@ use anyhow::{Context, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 use object_store::{
-    ObjectStore, PutMode, UpdateVersion,
+    ObjectStore, PutMode, RetryConfig, UpdateVersion,
     aws::{AmazonS3, AmazonS3Builder, AwsAuthorizer},
     client::HttpRequestBody,
     path::Path,
@@ -43,14 +43,28 @@ impl S3 {
         let region = std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".into());
+        let builder = AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_region(&region);
+        let this = Self::bind(builder, prefix, region)?;
+        Published::open(this.files.clone(), this, prefix).await
+    }
+    fn bind(builder: AmazonS3Builder, prefix: &str, region: String) -> anyhow::Result<Arc<Self>> {
+        // A conditional PUT that committed but returned 503 must remain
+        // unknown. An SDK retry can receive 412 from that very commit and
+        // incorrectly turn it into a definite failed comparison. Immutable
+        // file I/O retains its separate bounded SDK retry configuration.
         let store = Arc::new(
-            AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
-                .with_region(&region)
+            builder
+                .clone()
+                .with_retry(RetryConfig {
+                    max_retries: 0,
+                    ..Default::default()
+                })
                 .build()?,
         );
-        let files = Arc::new(Remote::new(store.clone(), prefix)?);
-        let this = Arc::new(Self {
+        let files = Arc::new(Remote::new(Arc::new(builder.build()?), prefix)?);
+        Ok(Arc::new(Self {
             store,
             files: files.clone(),
             prefix: format!("{prefix}/"),
@@ -59,8 +73,7 @@ impl S3 {
                 .timeout(Duration::from_secs(20))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
-        });
-        Published::open(files, this, prefix).await
+        }))
     }
     fn authority_key(&self) -> String {
         format!("{}authority.json", self.prefix)
@@ -221,5 +234,103 @@ impl Authority for S3 {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, extract::State, http::HeaderMap, response::Response, routing::get};
+    use std::sync::Mutex;
+
+    struct Wire {
+        puts: usize,
+        bucket: Bucket,
+        etag: String,
+    }
+
+    async fn read(State(state): State<Arc<Mutex<Wire>>>) -> Response {
+        let state = state.lock().unwrap();
+        Response::builder()
+            .header("etag", &state.etag)
+            .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
+            .body(Body::from(serde_json::to_vec(&state.bucket).unwrap()))
+            .unwrap()
+    }
+
+    async fn write(
+        State(state): State<Arc<Mutex<Wire>>>,
+        headers: HeaderMap,
+        bytes: Bytes,
+    ) -> Response {
+        let mut state = state.lock().unwrap();
+        state.puts += 1;
+        if headers.get("if-match").and_then(|h| h.to_str().ok()) != Some(state.etag.as_str()) {
+            return Response::builder()
+                .status(412)
+                .body(Body::from("<Error><Code>PreconditionFailed</Code></Error>"))
+                .unwrap();
+        }
+        state.bucket = serde_json::from_slice(&bytes).unwrap();
+        state.etag = "\"new\"".into();
+        // The authoritative update has happened. Simulate a gateway/server
+        // losing its successful acknowledgement and returning a transient error.
+        Response::builder()
+            .status(503)
+            .body(Body::from("<Error><Code>InternalError</Code></Error>"))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn conditional_update_does_not_retry_a_committed_error_into_a_false_comparison() {
+        let initial = Bucket {
+            revision: 0,
+            version: None,
+            info: BTreeMap::new(),
+        };
+        let state = Arc::new(Mutex::new(Wire {
+            puts: 0,
+            bucket: initial,
+            etag: "\"old\"".into(),
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new()
+            .route("/test/prefix/authority.json", get(read).put(write))
+            .with_state(state.clone());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let binding = S3::bind(
+            AmazonS3Builder::new()
+                .with_bucket_name("test")
+                .with_region("us-east-1")
+                .with_access_key_id("fixture")
+                .with_secret_access_key("fixture")
+                .with_endpoint(endpoint)
+                .with_allow_http(true),
+            "prefix",
+            "us-east-1".into(),
+        )
+        .unwrap();
+        let before = binding.read().await.unwrap();
+        let next = BTreeMap::from([("fixture".into(), "committed".into())]);
+        assert!(binding.replace(&before, next.clone()).await.is_err());
+        assert_eq!(state.lock().unwrap().puts, 1);
+        let observed = binding.read().await.unwrap();
+        assert_eq!(observed.revision, 1);
+        assert_eq!(observed.info, next);
+        // A separately invoked, genuinely stale comparison is still definite.
+        assert!(
+            binding
+                .replace(&before, BTreeMap::new())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.lock().unwrap().puts, 2);
+        assert_eq!(binding.read().await.unwrap().revision, 1);
+        task.abort();
+        task.await.unwrap_err();
     }
 }

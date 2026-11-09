@@ -76,3 +76,8 @@ Object lock and external retention rules can prevent reclamation. No external li
 ## Local mode
 
 A lifetime OS lock admits one process per directory. Writes use a temporary file, file fsync, atomic rename, and directory fsync. The compare-and-replace lock remains held inside the blocking filesystem task even if its async waiter is cancelled. Crash-left temporary files are removed after acquiring the lifetime lock on reopen. Local mode is not supported on shared/network filesystems or across multiple servers.
+
+
+## Provider retry boundaries
+
+The S3 control-register client and native B2 conditional publication path preserve unknown outcomes. In particular, an update that commits before its acknowledgement is replaced by an HTTP error must not be automatically retried and then reported as a definite comparison failure. S3 control PUTs therefore have SDK retries disabled; read-only observations and immutable file operations have separate bounded recovery policies. The shared publication layer resolves uncertain work through immutable proposal identity and durable receipts. Wire tests inject an update followed by a `503` acknowledgement and confirm that no hidden second comparison changes its classification.
