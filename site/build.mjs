@@ -25,7 +25,7 @@ const home=await readFile(new URL('home.html',import.meta.url),'utf8');
 await writeFile(new URL('index.html',out),layout('Storage that stays. Compute that scales.',home,true));
 for(const file of ['style.css','demo.js','icon.svg']) await copyFile(new URL(file,import.meta.url),new URL(file,out));
 await mkdir(new URL('evidence/',out),{recursive:true});
-for(const file of ['b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json','b2-recovery-2026-11-08.json','b2-rebase-2026-11-08.json','b2-grouped-2026-11-08.json','b2-profile-isolation-2026-11-08.json','b2-profile-metrics-2026-11-08.json','mixed-combining-minio-2026-11-08.json','b2-combining-2026-11-08.json','b2-combining-metrics-2026-11-08.json']) {
+for(const file of ['b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json','b2-recovery-2026-11-08.json','b2-rebase-2026-11-08.json','b2-grouped-2026-11-08.json','b2-profile-isolation-2026-11-08.json','b2-profile-metrics-2026-11-08.json','mixed-combining-minio-2026-11-08.json','b2-combining-2026-11-08.json','b2-combining-metrics-2026-11-08.json','mixed-combining-b2-2026-11-08.json','mixed-combining-b2-failed-2026-11-08.json','mixed-combining-b2-admin-limit-2026-11-08.json','mixed-combining-b2-partial-recovery-2026-11-08.json']) {
  await copyFile(new URL(`../docs/evidence/${file}`,import.meta.url),new URL(`evidence/${file}`,out));
 }
 await copyFile(new URL('../scripts/install.sh',import.meta.url),new URL('install.sh',out));
