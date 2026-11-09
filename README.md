@@ -49,6 +49,8 @@ Values are base64-encoded arbitrary bytes: `d29ybGQ=` is `world`. Keys are UTF-8
 
 Current source builds additionally support [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. Current builds also add [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md). These features postdate the v0.1.0 installer example above and require upgraded servers.
 
+Fresh cloud namespaces can also enable [cumulative immutable-upload admission](docs/design-upload-admission.md). Its byte and attempt ceilings survive restarts and scaling, and administrators can raise them without resetting spent credit. This shared ceiling is one part of resource protection; per-tenant spend isolation and complete cleanup under exhaustion remain production gates.
+
 ## Scale without moving the database
 
 ```text

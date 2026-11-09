@@ -18,6 +18,17 @@ pub struct Object {
 
 #[async_trait]
 pub trait Storage: Send + Sync {
+    async fn upload_budget(&self) -> anyhow::Result<Option<crate::upload_budget::UploadStatus>> {
+        Ok(None)
+    }
+    async fn replenish_upload_budget(
+        &self,
+        _: &crate::upload_budget::UploadRequest,
+    ) -> crate::Result<crate::upload_budget::UploadResult> {
+        Err(crate::Error::Invalid(
+            "this storage namespace has no upload budget".into(),
+        ))
+    }
     async fn maintenance(&self) -> anyhow::Result<()> {
         Ok(())
     }
@@ -36,6 +47,7 @@ pub trait Storage: Send + Sync {
 
 pub struct Remote {
     inner: Arc<dyn ObjectStore>,
+    uploads: Arc<dyn ObjectStore>,
     prefix: String,
 }
 impl Remote {
@@ -48,9 +60,15 @@ impl Remote {
             bail!("object prefix must be a nonempty ASCII identifier");
         }
         Ok(Self {
+            uploads: inner.clone(),
             inner,
             prefix: format!("{prefix}/"),
         })
+    }
+    /// Separate single-attempt uploads from retryable reads/listings.
+    pub(crate) fn with_uploads(mut self, uploads: Arc<dyn ObjectStore>) -> Self {
+        self.uploads = uploads;
+        self
     }
     fn path(&self, key: &str) -> Path {
         Path::from(format!("{}{key}", self.prefix))
@@ -126,7 +144,7 @@ impl Storage for Remote {
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool> {
         let mode = old.map_or(PutMode::Create, |v| PutMode::Update(v.0.clone()));
         match self
-            .inner
+            .uploads
             .put_opts(&self.path(key), bytes.into(), mode.into())
             .await
         {
@@ -139,7 +157,7 @@ impl Storage for Remote {
         }
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
-        self.inner.put(&self.path(key), bytes.into()).await?;
+        self.uploads.put(&self.path(key), bytes.into()).await?;
         Ok(())
     }
     async fn list(

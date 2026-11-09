@@ -7,7 +7,7 @@ use anyhow::{Context, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 use object_store::{
-    ObjectStore, PutMode, RetryConfig, UpdateVersion,
+    ObjectStore, PutMode, UpdateVersion,
     aws::{AmazonS3, AmazonS3Builder, AwsAuthorizer},
     client::HttpRequestBody,
     path::Path,
@@ -40,6 +40,13 @@ struct FileVersion {
 }
 impl S3 {
     pub async fn connect(bucket: &str, prefix: &str) -> anyhow::Result<Published> {
+        Self::connect_with_budget(bucket, prefix, None).await
+    }
+    pub async fn connect_with_budget(
+        bucket: &str,
+        prefix: &str,
+        limits: Option<crate::upload_budget::UploadLimits>,
+    ) -> anyhow::Result<Published> {
         let region = std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".into());
@@ -47,23 +54,25 @@ impl S3 {
             .with_bucket_name(bucket)
             .with_region(&region);
         let this = Self::bind(builder, prefix, region)?;
-        Published::open(this.files.clone(), this, prefix).await
+        Published::open_with_budget(this.files.clone(), this, prefix, limits).await
     }
     fn bind(builder: AmazonS3Builder, prefix: &str, region: String) -> anyhow::Result<Arc<Self>> {
         // A conditional PUT that committed but returned 503 must remain
         // unknown. An SDK retry can receive 412 from that very commit and
-        // incorrectly turn it into a definite failed comparison. Immutable
-        // file I/O retains its separate bounded SDK retry configuration.
-        let store = Arc::new(
-            builder
-                .clone()
-                .with_retry(RetryConfig {
-                    max_retries: 0,
-                    ..Default::default()
-                })
-                .build()?,
+        // incorrectly turn it into a definite failed comparison. Both control
+        // and immutable uploads have one attempt; reads retain SDK retries.
+        let store = Arc::new(super::transport::single_attempt(builder.clone())?);
+        let files = Arc::new(
+            Remote::new(
+                Arc::new(
+                    builder
+                        .with_http_connector(super::transport::Connector)
+                        .build()?,
+                ),
+                prefix,
+            )?
+            .with_uploads(store.clone()),
         );
-        let files = Arc::new(Remote::new(Arc::new(builder.build()?), prefix)?);
         Ok(Arc::new(Self {
             store,
             files: files.clone(),
@@ -72,6 +81,7 @@ impl S3 {
             client: Client::builder()
                 .timeout(Duration::from_secs(20))
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .build()?,
         }))
     }
@@ -164,6 +174,7 @@ impl Authority for S3 {
             });
         };
         let mut bucket: Bucket = serde_json::from_slice(&object.bytes)?;
+        bucket.info = crate::publication::control::decode(bucket.info)?;
         bucket.version = Some(object.version);
         Ok(bucket)
     }
@@ -177,7 +188,7 @@ impl Authority for S3 {
                 .revision
                 .checked_add(1)
                 .context("publication revision exhausted")?,
-            info,
+            info: crate::publication::control::encode(&info)?,
             version: None,
         };
         let mode = old
@@ -201,6 +212,7 @@ impl Authority for S3 {
             e_tag: result.e_tag,
             version: result.version,
         }));
+        next.info = info;
         Ok(Some(next))
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
@@ -247,6 +259,7 @@ mod tests {
         puts: usize,
         bucket: Bucket,
         etag: String,
+        acknowledgement: u16,
     }
 
     async fn read(State(state): State<Arc<Mutex<Wire>>>) -> Response {
@@ -276,13 +289,25 @@ mod tests {
         // The authoritative update has happened. Simulate a gateway/server
         // losing its successful acknowledgement and returning a transient error.
         Response::builder()
-            .status(503)
+            .status(state.acknowledgement)
+            .header("location", "/test/prefix/authority.json")
             .body(Body::from("<Error><Code>InternalError</Code></Error>"))
             .unwrap()
     }
 
     #[tokio::test]
     async fn conditional_update_does_not_retry_a_committed_error_into_a_false_comparison() {
+        check_uncertainty(503).await;
+    }
+
+    #[tokio::test]
+    async fn conditional_update_does_not_follow_a_redirect_into_a_false_comparison() {
+        for status in [301, 302, 303, 307, 308] {
+            check_uncertainty(status).await;
+        }
+    }
+
+    async fn check_uncertainty(acknowledgement: u16) {
         let initial = Bucket {
             revision: 0,
             version: None,
@@ -292,6 +317,7 @@ mod tests {
             puts: 0,
             bucket: initial,
             etag: "\"old\"".into(),
+            acknowledgement,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());

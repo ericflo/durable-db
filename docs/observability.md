@@ -25,6 +25,8 @@ Configure the deployment's actual service discovery and TLS endpoint; the exampl
 
 Metrics use fixed operation, outcome, and event names. They contain no database names, object paths, keys, values, tokens, or provider response messages. All series have bounded cardinality. Counters reset when the process restarts; aggregate `rate` or `increase` across replicas rather than subtracting counters across restarts.
 
+Format-4 upload admission adds `upload_grant_bytes`, `upload_grant_attempts`, `upload_charged_bytes`, `upload_charged_attempts`, and `upload_budget_exhausted` events. Grants count only confirmed allocations observed by that process; lost responses and process loss can strand additional durable allocation. Charges precede upload invocation and include attempts whose responses are lost. These process counters are diagnostics, not the authoritative balance or provider billing. The trusted control plane should poll `GET /v1/storage/upload-budget` with an administrator capability, monitor both remaining dimensions, and replenish deliberately with a durable request ID. Metrics-only credentials cannot read or modify that administrative endpoint.
+
 ## Measurements
 
 | Metric | Meaning |

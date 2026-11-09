@@ -18,6 +18,8 @@ Use `/health/live` for liveness and `/health/ready` for readiness. On SIGTERM th
 
 Set pod CPU/memory limits and concurrency/cache limits together. Memory cache bytes are a payload budget, not a process RSS ceiling. Bound ingress body size, authenticate at the service, terminate TLS at trusted ingress, and retain provider credentials only on the service side. See [security](security.md) for the remaining cluster-wide abuse protection work.
 
+Provider HTTP requests do not follow redirects. Configure the final regional S3 endpoint directly. The shared S3 connector preserves the SDK's environment-configured timeouts, connection pooling, HTTP version, randomized DNS, proxy/exclusions/proxy CA, content type, and certificate validation settings. It uses system trust roots; `disable_system_certificates` fails startup because this CLI has no replacement-root configuration. SDK-only programmatic custom resolvers, root certificates, and default headers are not exposed. AWS credential providers and server-side encryption configuration remain handled by the SDK. Immutable uploads have one attempt per invocation; reads retain bounded SDK retries.
+
 Every pod performs bounded jittered maintenance. Collection uses a durable publication fence; it does not depend on pod leases or reliable termination hooks. Failed deletion is retried in later sweeps. Both providers delete obsolete physical file versions. S3 also collects superseded versions of its directory control object. External retention must not prevent reclamation or delete live files.
 
 ## Kubernetes manifests

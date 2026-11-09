@@ -18,6 +18,8 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 | `POST /v1/databases/{db}/gc` | Admin: one bounded maintenance sweep |
 | `POST /v1/databases/{db}/access` | Admin: enable durable authorization, revoke a token ID, or rotate its generation |
 | `POST /v1/tokens` | Admin: mint a database-scoped token |
+| `GET /v1/storage/upload-budget` | Admin: authoritative cumulative upload ceilings and allocation, or `null` when unbudgeted |
+| `POST /v1/storage/upload-budget` | Admin: revision-checked, idempotent increase of upload ceilings |
 | `GET /metrics` | Administrator or metrics-only credential: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
 | `GET /health/live` | Process is serving HTTP |
 | `GET /health/ready` | Startup completed and server is not draining |
@@ -101,6 +103,18 @@ To revoke one token, submit a new policy request ID and the current **policy** r
 Policy changes leave the **data** revision unchanged and advance the separate policy revision. They retain the last 32 policy receipts, independent of data-write receipts. After an unknown outcome, retry the identical request ID, expected policy revision, and body. A retained receipt returns its original policy result, which may precede the current policy; use administrator info for the latest state. Beyond the receipt window, the old expected revision prevents reapplication and returns 409. Reusing a retained request ID with different content returns 400. A conflict requires inspecting fresh policy state before deciding on a new administrative operation.
 
 Info, reads, writes, and write-receipt replay authorize against the same validated manifest they use. A read already in flight may finish from its earlier authorized snapshot; an operation invoked after an acknowledged revocation cannot use that old policy. A write prepared before a policy change loses the exact manifest comparison if the policy publishes first. Administrator operations remain privileged. [Security boundaries](security.md) and [verification limits](verification.md#durable-authorization-lifecycle) still apply.
+
+## Cumulative upload admission
+
+Current source builds support [format-4 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
+
+The administrator GET returns `configuration_revision`, `limits: {bytes, attempts}`, and `allocated: {bytes, attempts}`. Allocation includes whole grants, uncertain allocations, and unused credit lost with a process. It is deliberately conservative. POST takes absolute replacement ceilings:
+
+```json
+{"request_id":"fund-next","expected_configuration_revision":0,"limits":{"bytes":2147483648,"attempts":200000}}
+```
+
+At least one ceiling must increase and neither may decrease. The result contains current `status` and `replayed`. Eight administrative receipts retain exact request identity; an evicted request's stale expected revision conflicts. Retry an uncertain change with its identical ID and body. Startup flags never reset an initialized ledger. Reads and metadata collection remain possible when exhausted; data-page GC and compaction currently require funded uploads. Exhaustion returns `503 storage_unavailable` because a previously submitted proposal may still commit. Resolve the original write identity after a refill; do not reinterpret exhaustion as a definite abort.
 
 ## Errors and bounds
 

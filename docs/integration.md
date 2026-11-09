@@ -4,7 +4,7 @@ This is the sole service-specific integration document. The database protocol, c
 
 The intended host is the NeuralColumn API, with one or more database IDs associated with a site's stable ID. The API already owns user/site identity and capability links. It should provision databases as an administrator, enforce site membership and application rules, and issue short-lived database-scoped capabilities or proxy requests. Site visitors must never receive the database signing key or object-provider credentials.
 
-Each site may provision multiple databases. The bucket directory must support a large site population without per-site buckets or tiny metadata slot limits. Format 3 uses a persistent B+tree; database cardinality and aggregate publication throughput must be qualified separately. Provisioning quotas should be explicit service policy, not an incidental storage format ceiling.
+Each site may provision multiple databases. The bucket directory must support a large site population without per-site buckets or tiny metadata slot limits. Formats 3 and 4 use a persistent B+tree; database cardinality and aggregate publication throughput must be qualified separately. Provisioning quotas should be explicit service policy, not an incidental storage format ceiling.
 
 **Rollout is blocked.** The first real-B2 test with four concurrent database writers exhausted retries under maintenance; delaying maintenance still left heavy publication contention. The 10,005-database directory test does not establish capacity for that many active sites. Resolve the [production gates](production-readiness.md), including the measured throughput failure, before onboarding production sites.
 
@@ -24,6 +24,7 @@ Each site may provision multiple databases. The bucket directory must support a 
 - Pi Session execution has one owner even though database API pods are interchangeable. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
 - Browser identity, CORS, individual-user row authorization, and billing belong to the gateway. Per-database scoped credentials alone do not provide row-level access control.
 - The indexed Pi adapter passes upstream conformance with scoped credentials and has direct record/index/document storage. B2 conformance and cache-free host restart with explicit takeover pass; complete full Harness and sustained-load qualification before production onboarding; the bounded journal remains a reference fixture.
-- Production readiness requires strict global physical/spend controls, deployment qualification of the implemented overlapping signing-key rollout, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
+- Fresh namespaces can enable the format-4 shared immutable-upload ledger. Initialize both ceilings at provisioning, keep replenishment IDs/revisions in the control plane, and monitor stranded grants and remaining authoritative capacity. This ceiling does not isolate sites from each other; per-site admission, request/egress budgets, and cleanup after exhaustion still need implementation.
+- Production readiness requires strict physical/spend controls, deployment qualification of the implemented overlapping signing-key rollout, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
 
 No running NeuralColumn service, bucket, deployment, or production credentials are modified by this repository's initial development work.

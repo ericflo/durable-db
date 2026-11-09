@@ -46,6 +46,13 @@ pub struct Native {
 }
 impl Native {
     pub async fn connect(bucket_name: &str, prefix: &str) -> anyhow::Result<Published> {
+        Self::connect_with_budget(bucket_name, prefix, None).await
+    }
+    pub async fn connect_with_budget(
+        bucket_name: &str,
+        prefix: &str,
+        limits: Option<crate::upload_budget::UploadLimits>,
+    ) -> anyhow::Result<Published> {
         let key_id =
             std::env::var("B2_APPLICATION_KEY_ID").context("B2_APPLICATION_KEY_ID is required")?;
         let application_key =
@@ -54,6 +61,7 @@ impl Native {
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .https_only(true)
             .user_agent(concat!("durable-db/", env!("CARGO_PKG_VERSION")))
             .build()?;
@@ -118,11 +126,20 @@ impl Native {
             .with_region(region)
             .with_endpoint(endpoint)
             .with_access_key_id(&native.key_id)
-            .with_secret_access_key(&native.application_key)
-            .build()?;
-        let files = Arc::new(Remote::new(Arc::new(s3), prefix)?);
+            .with_secret_access_key(&native.application_key);
+        let uploads = Arc::new(super::transport::single_attempt(s3.clone())?);
+        let files = Arc::new(
+            Remote::new(
+                Arc::new(
+                    s3.with_http_connector(super::transport::Connector)
+                        .build()?,
+                ),
+                prefix,
+            )?
+            .with_uploads(uploads),
+        );
         let native = Arc::new(native);
-        Published::open(files, native, prefix).await
+        Published::open_with_budget(files, native, prefix, limits).await
     }
     async fn update(
         &self,
@@ -130,7 +147,8 @@ impl Native {
         info: BTreeMap<String, String>,
     ) -> anyhow::Result<Option<Bucket>> {
         let account = self.auth.read().await.account_id.clone();
-        let (status, body) = self.call("b2_update_bucket", &json!({"accountId":account,"bucketId":self.bucket_id,"ifRevisionIs":old.revision,"bucketInfo":info})).await?;
+        let wire = crate::publication::control::encode(&info)?;
+        let (status, body) = self.call("b2_update_bucket", &json!({"accountId":account,"bucketId":self.bucket_id,"ifRevisionIs":old.revision,"bucketInfo":wire})).await?;
         if status == StatusCode::CONFLICT && body["code"] == "conflict" {
             return Ok(None);
         }
@@ -141,13 +159,13 @@ impl Native {
         }
         let returned: BTreeMap<String, String> =
             serde_json::from_value(body["bucketInfo"].clone())?;
-        if returned != info {
+        if returned != wire {
             bail!("B2 publication response differs from requested metadata");
         }
         Ok(Some(Bucket {
             version: None,
             revision,
-            info: returned,
+            info,
         }))
     }
     async fn call(&self, operation: &str, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
@@ -273,7 +291,9 @@ impl Authority for Native {
         Ok(Bucket {
             version: None,
             revision: b["revision"].as_u64().context("missing bucket revision")?,
-            info: serde_json::from_value(b["bucketInfo"].clone())?,
+            info: crate::publication::control::decode(serde_json::from_value(
+                b["bucketInfo"].clone(),
+            )?)?,
         })
     }
     async fn replace(

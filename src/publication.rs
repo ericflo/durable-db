@@ -5,6 +5,7 @@ use crate::{
     metrics::{self, Event, Operation, Outcome},
     observation::Observations,
     storage::{Object, Storage, Version},
+    upload_budget::{self, Allocator, UploadLimits, UploadRequest, UploadResult, UploadStatus},
 };
 use anyhow::{Context, bail};
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+pub(crate) mod control;
 mod proposal;
 
 const HEAD: &str = "durable-db-root";
@@ -73,6 +75,7 @@ pub struct Published {
     cache: Option<Arc<Cache>>,
     helpers: Semaphore,
     proposal_cleanup: proposal::Cleanup,
+    upload_budget: Option<Arc<Allocator>>,
 }
 impl Published {
     pub async fn open(
@@ -80,6 +83,19 @@ impl Published {
         authority: Arc<dyn Authority>,
         prefix: &str,
     ) -> anyhow::Result<Self> {
+        Self::open_with_budget(files, authority, prefix, None).await
+    }
+    /// `files.put` must send at most one immutable PUT attempt per invocation.
+    /// The built-in B2/S3 bindings enforce this at both SDK and HTTP layers.
+    pub async fn open_with_budget(
+        files: Arc<dyn Storage>,
+        authority: Arc<dyn Authority>,
+        prefix: &str,
+        limits: Option<UploadLimits>,
+    ) -> anyhow::Result<Self> {
+        if let Some(limits) = limits {
+            limits.validate()?;
+        }
         let files: Arc<dyn Storage> = Arc::new(crate::measured::Files(files));
         let authority: Arc<dyn Authority> = Arc::new(crate::measured::Register(authority));
         let before = authority.read().await?;
@@ -97,20 +113,21 @@ impl Published {
         for _ in 0..8 {
             let bucket = authority.read().await?;
             if let Some(format) = bucket.info.get("durable-db-format") {
-                if format != "3"
+                if !["3", "4"].contains(&format.as_str())
                     || bucket.info.get("durable-db-prefix").map(String::as_str) != Some(prefix)
                 {
                     bail!("publication directory is initialized with a different format or prefix");
                 }
-                return Ok(Self {
-                    cache: None,
-                    helpers: Semaphore::new(1),
-                    proposal_cleanup: proposal::Cleanup::new(authority.clone()),
-                    observations: Observations::new(authority.clone()),
-                    directory: Directory::new(files.clone()),
-                    files,
-                    authority,
-                });
+                if format == "3" && limits.is_some() {
+                    bail!(
+                        "upload budget activation requires a fresh namespace; format-3 migration is unsupported"
+                    );
+                }
+                root(&bucket.info)?;
+                if format == "4" {
+                    upload_budget::validate(&bucket)?;
+                }
+                return Ok(Self::initialized(files, authority, format == "4"));
             }
             if bucket
                 .info
@@ -120,22 +137,50 @@ impl Published {
                 bail!("unrecognized durable-db bucket metadata");
             }
             let mut info = bucket.info.clone();
-            info.insert("durable-db-format".into(), "3".into());
+            info.insert(
+                "durable-db-format".into(),
+                if limits.is_some() { "4" } else { "3" }.into(),
+            );
             info.insert("durable-db-prefix".into(), prefix.into());
+            if let Some(limits) = limits {
+                info.insert(upload_budget::FIELD.into(), upload_budget::initial(limits)?);
+                info.insert(
+                    HEAD.into(),
+                    serde_json::to_string(&BudgetRoot {
+                        upload_format: 4,
+                        directory: None,
+                    })?,
+                );
+            }
             budget(&info)?;
             if authority.replace(&bucket, info).await?.is_some() {
-                return Ok(Self {
-                    cache: None,
-                    helpers: Semaphore::new(1),
-                    proposal_cleanup: proposal::Cleanup::new(authority.clone()),
-                    observations: Observations::new(authority.clone()),
-                    directory: Directory::new(files.clone()),
-                    files,
-                    authority,
-                });
+                return Ok(Self::initialized(files, authority, limits.is_some()));
             }
         }
         bail!("publication directory initialization is contended; retry startup")
+    }
+    fn initialized(
+        mut files: Arc<dyn Storage>,
+        authority: Arc<dyn Authority>,
+        budgeted: bool,
+    ) -> Self {
+        let upload_budget = budgeted.then(|| Arc::new(Allocator::new(authority.clone())));
+        if let Some(allocator) = &upload_budget {
+            files = Arc::new(upload_budget::Files {
+                inner: files,
+                allocator: allocator.clone(),
+            });
+        }
+        Self {
+            cache: None,
+            helpers: Semaphore::new(1),
+            proposal_cleanup: proposal::Cleanup::new(authority.clone()),
+            observations: Observations::new(authority.clone()),
+            directory: Directory::new(files.clone()),
+            files,
+            authority,
+            upload_budget,
+        }
     }
     /// Shares the engine's bounded cache; no extra unaccounted index cache.
     pub fn with_cache(mut self, cache: Arc<Cache>) -> Self {
@@ -217,7 +262,22 @@ fn slot(key: &str) -> anyhow::Result<String> {
     crate::engine::validate_db(db)?;
     Ok(db.to_owned())
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetRoot {
+    upload_format: u8,
+    directory: Option<Root>,
+}
 fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
+    if info.get("durable-db-format").map(String::as_str) == Some("4") {
+        let envelope: BudgetRoot =
+            serde_json::from_str(info.get(HEAD).context("missing budgeted root")?)?;
+        anyhow::ensure!(envelope.upload_format == 4, "unsupported budgeted root");
+        if let Some(root) = &envelope.directory {
+            root.validate()?;
+        }
+        return Ok(envelope.directory);
+    }
     info.get(HEAD)
         .map(|value| {
             let root: Root = serde_json::from_str(value)?;
@@ -226,6 +286,18 @@ fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
         })
         .transpose()
 }
+fn write_root(info: &mut BTreeMap<String, String>, root: Root) -> anyhow::Result<()> {
+    let encoded = if info.get("durable-db-format").map(String::as_str) == Some("4") {
+        serde_json::to_string(&BudgetRoot {
+            upload_format: 4,
+            directory: Some(root),
+        })?
+    } else {
+        serde_json::to_string(&root)?
+    };
+    info.insert(HEAD.into(), encoded);
+    Ok(())
+}
 fn cursor<'a>(bucket: &'a Bucket, field: &str) -> Option<&'a str> {
     bucket
         .info
@@ -233,7 +305,7 @@ fn cursor<'a>(bucket: &'a Bucket, field: &str) -> Option<&'a str> {
         .filter(|v| !v.is_empty())
         .map(String::as_str)
 }
-fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
+pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
     // Admission must leave room for later reads and maintenance. Otherwise a valid
     // create could fill the directory and prevent its own read/collection fences.
     let mut reserved = info.clone();
@@ -246,18 +318,43 @@ fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
         (PROPOSAL_CURSOR, 111),
         (HELP_CURSOR, 111),
         (HEAD, 1024),
+        (
+            upload_budget::FIELD,
+            if info.contains_key(upload_budget::FIELD) {
+                2304
+            } else {
+                0
+            },
+        ),
     ] {
-        if reserved.get(field).is_none_or(|v| v.len() < size) {
+        if size > 0 && reserved.get(field).is_none_or(|v| v.len() < size) {
             reserved.insert(field.into(), "0".repeat(size));
         }
     }
-    if info.keys().any(|k| k.len() > 50) || serde_json::to_vec(&reserved)?.len() > MAX_INFO {
+    if info.keys().any(|k| k.len() > 50)
+        || serde_json::to_vec(&control::reserved_wire(&reserved)?)?.len() > MAX_INFO
+    {
         bail!("publication authority metadata budget exceeded");
     }
     Ok(())
 }
 #[async_trait]
 impl Storage for Published {
+    async fn upload_budget(&self) -> anyhow::Result<Option<UploadStatus>> {
+        match &self.upload_budget {
+            Some(allocator) => Ok(Some(allocator.status().await?)),
+            None => Ok(None),
+        }
+    }
+    async fn replenish_upload_budget(
+        &self,
+        request: &UploadRequest,
+    ) -> crate::Result<UploadResult> {
+        let allocator = self.upload_budget.as_ref().ok_or_else(|| {
+            crate::Error::Invalid("this storage namespace has no upload budget".into())
+        })?;
+        allocator.replenish(request).await
+    }
     async fn get(&self, key: &str, max_bytes: usize) -> anyhow::Result<Option<Object>> {
         if !key.starts_with("heads/") {
             return self.files.get(key, max_bytes).await;

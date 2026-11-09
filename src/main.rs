@@ -39,6 +39,20 @@ enum Command {
         b2_bucket: Option<String>,
         #[arg(long, default_value = "durable-db", env = "DURABLE_DB_PREFIX")]
         prefix: String,
+        /// Initialize a fresh cloud namespace with this cumulative immutable-upload byte ceiling.
+        #[arg(
+            long,
+            env = "DURABLE_DB_UPLOAD_BUDGET_BYTES",
+            requires = "upload_budget_attempts"
+        )]
+        upload_budget_bytes: Option<u64>,
+        /// Cumulative immutable PUT attempt ceiling; authoritative once initialized.
+        #[arg(
+            long,
+            env = "DURABLE_DB_UPLOAD_BUDGET_ATTEMPTS",
+            requires = "upload_budget_bytes"
+        )]
+        upload_budget_attempts: Option<u64>,
         #[arg(long, env = "DURABLE_DB_ADMIN_KEY_FILE")]
         admin_key_file: Option<PathBuf>,
         #[arg(long, default_value_t = 64, env = "DURABLE_DB_MEMORY_CACHE_MIB")]
@@ -168,6 +182,8 @@ async fn main() -> anyhow::Result<()> {
             bucket,
             b2_bucket,
             prefix,
+            upload_budget_bytes,
+            upload_budget_attempts,
             admin_key_file,
             memory_cache_mib,
             disk_cache,
@@ -184,6 +200,15 @@ async fn main() -> anyhow::Result<()> {
                 bail!("invalid resource configuration");
             }
             let cluster = bucket.is_some() || b2_bucket.is_some();
+            let upload_limits = match (upload_budget_bytes, upload_budget_attempts) {
+                (Some(bytes), Some(attempts)) if cluster => {
+                    let limits = durable_db::upload_budget::UploadLimits { bytes, attempts };
+                    limits.validate()?;
+                    Some(limits)
+                }
+                (None, None) => None,
+                _ => bail!("upload budgets require both ceilings and B2/S3 storage"),
+            };
             let key_file = match admin_key_file {
                 Some(p) => p,
                 None if cluster => bail!(
@@ -205,16 +230,20 @@ async fn main() -> anyhow::Result<()> {
             )?);
             let storage: Arc<dyn Storage> = if let Some(bucket) = b2_bucket {
                 Arc::new(
-                    Native::connect(&bucket, &prefix)
+                    Native::connect_with_budget(&bucket, &prefix, upload_limits)
                         .await
                         .context("initialize B2 authority")?
                         .with_cache(cache.clone()),
                 )
             } else if let Some(bucket) = bucket {
                 Arc::new(
-                    durable_db::providers::s3::S3::connect(&bucket, &prefix)
-                        .await?
-                        .with_cache(cache.clone()),
+                    durable_db::providers::s3::S3::connect_with_budget(
+                        &bucket,
+                        &prefix,
+                        upload_limits,
+                    )
+                    .await?
+                    .with_cache(cache.clone()),
                 )
             } else {
                 let local = Local::open(data.join("store"))?;

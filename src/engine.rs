@@ -275,6 +275,15 @@ impl Engine {
     pub fn cache(&self) -> &Cache {
         &self.cache
     }
+    pub async fn upload_budget(&self) -> Result<Option<crate::upload_budget::UploadStatus>> {
+        Ok(self.storage.upload_budget().await?)
+    }
+    pub async fn replenish_upload_budget(
+        &self,
+        request: &crate::upload_budget::UploadRequest,
+    ) -> Result<crate::upload_budget::UploadResult> {
+        self.storage.replenish_upload_budget(request).await
+    }
     pub async fn create(&self, db: &str, limits: Limits) -> Result<Info> {
         validate_db(db)?;
         validate_limits(&limits)?;

@@ -243,7 +243,7 @@ impl Published {
                 other => other?,
             };
             let mut info = observed.info.clone();
-            info.insert(HEAD.into(), serde_json::to_string(&updated)?);
+            write_root(&mut info, updated)?;
             info.insert(HELP_CURSOR.into(), next_cursor);
             budget(&info)?;
             // Errors may have committed the whole group. Preserve uncertainty.

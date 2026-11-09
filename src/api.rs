@@ -72,6 +72,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/databases/{db}/gc", post(gc))
         .route("/v1/databases/{db}/access", post(access))
         .route("/v1/tokens", post(token))
+        .route(
+            "/v1/storage/upload-budget",
+            get(upload_budget).post(replenish_upload_budget),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(middleware::from_fn_with_state(app.clone(), admission))
         .with_state(app)
@@ -223,6 +227,25 @@ async fn create(
         return Err(Error::Unauthorized);
     }
     Ok(Json(app.engine.create(&db, limits).await?))
+}
+async fn upload_budget(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+) -> Result<Json<Option<crate::upload_budget::UploadStatus>>> {
+    if !app.auth.is_admin(bearer(&headers)?) {
+        return Err(Error::Unauthorized);
+    }
+    Ok(Json(app.engine.upload_budget().await?))
+}
+async fn replenish_upload_budget(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    Json(request): Json<crate::upload_budget::UploadRequest>,
+) -> Result<Json<crate::upload_budget::UploadResult>> {
+    if !app.auth.is_admin(bearer(&headers)?) {
+        return Err(Error::Unauthorized);
+    }
+    Ok(Json(app.engine.replenish_upload_budget(&request).await?))
 }
 async fn create_protected(
     State(app): State<Arc<App>>,

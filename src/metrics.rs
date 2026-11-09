@@ -96,8 +96,13 @@ pub enum Event {
     ProposalCandidates,
     ProposalRejected,
     ProposalDeleteAck,
+    UploadChargedBytes,
+    UploadChargedAttempts,
+    UploadGrantBytes,
+    UploadGrantAttempts,
+    UploadBudgetExhausted,
 }
-const EVENTS: [&str; 18] = [
+const EVENTS: [&str; 23] = [
     "read_groups",
     "read_group_members",
     "observation_queue_rejected",
@@ -116,6 +121,11 @@ const EVENTS: [&str; 18] = [
     "proposal_candidates",
     "proposal_rejected",
     "proposal_delete_ack",
+    "upload_charged_bytes",
+    "upload_charged_attempts",
+    "upload_grant_bytes",
+    "upload_grant_attempts",
+    "upload_budget_exhausted",
 ];
 const OUTCOMES: [&str; 8] = [
     "ok",
