@@ -243,6 +243,24 @@ Three unsafe controls must fail: issuing grants for frozen/superseded assignment
 
 This establishes bounded permission composition under the root timing abstraction. It assumes atomic durable placement updates and an issuer whose assignment view is synchronized with freeze decisions. The wire protocol must freeze issuance before an uncertain update and recover exact placement after root replacement; that refinement is not implemented here. Platform clocks, journal selection/data history, graceful early release, placement policy, routing, transactions, resource admission, collection and liveness remain open. The root/journal theorem does not automatically prove this delegated composition. No runtime clock dependency or replacement serving engine is adopted.
 
+## Candidate delegated journal recovery
+
+`PartitionJournal` runs the actual `PartitionControl` and `RootControl` transitions together with immutable journal uploads, permission-checked acknowledgements, recovery and conditional prefix selection. A journal belongs to a partition's writer generation, not to a coordinator epoch. A surviving writer can receive permission from a replacement coordinator and continue its existing journal. Replacing the writer itself must allocate a new generation; it cannot reopen the old generation for writing.
+
+| Instance | Bounds | Distinct states |
+| --- | --- | ---: |
+| One movement | One root, one partition, two generations, two batches per generation, two time advances | 6,329 |
+| Interrupted movement | Two roots, one partition, two generations, one batch per generation, two time advances | 177,371 |
+| Independent histories | One root, two partitions, two generations, one batch per generation, two time advances | 328,091 |
+| Repeated movement | One root, one partition, three generations, one batch per generation, three time advances | 108,304 |
+| Surviving writer | Two roots, one partition, one generation, two batches, two time advances | 93,201 |
+
+Seven required unsafe controls detect acknowledgement without permission, consumption across gaps, recovery before permission, stale negative reads, reselection, premature serving and a skipped partition drain. Five reachability controls require inherited acknowledged history after movement, interrupted movement completed by a replacement root, simultaneous serving histories on moved and untouched partitions, two successive moves retaining both predecessor histories, and new acknowledgements by the same writer under two different roots. The last uses a ghost set recording the root authorizing each actual acknowledgement; a coordinator change alone does not satisfy it. These controls establish reachable scenarios, not liveness.
+
+Run `scripts/check-candidate.sh PartitionJournal`. Woodpecker requires every instance and control in a separately cached stage. The [evidence](evidence/partition-journal-candidate-2026-11-09.json) records all configuration bounds, generated states, depths and fingerprint estimates. These finite instances do not establish arbitrary partitions, generations, histories or all combinations of their bounds. The existing unbounded root/journal theorem does not prove this delegated composition.
+
+The model assumes the root elapsed-time contract, atomic durable placement changes with synchronized issuance, fresh immutable object observations, conditional immutable prefix selection and exact validated reads of selected prefixes. A selected prefix survives losing a scan or coordinator. Delayed uploads remain possible after movement. Pauses and process loss delay or omit actions; a replacement writer is a fresh generation. Transaction evaluation, request receipts, admission, reclamation, runtime/platform refinement and liveness remain open. No clock-based serving code is adopted by this result.
+
 ## Candidate clock error margins
 
 `spec/candidates/GrantBoundsProof.tla` proves four arithmetic lemmas with **19 strict TLAPS obligations**: an upper bound on root permission, exclusion after a successor drain, the rounded child-duration bound, and containment of a delivered child's permission within its parent. There is no finite bound on the nonnegative integer durations or error allowance in these lemmas. This is an arithmetic proof under a clock contract, not an unbounded proof of the ownership protocol.

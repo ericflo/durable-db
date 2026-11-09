@@ -47,3 +47,5 @@ Partition movement runs with `scripts/check-candidate.sh PartitionControl` in it
 Positive root/root-journal configurations list their shared invariant clauses once; this preserves the same conjunction and state bounds while avoiding repeated evaluation of large type maps. Compiler builds stop their kache daemon on exit, including failure, while retaining the compilation cache.
 
 Proof failures print their failed obligations into CI output before returning the checker's failure status. The root/journal proof splits type preservation and unaffected recovery references into explicit lemmas so verification does not depend on one large solver query completing on the development host. Strict checking, fresh fingerprints and the required negative control remain unchanged.
+
+Delegated journal composition runs with `scripts/check-candidate.sh PartitionJournal` in `model-candidate-partitionjournal`. Its five positive instances, seven unsafe variants and five reachability controls are mandatory. The wrapper copies both permission dependencies, so the check exercises the maintained root and movement protocols.

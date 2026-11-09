@@ -4,8 +4,8 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 candidate=${1:-}
 case "$candidate" in
-  OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl) ;;
-  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl' >&2; exit 2 ;;
+  OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal) ;;
+  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal' >&2; exit 2 ;;
 esac
 
 "$repo/scripts/check-model.sh" prepare
@@ -16,8 +16,11 @@ trap 'exit 143' TERM
 mkdir -p "$scratch/scripts" "$scratch/spec" "$scratch/.tools"
 cp "$repo/scripts/check-model.sh" "$scratch/scripts/"
 cp "$repo/spec/candidates/$candidate.tla" "$repo/spec/candidates/$candidate.checks" "$scratch/spec/"
-if [ "$candidate" = RootJournal ] || [ "$candidate" = PartitionControl ]; then
+if [ "$candidate" = RootJournal ] || [ "$candidate" = PartitionControl ] || [ "$candidate" = PartitionJournal ]; then
   cp "$repo/spec/candidates/RootControl.tla" "$scratch/spec/"
+fi
+if [ "$candidate" = PartitionJournal ]; then
+  cp "$repo/spec/candidates/PartitionControl.tla" "$scratch/spec/"
 fi
 ln -s "$repo/.tools/tla2tools-1.7.4.jar" "$scratch/.tools/tla2tools-1.7.4.jar"
 while read -r kind config rest; do

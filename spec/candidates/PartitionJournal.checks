@@ -1,0 +1,18 @@
+# kind config log-tag heap expected-counterexample
+safe PartitionJournal.cfg partition-journal 2g -
+safe PartitionJournalRecovery.cfg partition-journal-recovery 2g -
+safe PartitionJournalIndependent.cfg partition-journal-independent 2g -
+safe PartitionJournalRepeated.cfg partition-journal-repeated 2g -
+safe PartitionJournalResume.cfg partition-journal-resume 2g -
+unsafe PartitionJournalUnsafePermission.cfg partition-journal-unsafepermission 2g SelectedHistory
+unsafe PartitionJournalUnsafeGap.cfg partition-journal-unsafegap 2g DurableHistory
+unsafe PartitionJournalUnsafeEarly.cfg partition-journal-unsafeearly 2g SelectedHistory
+unsafe PartitionJournalUnsafeMissing.cfg partition-journal-unsafemissing 2g SelectedHistory
+unsafe PartitionJournalUnsafeReseal.cfg partition-journal-unsafereseal 2g ImmutableHistory
+unsafe PartitionJournalUnsafeReady.cfg partition-journal-unsafeready 2g CompleteHistory
+unsafe PartitionJournalUnsafeDrain.cfg partition-journal-unsafedrain 2g SelectedHistory
+unsafe PartitionJournalCoverage.cfg partition-journal-coverage 2g NotMovedHistory
+unsafe PartitionJournalRecoveryCoverage.cfg partition-journal-recoverycoverage 2g NotRecoveredHistory
+unsafe PartitionJournalIndependentCoverage.cfg partition-journal-independentcoverage 2g NotIndependentHistory
+unsafe PartitionJournalRepeatedCoverage.cfg partition-journal-repeatedcoverage 2g NotRepeatedHistory
+unsafe PartitionJournalResumeCoverage.cfg partition-journal-resumecoverage 2g NotResumedHistory
