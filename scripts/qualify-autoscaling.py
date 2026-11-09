@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--context', required=True)
     parser.add_argument('--provider-ip', help='Optional disposable provider IPv4 for a 40-second node egress partition')
+    parser.add_argument('--inject-oom', action='store_true', help='Temporarily lower one identified API container cgroup limit to trigger a real kernel OOM kill')
     parser.add_argument('--cpu-request', default='100m')
     parser.add_argument('--read-workers', type=int, default=32)
     parser.add_argument('--phase-timeout', type=int, default=600)
@@ -56,6 +57,7 @@ def main():
                   configuration=dict(image=args.image, cpu_request=args.cpu_request, cpu_limit='1',
                                      cpu_target_percent=70, read_workers=args.read_workers,
                                      maintenance_seconds=15, memory_cache_mib=64, disk_cache_mib=128,
+                                     inject_oom=args.inject_oom,
                                      hpa_down_stabilization_seconds=30, hpa_down_period_seconds=15),
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   phases=[], observations=[], http_attempt_statuses={}, writes_acknowledged=0,
@@ -323,6 +325,47 @@ def main():
             docker('exec', node, 'kill', '-KILL', str(pid))
             time.sleep(15)
             phase('api-process-sigkill', node=node, observed=wait_replicas(None, cpu=True))
+
+            if args.inject_oom:
+                chosen = next(p for p in pods() if not p['metadata'].get('deletionTimestamp') and
+                              p['status'].get('containerStatuses') and all(c.get('ready') for c in p['status']['containerStatuses']))
+                node = chosen['spec']['nodeName']
+                container_id = chosen['status']['containerStatuses'][0]['containerID'].split('://', 1)[1]
+                inspected = json.loads(docker('exec', node, 'crictl', 'inspect', container_id))
+                pod_uid = chosen['metadata']['uid']
+                if inspected['status']['labels'].get('io.kubernetes.pod.uid') != pod_uid:
+                    raise RuntimeError('Container identity changed before OOM injection')
+                pid = int(inspected['info']['pid'])
+                if pid <= 1:
+                    raise RuntimeError('Unsafe OOM target PID')
+                cgroups = docker('exec', node, 'cat', f'/proc/{pid}/cgroup').decode().splitlines()
+                if len(cgroups) != 1 or not cgroups[0].startswith('0::/'):
+                    raise RuntimeError('OOM qualification requires a unified container cgroup')
+                group = cgroups[0][3:]
+                if '..' in group or pod_uid.replace('-', '_') not in group or container_id not in group:
+                    raise RuntimeError('Cgroup does not identify the selected API container')
+                limit = '/sys/fs/cgroup' + group + '/memory.max'
+                previous = docker('exec', node, 'cat', limit).decode().strip()
+                try:
+                    # Positional arguments keep the cgroup path out of shell
+                    # source. The exec process belongs to the kind node, not
+                    # the API cgroup whose limit is being reduced.
+                    docker('exec', node, 'sh', '-c', 'printf "%s" "$1" > "$2"', 'sh', '1048576', limit)
+                finally:
+                    exists = subprocess.run(['docker', 'exec', node, 'test', '-e', limit], capture_output=True, timeout=20).returncode == 0
+                    if exists:
+                        docker('exec', node, 'sh', '-c', 'printf "%s" "$1" > "$2"', 'sh', previous, limit)
+                deadline = time.monotonic() + 45
+                while True:
+                    terminated = json.loads(docker('exec', node, 'crictl', 'inspect', container_id))['status']
+                    if terminated.get('reason') == 'OOMKilled' and terminated.get('exitCode') == 137:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Kernel OOM termination was not confirmed by the container runtime')
+                    time.sleep(1)
+                phase('api-container-oom', node=node, runtime_reason=terminated['reason'],
+                      exit_code=terminated['exitCode'], forced_limit_bytes=1048576,
+                      observed=wait_replicas(None, cpu=True))
 
             if args.provider_ip:
                 blocked_node = node

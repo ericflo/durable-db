@@ -11,7 +11,7 @@ One shared publication implementation on B2 and S3, with a persistent B+tree dat
 - Complete full Pi Harness integration and sustained-load qualification of the indexed adapter; all 32 upstream cases pass on B2, and cache-free crash/takeover recovery passes.
 - Add durable cluster-wide physical allocation/spend admission, request and bandwidth budgets, and abuse tests across replicas.
 - Add tenant export, deletion/retention, and durable audit delivery. Overlapping signing keys, expiring administrator capabilities, durable token revocation, and idempotent protected provisioning are implemented in current source builds; complete their broader deployment qualification.
-- Extend the passing kind/MinIO CPU-HPA, drain, SIGKILL, provider-partition, and complete-pod-loss campaign to B2 and independent nodes; add OOM and longer fault histories.
+- Extend the passing kind/MinIO CPU-HPA, drain, SIGKILL, kernel OOM, provider-partition, and complete-pod-loss campaigns to B2 and independent nodes; add sustained memory bounds and longer fault histories.
 - Remove the single bucket publication throughput bottleneck through a modeled group-commit/partitioning design before claiming high throughput across many active sites.
 - Run performance and soak tests against AWS with published latency distributions, cost/transaction, cache hit rates, and per-database contention. Optimize only from those measurements.
 - Mechanize the unbounded safety argument and record the abstraction/refinement obligations.
