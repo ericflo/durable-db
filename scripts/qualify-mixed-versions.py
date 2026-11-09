@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='durable-db-mixed-') as tmp:
     root = Path(tmp)
     subprocess.run([new, 'keygen', '--output', str(root / 'admin.key')], check=True,
                    stdout=subprocess.DEVNULL)
-    token = subprocess.check_output([new, 'token', '--key-file', str(root / 'admin.key'), '--admin']).decode().strip()
+    token = subprocess.check_output([old, 'token', '--key-file', str(root / 'admin.key'), '--admin']).decode().strip()
     scoped_tokens = {}
 
     def start(index, binary):

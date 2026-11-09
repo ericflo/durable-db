@@ -23,7 +23,7 @@ Each site may provision multiple databases. The bucket directory must support a 
 - The existing platform uses B2. B2 is a required authority, using native bucket revision publication rather than S3 conditional file overwrites. The common B2/S3 protocol has passed its initial real-B2 test; complete scaling, abuse, and soak qualification before platform rollout. See [the B2 design](b2.md).
 - Pi Session execution has one owner even though database API pods are interchangeable. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
 - Browser identity, CORS, individual-user row authorization, and billing belong to the gateway. Per-database scoped credentials alone do not provide row-level access control.
-- The indexed Pi adapter passes upstream conformance with scoped credentials and has direct record/index/document storage. Complete cloud, host-restart, and sustained-load qualification before production onboarding; the bounded journal remains a reference fixture.
-- Production readiness requires strict global physical/spend controls, overlapping signing-key rotation, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
+- The indexed Pi adapter passes upstream conformance with scoped credentials and has direct record/index/document storage. B2 conformance and cache-free host restart with explicit takeover pass; complete full Harness and sustained-load qualification before production onboarding; the bounded journal remains a reference fixture.
+- Production readiness requires strict global physical/spend controls, deployment qualification of the implemented overlapping signing-key rollout, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
 
 No running NeuralColumn service, bucket, deployment, or production credentials are modified by this repository's initial development work.

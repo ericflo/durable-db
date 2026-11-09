@@ -41,7 +41,14 @@ suite('indexed adapter failure and resource boundaries', () => {
   it('opens without scanning or replaying unrelated history and preserves ordered indexes', async () => {
     const { client } = await fixture();
     let reads = 0, scans = 0;
-    const observed = { read: request => { reads++; scans += request?.scans?.length ?? 0; return client.read(request); }, commit: request => client.commit(request) };
+    const observed = { read: async request => {
+      scans += request?.scans?.length ?? 0;
+      const result = await client.read(request);
+      // Admission retries do not add successful metadata reads or replay work.
+      // Count scans even on rejected attempts so a hidden history scan fails.
+      reads++;
+      return result;
+    }, commit: request => client.commit(request) };
     const storage = await openIndexedPiStorage(observed);
     await commit(storage, [root]);
     for (let start = 2; start < 302; start += 25) await commit(storage, Array.from({ length: 25 }, (_, index) => entry(start + index)));

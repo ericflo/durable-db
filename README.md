@@ -47,7 +47,7 @@ curl http://127.0.0.1:7654/v1/databases/demo/read \
 
 Values are base64-encoded arbitrary bytes: `d29ybGQ=` is `world`. Keys are UTF-8 strings. A read returns a revision; supply it when committing changes. A `409` requires a fresh read and recomputation. Retry an uncertain write with the **identical** request ID, revision, and body.
 
-Current source builds additionally support [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. These features postdate the v0.1.0 installer example above and require upgraded servers.
+Current source builds additionally support [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. Current builds also add [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md). These features postdate the v0.1.0 installer example above and require upgraded servers.
 
 ## Scale without moving the database
 
@@ -57,7 +57,7 @@ clients ─ service ├── API pod · bounded cache ──┼── immutable
                   └── API pod · bounded cache ──┘          object storage
 ```
 
-Pods need the same bucket, prefix, and signing key. They need no peer discovery, quorum membership changes, attached data volume, or distributed lease. Removing every pod stops availability but leaves the database in object storage. Starting one pod restores service.
+Pods need the same bucket and prefix, and compatible signing keys for the current rotation phase. They need no peer discovery, quorum membership changes, attached data volume, or distributed lease. Removing every pod stops availability but leaves the database in object storage. Starting one pod restores service.
 
 ```sh
 export AWS_REGION=us-east-1

@@ -78,6 +78,18 @@ enum Command {
         #[arg(long, default_value = "admin.key")]
         output: PathBuf,
     },
+    /// Assemble a bounded rotation keyring from raw hex key files.
+    Keyring {
+        #[arg(long)]
+        active_key_file: PathBuf,
+        #[arg(long, action = clap::ArgAction::Append)]
+        verify_key_file: Vec<PathBuf>,
+        /// Accept the old administrator envelope, which exposes a signing key.
+        #[arg(long)]
+        allow_legacy_admin: bool,
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -93,6 +105,25 @@ async fn main() -> anyhow::Result<()> {
             keygen(&output)?;
             println!("Created {}", output.display());
         }
+        Command::Keyring {
+            active_key_file,
+            verify_key_file,
+            allow_legacy_admin,
+            output,
+        } => {
+            anyhow::ensure!(
+                verify_key_file.len() <= 3,
+                "at most three verification key files are allowed"
+            );
+            let active = read_key_file(&active_key_file)?;
+            let verify = verify_key_file
+                .iter()
+                .map(|p| read_key_file(p))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let document = Auth::keyring_document(&active, verify, allow_legacy_admin)?;
+            write_secret(&output, document.as_bytes())?;
+            println!("Created {}", output.display());
+        }
         Command::Token {
             key_file,
             database,
@@ -103,9 +134,9 @@ async fn main() -> anyhow::Result<()> {
             incarnation,
             generation,
         } => {
-            let auth = Auth::new(&std::fs::read_to_string(key_file)?)?;
+            let auth = Auth::new(&read_key_file(&key_file)?)?;
             if admin {
-                println!("{}", auth.admin_token());
+                println!("{}", auth.administrator_token(ttl_seconds)?);
             } else if metrics {
                 println!("{}", auth.metrics_token(ttl_seconds)?);
             } else if let Some(incarnation) = incarnation {
@@ -167,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
                     p
                 }
             };
-            let auth = Auth::new(&std::fs::read_to_string(&key_file).context("read signing key")?)?;
+            let auth = Auth::new(&read_key_file(&key_file)?)?;
             let cache = Arc::new(Cache::new(
                 memory_cache_mib * 1024 * 1024,
                 disk_cache.map(|p| (p, disk_cache_mib * 1024 * 1024)),
@@ -209,6 +240,20 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 fn keygen(path: &Path) -> anyhow::Result<()> {
+    let key: [u8; 32] = rand::random();
+    write_secret(path, format!("{}\n", hex::encode(key)).as_bytes())
+}
+fn read_key_file(path: &Path) -> anyhow::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).context("open signing-key file")?;
+    let mut contents = String::new();
+    file.take(16385)
+        .read_to_string(&mut contents)
+        .context("read signing-key file")?;
+    anyhow::ensure!(contents.len() <= 16384, "signing-key file exceeds 16 KiB");
+    Ok(contents)
+}
+fn write_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -218,8 +263,7 @@ fn keygen(path: &Path) -> anyhow::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    let key: [u8; 32] = rand::random();
-    writeln!(file, "{}", hex::encode(key))?;
+    file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
 }

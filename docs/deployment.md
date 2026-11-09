@@ -33,3 +33,8 @@ The multi-process integration test (`scripts/test-process-scaling.py`) exercised
 `scripts/test-kubernetes.py` passed against real B2 using the Woodpecker-built image: HPA bounds changed 1→3→1, all 36 writes were retained, and forced deletion of the last pod recovered with fresh disposable caches. This tests the HPA controller responding to bounds, not CPU load. The qualification cluster lacked a working resource-metrics API; CPU-triggered scaling, node drains, and partitions remain separate qualification work. The script records HPA conditions so that distinction stays visible.
 
 Use a registry address reachable by the **nodes' container runtime**, not just by pods. For example, a build may push through a cluster DNS service while the nodes pull the same registry through a configured NodePort alias. The qualification run used this arrangement; it did not modify cluster-wide registry or metrics settings.
+
+
+## Signing-key changes
+
+Current source builds read either the original hex key file or a bounded JSON keyring through the same `--admin-key-file` setting. Follow the [expansion, promotion, and retirement procedure](design-signing-rotation.md). Key files are loaded at startup: update the Secret and complete the corresponding rolling restart, including the template used by new autoscaled pods. A still-serving process outside the current control-plane view must be fenced from clients or included in the completion check. Keep the old key trusted during an availability rollback; a compromised or deliberately retired key must not be reintroduced by restoring an old Secret.

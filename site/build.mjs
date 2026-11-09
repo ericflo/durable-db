@@ -14,10 +14,14 @@ md.renderer.rules.heading_open=(tokens,index,options,env,self)=>{
 };
 const nav=`<a class="wordmark" href="index.html"><span class="mark" aria-hidden="true">▤</span> durable-db</a><nav aria-label="Main"><a href="architecture.html">Architecture</a><a href="api.html">API</a><a href="verification.html">Verification</a><a class="nav-button" href="development.html">Build it ↗</a></nav>`;
 function layout(title,body,home=false){return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="An experimental Rust transactional database with authoritative B2 or S3 storage and disposable compute."><meta name="color-scheme" content="light"><title>${title} · durable-db</title><link rel="icon" href="icon.svg" type="image/svg+xml"><link rel="stylesheet" href="style.css"></head><body><header>${nav}</header>${body}<footer><a class="wordmark" href="index.html">durable-db</a><p>Apache-2.0 · Built in Rust · Verified within explicit bounds</p><a href="roadmap.html">Experimental. Follow the work ↗</a></footer>${home?'<script src="demo.js" defer></script>':''}</body></html>`;}
-for(const doc of docs){
+const designDocs=['design-signing-rotation'];
+for(const doc of [...docs,...designDocs]){
  const source=await readFile(new URL(`../docs/${doc}.md`,import.meta.url),'utf8');
  const title=source.split('\n')[0].replace(/^# /,'');
- const content=md.render(source,{headingIds:new Map()}).replace(/href="([a-z-]+)\.md(#[^"]*)?"/g,'href="$1.html$2"');
+ const content=md.render(source,{headingIds:new Map()}).replace(/href="([a-z0-9-]+)\.md(#[^"]*)?"/g,(_match,name,fragment='')=>{
+  if(![...docs,...designDocs].includes(name)) throw new Error(`Unpublished documentation target: ${name}`);
+  return `href="${name}.html${fragment}"`;
+ });
  const sidebar=docs.map(d=>`<a ${doc===d?'aria-current="page"':''} href="${d}.html">${d.replaceAll('-',' ')}</a>`).join('');
  await writeFile(new URL(`${doc}.html`,out),layout(title,`<main class="docs"><aside aria-label="Documentation">${sidebar}</aside><article>${content}</article></main>`));
 }
@@ -25,7 +29,7 @@ const home=await readFile(new URL('home.html',import.meta.url),'utf8');
 await writeFile(new URL('index.html',out),layout('Storage that stays. Compute that scales.',home,true));
 for(const file of ['style.css','demo.js','icon.svg']) await copyFile(new URL(file,import.meta.url),new URL(file,out));
 await mkdir(new URL('evidence/',out),{recursive:true});
-for(const file of ['b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json','b2-recovery-2026-11-08.json','b2-rebase-2026-11-08.json','b2-grouped-2026-11-08.json','b2-profile-isolation-2026-11-08.json','b2-profile-metrics-2026-11-08.json','mixed-combining-minio-2026-11-08.json','b2-combining-2026-11-08.json','b2-combining-metrics-2026-11-08.json','mixed-combining-b2-2026-11-08.json','mixed-combining-b2-failed-2026-11-08.json','mixed-combining-b2-admin-limit-2026-11-08.json','mixed-combining-b2-partial-recovery-2026-11-08.json','policy-upgrade-minio-2026-11-08.json','policy-upgrade-b2-2026-11-08.json','protected-creation-minio-2026-11-08.json','protected-creation-b2-2026-11-08.json']) {
+for(const file of ['pi-indexed-b2-2026-11-09.json','b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json','b2-recovery-2026-11-08.json','b2-rebase-2026-11-08.json','b2-grouped-2026-11-08.json','b2-profile-isolation-2026-11-08.json','b2-profile-metrics-2026-11-08.json','mixed-combining-minio-2026-11-08.json','b2-combining-2026-11-08.json','b2-combining-metrics-2026-11-08.json','mixed-combining-b2-2026-11-08.json','mixed-combining-b2-failed-2026-11-08.json','mixed-combining-b2-admin-limit-2026-11-08.json','mixed-combining-b2-partial-recovery-2026-11-08.json','policy-upgrade-minio-2026-11-08.json','policy-upgrade-b2-2026-11-08.json','protected-creation-minio-2026-11-08.json','protected-creation-b2-2026-11-08.json']) {
  await copyFile(new URL(`../docs/evidence/${file}`,import.meta.url),new URL(`evidence/${file}`,out));
 }
 await copyFile(new URL('../scripts/install.sh',import.meta.url),new URL('install.sh',out));
@@ -35,4 +39,4 @@ for(const file of ['alerts.yml','alerts.test.yml']) {
 }
 await writeFile(new URL('.nojekyll',out),'');
 // Explicit whitelist: integration plans and private source never enter the public site.
-console.log(`Built ${docs.length+1} public pages into .site/`);
+console.log(`Built ${docs.length+designDocs.length+1} public pages into .site/`);

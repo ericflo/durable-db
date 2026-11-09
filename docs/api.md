@@ -1,6 +1,8 @@
 # HTTP API
 
-This page describes current source builds. The original v0.1.0 release predates protected creation, durable revocation, and metrics-only credentials.
+This page describes current source builds. The original v0.1.0 release predates protected creation, durable revocation, metrics-only credentials, and overlapping signing keys.
+
+Administrator tokens from current `token --admin` are expiring `ddb_control_` capabilities. Token TTL defaults to one hour and is bounded to 30 days. See the [key rollout procedure](design-signing-rotation.md) before migrating control clients or rotating keys.
 
 Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. Keys are ordered by their UTF-8 bytes, independent of locale. Values are standard base64. `null` means absent in a read/check and delete in a write; an empty string is a present zero-byte value.
 

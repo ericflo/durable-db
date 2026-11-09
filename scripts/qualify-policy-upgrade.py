@@ -42,7 +42,7 @@ processes = {}
 with tempfile.TemporaryDirectory(prefix='durable-db-policy-upgrade-') as tmp:
     root = Path(tmp)
     subprocess.run([new, 'keygen', '--output', str(root / 'key')], check=True, stdout=subprocess.DEVNULL)
-    admin = subprocess.check_output([new, 'token', '--key-file', str(root / 'key'), '--admin'], text=True).strip()
+    admin = subprocess.check_output([old, 'token', '--key-file', str(root / 'key'), '--admin'], text=True).strip()
 
     def start(index, binary):
         log = open(root / f'{index}.log', 'w')
