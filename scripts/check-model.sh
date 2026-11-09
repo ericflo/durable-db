@@ -80,3 +80,20 @@ status=$?
 set -e
 [ "$status" = 12 ] && grep -q 'Invariant ObservationWithinInvocation is violated' "$tools/model-observation-unsafe.log" || { cat "$tools/model-observation-unsafe.log"; exit 1; }
 echo 'Observation negative control: joining an in-flight barrier can return a pre-invocation snapshot.'
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx2g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-combining" -config PublicationCombining.cfg PublicationCombining.tla > "$tools/model-combining.log" 2>&1
+tail -n 9 "$tools/model-combining.log"
+for case in Fence Target Merge Abort; do
+  case "$case" in
+    Fence) invariant=ReferencedManifestsExist ;;
+    Target) invariant=ExpectedTargetsCompared ;;
+    Merge) invariant=UnrelatedWritesPreserved ;;
+    Abort) invariant=NoCommitAfterDefiniteAbort ;;
+  esac
+  set +e
+  "${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-combining-$case" -config "UnsafeCombining$case.cfg" PublicationCombining.tla > "$tools/model-combining-$case.log" 2>&1
+  status=$?
+  set -e
+  [ "$status" = 12 ] && grep -q "Invariant $invariant is violated" "$tools/model-combining-$case.log" || { cat "$tools/model-combining-$case.log"; exit 1; }
+  echo "Combining negative control: $case guard detects $invariant."
+done

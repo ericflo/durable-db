@@ -11,7 +11,7 @@ Metrics use fixed operation, outcome, and event names. They contain no database 
 | `durable_db_operations_total{operation,outcome}` | Completed or cancelled attempts; outcomes distinguish success, conflict, rejection, authorization failure, invalid requests, service unavailability, errors, and cancellation |
 | `durable_db_operation_duration_seconds{operation}` | Histogram including failures and cancellation; bounds range from 1 ms to 30 s, followed by `+Inf` |
 | `durable_db_operations_inflight{operation}` | Attempts currently awaiting completion; cancellation releases the gauge |
-| `durable_db_events_total{event}` | Sealed read groups and their members, queue rejection, publication rebases, cache hits/misses, collection candidates, and acknowledged object deletions |
+| `durable_db_events_total{event}` | Sealed read groups and their members, queue rejection, submitted proposals, publication groups/members/rebases, rejected proposals, cache hits/misses, collection candidates, and acknowledged object deletions |
 | `durable_db_requests_total` | Legacy count of requests admitted to the handler |
 | `durable_db_rejected_total` | Legacy count of rate/concurrency rejections; the operation outcomes cover additional rejection paths |
 | `durable_db_cache_bytes` | Current accounted memory-cache usage, including estimated entry overhead; not process RSS |
@@ -38,7 +38,7 @@ histogram_quantile(0.95,
 )
 ```
 
-The ratio of `read_group_members` to `read_groups` measures barrier sharing. Compare `cache_hit` and `cache_miss`, but remember that cache misses include checksum mismatches and cache-disabled configurations. High cache hit rates do not eliminate the authoritative read barrier.
+The ratio of `read_group_members` to `read_groups` measures barrier sharing. `publication_group_members / publication_groups` measures the selected group size for acknowledged helper CAS calls; an unknown CAS response can make those counters undercount successful publication. `proposal_submitted` counts acknowledged uploads, while `proposal_candidates`, `proposal_rejected`, and `proposal_delete_ack` expose proposal scan, validation, and cleanup activity. These counters do not measure the pending queue or establish that every submitted proposal eventually committed. Compare `cache_hit` and `cache_miss`, but remember that cache misses include checksum mismatches and cache-disabled configurations. High cache hit rates do not eliminate the authoritative read barrier.
 
 ## Alert rules and qualification
 

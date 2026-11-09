@@ -3,13 +3,37 @@ use durable_db::{Error, cache::Cache, engine::*, providers::b2::Native, storage:
 use std::sync::Arc;
 
 // Both opt-in tests share a bucket and run concurrently. A collector in one
-// test can legitimately fence a create in the other. Retry only definite
-// conflicts; an unknown provider outcome still fails qualification visibly.
+// test can legitimately fence a submitted proposal in the other. These tests
+// exclusively own fresh database names, so observing that name can resolve an
+// uncertain create. Production create idempotency remains a separate API gate.
+fn proposal_race(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("outcome is uncertain")
+        || message.starts_with("directory snapshot was collected")
+}
 async fn create(engine: &Engine, db: &str) {
     for attempt in 0..12 {
         match engine.create(db, Limits::default()).await {
             Ok(_) => return,
             Err(Error::Conflict) => {
+                if let Ok(info) = engine.info(db).await {
+                    assert_eq!(info.revision, 0);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
+            }
+            Err(Error::Storage(error)) if proposal_race(&error) => {
+                eprintln!(
+                    "B2 create proposal raced collection; recovering the uniquely owned name"
+                );
+                match engine.info(db).await {
+                    Ok(info) => {
+                        assert_eq!(info.revision, 0);
+                        return;
+                    }
+                    Err(Error::NotFound) => {}
+                    Err(error) => panic!("B2 create recovery failed: {error}"),
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
             }
             Err(error) => panic!("B2 create failed: {error}"),
@@ -49,6 +73,11 @@ async fn real_b2_conditional_authority_versions_and_cache_free_recovery() {
                     break;
                 }
                 Err(Error::Conflict) => {}
+                Err(Error::Storage(error)) if proposal_race(&error) => {
+                    eprintln!(
+                        "B2 commit proposal raced collection; retrying the identical request"
+                    );
+                }
                 Err(e) => panic!("B2 write failed: {e}"),
             }
         }

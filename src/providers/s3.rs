@@ -191,7 +191,7 @@ impl Authority for S3 {
         Ok(Some(next))
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
-        if !["blocks/", "manifests/", "indexes/"]
+        if !["blocks/", "manifests/", "indexes/", "proposals/"]
             .iter()
             .any(|prefix| key.starts_with(prefix))
         {

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
+mod batch;
 
 const FANOUT: usize = 64;
 const MAX_NODE_BYTES: usize = 64 * 1024;
@@ -39,10 +40,15 @@ pub(crate) struct MissingNode;
 pub(crate) struct Directory {
     files: Arc<dyn Storage>,
     cache: Option<Arc<Cache>>,
+    cache_writes: bool,
 }
 impl Directory {
     pub fn new(files: Arc<dyn Storage>) -> Self {
-        Self { files, cache: None }
+        Self {
+            files,
+            cache: None,
+            cache_writes: true,
+        }
     }
     pub fn with_cache(mut self, cache: Arc<Cache>) -> Self {
         self.cache = Some(cache);
@@ -79,7 +85,10 @@ impl Directory {
                 && height == root.height,
             "directory reference does not match its node"
         );
-        if cache_miss && let Some(cache) = &self.cache {
+        if self.cache_writes
+            && cache_miss
+            && let Some(cache) = &self.cache
+        {
             cache.insert(&root.object, bytes).await;
         }
         Ok(node)
@@ -101,7 +110,9 @@ impl Directory {
             height,
         };
         self.files.put(&root.object, bytes.clone()).await?;
-        if let Some(cache) = &self.cache {
+        if self.cache_writes
+            && let Some(cache) = &self.cache
+        {
             cache.insert(&root.object, bytes).await;
         }
         Ok(root)
@@ -150,7 +161,7 @@ impl Directory {
         Ok(result)
     }
     /// Path copying touches at most two nodes per level, plus a new root on split.
-    pub async fn insert(
+    async fn insert_one(
         &self,
         root: Option<&Root>,
         db: &str,

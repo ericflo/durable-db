@@ -13,11 +13,15 @@ use object_store::UpdateVersion;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
+mod proposal;
 
 const HEAD: &str = "durable-db-root";
 const CURSOR: &str = "durable-db-gc";
 const INDEX_CURSOR: &str = "durable-db-index-gc";
+const PROPOSAL_CURSOR: &str = "durable-db-proposal-gc";
+const HELP_CURSOR: &str = "durable-db-proposal-scan";
 const MAX_INFO: usize = 9000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +71,8 @@ pub struct Published {
     directory: Directory,
     observations: Observations,
     cache: Option<Arc<Cache>>,
+    helpers: Semaphore,
+    proposal_cleanup: proposal::Cleanup,
 }
 impl Published {
     pub async fn open(
@@ -98,6 +104,8 @@ impl Published {
                 }
                 return Ok(Self {
                     cache: None,
+                    helpers: Semaphore::new(1),
+                    proposal_cleanup: proposal::Cleanup::new(authority.clone()),
                     observations: Observations::new(authority.clone()),
                     directory: Directory::new(files.clone()),
                     files,
@@ -118,6 +126,8 @@ impl Published {
             if authority.replace(&bucket, info).await?.is_some() {
                 return Ok(Self {
                     cache: None,
+                    helpers: Semaphore::new(1),
+                    proposal_cleanup: proposal::Cleanup::new(authority.clone()),
                     observations: Observations::new(authority.clone()),
                     directory: Directory::new(files.clone()),
                     files,
@@ -133,96 +143,6 @@ impl Published {
         self.cache = Some(cache);
         self
     }
-    async fn publish(
-        &self,
-        key: &str,
-        old: Option<&Version>,
-        bytes: Bytes,
-    ) -> anyhow::Result<bool> {
-        let slot = slot(key)?;
-        let bucket = self.authority.read().await?;
-        let base_root = root(&bucket.info)?;
-        let current = match self.directory.get(base_root.as_ref(), &slot).await {
-            Err(e) if e.is::<MissingNode>() => return Ok(false),
-            other => other?,
-        };
-        let identity = current.as_ref().map(serde_json::to_string).transpose()?;
-        let matches = match old {
-            None => current.is_none(),
-            Some(v) => identity.as_ref() == v.0.e_tag.as_ref(),
-        };
-        if !matches {
-            return Ok(false);
-        }
-        let pointer = Pointer {
-            key: format!("manifests/{slot}.{}", Uuid::new_v4()),
-            sha256: hex::encode(Sha256::digest(&bytes)),
-        };
-        let mut info = bucket.info.clone();
-        budget(&info)?; // Reserve the bounded root and all maintenance fields before upload.
-        self.files.put(&pointer.key, bytes.clone()).await?;
-        if let Some(cache) = &self.cache {
-            cache.insert(&pointer.key, bytes).await;
-        }
-        let mut updated = match self
-            .directory
-            .insert(base_root.as_ref(), &slot, pointer.clone())
-            .await
-        {
-            Err(e) if e.is::<MissingNode>() => return Ok(false),
-            other => other?,
-        };
-        info.insert(HEAD.into(), serde_json::to_string(&updated)?);
-        budget(&info)?;
-        let mut observed = bucket.clone();
-        for attempt in 0..8 {
-            // An error has an unknown outcome and must go back to receipt recovery.
-            if self.authority.replace(&observed, info).await?.is_some() {
-                return Ok(true);
-            }
-            if attempt == 7 {
-                return Ok(false);
-            }
-            let latest = self.authority.read().await?;
-            // A collector may have deleted our unpublished manifest or path.
-            // Never reuse an upload across a collection fence, even when our
-            // database pointer did not change. Fence identities cannot be reused.
-            if latest.info.get("durable-db-fence") != bucket.info.get("durable-db-fence") {
-                return Ok(false);
-            }
-            if latest.info.get(HEAD) != observed.info.get(HEAD) {
-                let latest_root = root(&latest.info)?;
-                let target = match self.directory.get(latest_root.as_ref(), &slot).await {
-                    Err(e) if e.is::<MissingNode>() => return Ok(false),
-                    other => other?,
-                };
-                // Engine-level collection and competing writes to this database
-                // also change its immutable pointer. They must cause a restart.
-                if target != current {
-                    return Ok(false);
-                }
-                metrics::REGISTRY.event(Event::PublicationRebase, 1);
-                // Only unrelated entries changed. Rebuild from the NEW root;
-                // retaining the old path would erase their acknowledged writes.
-                // All path objects are fresh. A later fence/root race is caught
-                // by the next CAS; an ambiguous response still returns an error.
-                updated = match self
-                    .directory
-                    .insert(latest_root.as_ref(), &slot, pointer.clone())
-                    .await
-                {
-                    Err(e) if e.is::<MissingNode>() => return Ok(false),
-                    other => other?,
-                };
-            }
-            info = latest.info.clone();
-            info.insert(HEAD.into(), serde_json::to_string(&updated)?);
-            budget(&info)?;
-            observed = latest;
-            tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
-        }
-        Ok(false)
-    }
     /// List before fencing. Test membership using bounded paths, never a full scan.
     /// Returns manifests removed; obsolete directory pages are collected as well.
     pub async fn collect_manifests(&self) -> anyhow::Result<usize> {
@@ -235,10 +155,18 @@ impl Published {
             .files
             .list("indexes/", cursor(&before, INDEX_CURSOR), 128)
             .await?;
+        let proposals = self
+            .files
+            .list("proposals/", cursor(&before, PROPOSAL_CURSOR), 128)
+            .await?;
         let current = self.authority.read().await?;
         let protected = root(&current.info)?;
         let mut info = current.info.clone();
-        for (field, candidates) in [(CURSOR, &manifests), (INDEX_CURSOR, &indexes)] {
+        for (field, candidates) in [
+            (CURSOR, &manifests),
+            (INDEX_CURSOR, &indexes),
+            (PROPOSAL_CURSOR, &proposals),
+        ] {
             info.insert(
                 field.into(),
                 if candidates.len() == 128 {
@@ -252,6 +180,13 @@ impl Published {
         budget(&info)?;
         if self.authority.replace(&current, info).await?.is_none() {
             return Ok(0);
+        }
+        // All listed proposals precede this fence. Even a helper retaining
+        // their bytes cannot publish across it. No reference test is needed.
+        for key in proposals {
+            metrics::REGISTRY.event(Event::ProposalCandidates, 1);
+            self.authority.delete_versions(&key).await?;
+            metrics::REGISTRY.event(Event::ProposalDeleteAck, 1);
         }
         let mut deleted = 0;
         for key in manifests {
@@ -308,6 +243,8 @@ fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
         ("durable-db-fence", 36),
         (CURSOR, 111),
         (INDEX_CURSOR, 109),
+        (PROPOSAL_CURSOR, 111),
+        (HELP_CURSOR, 111),
         (HEAD, 1024),
     ] {
         if reserved.get(field).is_none_or(|v| v.len() < size) {

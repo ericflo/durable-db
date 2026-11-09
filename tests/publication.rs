@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, Notify};
 struct Counted {
     inner: Arc<dyn Storage>,
     gets: Arc<AtomicUsize>,
+    lost_proposal_ack: Arc<AtomicBool>,
 }
 #[async_trait]
 impl Storage for Counted {
@@ -30,7 +31,11 @@ impl Storage for Counted {
         self.inner.cas(key, old, bytes).await
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
-        self.inner.put(key, bytes).await
+        self.inner.put(key, bytes).await?;
+        if key.starts_with("proposals/") && self.lost_proposal_ack.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("injected lost response after proposal upload");
+        }
+        Ok(())
     }
     async fn list(
         &self,
@@ -46,6 +51,7 @@ impl Storage for Counted {
 }
 struct Metadata {
     gets: Arc<AtomicUsize>,
+    lost_proposal_ack: Arc<AtomicBool>,
     state: Mutex<Bucket>,
     files: Arc<dyn Storage>,
     pause: AtomicBool,
@@ -90,12 +96,15 @@ async fn setup() -> (Arc<Published>, Arc<Metadata>) {
     let files =
         Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
     let gets = Arc::new(AtomicUsize::new(0));
+    let lost_proposal_ack = Arc::new(AtomicBool::new(false));
     let files = Arc::new(Counted {
         inner: files,
         gets: gets.clone(),
+        lost_proposal_ack: lost_proposal_ack.clone(),
     });
     let metadata = Arc::new(Metadata {
         gets,
+        lost_proposal_ack,
         state: Mutex::new(Bucket {
             version: None,
             revision: 0,
@@ -118,6 +127,18 @@ async fn setup() -> (Arc<Published>, Arc<Metadata>) {
 }
 fn engine(b2: Arc<Published>) -> Engine {
     Engine::new(b2, Arc::new(Cache::new(0, None).unwrap()))
+}
+async fn replica(metadata: &Arc<Metadata>) -> Arc<Published> {
+    Arc::new(
+        Published::open(metadata.files.clone(), metadata.clone(), "test")
+            .await
+            .unwrap(),
+    )
+}
+fn expected_race(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("outcome is uncertain")
+        || message.starts_with("directory snapshot was collected")
 }
 fn request(revision: u64) -> CommitRequest {
     CommitRequest {
@@ -269,7 +290,7 @@ async fn manifest_collector_fences_a_paused_publisher_and_reclaims_its_orphan() 
         1
     );
     metadata.resume.notify_one();
-    assert!(!task.await.unwrap().unwrap());
+    assert!(task.await.unwrap().is_err());
     assert_eq!(
         b2.get("heads/a.json", 100).await.unwrap().unwrap().bytes,
         b"one"[..]
@@ -440,27 +461,42 @@ async fn ten_thousand_databases_split_page_recover_and_collect() {
 }
 #[tokio::test]
 async fn multiple_stateless_replicas_survive_both_collectors_and_reopen() {
-    let (b2, _) = setup().await;
+    let (b2, metadata) = setup().await;
     engine(b2.clone())
         .create("test", Limits::default())
         .await
         .unwrap();
     let mut tasks = vec![];
     for worker in 0..3 {
-        let b2 = b2.clone();
+        let b2 = replica(&metadata).await;
         tasks.push(tokio::spawn(async move {
             let e = engine(b2);
             for op in 0..12 {
-                loop {
+                let mut done = false;
+                for _ in 0..100 {
                     let r = e.info("test").await.unwrap().revision;
                     let mut req = request(r);
                     req.request_id = format!("worker-{worker}-op-{op}");
-                    match e.commit("test", &req).await {
-                        Ok(_) => break,
+                    let mut result = e.commit("test", &req).await;
+                    for _ in 0..20 {
+                        if !matches!(&result, Err(Error::Storage(error)) if expected_race(error)) {
+                            break;
+                        }
+                        // Preserve the full original request until receipt recovery
+                        // or a fresh manifest establishes a definite conflict.
+                        tokio::task::yield_now().await;
+                        result = e.commit("test", &req).await;
+                    }
+                    match result {
+                        Ok(_) => {
+                            done = true;
+                            break;
+                        }
                         Err(Error::Conflict) => {}
                         Err(e) => panic!("{e}"),
                     }
                 }
+                assert!(done, "writer exhausted bounded recovery attempts");
             }
         }));
     }
@@ -550,7 +586,7 @@ async fn distinct_databases_split_while_publishers_and_collectors_race() {
     let (store, metadata) = setup().await;
     let mut tasks = Vec::new();
     for worker in 0..3 {
-        let store = store.clone();
+        let store = replica(&metadata).await;
         tasks.push(tokio::spawn(async move {
             let e = engine(store);
             for n in 0..40 {
@@ -562,7 +598,22 @@ async fn distinct_databases_split_while_publishers_and_collectors_race() {
                             created = true;
                             break;
                         }
-                        Err(Error::Conflict) => tokio::task::yield_now().await,
+                        Err(error) if matches!(error, Error::Conflict)
+                            || matches!(&error, Error::Storage(error) if expected_race(error)) => {
+                            // This fixture exclusively owns this unique name.
+                            // A submitted create can be helped after an unknown
+                            // response, so observe it before trying again.
+                            match e.info(&db).await {
+                                Ok(info) => {
+                                    assert_eq!(info.revision, 0);
+                                    created = true;
+                                    break;
+                                }
+                                Err(Error::NotFound) => {}
+                                Err(error) => panic!("{error}"),
+                            }
+                            tokio::task::yield_now().await;
+                        }
                         Err(e) => panic!("{e}"),
                     }
                 }
@@ -633,6 +684,7 @@ async fn idle_page_collection_does_not_rewrite_the_directory() {
 async fn publication_retries_read_barriers_and_rebases_unrelated_database_writes() {
     for change_root in [false, true] {
         let (store, metadata) = setup().await;
+        let other = replica(&metadata).await;
         store
             .cas("heads/a.json", None, Bytes::from_static(b"one"))
             .await
@@ -658,7 +710,7 @@ async fn publication_retries_read_barriers_and_rebases_unrelated_database_writes
         }
         if change_root {
             assert!(
-                store
+                other
                     .cas("heads/b.json", None, Bytes::from_static(b"other"))
                     .await
                     .unwrap()
@@ -699,6 +751,7 @@ async fn wait_paused(metadata: &Metadata) {
 #[tokio::test]
 async fn rebasing_never_overwrites_a_competing_write_to_the_same_database() {
     let (store, metadata) = setup().await;
+    let other = replica(&metadata).await;
     assert!(
         store
             .cas("heads/a.json", None, Bytes::from_static(b"one"))
@@ -718,7 +771,7 @@ async fn rebasing_never_overwrites_a_competing_write_to_the_same_database() {
     });
     wait_paused(&metadata).await;
     assert!(
-        store
+        other
             .cas(
                 "heads/a.json",
                 Some(&old.version),
@@ -728,7 +781,7 @@ async fn rebasing_never_overwrites_a_competing_write_to_the_same_database() {
             .unwrap()
     );
     metadata.resume.notify_one();
-    assert!(!writer.await.unwrap().unwrap());
+    assert!(writer.await.unwrap().is_err());
     assert_eq!(
         store.get("heads/a.json", 100).await.unwrap().unwrap().bytes,
         b"winner"[..]
@@ -736,121 +789,267 @@ async fn rebasing_never_overwrites_a_competing_write_to_the_same_database() {
 }
 
 #[tokio::test]
-async fn rebased_paths_survive_more_unrelated_writes_but_not_a_collection_fence() {
-    for collect in [false, true] {
-        let (store, metadata) = setup().await;
-        assert!(
-            store
-                .cas("heads/a.json", None, Bytes::from_static(b"one"))
-                .await
-                .unwrap()
-        );
-        let old = store.get("heads/a.json", 100).await.unwrap().unwrap();
-        metadata.pause.store(true, Ordering::SeqCst);
-        let writer = tokio::spawn({
-            let store = store.clone();
-            async move {
-                store
-                    .cas(
-                        "heads/a.json",
-                        Some(&old.version),
-                        Bytes::from_static(b"two"),
-                    )
-                    .await
-            }
-        });
-        wait_paused(&metadata).await;
-        assert!(
-            store
-                .cas("heads/b.json", None, Bytes::from_static(b"other"))
-                .await
-                .unwrap()
-        );
-        metadata.pause.store(true, Ordering::SeqCst);
-        metadata.resume.notify_one();
-        wait_paused(&metadata).await; // A rebuilt path is uploaded, awaiting its CAS.
-        if collect {
-            assert_eq!(store.collect_manifests().await.unwrap(), 1);
-        } else {
-            assert!(
-                store
-                    .cas("heads/c.json", None, Bytes::from_static(b"third"))
-                    .await
-                    .unwrap()
-            );
-        }
-        metadata.resume.notify_one();
-        assert_eq!(writer.await.unwrap().unwrap(), !collect);
-        let reopened = Published::open(metadata.files.clone(), metadata.clone(), "test")
+async fn abandoned_origin_is_published_by_another_replica_in_one_group() {
+    let (store, metadata) = setup().await;
+    let other = replica(&metadata).await;
+    store
+        .cas("heads/a.json", None, Bytes::from_static(b"one"))
+        .await
+        .unwrap();
+    let old = store.get("heads/a.json", 100).await.unwrap().unwrap();
+    metadata.pause.store(true, Ordering::SeqCst);
+    let writer = tokio::spawn(async move {
+        store
+            .cas(
+                "heads/a.json",
+                Some(&old.version),
+                Bytes::from_static(b"two"),
+            )
             .await
-            .unwrap();
-        assert_eq!(
-            reopened
-                .get("heads/a.json", 100)
-                .await
-                .unwrap()
-                .unwrap()
-                .bytes,
-            if collect { &b"one"[..] } else { &b"two"[..] }
-        );
-        assert_eq!(
-            reopened
-                .get("heads/b.json", 100)
-                .await
-                .unwrap()
-                .unwrap()
-                .bytes,
-            b"other"[..]
-        );
-        if !collect {
-            assert_eq!(
-                reopened
-                    .get("heads/c.json", 100)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .bytes,
-                b"third"[..]
-            );
-            assert_eq!(
-                metadata
-                    .files
-                    .list("manifests/", None, 100)
-                    .await
-                    .unwrap()
-                    .len(),
-                4
-            );
-        }
-    }
+    });
+    wait_paused(&metadata).await;
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
+    // The originating task and Published instance are gone. Helping is durable.
+    let before = metadata.read().await.unwrap();
+    assert!(
+        other
+            .cas("heads/b.json", None, Bytes::from_static(b"other"))
+            .await
+            .unwrap()
+    );
+    let after = metadata.read().await.unwrap();
+    assert_eq!(after.revision, before.revision + 1);
+    let reopened = replica(&metadata).await;
+    assert_eq!(
+        reopened
+            .get("heads/a.json", 100)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"two"[..]
+    );
+    assert_eq!(
+        reopened
+            .get("heads/b.json", 100)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"other"[..]
+    );
+    other.collect_manifests().await.unwrap();
+    assert!(
+        metadata
+            .files
+            .list("proposals/", None, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        metadata
+            .files
+            .list("manifests/", None, 128)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]
-async fn lost_acknowledgement_after_rebase_is_resolved_by_the_original_receipt() {
+async fn lost_group_acknowledgement_recovers_every_original_receipt() {
     let (store, metadata) = setup().await;
+    let other = replica(&metadata).await;
     let e = Arc::new(engine(store.clone()));
+    let helper = engine(other);
     e.create("a", Limits::default()).await.unwrap();
+    e.create("b", Limits::default()).await.unwrap();
     metadata.pause.store(true, Ordering::SeqCst);
     let writer = tokio::spawn({
         let e = e.clone();
         async move { e.commit("a", &request(0)).await }
     });
     wait_paused(&metadata).await;
-    e.create("b", Limits::default()).await.unwrap();
-    metadata.pause.store(true, Ordering::SeqCst);
-    metadata.resume.notify_one();
-    wait_paused(&metadata).await;
     metadata.lost_ack.store(true, Ordering::SeqCst);
-    metadata.resume.notify_one();
-    assert!(matches!(writer.await.unwrap(), Err(Error::Storage(_))));
-    e.gc("a").await.unwrap();
-    store.collect_manifests().await.unwrap();
-    let reopened = engine(Arc::new(
-        Published::open(metadata.files.clone(), metadata.clone(), "test")
-            .await
-            .unwrap(),
+    assert!(matches!(
+        helper.commit("b", &request(0)).await,
+        Err(Error::Storage(_))
     ));
-    assert!(reopened.commit("a", &request(0)).await.unwrap().replayed);
-    assert_eq!(reopened.info("a").await.unwrap().revision, 1);
-    assert_eq!(reopened.info("b").await.unwrap().revision, 0);
+    // The whole group committed despite the helper's lost response. The first
+    // writer's stale CAS loses, then its own unique pointer proves success.
+    metadata.resume.notify_one();
+    assert_eq!(writer.await.unwrap().unwrap().revision, 1);
+    e.gc("a").await.unwrap();
+    e.gc("b").await.unwrap();
+    store.collect_manifests().await.unwrap();
+    let reopened = engine(replica(&metadata).await);
+    for db in ["a", "b"] {
+        assert!(reopened.commit(db, &request(0)).await.unwrap().replayed);
+        assert_eq!(reopened.info(db).await.unwrap().revision, 1);
+    }
+}
+
+#[tokio::test]
+async fn a_lost_proposal_upload_response_does_not_abort_its_future_publication() {
+    let (store, metadata) = setup().await;
+    let other = replica(&metadata).await;
+    let e = engine(store);
+    let helper = engine(other);
+    e.create("a", Limits::default()).await.unwrap();
+    e.create("b", Limits::default()).await.unwrap();
+    metadata.lost_proposal_ack.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        e.commit("a", &request(0)).await,
+        Err(Error::Storage(_))
+    ));
+    assert_eq!(e.info("a").await.unwrap().revision, 0);
+    helper.commit("b", &request(0)).await.unwrap();
+    assert_eq!(e.info("a").await.unwrap().revision, 1);
+    assert!(e.commit("a", &request(0)).await.unwrap().replayed);
+}
+
+#[tokio::test]
+async fn collection_invalidates_an_entire_loaded_selection() {
+    let (store, metadata) = setup().await;
+    let other = replica(&metadata).await;
+    store
+        .cas("heads/a.json", None, Bytes::from_static(b"a0"))
+        .await
+        .unwrap();
+    store
+        .cas("heads/b.json", None, Bytes::from_static(b"b0"))
+        .await
+        .unwrap();
+    let a = store.get("heads/a.json", 100).await.unwrap().unwrap();
+    let b = store.get("heads/b.json", 100).await.unwrap().unwrap();
+    metadata.pause.store(true, Ordering::SeqCst);
+    let origin = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .cas("heads/a.json", Some(&a.version), Bytes::from_static(b"a1"))
+                .await
+        }
+    });
+    wait_paused(&metadata).await;
+    origin.abort();
+    assert!(origin.await.unwrap_err().is_cancelled());
+    metadata.pause.store(true, Ordering::SeqCst);
+    let helper = tokio::spawn(async move {
+        other
+            .cas("heads/b.json", Some(&b.version), Bytes::from_static(b"b1"))
+            .await
+    });
+    wait_paused(&metadata).await;
+    assert_eq!(store.collect_manifests().await.unwrap(), 2); // Both staged manifests, neither live head.
+    metadata.resume.notify_one();
+    assert!(helper.await.unwrap().is_err());
+    assert_eq!(
+        store.get("heads/a.json", 100).await.unwrap().unwrap().bytes,
+        b"a0"[..]
+    );
+    assert_eq!(
+        store.get("heads/b.json", 100).await.unwrap().unwrap().bytes,
+        b"b0"[..]
+    );
+    assert!(
+        metadata
+            .files
+            .list("proposals/", None, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn malformed_proposals_never_authorize_a_directory_change() {
+    let (store, metadata) = setup().await;
+    for body in [b"not json".as_slice(), br#"{"database":"a","expected":null,"next":{"key":"manifests/foreign.00000000-0000-0000-0000-000000000001","sha256":"00"},"fence":null}"#] {
+        metadata.files.put(&format!("proposals/a.{}", uuid::Uuid::new_v4()), Bytes::copy_from_slice(body)).await.unwrap();
+    }
+    assert!(
+        store
+            .cas("heads/b.json", None, Bytes::from_static(b"b"))
+            .await
+            .unwrap()
+    );
+    assert!(store.get("heads/a.json", 100).await.unwrap().is_none());
+    store.collect_manifests().await.unwrap();
+    assert!(
+        metadata
+            .files
+            .list("proposals/", None, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn selection_is_bounded_and_remaining_proposals_can_make_progress() {
+    let (store, metadata) = setup().await;
+    // Abandon more proposals than one group can select. Each replica vanishes
+    // before its CAS, leaving no volatile coordinator for the next helper.
+    for n in 0..65 {
+        let origin = replica(&metadata).await;
+        metadata.pause.store(true, Ordering::SeqCst);
+        let task = tokio::spawn(async move {
+            origin
+                .cas(
+                    &format!("heads/db-{n:02}.json"),
+                    None,
+                    Bytes::from_static(b"pending"),
+                )
+                .await
+        });
+        wait_paused(&metadata).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+    store
+        .cas("heads/helper.json", None, Bytes::from_static(b"first"))
+        .await
+        .unwrap();
+    let state = metadata.read().await.unwrap();
+    let root: serde_json::Value = serde_json::from_str(&state.info["durable-db-root"]).unwrap();
+    assert_eq!(root["count"], 64);
+    store
+        .cas(
+            "heads/helper-next.json",
+            None,
+            Bytes::from_static(b"second"),
+        )
+        .await
+        .unwrap();
+    // A full listing can contain one more candidate than the remaining group
+    // slots. Wrap the cursor to revisit the candidate deferred on that page.
+    store
+        .cas("heads/helper-last.json", None, Bytes::from_static(b"third"))
+        .await
+        .unwrap();
+    // The durable cursor progresses even if completed cleanup is delayed.
+    for n in 0..65 {
+        assert_eq!(
+            store
+                .get(&format!("heads/db-{n:02}.json"), 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"pending"[..]
+        );
+    }
+    store.collect_manifests().await.unwrap();
+    assert!(
+        metadata
+            .files
+            .list("proposals/", None, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

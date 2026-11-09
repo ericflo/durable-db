@@ -88,8 +88,14 @@ pub enum Event {
     ManifestDeleteAck,
     IndexCandidates,
     IndexDeleteAck,
+    ProposalSubmitted,
+    PublicationGroups,
+    PublicationGroupMembers,
+    ProposalCandidates,
+    ProposalRejected,
+    ProposalDeleteAck,
 }
-const EVENTS: [&str; 12] = [
+const EVENTS: [&str; 18] = [
     "read_groups",
     "read_group_members",
     "observation_queue_rejected",
@@ -102,6 +108,12 @@ const EVENTS: [&str; 12] = [
     "manifest_delete_ack",
     "index_candidates",
     "index_delete_ack",
+    "proposal_submitted",
+    "publication_groups",
+    "publication_group_members",
+    "proposal_candidates",
+    "proposal_rejected",
+    "proposal_delete_ack",
 ];
 const OUTCOMES: [&str; 8] = [
     "ok",
