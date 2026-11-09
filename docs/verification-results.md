@@ -30,6 +30,12 @@ The first hardening pass adds per-database concurrency admission, separate admin
 
 RustSec found two `quick-xml` denial-of-service advisories in the previous lockfile ([RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194.html), [RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195.html)) and an unused default-feature path to unmaintained `atomic-polyfill`. Updating the object-store client and XML parser, and disabling unused postcard defaults, removes those findings. cargo-audit 0.22.2 reports zero vulnerabilities or warnings against advisory database commit `7a40350e1b8ba5b656d909f88222a8059a83d88d`. The client test tools and documentation builder also had npm audit findings; their updated lockfiles report zero vulnerabilities. Fresh Rust and npm audits are now required Woodpecker gates outside Docker build caching. This is an advisory-database result, not an independent security review.
 
+## Publication contention changes (2026-11-08)
+
+The next source changes safely rebase staged publications across unrelated database writes, seal bounded groups before sharing a remote read barrier, and cache immutable manifest bytes within the existing cache budget. The storage format and provider bindings are unchanged. All 33 local Rust tests pass, including the 10,005-database test (139 seconds), rebase/collector interleavings, lost-acknowledgement recovery, delayed-barrier responses, queue saturation/cancellation, and stale cached manifests. Versioned and unversioned MinIO tests pass again. All seven bounded models and nine negative configurations pass their expected checks; the new rebase and observation models explore 195,642 and 25,194 distinct states respectively. See [model bounds and obligations](verification.md).
+
+Cloud load qualification remains open. These changes do not close the failed performance gate below or establish an operating envelope. The original v0.1.0 release artifact predates them.
+
 ## Initial local latency baseline
 
 One release-build run on an AMD Ryzen AI Max+ 395 laptop, local filesystem with fsync, 1 KiB values, sequential operations. Other development work was active. This is an initial microbenchmark, not cloud performance or a throughput claim.

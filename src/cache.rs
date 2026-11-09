@@ -1,9 +1,13 @@
-//! Caches only hold immutable, checksum-verified blocks. Manifests are never cached.
+//! Caches hold immutable bytes; mutable authority and local heads are never cached.
 use bytes::Bytes;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::Mutex;
+
+// The largest immutable object is a remote manifest. Data and index pages
+// enforce their own smaller limits after cache lookup.
+const MAX_OBJECT_BYTES: usize = 512 * 1024;
 
 struct Entry<T> {
     value: T,
@@ -105,7 +109,7 @@ impl Cache {
                     continue;
                 }
                 let size = item.metadata()?.len() as usize;
-                if size.saturating_add(320) > limit {
+                if size > MAX_OBJECT_BYTES || size.saturating_add(320) > limit {
                     std::fs::remove_file(item.path())?;
                     continue;
                 }
@@ -137,19 +141,19 @@ impl Cache {
             let file = hex::encode(Sha256::digest(key.as_bytes()));
             disk.index.get(&file)?;
             let path = disk.root.join(&file);
-            // Index entries are capped at the engine's immutable object size.
+            // Never trust a cache file's size, including after local corruption.
             use tokio::io::AsyncReadExt;
             let handle = tokio::fs::File::open(&path).await.ok()?;
-            if handle.metadata().await.ok()?.len() > 256 * 1024 {
+            if handle.metadata().await.ok()?.len() > MAX_OBJECT_BYTES as u64 {
                 return None;
             }
             let mut bytes = Vec::new();
             handle
-                .take(256 * 1024 + 1)
+                .take(MAX_OBJECT_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
                 .await
                 .ok()?;
-            if bytes.len() > 256 * 1024 {
+            if bytes.len() > MAX_OBJECT_BYTES {
                 return None;
             }
             if hex::encode(Sha256::digest(&bytes)) != digest {
@@ -171,6 +175,9 @@ impl Cache {
         None
     }
     pub async fn insert(&self, key: &str, bytes: Bytes) {
+        if bytes.len() > MAX_OBJECT_BYTES {
+            return;
+        }
         self.memory.lock().await.insert(
             key.to_string(),
             MemoryValue {

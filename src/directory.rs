@@ -54,6 +54,7 @@ impl Directory {
             Some(cache) => cache.get(&root.object, &root.digest).await,
             None => None,
         };
+        let cache_miss = cached.is_none();
         let bytes = match cached {
             Some(bytes) => bytes,
             None => {
@@ -78,7 +79,7 @@ impl Directory {
                 && height == root.height,
             "directory reference does not match its node"
         );
-        if let Some(cache) = &self.cache {
+        if cache_miss && let Some(cache) = &self.cache {
             cache.insert(&root.object, bytes).await;
         }
         Ok(node)

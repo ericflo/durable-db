@@ -18,7 +18,7 @@ Backup retention and recovery objectives are not yet selected. A proposed starti
 
 | Gate | Current evidence or gap | Evidence required to close |
 | --- | --- | --- |
-| Publication safety | Five finite TLA+ models, negative controls, race and lost-response tests pass | Compose the models; document storage/network assumptions; mechanize the inductive safety argument and implementation refinement obligations; independently review the protocol |
+| Publication safety | Seven finite TLA+ models cover publication, collection, directory reachability, retries, rebasing, and sealed read groups; negative controls and race tests | Compose the models; document storage/network assumptions; mechanize the inductive safety argument and implementation refinement obligations; independently review the protocol |
 | Cloud performance | **Failed:** four-writer B2 baseline exhausted retries and fell to 0.341 successful ops/s; isolation without maintenance still had heavy conflicts | Model and implement publication progress/batching; publish B2 and AWS p50/p95/p99, failures, retries, sustained throughput, physical amplification, and cost at the selected workload |
 | Public multitenancy | Exact logical quotas, scoped tokens, bounded requests/caches, per-pod rate and concurrency limits | Durable cluster-wide upload, request, bandwidth, and administrative creation budgets; adversarial tests show that adding pods, retries, cancellation, and delayed uploads cannot bypass them |
 | Credentials and lifecycle | Expiring tokens; replacement signing key invalidates existing tokens | Individual token revocation, overlapping key rotation, tenant export/deletion/retention, and durable audit delivery, exercised during rolling deploys and partitions |

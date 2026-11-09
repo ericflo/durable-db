@@ -3,6 +3,7 @@ pub mod auth;
 pub mod cache;
 mod directory;
 pub mod engine;
+mod observation;
 pub mod providers;
 pub mod publication;
 pub mod storage;

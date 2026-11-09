@@ -55,3 +55,28 @@ status=$?
 set -e
 [ "$status" = 12 ] && grep -q 'Invariant ReferencedManifestExists is violated' "$tools/model-retry-unsafe.log" || { cat "$tools/model-retry-unsafe.log"; exit 1; }
 echo 'Retry negative control: ignoring a collection fence publishes a deleted manifest.'
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-rebase" -config PublicationRebase.cfg PublicationRebase.tla > "$tools/model-rebase.log" 2>&1
+tail -n 9 "$tools/model-rebase.log"
+for case in Fence Target Merge; do
+  case "$case" in
+    Fence) invariant=ReferencedManifestExists ;;
+    Target) invariant=TargetWriteNotOverwritten ;;
+    Merge) invariant=OtherWritesPreserved ;;
+  esac
+  set +e
+  "${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-rebase-$case" -config "UnsafeRebase$case.cfg" PublicationRebase.tla > "$tools/model-rebase-$case.log" 2>&1
+  status=$?
+  set -e
+  [ "$status" = 12 ] && grep -q "Invariant $invariant is violated" "$tools/model-rebase-$case.log" || { cat "$tools/model-rebase-$case.log"; exit 1; }
+  echo "Rebase negative control: $case guard detects $invariant."
+done
+
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-observation" -config ObservationBatch.cfg ObservationBatch.tla > "$tools/model-observation.log" 2>&1
+tail -n 9 "$tools/model-observation.log"
+set +e
+"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-observation-unsafe" -config UnsafeObservationBatch.cfg ObservationBatch.tla > "$tools/model-observation-unsafe.log" 2>&1
+status=$?
+set -e
+[ "$status" = 12 ] && grep -q 'Invariant ObservationWithinInvocation is violated' "$tools/model-observation-unsafe.log" || { cat "$tools/model-observation-unsafe.log"; exit 1; }
+echo 'Observation negative control: joining an in-flight barrier can return a pre-invocation snapshot.'

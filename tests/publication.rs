@@ -130,6 +130,77 @@ fn request(revision: u64) -> CommitRequest {
         }],
     }
 }
+
+#[tokio::test]
+async fn cached_manifests_follow_fresh_authority_and_keep_read_bounds() {
+    for memory in [false, true] {
+        let (writer, metadata) = setup().await;
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            Cache::new(
+                if memory { 1024 * 1024 } else { 0 },
+                if memory {
+                    None
+                } else {
+                    Some((directory.path().to_owned(), 1024 * 1024))
+                },
+            )
+            .unwrap(),
+        );
+        let reader = Published::open(metadata.files.clone(), metadata.clone(), "test")
+            .await
+            .unwrap()
+            .with_cache(cache);
+        // Remote manifests may exceed the data-page size limit.
+        let initial = Bytes::from(vec![b'a'; 300 * 1024]);
+        writer
+            .cas("heads/a.json", None, initial.clone())
+            .await
+            .unwrap();
+        let old = reader
+            .get("heads/a.json", 512 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.bytes, initial);
+        let before = metadata.gets.load(Ordering::SeqCst);
+        let revision = metadata.read().await.unwrap().revision;
+        assert_eq!(
+            reader
+                .get("heads/a.json", 512 * 1024)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            initial
+        );
+        assert_eq!(metadata.gets.load(Ordering::SeqCst), before);
+        assert!(metadata.read().await.unwrap().revision > revision);
+        assert!(reader.get("heads/a.json", 100).await.is_err());
+
+        writer
+            .cas(
+                "heads/a.json",
+                Some(&old.version),
+                Bytes::from_static(b"new"),
+            )
+            .await
+            .unwrap();
+        writer.collect_manifests().await.unwrap();
+        // The cached old manifest remains present after remote collection. A
+        // fresh request must nevertheless select the acknowledged replacement.
+        assert_eq!(
+            reader
+                .get("heads/a.json", 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"new"[..]
+        );
+        assert!(metadata.gets.load(Ordering::SeqCst) > before);
+    }
+}
 #[tokio::test]
 async fn native_authority_preserves_metadata_and_compares_database_identity() {
     let (b2, metadata) = setup().await;
@@ -555,7 +626,7 @@ async fn idle_page_collection_does_not_rewrite_the_directory() {
 }
 
 #[tokio::test]
-async fn publication_retries_read_barriers_but_never_a_changed_root() {
+async fn publication_retries_read_barriers_and_rebases_unrelated_database_writes() {
     for change_root in [false, true] {
         let (store, metadata) = setup().await;
         store
@@ -590,15 +661,18 @@ async fn publication_retries_read_barriers_but_never_a_changed_root() {
             );
         }
         metadata.resume.notify_one();
-        assert_eq!(writer.await.unwrap().unwrap(), !change_root);
+        assert!(writer.await.unwrap().unwrap());
         let value = store.get("heads/a.json", 100).await.unwrap().unwrap().bytes;
+        assert_eq!(value, &b"two"[..]);
+        // Rebase rewrites the path, not the immutable transaction manifest.
         assert_eq!(
-            value,
-            if change_root {
-                &b"one"[..]
-            } else {
-                &b"two"[..]
-            }
+            metadata
+                .files
+                .list("manifests/", None, 100)
+                .await
+                .unwrap()
+                .len(),
+            if change_root { 3 } else { 2 }
         );
         if change_root {
             assert_eq!(
@@ -607,4 +681,172 @@ async fn publication_retries_read_barriers_but_never_a_changed_root() {
             );
         }
     }
+}
+
+async fn wait_paused(metadata: &Metadata) {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        metadata.paused.notified(),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn rebasing_never_overwrites_a_competing_write_to_the_same_database() {
+    let (store, metadata) = setup().await;
+    assert!(
+        store
+            .cas("heads/a.json", None, Bytes::from_static(b"one"))
+            .await
+            .unwrap()
+    );
+    let old = store.get("heads/a.json", 100).await.unwrap().unwrap();
+    let version = old.version.clone();
+    metadata.pause.store(true, Ordering::SeqCst);
+    let writer = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .cas("heads/a.json", Some(&version), Bytes::from_static(b"stale"))
+                .await
+        }
+    });
+    wait_paused(&metadata).await;
+    assert!(
+        store
+            .cas(
+                "heads/a.json",
+                Some(&old.version),
+                Bytes::from_static(b"winner")
+            )
+            .await
+            .unwrap()
+    );
+    metadata.resume.notify_one();
+    assert!(!writer.await.unwrap().unwrap());
+    assert_eq!(
+        store.get("heads/a.json", 100).await.unwrap().unwrap().bytes,
+        b"winner"[..]
+    );
+}
+
+#[tokio::test]
+async fn rebased_paths_survive_more_unrelated_writes_but_not_a_collection_fence() {
+    for collect in [false, true] {
+        let (store, metadata) = setup().await;
+        assert!(
+            store
+                .cas("heads/a.json", None, Bytes::from_static(b"one"))
+                .await
+                .unwrap()
+        );
+        let old = store.get("heads/a.json", 100).await.unwrap().unwrap();
+        metadata.pause.store(true, Ordering::SeqCst);
+        let writer = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas(
+                        "heads/a.json",
+                        Some(&old.version),
+                        Bytes::from_static(b"two"),
+                    )
+                    .await
+            }
+        });
+        wait_paused(&metadata).await;
+        assert!(
+            store
+                .cas("heads/b.json", None, Bytes::from_static(b"other"))
+                .await
+                .unwrap()
+        );
+        metadata.pause.store(true, Ordering::SeqCst);
+        metadata.resume.notify_one();
+        wait_paused(&metadata).await; // A rebuilt path is uploaded, awaiting its CAS.
+        if collect {
+            assert_eq!(store.collect_manifests().await.unwrap(), 1);
+        } else {
+            assert!(
+                store
+                    .cas("heads/c.json", None, Bytes::from_static(b"third"))
+                    .await
+                    .unwrap()
+            );
+        }
+        metadata.resume.notify_one();
+        assert_eq!(writer.await.unwrap().unwrap(), !collect);
+        let reopened = Published::open(metadata.files.clone(), metadata.clone(), "test")
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get("heads/a.json", 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            if collect { &b"one"[..] } else { &b"two"[..] }
+        );
+        assert_eq!(
+            reopened
+                .get("heads/b.json", 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            b"other"[..]
+        );
+        if !collect {
+            assert_eq!(
+                reopened
+                    .get("heads/c.json", 100)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .bytes,
+                b"third"[..]
+            );
+            assert_eq!(
+                metadata
+                    .files
+                    .list("manifests/", None, 100)
+                    .await
+                    .unwrap()
+                    .len(),
+                4
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_acknowledgement_after_rebase_is_resolved_by_the_original_receipt() {
+    let (store, metadata) = setup().await;
+    let e = Arc::new(engine(store.clone()));
+    e.create("a", Limits::default()).await.unwrap();
+    metadata.pause.store(true, Ordering::SeqCst);
+    let writer = tokio::spawn({
+        let e = e.clone();
+        async move { e.commit("a", &request(0)).await }
+    });
+    wait_paused(&metadata).await;
+    e.create("b", Limits::default()).await.unwrap();
+    metadata.pause.store(true, Ordering::SeqCst);
+    metadata.resume.notify_one();
+    wait_paused(&metadata).await;
+    metadata.lost_ack.store(true, Ordering::SeqCst);
+    metadata.resume.notify_one();
+    assert!(matches!(writer.await.unwrap(), Err(Error::Storage(_))));
+    e.gc("a").await.unwrap();
+    store.collect_manifests().await.unwrap();
+    let reopened = engine(Arc::new(
+        Published::open(metadata.files.clone(), metadata.clone(), "test")
+            .await
+            .unwrap(),
+    ));
+    assert!(reopened.commit("a", &request(0)).await.unwrap().replayed);
+    assert_eq!(reopened.info("a").await.unwrap().revision, 1);
+    assert_eq!(reopened.info("b").await.unwrap().revision, 0);
 }
