@@ -1,12 +1,15 @@
 # HTTP API
 
+This page describes current source builds. The original v0.1.0 release predates protected creation, durable revocation, and metrics-only credentials.
+
 Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. Keys are ordered by their UTF-8 bytes, independent of locale. Values are standard base64. `null` means absent in a read/check and delete in a write; an empty string is a present zero-byte value.
 
 ## Endpoints
 
 | Method and path | Meaning |
 | --- | --- |
-| `POST /v1/databases/{db}` | Admin: create with `max_bytes` and `max_keys` quotas |
+| `PUT /v1/databases/{db}` | Admin: idempotent protected creation with a permanent request identity |
+| `POST /v1/databases/{db}` | Admin: legacy format-1 creation with `max_bytes` and `max_keys` quotas |
 | `GET /v1/databases/{db}` | Revision, logical usage, pages, and limits |
 | `POST /v1/databases/{db}/read` | Atomic read of keys and/or ordered scans |
 | `POST /v1/databases/{db}/commit` | Revision-checked atomic writes and optional value checks |
@@ -18,6 +21,23 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 | `GET /health/ready` | Startup completed and server is not draining |
 
 Readiness does not continuously probe the object provider; provider outages return 503 from data requests. Liveness never depends on storage availability, avoiding restart storms.
+
+## Create a protected database
+
+Use `PUT /v1/databases/{db}` with an administrator credential:
+
+```json
+{
+  "request_id": "persist-this-unique-provisioning-id",
+  "limits": {"max_bytes": 67108864, "max_keys": 100000}
+}
+```
+
+The operation atomically creates a format-2 database with revocable tokens enabled from the start. The response is `{info, replayed}`; initial `info.policy` has a fresh incarnation, generation zero, policy revision one, and no revocations. Legacy application tokens cannot access it. Mint scoped tokens through `POST /v1/tokens` after creation.
+
+Persist the exact creation request in your provisioning system before sending it. A retry with the same ID and limits returns the original initial info even after later data writes, policy changes, and collection. Its receipt lasts for the database lifetime, independently of the bounded transaction/policy receipt windows. A different creation ID returns 409; reusing the original ID with different limits returns 400. An existing legacy database cannot be claimed by this operation. PUT never replaces an existing database. On a transport failure or 503, retry the identical creation request; observing only that the name exists is insufficient evidence that your creation succeeded.
+
+`POST /v1/databases/{db}` retains the original legacy behavior for compatibility. It accepts only `{max_bytes,max_keys}`, has no creation receipt, and starts without durable revocation. New provisioning should use PUT. All servers must support format 2 before serving protected databases.
 
 ## Read a snapshot
 
@@ -60,7 +80,7 @@ A client must retain its exact serialized operation intent across transport retr
 
 ## Durable token revocation
 
-Creation currently preserves legacy format 1 for upgrade compatibility. Before issuing application credentials for a protected deployment, upgrade all servers, then enable the database policy with an administrator request:
+PUT creation starts protected. For an existing legacy database, upgrade all servers, then enable its database policy with an administrator request:
 
 ```json
 {

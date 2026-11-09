@@ -63,7 +63,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/health/live", get(|| async { "ok" }))
         .route("/health/ready", get(ready))
         .route("/metrics", get(metrics))
-        .route("/v1/databases/{db}", get(info).post(create))
+        .route(
+            "/v1/databases/{db}",
+            get(info).post(create).put(create_protected),
+        )
         .route("/v1/databases/{db}/read", post(read))
         .route("/v1/databases/{db}/commit", post(commit))
         .route("/v1/databases/{db}/gc", post(gc))
@@ -95,7 +98,12 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
         Some("/v1/databases/{db}/commit") => Operation::HttpCommit,
         Some("/v1/databases/{db}/gc") => Operation::HttpGc,
         Some("/v1/databases/{db}/access") => Operation::HttpAccess,
-        Some("/v1/databases/{db}") if request.method() == axum::http::Method::POST => {
+        Some("/v1/databases/{db}")
+            if matches!(
+                *request.method(),
+                axum::http::Method::POST | axum::http::Method::PUT
+            ) =>
+        {
             Operation::HttpCreate
         }
         Some("/v1/databases/{db}") => Operation::HttpInfo,
@@ -215,6 +223,17 @@ async fn create(
         return Err(Error::Unauthorized);
     }
     Ok(Json(app.engine.create(&db, limits).await?))
+}
+async fn create_protected(
+    State(app): State<Arc<App>>,
+    Path(db): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::engine::CreateRequest>,
+) -> Result<Json<crate::engine::CreateResult>> {
+    if !app.auth.is_admin(bearer(&headers)?) {
+        return Err(Error::Unauthorized);
+    }
+    Ok(Json(app.engine.create_protected(&db, &request).await?))
 }
 async fn info(
     State(app): State<Arc<App>>,

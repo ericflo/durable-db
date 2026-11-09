@@ -204,6 +204,54 @@ async fn revocation_invalidates_an_abandoned_write_and_policy_receipts_survive_h
         1
     );
 }
+
+#[tokio::test]
+async fn protected_creation_receipt_survives_abandonment_helping_and_collection() {
+    let (published, metadata) = setup().await;
+    let db = engine(published);
+    db.create("helper", Limits::default()).await.unwrap();
+    let create = CreateRequest {
+        request_id: "create-protected".into(),
+        limits: Limits::default(),
+    };
+    metadata.lost_proposal_ack.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        db.create_protected("test", &create).await,
+        Err(Error::Storage(_))
+    ));
+    engine(replica(&metadata).await)
+        .commit("helper", &request(0))
+        .await
+        .unwrap();
+    let recovered = engine(replica(&metadata).await)
+        .create_protected("test", &create)
+        .await
+        .unwrap();
+    assert!(recovered.replayed);
+    db.commit("test", &request(0)).await.unwrap();
+    db.change_policy(
+        "test",
+        &PolicyRequest {
+            request_id: "rotate".into(),
+            expected_policy_revision: 1,
+            change: PolicyAction::Rotate,
+        },
+    )
+    .await
+    .unwrap();
+    db.gc("test").await.unwrap();
+    db.maintain_storage().await.unwrap();
+    let replay = engine(replica(&metadata).await)
+        .create_protected("test", &create)
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        serde_json::to_value(replay.info).unwrap(),
+        serde_json::to_value(recovered.info).unwrap()
+    );
+    assert_eq!(db.info("test").await.unwrap().revision, 1);
+}
 async fn replica(metadata: &Arc<Metadata>) -> Arc<Published> {
     Arc::new(
         Published::open(metadata.files.clone(), metadata.clone(), "test")

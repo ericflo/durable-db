@@ -67,11 +67,11 @@ with tempfile.TemporaryDirectory(prefix='durable-db-policy-upgrade-') as tmp:
         process.wait(timeout=10)
         log.close()
 
-    def request(index, path, body=None, token=None, expected=200):
+    def request(index, path, body=None, token=None, expected=200, method=None):
         data = None if body is None else json.dumps(body).encode()
         for attempt in range(12):
             req = urllib.request.Request(f'http://127.0.0.1:{args.port + index}' + path,
-                                         data=data, headers={'Authorization': 'Bearer ' + (token or admin),
+                                         data=data, method=method, headers={'Authorization': 'Bearer ' + (token or admin),
                                                              'Content-Type': 'application/json'})
             try:
                 with urllib.request.urlopen(req, timeout=35) as response:
@@ -102,6 +102,15 @@ with tempfile.TemporaryDirectory(prefix='durable-db-policy-upgrade-') as tmp:
         legacy_token = subprocess.check_output([old, 'token', '--key-file', str(root / 'key'),
                                                 '--database', names['protected'], '--write'], text=True).strip()
         start(1, new)
+        atomic_path = '/v1/databases/' + namespace + '-atomic'
+        creation = dict(request_id='create-protected', limits=dict(max_bytes=1048576, max_keys=1000))
+        created = request(1, atomic_path, creation, method='PUT')
+        assert not created['replayed'] and created['info']['policy']['revision'] == 1
+        request(0, atomic_path, expected=503)
+        request(1, atomic_path + '/commit', write(0, 'atomic-write'))
+        replay = request(1, atomic_path, creation, method='PUT')
+        assert replay['replayed'] and replay['info'] == created['info']
+        report['checks'].append('protected creation is atomic and exact replay retains initial info after a write')
         request(1, db('protected', '/read'), dict(keys=['fixture']), token=legacy_token)
         enable = dict(request_id='enable', expected_policy_revision=0, change=dict(action='enable'))
         policy = request(1, db('protected', '/access'), enable)['policy']
@@ -132,6 +141,8 @@ with tempfile.TemporaryDirectory(prefix='durable-db-policy-upgrade-') as tmp:
         replay = request(1, db('protected', '/access'), enable)
         assert replay['replayed'] and replay['policy'] == policy
         request(1, db('protected', '/gc'), {})
+        replay = request(1, atomic_path, creation, method='PUT')
+        assert replay['replayed'] and replay['info'] == created['info']
         report['checks'].append('cold old binary refuses downgrade; new binary retains data, revocation, and original receipt')
         report['complete'] = True
     except Exception as error:

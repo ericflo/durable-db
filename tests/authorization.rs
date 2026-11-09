@@ -4,7 +4,10 @@ use durable_db::{
     Error,
     auth::{Access, Auth},
     cache::Cache,
-    engine::{CommitRequest, Engine, Limits, PolicyAction, PolicyRequest, ReadRequest, Write},
+    engine::{
+        CommitRequest, CreateRequest, Engine, Limits, PolicyAction, PolicyRequest, ReadRequest,
+        Write,
+    },
     storage::{Object, Remote, Storage, Version},
 };
 use std::sync::{
@@ -557,6 +560,296 @@ async fn real_http_policy_activation_token_issuance_revocation_and_rotation() {
         .unwrap();
     assert_eq!(current["revision"], 0);
     assert_eq!(current["policy"]["generation"], 1);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn protected_creation_recovers_its_original_identity_after_lost_ack_and_receipt_churn() {
+    let storage = Faults::new();
+    let db = engine(storage.clone());
+    let create = CreateRequest {
+        request_id: "create".into(),
+        limits: Limits::default(),
+    };
+    storage.lost_ack.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        db.create_protected("test", &create).await,
+        Err(Error::Storage(_))
+    ));
+    let original = engine(storage.clone())
+        .create_protected("test", &create)
+        .await
+        .unwrap();
+    assert!(original.replayed);
+    let auth = Auth::new(&"26".repeat(32)).unwrap();
+    let legacy = auth
+        .access(
+            &auth.issue("test".into(), true, 3600).unwrap(),
+            "test",
+            true,
+        )
+        .unwrap();
+    assert!(matches!(
+        db.info_with_access("test", &legacy).await,
+        Err(Error::Unauthorized)
+    ));
+    assert_eq!(original.info.policy.as_ref().unwrap().revision, 1);
+    let (access, _) = credential(&db, &auth).await;
+    for revision in 0..130 {
+        let mut request = write();
+        request.expected_revision = revision;
+        request.request_id = format!("write-{revision}");
+        db.commit_with_access("test", &request, &access)
+            .await
+            .unwrap();
+    }
+    for revision in 1..35 {
+        db.change_policy("test", &change(revision, PolicyAction::Rotate))
+            .await
+            .unwrap();
+    }
+    db.gc("test").await.unwrap();
+    db.compact("test").await.unwrap();
+    let replay = engine(storage.clone())
+        .create_protected("test", &create)
+        .await
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        serde_json::to_value(replay.info).unwrap(),
+        serde_json::to_value(original.info).unwrap()
+    );
+    assert_eq!(db.info("test").await.unwrap().revision, 130);
+    let mut changed = create.clone();
+    changed.limits.max_keys -= 1;
+    assert!(matches!(
+        db.create_protected("test", &changed).await,
+        Err(Error::Invalid(_))
+    ));
+    changed = create.clone();
+    changed.request_id = "different-creator".into();
+    assert!(matches!(
+        db.create_protected("test", &changed).await,
+        Err(Error::Conflict)
+    ));
+    db.create("legacy", Limits::default()).await.unwrap();
+    assert!(matches!(
+        db.create_protected("legacy", &create).await,
+        Err(Error::Conflict)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_creators_only_recover_an_exact_published_identity() {
+    for identical in [true, false] {
+        let storage = Faults::new();
+        let db = engine(storage.clone());
+        let request = CreateRequest {
+            request_id: "original".into(),
+            limits: Limits::default(),
+        };
+        let first = request.clone();
+        storage.pause_cas.store(true, Ordering::SeqCst);
+        let creator = db.clone();
+        let task = tokio::spawn(async move { creator.create_protected("test", &first).await });
+        storage.reached.notified().await;
+        let mut competitor = request;
+        if !identical {
+            competitor.request_id = "competitor".into();
+        }
+        let winner = engine(storage.clone())
+            .create_protected("test", &competitor)
+            .await
+            .unwrap();
+        assert!(!winner.replayed);
+        storage.resume.notify_one();
+        let result = task.await.unwrap();
+        if identical {
+            let result = result.unwrap();
+            assert!(result.replayed);
+            assert_eq!(result.info.policy, winner.info.policy);
+        } else {
+            assert!(matches!(result, Err(Error::Conflict)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_creation_receipts_fail_closed_before_data_io() {
+    for variant in 0..5 {
+        let storage = Faults::new();
+        let db = engine(storage.clone());
+        let request = CreateRequest {
+            request_id: "create".into(),
+            limits: Limits::default(),
+        };
+        db.create_protected("test", &request).await.unwrap();
+        let head = storage
+            .get("heads/test.json", 512 * 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&head.bytes).unwrap();
+        match variant {
+            0 => {
+                manifest["creation"]["initial"]["revision"] = 1.into();
+            }
+            1 => {
+                manifest["creation"]["initial"]["limits"]["max_bytes"] = 0.into();
+            }
+            2 => {
+                manifest["creation"]["initial"]["policy"]["incarnation"] =
+                    uuid::Uuid::new_v4().to_string().into();
+            }
+            3 => {
+                manifest["creation"]["digest"] = "a".repeat(64).into();
+            }
+            _ => {
+                manifest["creation"]["id"] = "different".into();
+            }
+        }
+        assert!(
+            storage
+                .inner
+                .cas(
+                    "heads/test.json",
+                    Some(&head.version),
+                    serde_json::to_vec(&manifest).unwrap().into()
+                )
+                .await
+                .unwrap()
+        );
+        assert!(db.create_protected("test", &request).await.is_err());
+        assert!(db.commit("test", &write()).await.is_err());
+        assert!(db.gc("test").await.is_err());
+        assert_eq!(storage.uploads.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn real_http_protected_creation_is_administrator_only_and_idempotent() {
+    use durable_db::api::{App, router};
+    use serde_json::{Value, json};
+    let db = engine(Faults::new());
+    let auth = Auth::new(&"27".repeat(32)).unwrap();
+    let admin = auth.admin_token();
+    let metrics = auth.metrics_token(3600).unwrap();
+    let tenant = auth.issue("test".into(), true, 3600).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(Arc::new(App::new(db, auth, 16))))
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    let endpoint = format!("{base}/v1/databases/test");
+    let create = json!({"request_id":"create","limits":{"max_bytes":1048576,"max_keys":1000}});
+    for token in [&tenant, &metrics] {
+        assert_eq!(
+            client
+                .put(&endpoint)
+                .bearer_auth(token)
+                .json(&create)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    let response = client
+        .put(&endpoint)
+        .bearer_auth(&admin)
+        .json(&create)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let original: Value = response.json().await.unwrap();
+    assert_eq!(original["replayed"], false);
+    assert_eq!(original["info"]["policy"]["revision"], 1);
+    let replay: Value = client
+        .put(&endpoint)
+        .bearer_auth(&admin)
+        .json(&create)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["info"], original["info"]);
+    assert_eq!(
+        client
+            .get(&endpoint)
+            .bearer_auth(&tenant)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let issued: Value = client
+        .post(format!("{base}/v1/tokens"))
+        .bearer_auth(&admin)
+        .json(&json!({"database":"test","write":true,"ttl_seconds":3600}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .post(format!("{endpoint}/commit"))
+            .bearer_auth(issued["token"].as_str().unwrap())
+            .json(&write())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let replay: Value = client
+        .put(&endpoint)
+        .bearer_auth(&admin)
+        .json(&create)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay["info"], original["info"]);
+    let mut changed = create.clone();
+    changed["limits"]["max_keys"] = 999.into();
+    assert_eq!(
+        client
+            .put(&endpoint)
+            .bearer_auth(&admin)
+            .json(&changed)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    changed = create;
+    changed["request_id"] = "foreign".into();
+    assert_eq!(
+        client
+            .put(&endpoint)
+            .bearer_auth(&admin)
+            .json(&changed)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
     server.abort();
     let _ = server.await;
 }

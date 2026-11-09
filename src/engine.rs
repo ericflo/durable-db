@@ -15,7 +15,9 @@ use std::{
 };
 use uuid::Uuid;
 mod access;
+mod creation;
 pub use access::{PolicyAction, PolicyInfo, PolicyRequest, PolicyResult};
+pub use creation::{CreateRequest, CreateResult};
 
 pub const MAX_BODY: usize = 1024 * 1024;
 const MAX_HEAD: usize = 512 * 1024;
@@ -71,6 +73,8 @@ struct Manifest {
     gc_after: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     policy: Option<access::Policy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creation: Option<creation::CreationReceipt>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Info {
@@ -83,6 +87,21 @@ pub struct Info {
     pub policy: Option<PolicyInfo>,
 }
 impl Manifest {
+    fn empty(limits: Limits, policy: Option<access::Policy>) -> Self {
+        Self {
+            format: if policy.is_some() { 2 } else { 1 },
+            revision: 0,
+            fence: Uuid::new_v4().to_string(),
+            limits,
+            bytes: 0,
+            keys: 0,
+            pages: Vec::new(),
+            receipts: Vec::new(),
+            gc_after: None,
+            policy,
+            creation: None,
+        }
+    }
     fn validate(&self, db: &str) -> anyhow::Result<()> {
         ensure!(
             ((self.format == 1 && self.policy.is_none())
@@ -92,6 +111,9 @@ impl Manifest {
         );
         if let Some(policy) = &self.policy {
             policy.validate()?;
+        }
+        if let Some(creation) = &self.creation {
+            creation.validate(self)?;
         }
         Uuid::parse_str(&self.fence).context("invalid manifest fence")?;
         ensure!(
@@ -255,27 +277,8 @@ impl Engine {
     }
     pub async fn create(&self, db: &str, limits: Limits) -> Result<Info> {
         validate_db(db)?;
-        if limits.max_bytes == 0
-            || limits.max_bytes > 256 * 1024 * 1024
-            || limits.max_keys == 0
-            || limits.max_keys > 1_000_000
-        {
-            return Err(Error::Invalid(
-                "quota outside supported bounds (1..256 MiB, 1..1,000,000 keys)".into(),
-            ));
-        }
-        let manifest = Manifest {
-            format: 1,
-            revision: 0,
-            fence: Uuid::new_v4().to_string(),
-            limits,
-            bytes: 0,
-            keys: 0,
-            pages: Vec::new(),
-            receipts: Vec::new(),
-            gc_after: None,
-            policy: None,
-        };
+        validate_limits(&limits)?;
+        let manifest = Manifest::empty(limits, None);
         if !self
             .storage
             .cas(&head(db), None, encode_head(&manifest)?)
@@ -723,6 +726,18 @@ impl Engine {
     }
 }
 
+fn validate_limits(limits: &Limits) -> Result<()> {
+    if limits.max_bytes == 0
+        || limits.max_bytes > 256 * 1024 * 1024
+        || limits.max_keys == 0
+        || limits.max_keys > 1_000_000
+    {
+        return Err(Error::Invalid(
+            "quota outside supported bounds (1..256 MiB, 1..1,000,000 keys)".into(),
+        ));
+    }
+    Ok(())
+}
 fn head(db: &str) -> String {
     format!("heads/{db}.json")
 }

@@ -10,7 +10,7 @@ Each site may provision multiple databases. The bucket directory must support a 
 
 ## Acceptance scenario
 
-1. Create a site, provision a database, and persist the mapping in the service control plane.
+1. Create a site and persist its database provisioning request ID/configuration before calling protected PUT creation. Retry the identical request after uncertainty; retain the returned incarnation and site mapping in the service control plane, then mint a scoped token. A matching database name alone does not establish provisioning ownership.
 2. Use the general KV API for site settings and application records; test denied cross-site reads/writes and a quota-exhausting client.
 3. Start a Pi Harness with storage under a dedicated prefix and submit an idempotent request.
 4. Interrupt a tool/model turn, replace API pods, and explicitly transfer the Session owner after the harness host restarts.
@@ -24,6 +24,6 @@ Each site may provision multiple databases. The bucket directory must support a 
 - Pi Session execution has one owner even though database API pods are interchangeable. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
 - Browser identity, CORS, individual-user row authorization, and billing belong to the gateway. Per-database scoped credentials alone do not provide row-level access control.
 - The reference Pi adapter validates semantics but needs replacement with the indexed adapter before production onboarding.
-- Production readiness requires strict global physical/spend controls, key rotation/revocation, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
+- Production readiness requires strict global physical/spend controls, overlapping signing-key rotation, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
 
 No running NeuralColumn service, bucket, deployment, or production credentials are modified by this repository's initial development work.

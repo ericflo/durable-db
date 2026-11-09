@@ -49,6 +49,11 @@ pub(super) struct Policy {
     receipts: Vec<PolicyReceipt>,
 }
 impl Policy {
+    pub(super) fn created() -> Self {
+        let mut policy = Self::new();
+        policy.revision = 1;
+        policy
+    }
     fn new() -> Self {
         Self {
             incarnation: Uuid::new_v4().to_string(),
@@ -73,7 +78,6 @@ impl Policy {
                 && self.generation < self.revision
                 && self.revoked.len() <= MAX_REVOKED
                 && self.revoked.iter().all(|id| canonical_uuid(id))
-                && !self.receipts.is_empty()
                 && self.receipts.len() <= MAX_RECEIPTS,
             "invalid stored access policy"
         );
@@ -95,10 +99,17 @@ impl Policy {
             );
             previous = receipt.result.revision;
         }
-        ensure!(
-            self.receipts.last().map(|r| &r.result) == Some(&self.info()),
-            "policy receipt does not match state"
-        );
+        if let Some(receipt) = self.receipts.last() {
+            ensure!(
+                receipt.result == self.info(),
+                "policy receipt does not match state"
+            );
+        } else {
+            ensure!(
+                self.revision == 1 && self.generation == 0 && self.revoked.is_empty(),
+                "invalid initial policy"
+            );
+        }
         Ok(())
     }
 }

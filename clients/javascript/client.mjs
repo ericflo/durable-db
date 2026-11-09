@@ -14,7 +14,10 @@ export class DurableDb {
     this.url = url.replace(/\/$/, ""); this.database = database; this.token = token;
   }
   async request(path, body, method = "POST") {
-    const response = await fetch(`${this.url}/v1/databases/${encodeURIComponent(this.database)}${path}`, {
+    return this.#request(`${this.url}/v1/databases/${encodeURIComponent(this.database)}${path}`, body, method);
+  }
+  async #request(url, body, method = "POST") {
+    const response = await fetch(url, {
       method, headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
       ...(method === "GET" ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(35_000),
     });
@@ -23,6 +26,16 @@ export class DurableDb {
     return result;
   }
   create(limits = { max_bytes: 64 * 1024 * 1024, max_keys: 100000 }) { return this.request("", limits); }
+  /** Keep the SAME creation object across every retry, including unknown outcomes. */
+  createProtected({ request_id, limits = { max_bytes: 64 * 1024 * 1024, max_keys: 100000 } }) {
+    return this.request("", { request_id, limits }, "PUT");
+  }
+  changeAccess({ request_id, expected_policy_revision, change }) {
+    return this.request("/access", { request_id, expected_policy_revision, change });
+  }
+  issueToken({ write = false, ttl_seconds = 3600 } = {}) {
+    return this.#request(`${this.url}/v1/tokens`, { database: this.database, write, ttl_seconds });
+  }
   info() { return this.request("", undefined, "GET"); }
   read({ keys = [], scans = [], expected_revision } = {}) { return this.request("/read", { keys, scans, expected_revision }); }
   /** Keep the SAME request_id and expected_revision when retrying an uncertain outcome. */
