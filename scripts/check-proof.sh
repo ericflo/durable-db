@@ -27,8 +27,13 @@ fi
 mkdir -p .tools
 work=$(mktemp -d "$repo/.tools/proof-check.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+status=0
 "$checker" --strict --nofp --threads 2 --timing --cache-dir "$work/safe-cache" \
-  "$proof_dir/${module}Proof.tla" > ".tools/proof-$tag.log" 2>&1
+  "$proof_dir/${module}Proof.tla" > ".tools/proof-$tag.log" 2>&1 || status=$?
+if [ "$status" != 0 ]; then
+  cat ".tools/proof-$tag.log" >&2
+  exit "$status"
+fi
 grep -E 'All [1-9][0-9]* obligations proved' ".tools/proof-$tag.log"
 tail -n 4 ".tools/proof-$tag.log"
 # Recheck a changed protocol with fresh fingerprints. The intended induction

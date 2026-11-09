@@ -164,9 +164,12 @@ THEOREM PrepareBatchPreserves ==
   <2> QED BY StutteringStrong, <2>1 DEF CompositeStrong
 <1>2. DataStrong'
   <2>1. DataTypeOK'
-    BY SMT, Parameters, JournalParameters DEF vars, CompositeStrong, PrepareBatch,
-       DataStrong, DataTypeOK, DurableKnowledge, SelectedHistory, ImmutableSelection, CompleteHistory,
-           DataOrder, RecoveryState, IdleScan, Ids, RootValid
+    <3>before. planned \in [Ids -> Nat] /\ planned[p] \in Nat
+      BY SMT DEF CompositeStrong, DataStrong, DataTypeOK
+    <3>value. planned[p] + 1 \in Nat BY SMT, <3>before
+    <3>planned. planned' \in [Ids -> Nat]
+      BY SMT, UpdateRange, <3>before, <3>value DEF PrepareBatch
+    <3> QED BY <3>planned DEF CompositeStrong, DataStrong, DataTypeOK, PrepareBatch, vars
   <2>2. DurableKnowledge'
     BY SMT, Parameters, JournalParameters DEF vars, CompositeStrong, PrepareBatch,
        DataStrong, DataTypeOK, DurableKnowledge, SelectedHistory, ImmutableSelection, CompleteHistory,
@@ -424,9 +427,16 @@ THEOREM AcknowledgeBatchPreserves ==
         DataTypeOK, DurableKnowledge, SelectedHistory, ImmutableSelection, CompleteHistory, DataOrder,
             RecoveryState, IdleScan, Ids, RootValid
 <1>11. RecoveryState'
-  BY SMTT(15), Parameters, <1>4
-    DEF CompositeStrong, DataStrong, AcknowledgeBatch, vars,
-        DataTypeOK, RecoveryState, IdleScan, Ids
+  <2>1. ASSUME NEW q \in Ids, scans[q].epoch # 0
+        PROVE acknowledged'[scans[q].epoch] = acknowledged[scans[q].epoch]
+    <3>range. scans[q].epoch \in 0..Epochs
+      BY SMT DEF CompositeStrong, DataStrong, DataTypeOK
+    <3>domain. scans[q].epoch \in Ids
+      BY SMT, EpochDomain, <2>1, <3>range
+    <3> QED BY SMT, <1>4, <2>1, <3>domain
+      DEF CompositeStrong, DataStrong, DataTypeOK, AcknowledgeBatch
+  <2> QED BY SMT, <2>1
+    DEF CompositeStrong, DataStrong, RecoveryState, AcknowledgeBatch, vars
 <1> QED BY <1>1, <1>5, <1>6, <1>7, <1>8, <1>9, <1>10, <1>11 DEF CompositeStrong, DataStrong
 
 THEOREM BeginRecoveryPreserves ==
@@ -591,9 +601,13 @@ THEOREM ForgetRecoveryPreserves ==
   <2> QED BY StutteringStrong, <2>1 DEF CompositeStrong
 <1>2. DataStrong'
   <2>1. DataTypeOK'
-    BY SMTT(15), Parameters, JournalParameters DEF vars, CompositeStrong, ForgetRecovery,
-       DataStrong, DataTypeOK, DurableKnowledge, SelectedHistory, ImmutableSelection, CompleteHistory,
-           DataOrder, RecoveryState, IdleScan, Ids, RootValid
+    <3>before. scans \in [Ids -> [epoch : 0..Epochs, position : Nat, finished : BOOLEAN]]
+      BY SMT DEF CompositeStrong, DataStrong, DataTypeOK
+    <3>value. IdleScan \in [epoch : 0..Epochs, position : Nat, finished : BOOLEAN]
+      BY SMT, Parameters DEF IdleScan
+    <3>scans. scans' \in [Ids -> [epoch : 0..Epochs, position : Nat, finished : BOOLEAN]]
+      BY SMT, UpdateRange, <3>before, <3>value DEF ForgetRecovery
+    <3> QED BY <3>scans DEF CompositeStrong, DataStrong, DataTypeOK, ForgetRecovery, vars
   <2>2. DurableKnowledge'
     BY SMT, Parameters, JournalParameters DEF vars, CompositeStrong, ForgetRecovery,
        DataStrong, DataTypeOK, DurableKnowledge, SelectedHistory, ImmutableSelection, CompleteHistory,

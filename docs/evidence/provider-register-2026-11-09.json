@@ -213,5 +213,6 @@
     ".tools/register-b2-journal_cloud-initial.log": "ba1bc816ae61daba0ef330228bc081db6da2021137fcc08d4287e49dac774c2b",
     ".tools/provider-register-cloud.json": "0e0f652b3e4023ddb8d46133c5055ca1105a0e2061fd5a78276b1f4f43569083"
   },
-  "private_fixture_launcher_sha256": "6878e91c94af30fbcbed17f4a1068d189967a25793d49ef221ec834c1354f0b3"
+  "private_fixture_launcher_sha256": "6878e91c94af30fbcbed17f4a1068d189967a25793d49ef221ec834c1354f0b3",
+  "source_commit": "3e04707be3c38fedd55448f7fcf6b6a2bb6346f6"
 }

@@ -192,5 +192,6 @@
     ".tools/candidates/PartitionControl/model-partition-control-reply.log": "dfa0e8de887c75630fc128f331a12f962ac9b18714e231e0e01efa05ea3cb4ad",
     ".tools/candidates/PartitionControl/model-partition-control.log": "524450bb0fa378f87b327d6f93d44880893e30b294dd2765517663a965370d18",
     ".tools/partition-control-standard-final.log": "b9e7a880ab3de5be1d49456afe169e1c74cf26965a702008a27ddd29b91804ca"
-  }
+  },
+  "source_commit": "bcdb388ab6b6de96aa2c85b4dd802c7425a7c07e"
 }

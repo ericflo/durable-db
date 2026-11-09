@@ -251,6 +251,7 @@ COPY examples/*.rs examples/
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
+    trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT; \
     cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings \
     && cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect \
     && cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect \
