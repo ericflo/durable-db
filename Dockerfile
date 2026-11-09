@@ -92,6 +92,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh SigningRotation && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-uploadcredits
+COPY spec/UploadCredits.tla spec/UploadCredits.checks spec/UploadCredits.cfg spec/UnsafeUploadRefund.cfg spec/UnsafeUploadRestore.cfg spec/UnsafeUploadBeforeCharge.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh UploadCredits && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
 COPY --from=model-cluster /checks/ /checks/
 COPY --from=model-bucket /checks/ /checks/
@@ -105,6 +111,7 @@ COPY --from=model-authorizationlifecycle /checks/ /checks/
 COPY --from=model-databasecreation /checks/ /checks/
 COPY --from=model-pisession /checks/ /checks/
 COPY --from=model-signingrotation /checks/ /checks/
+COPY --from=model-uploadcredits /checks/ /checks/
 
 FROM tools AS build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./

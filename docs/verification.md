@@ -132,3 +132,8 @@ This small model assumes the previously modeled exact absent-target publication 
 ## Overlapping signing-key rollout
 
 `SigningRotation.tla` checks two serving processes, two bounded issued tokens, two keys, and the expansion/promotion/retirement sequence described in [the key rotation design](design-signing-rotation.md). The positive configuration explores 1,189 states (4,360 generated, depth 14). Both negative controls fail the rolling-interoperability invariant: premature promotion and retirement of a still-live token's key. The model includes independent crashes, all-process loss, and restart from the current configuration. Serving partitioned processes must remain inside the completion barrier; that requirement is an assumption, not a Kubernetes fencing proof. Cryptography, clock skew, configuration delivery, offline issuers, and Rust verification are not established by this finite model.
+
+
+## Nonrefundable immutable-upload credits (design stage)
+
+`UploadCredits.tla` checks two processes, two grants, three requests, four units of capacity, and up to two upload attempts per charged request. It explores 6,426 states (21,209 generated, depth 15) with crashes, all-process loss, missing allocation acknowledgements, and delayed arrivals. Three negative controls detect refunding dead-process credit, restoring spent credit, and uploading before charging. The design is not implemented yet. This finite abstraction does not establish provider billing bounds, SDK attempt accounting, tenant isolation, migration, or composition with the publication/collector model; those obligations remain in `docs/design-upload-admission.md`.
