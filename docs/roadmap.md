@@ -1,27 +1,27 @@
 # Roadmap and release gates
 
-The [production readiness plan](production-readiness.md) is the release checklist, with measurable acceptance criteria and explicit remaining gaps.
+**The next milestone is a usable replacement serving engine.** The current shared read barrier and publication path have not met the performance brief. More qualification of that path cannot close the architectural gap.
 
-## Initial experimental release — delivered as v0.1.0
+The [production readiness plan](production-readiness.md) owns the release checklist and evidence requirements. This roadmap gives the implementation order without maintaining a second checklist.
 
-One shared publication implementation on B2 and S3, with a persistent B+tree database directory, modeled conditional publication and version-aware reclamation. Working single-node local service; S3 CAS backend with compatibility probe; ordered pages and atomic revision-checked writes; bounded caches; signed scoped credentials; logical quotas and admission limits; automatic fenced collection and incremental compaction; a checked TLA+ model with a negative control; Woodpecker CI; a public documentation site; and a bounded Pi reference adapter.
+## Build and measure the replacement
 
-## Before a hosted preview
+Compose the [owned-partition design](design-owned-partitions.md) into an executable path: local reads under valid ownership, independent immutable log batches, bounded transaction validation, and recovery of every acknowledged write. Preserve one B2/S3 algorithm and the object-store durability boundary.
 
-- Complete full Pi Harness integration and sustained-load qualification of the indexed adapter; all 32 upstream cases pass on B2, and cache-free crash/takeover recovery passes.
-- Add durable cluster-wide physical allocation/spend admission, request and bandwidth budgets, and abuse tests across replicas.
-- Add tenant export, deletion/retention, and durable audit delivery. Overlapping signing keys, expiring administrator capabilities, durable token revocation, and idempotent protected provisioning are implemented in current source builds; complete their broader deployment qualification.
-- Extend the passing kind/B2 and kind/MinIO CPU-HPA, drain, SIGKILL, kernel OOM, provider-partition, and complete-pod-loss campaigns to independent physical nodes; add sustained memory bounds and longer fault histories.
-- Remove the single bucket publication throughput bottleneck through a modeled group-commit/partitioning design before claiming high throughput across many active sites.
-- Run performance and soak tests against AWS with published latency distributions, cost/transaction, cache hit rates, and per-database contention. Optimize only from those measurements.
-- Mechanize the unbounded safety argument and record the abstraction/refinement obligations.
+The journal, conflict validator and invocation-bound control sessions are implemented components. Their models and abstract permission/history proofs have explicit assumptions; timing, election, wire and implementation composition remains open. They do not yet replace the HTTP engine.
 
-## Before general availability
+The first end-to-end qualification must include stale owners that remain alive, movement, scale-down to one and complete compute loss. Measure warm reads, batched durable writes, many active databases and disjoint-key transactions within one database. Publish latency, failures, retries, fairness, provider calls and cost on B2, then AWS S3.
 
-- Versioned storage migrations and mixed-version rolling upgrades, with rollback rules.
-- Consistent logical export and resumable protected restore are implemented; scheduled backups, point-in-time recovery/retention, recurring restore drills, and corruption repair remain.
-- Multilevel data-page indexes and larger individual databases without unbounded manifests or request memory.
-- B2 cloud qualification, contention measurements, and fault testing of its native bucket-revision publication protocol.
-- Independent protocol/security review, fuzzing, fault-injection campaigns, release signing/attestation, and cross-platform install verification.
+## Qualify a hosted preview
 
-Cross-database transactions, arbitrary SQL, row-level authorization, and automatic conflict-free merging are not part of the initial contract. They require separate designs rather than silent additions to the manifest protocol.
+Integrate per-tenant physical admission, fair request and bandwidth budgets, authorization, lifecycle and bounded automatic maintenance. Unknown or delayed uploads must not create free spend rights. Add multilevel indexes, retained snapshots and recoverable compaction without making local storage authoritative.
+
+Run Pi workflows and general web application workloads through the actual replacement API and typed client. Extend the existing Kubernetes and physical-host fault campaigns to that engine, including host loss, provider throttling, mixed versions, recovery and sustained resource bounds. Keep laptop setup and installation as primary acceptance tests.
+
+## Release for production
+
+Close every remaining [production gate](production-readiness.md): backup/PITR and restore drills, sustained load with injected failures, compatible upgrades, operational alerts, signed artifacts and advertised-platform installation. Resolve independent protocol and security review findings before changing the experimental status.
+
+Keep the private source Apache-2.0 licensed and maintain the public documentation through Woodpecker. Open the source repository when its owner requests it.
+
+Cross-database transactions, arbitrary SQL, row-level authorization and automatic conflict-free merging are outside the initial contract.

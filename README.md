@@ -28,7 +28,7 @@ export PATH="$HOME/.local/bin:$PATH"
 durable-db serve --data ./data
 ```
 
-The installer verifies the release checksum and installs one file into `~/.local/bin`. Set `DURABLE_DB_INSTALL_DIR` to choose another directory. For other platforms, [build from source](#build-and-test).
+The installer verifies the release checksum and installs one file into `~/.local/bin`. Set `DURABLE_DB_INSTALL_DIR` to choose another directory. For other platforms, [build from source](#build-from-source).
 
 The default address is `127.0.0.1:7654`. First startup generates `data/admin.key` with owner-only file permissions. Keep that signing key private. Generate an administrator token in another terminal:
 
@@ -49,7 +49,7 @@ curl http://127.0.0.1:7654/v1/databases/demo/read \
 
 Values are base64-encoded arbitrary bytes: `d29ybGQ=` is `world`. Keys are UTF-8 strings. A read returns a revision; supply it when committing changes. A `409` requires a fresh read and recomputation. Retry an uncertain write with the **identical** request ID, revision, and body.
 
-Current source builds additionally support [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. Current builds also add [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md). Current builds also include [consistent logical export and resumable restore](docs/recovery.md). These features postdate the v0.1.0 installer example above and require upgraded servers.
+Current source builds add [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database), [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md), and [consistent export and resumable restore](docs/recovery.md). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. These features postdate the v0.1.0 installer example and require upgraded servers.
 
 Fresh cloud namespaces can also enable [cumulative immutable-upload admission](docs/design-upload-admission.md). Its byte and attempt ceilings survive restarts and scaling, and administrators can raise them without resetting spent credit. This shared ceiling is one part of resource protection; format 5 also reclaims unreachable pages without upload credit. Per-tenant spend isolation and sustained-load qualification remain production gates.
 
@@ -106,7 +106,7 @@ Pods add request concurrency, but directory publication serializes within a buck
 - [Production readiness and release gates](docs/production-readiness.md)
 - [Roadmap](docs/roadmap.md)
 
-## Build and test
+## Build from source
 
 Rust is pinned in `rust-toolchain.toml`. All compiler invocations use [kache](https://github.com/kunobi-ninja/kache); keep its client and engine together.
 
@@ -117,9 +117,8 @@ scripts/install-kache.sh
 export PATH="$PWD/.tools/bin:$PATH"
 export KACHE_CONFIG="$PWD/.kache.toml"
 cargo build --locked --release
-cargo test --locked --all-targets
-scripts/check-model.sh             # Java 11+; checksum-pinned TLC
-cd clients/javascript && npm ci && npm test # HTTP conformance requires test server env
 ```
+
+The executable is `target/release/durable-db`. The [development guide](docs/development.md) covers focused checks, the complete Rust/model/client suite and provider fixtures. Run the large directory capacity regression in release mode, as CI does; a debug sweep makes ordinary iteration unnecessarily slow.
 
 CI, static binary builds, container builds, and documentation publication use **Woodpecker**. No GitHub Actions workflows are used. Apache-2.0 licensed. Contributions will open when the repository becomes public.

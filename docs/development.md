@@ -29,6 +29,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
+| Ownership intervals | `cargo test --locked --lib ownership::timing` and `scripts/check-proof.sh GrantBounds` |
 | Candidate root request lifecycle | `scripts/check-candidate.sh RootRequests` and `scripts/check-proof.sh RootRequests` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |

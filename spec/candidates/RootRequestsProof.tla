@@ -629,16 +629,16 @@ THEOREM DeliverRows ==
   BY DEF Deliver
 <1>2. \A b \in Ids: requests'[b].owner = requests[b].owner
                      /\ requests'[b].started = requests[b].started
-  BY SMT DEF Deliver, Strong, TypeOK
+  BY SMT, DeliverRequestShape, StateTypes DEF RequestRecord
 <1>3. \A p \in Owners: p # requests[a].owner => roots'[p] = roots[p]
-  BY SMT DEF Deliver, Strong, TypeOK
+  BY SMT, DeliverRootShape, StateTypes
 <1>4. \A p \in Owners: roots[p].phase # "fresh" => roots'[p].drain = roots[p].drain
-  BY SMT DEF Deliver, Strong, TypeOK
+  BY SMT, DeliverRootShape, StateTypes DEF ReplyValue, RootRecord, RequestRecord
 <1>5. \A p \in Owners: roots[p].phase = "fresh" /\ roots'[p].phase # "fresh" =>
             p = requests[a].owner /\ roots'[p].drain = now
-  BY SMT DEF Deliver, Strong, TypeOK
+  BY SMT, DeliverRootShape, StateTypes DEF ReplyValue, RootRecord, RequestRecord
 <1>6. \A p \in Owners: roots[p].phase # "fresh" => roots'[p].phase # "fresh"
-  BY SMT DEF Deliver, Strong, TypeOK
+  BY SMT, DeliverRootShape, StateTypes DEF ReplyValue, RootRecord, RequestRecord
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6
 
 THEOREM DeliverRequestFields ==

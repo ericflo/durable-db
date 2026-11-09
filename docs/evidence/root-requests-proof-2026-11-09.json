@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "recorded_at": "2026-11-09T22:43:47.493730+00:00",
-  "base_commit": "d5439e120ae7a22c0aa2a7e881dcd7fd648864b8",
+  "recorded_at": "2026-11-09T23:17:00.466893+00:00",
+  "base_commit": "e6552dacc1ee11522ef9335864953cf5ef408021",
   "status": "Abstract root-request safety proof and finite regressions; no runtime adoption",
   "previous_finite_evidence": "root-requests-candidate-2026-11-09.json",
   "standard_model_checker_passed": true,
@@ -204,7 +204,7 @@
   ],
   "proof": {
     "theorem": "Spec => [](RootExclusive /\\ EpochOrder)",
-    "strict_obligations": 973,
+    "strict_obligations": 983,
     "fresh_fingerprints": true,
     "scope": "Arbitrary finite epoch and invocation counts, positive integer lifetimes, time bounds and execution lengths, from the active-first-root seed",
     "inductive_invariant": "Strong: types, history order, confirmed views, captured requests, applied results, clock order and bounds on older grants/requests at later confirmed fences",
@@ -215,7 +215,7 @@
         "required_action": "Apply(a)",
         "failed_obligations": 1,
         "checked_obligations": 6,
-        "log_sha256": "a049199d9d82c3915fefb91972544686852679ed213eb5c78260e9be41e65cde"
+        "log_sha256": "699d64308bacfec6852f216f5804221c926bfbcbbd98cb393775edcf1b6d6b95"
       },
       {
         "name": "root-requests-timeout",
@@ -223,7 +223,7 @@
         "required_action": "Timeout(p, a)",
         "failed_obligations": 1,
         "checked_obligations": 2,
-        "log_sha256": "68be29ace1902bf5cd611304ade40c26e7898f20d07545376979c5a97c665a61"
+        "log_sha256": "d20c19b450a459e8f5210838a8a10d2fa1c0f68c5ab318ec105839eac71a8de4"
       },
       {
         "name": "root-requests-reply",
@@ -231,7 +231,7 @@
         "required_action": "Deliver(a)",
         "failed_obligations": 1,
         "checked_obligations": 1,
-        "log_sha256": "2aabd17244be839366b98fd316cd4f799aa2eaea45979e3a13018733da8007a7"
+        "log_sha256": "829938201d9f7370a29a35505401e3054c800944e3c8e1928a66817ad7e9b333"
       },
       {
         "name": "root-requests-drain",
@@ -239,10 +239,10 @@
         "required_action": "Start(p, a, kind, source)",
         "failed_obligations": 1,
         "checked_obligations": 3,
-        "log_sha256": "a8304858eecda40af9a222a94cf60ead4311cbb5a07c6b68c66f4740f501c6bc"
+        "log_sha256": "6d62d7cb14b202509d7bbd6d0e8930fa3bd81082d1a7efc9d2ab9854ce47dc44"
       }
     ],
-    "local_seconds": 207.983096,
+    "local_seconds": 196.358676,
     "standard_library_facts": [
       "SequenceTheorems.LenProperties",
       "SequenceTheorems.IsASeq",
@@ -279,7 +279,7 @@
     "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
     "scripts/check-proof.sh": "4e0ec0797c53a4bc99eefd595daf6c0d33a174917195c68f19bf4589c2d8ee54",
     "scripts/install-tlaps.sh": "95ddc6c9b7ea9afeba28b7c0fe658150595f18caa059e995b2861e30050d26bc",
-    "site/build.mjs": "a577ecc1c6058add8c6f527e98a7c2950a73bea57d29985ad360eeca7946547f",
+    "site/build.mjs": "478f1882f4ebd49816061972046e2d8978465418f9403f22cf8817627b814a83",
     "spec/candidates/RootRequests.cfg": "f893b6c9e980e8219a11ad1e870d94bdde02532cc7b8791410af78bb9e3a354f",
     "spec/candidates/RootRequests.checks": "b2ac0c998e75bdef031347e555c08848ee97b85d8b805cebf7f52130893b5a46",
     "spec/candidates/RootRequests.proof": "fb450225adfb761bea2771f19975e18c964c694718be17c9d0cad4ab93417e28",
@@ -287,7 +287,7 @@
     "spec/candidates/RootRequestsActivationRecovered.cfg": "8f1500ee7de87768ef48cfb0150922ee03395e72b15eea184a93177d84163443",
     "spec/candidates/RootRequestsLateRejected.cfg": "06c26bfb1a900001a81498e2a8c87b7b29db19eb280664857d996c52ee3aa037",
     "spec/candidates/RootRequestsLateReply.cfg": "3c5321165f751f679d71584878259fff9d4e7772b2735b94df1ad7029783d8d7",
-    "spec/candidates/RootRequestsProof.tla": "d545d5433bd5825d905aaa45889ef0681386b14e48a7f894e59b060d602371a0",
+    "spec/candidates/RootRequestsProof.tla": "e3e3bc7d3f442981353b7ff68134bfbd6173d08b8e29661e137069e2966debfc",
     "spec/candidates/RootRequestsRecovered.cfg": "b8b7fbc55f6006476814972e21db0cdf810248e079483d25124ce5dedabfe283",
     "spec/candidates/RootRequestsRenewed.cfg": "4195f7a54cd4c2a58b98d5efa126bcaea71671eadb78b99d2028542fc772ae76",
     "spec/candidates/RootRequestsRepeated.cfg": "cd755169488a11cc7cf2186f7afa7ae0006d73207e66930498f89dfdcf8a390e",
@@ -310,16 +310,17 @@
     ".tools/candidates/RootRequests/model-root-requests-three-epochs.log": "8eb11087d4db5c3a47ce9773a2bfe748cbc97c0e3bb29bea8aa66e00cfbec54d",
     ".tools/candidates/RootRequests/model-root-requests-timeout.log": "4dc1cb33472a29304d2e71c1d27e7e0cb2e32ccafe3363cb0ee514887ae58311",
     ".tools/candidates/RootRequests/model-root-requests.log": "4fff22ab3a9313ec489f4ed49660f7611d4df5f904ff438ec36c99ccbbffee32",
-    ".tools/proof-negative-root-requests-compare.log": "a049199d9d82c3915fefb91972544686852679ed213eb5c78260e9be41e65cde",
-    ".tools/proof-negative-root-requests-drain.log": "a8304858eecda40af9a222a94cf60ead4311cbb5a07c6b68c66f4740f501c6bc",
-    ".tools/proof-negative-root-requests-reply.log": "2aabd17244be839366b98fd316cd4f799aa2eaea45979e3a13018733da8007a7",
-    ".tools/proof-negative-root-requests-timeout.log": "68be29ace1902bf5cd611304ade40c26e7898f20d07545376979c5a97c665a61",
-    ".tools/proof-root-requests.log": "bbb4cca39fb3d8b68a1d0b30bbf5db4239fc9415d93385f6c98e6518b33cad9c",
+    ".tools/proof-negative-root-requests-compare.log": "699d64308bacfec6852f216f5804221c926bfbcbbd98cb393775edcf1b6d6b95",
+    ".tools/proof-negative-root-requests-drain.log": "6d62d7cb14b202509d7bbd6d0e8930fa3bd81082d1a7efc9d2ab9854ce47dc44",
+    ".tools/proof-negative-root-requests-reply.log": "829938201d9f7370a29a35505401e3054c800944e3c8e1928a66817ad7e9b333",
+    ".tools/proof-negative-root-requests-timeout.log": "d20c19b450a459e8f5210838a8a10d2fa1c0f68c5ab318ec105839eac71a8de4",
+    ".tools/proof-root-requests.log": "66cc78ed2c0c7022c8c891476c3dd0f06d3a050c55db12501114855ff287b15f",
     ".tools/root-requests-general-maintained.log": "7b89c0b642c7880bb4c99e813b0b5d8505b157278a705e09f8b24fc03a579854",
-    ".tools/root-requests-proof-standard.log": "c95371a1ea74d0551701c8349d7ea78b9f048327db40cac5c62874a8c23149c2",
+    ".tools/root-requests-proof-standard.log": "65594e4b711bb74e11e8bb9e3c6a7d4a8f9a26031d79e4a676a883e71c2d6cf5",
     ".tools/tlaps-retained-install-verification.json": "6d5e9934972cccfef76186c6de045f924b047945548b7edfe5806d8f5e2106c1",
     ".tools/tlaps-cold-check.log": "c1a709f7907b65f1ca2568672f901b7e4fc879bd40ce9a6e3b84c7c3293521dd",
-    ".tools/root-requests-builder-proof.log": "8398c36db619b2d1cbd760e6664a7a224185eba0080b26972463e16d966a52a4"
+    ".tools/root-requests-builder-proof.log": "8f0acd5a42ea8c0ab03f4cdc9e6de1b309c01dfc4da73de769c38124f9f9ae03",
+    ".tools/root-requests-rows.log": "f6248aed46521880a35c8c3ce07b4182d8ed13368e9f77c952ba61e52034d597"
   },
   "toolchain": {
     "tlc_release": "1.7.4",
@@ -366,22 +367,53 @@
       },
       "public_pages_published": false,
       "reason": "Broad proof queries did not discharge on the CI builder; local complete proof and mutations passed. No protocol or invariant relaxation is permitted."
+    },
+    {
+      "source_commit": "e6552dacc1ee11522ef9335864953cf5ef408021",
+      "woodpecker": {
+        "pipeline": 57,
+        "status": "failure",
+        "failed_obligations": 5,
+        "checked_obligations": 973,
+        "failed_helper": "DeliverRows",
+        "failed_source_lines": [
+          632,
+          634,
+          636,
+          639,
+          641
+        ],
+        "build_log_sha256": "ea70c7ca861ef2694a6a933b2e2efbc455b78c9d70ea7ac74974f8c0c10a623a"
+      },
+      "public_pages_published": false,
+      "isolated_preflight": {
+        "status": "success",
+        "target": "proof-root-requests",
+        "same_builder_as_failed_pipeline": 56,
+        "strict_obligations": 973,
+        "required_unsafe_controls": 4,
+        "positive_seconds": 416.930907,
+        "stage_seconds": 528.7,
+        "cold_toolchain_download_verified": true,
+        "build_log_sha256": "8398c36db619b2d1cbd760e6664a7a224185eba0080b26972463e16d966a52a4",
+        "temporary_remote_context_removed": true
+      },
+      "reason": "The isolated Docker stage passed, but five broad reply-effect queries did not discharge in the full build. The revision uses previously proved record projections instead of expanding the complete transition."
     }
   ],
   "qualification": {
     "status": "pending",
-    "reason": "Full proof and four controls passed locally and in the exact Docker target on the builder that failed pipeline 56. Complete Woodpecker qualification and Pages publication remain required."
+    "reason": "The complete revised proof and all four unsafe controls pass locally and on the CI builder; complete Woodpecker qualification and Pages publication remain required."
   },
   "builder_preflight": {
     "status": "success",
     "target": "proof-root-requests",
-    "same_builder_as_failed_pipeline": 56,
-    "strict_obligations": 973,
+    "same_builder_as_failed_pipeline": 57,
+    "strict_obligations": 983,
     "required_unsafe_controls": 4,
-    "positive_seconds": 416.930907,
-    "stage_seconds": 528.7,
-    "cold_toolchain_download_verified": true,
-    "build_log_sha256": "8398c36db619b2d1cbd760e6664a7a224185eba0080b26972463e16d966a52a4",
+    "positive_seconds": 392.42093,
+    "stage_seconds": 504.0,
+    "build_log_sha256": "8f0acd5a42ea8c0ab03f4cdc9e6de1b309c01dfc4da73de769c38124f9f9ae03",
     "temporary_remote_context_removed": true
   }
 }
