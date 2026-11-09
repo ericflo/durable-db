@@ -1,5 +1,5 @@
 tag|root-requests
 negative|root-requests-compare|ApplyShape|Apply(a)|s!success == UnsafeCompare!success == TRUE!
-negative|root-requests-timeout|TimeoutPreserves|Timeout(p, a)|s!IF UnsafeTimeout!IF TRUE!
-negative|root-requests-reply|DeliverPreserves|Deliver(a)|s!IF UnsafeLateExpiry!IF TRUE!
-negative|root-requests-drain|StartPreserves|Start(p, a, kind, source)|s!(UnsafeDrain \\/!(TRUE \\/!
+negative|root-requests-timeout|TimeoutStable|Timeout(p, a)|s!IF UnsafeTimeout!IF TRUE!
+negative|root-requests-reply|DeliverRootShape|Deliver(a)|s!IF UnsafeLateExpiry!IF TRUE!
+negative|root-requests-drain|StartConditions|Start(p, a, kind, source)|s!(UnsafeDrain \\/!(TRUE \\/!

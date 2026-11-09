@@ -95,7 +95,7 @@ check_negative() {
     cat ".tools/proof-negative-$name.log" >&2
     echo 'Unsafe proof unexpectedly succeeded' >&2; exit 1
   fi
-  if ! grep -Eq '[1-9][0-9]*/[1-9][0-9]* obligations failed' ".tools/proof-negative-$name.log" \
+  if ! grep -Eq '[1-9][0-9]*/[1-9][0-9]* obligations? failed' ".tools/proof-negative-$name.log" \
     || ! grep -Fq "$required" ".tools/proof-negative-$name.log"; then
     cat ".tools/proof-negative-$name.log" >&2
     echo "Missing expected proof failure: $name" >&2

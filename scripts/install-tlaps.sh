@@ -1,5 +1,5 @@
 #!/bin/sh
-# Verified upstream snapshot. The asset ID and hash pin bytes even though its tag rolls.
+# Retained upstream snapshot. The mirror and hash survive rolling-release asset removal.
 set -eu
 case "$(uname -s)/$(uname -m)" in Linux/x86_64) ;; *) echo 'Pinned TLAPS bundle requires Linux x86_64; provide TLAPM built from c8ddc44.' >&2; exit 1 ;; esac
 proof_dir=${1:?usage: install-tlaps.sh DESTINATION}
@@ -13,7 +13,7 @@ if [ ! -f "$archive" ]; then
   else
     curl --proto '=https' --tlsv1.2 --retry 3 --max-time 180 -fLsS \
       -H 'Accept: application/octet-stream' \
-      https://api.github.com/repos/tlaplus/tlapm/releases/assets/721898594 -o "$archive.part"
+      https://github.com/ericflo/durable-db-site/releases/download/verification-tlapm-c8ddc44/tlapm-c8ddc44-linux-x86_64.tar.gz -o "$archive.part"
   fi
   printf '%s  %s\n' "$expected" "$archive.part" | sha256sum -c -
   mv "$archive.part" "$archive"

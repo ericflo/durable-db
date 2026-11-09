@@ -36,6 +36,11 @@ THEOREM TypedRequest ==
   PROVE requests[a] \in RequestRecord
   BY SMT DEF Strong, TypeOK, RequestRecord
 
+THEOREM TypedHistory ==
+  ASSUME Strong, NEW i \in 1..Len(history)
+  PROVE history[i] \in Metadata
+  BY SMT, SequenceFacts DEF Strong
+
 THEOREM CapturedEntry ==
   ASSUME Strong, NEW a \in Ids, requests[a].status # "fresh"
   PROVE LET r == requests[a] IN
@@ -192,24 +197,52 @@ THEOREM DeliverViewShape ==
         ELSE view' = view
   BY DEF Deliver
 
+THEOREM StateTypes ==
+  ASSUME Strong
+  PROVE /\ roots \in [Owners -> RootRecord]
+        /\ requests \in [Ids -> RequestRecord]
+        /\ view \in [Owners -> Metadata]
+        /\ valid \in [Owners -> BOOLEAN] /\ active \in [Owners -> 0..Attempts]
+        /\ now \in Nat /\ applied \subseteq Ids /\ timedOut \subseteq Ids
+  BY DEF Strong, TypeOK, RootRecord, RequestRecord
+
+THEOREM InitialMetadata == Initial \in Metadata
+  BY SMT, Parameters DEF Initial, Metadata, Owners
+
+THEOREM UpdateFunction ==
+  ASSUME NEW D, NEW R, NEW f \in [D -> R], NEW k \in D, NEW v \in R
+  PROVE [f EXCEPT ![k] = v] \in [D -> R]
+  BY SMT
+
+THEOREM TimeoutStable ==
+  ASSUME NEW p \in Owners, NEW a \in Ids, Timeout(p, a)
+  PROVE UNCHANGED <<history, roots, view, requests, now, applied>>
+  BY Parameters DEF Timeout
+
 THEOREM StartType ==
   ASSUME NEW p \in Owners, NEW a \in Ids, NEW kind \in Kinds, Strong,
          NEW source \in Sources(p, kind), Start(p, a, kind, source)
   PROVE TypeOK'
-<1>1. requests' \in [Ids -> RequestRecord]
-  <2>1. a \in Ids /\ requests \in [Ids -> RequestRecord]
-    BY SMT, Parameters DEF Strong, TypeOK, Metadata, RequestRecord, Owners, Ids
-  <2>2. requests'[a] \in RequestRecord
-    BY SMT, <2>1, Parameters, SequenceFacts, SourceFacts DEF Start, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, NextId, Initial, Sources
-  <2>3. DOMAIN requests' = Ids
-        /\ \A b \in Ids: b # a => requests'[b] = requests[b]
-    BY SMT, <2>1 DEF Start
-  <2> QED BY SMT, <2>1, <2>2, <2>3 DEF Start
-<1>2. active' \in [Owners -> 0..Attempts]
-  BY SMT, Parameters, SequenceFacts, SourceFacts DEF Start, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, NextId, Initial, Sources
-<1>3. valid' \in [Owners -> BOOLEAN]
-  BY SMT, Parameters, SequenceFacts, SourceFacts DEF Start, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, NextId, Initial, Sources
-<1> QED BY SMT, <1>1, <1>2, <1>3, Parameters DEF Start, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, NextId, Initial, Sources
+<1>1. [status |-> "pending", kind |-> kind, owner |-> p,
+       expected |-> source.revision, started |-> now,
+       open |-> IF kind = "fence" THEN FALSE ELSE IF kind = "activate" THEN TRUE ELSE source.open,
+       result |-> Initial] \in RequestRecord
+  <2>1. source \in Metadata /\ now \in Nat /\ Initial \in Metadata
+    BY SourceFacts, StateTypes, InitialMetadata
+  <2>2. source.revision \in Nat /\ source.open \in BOOLEAN
+    BY SMT, <2>1 DEF Metadata
+  <2>3. (IF kind = "fence" THEN FALSE ELSE IF kind = "activate" THEN TRUE ELSE source.open) \in BOOLEAN
+    BY SMT, <2>2
+  <2> QED BY SMT, <2>1, <2>2, <2>3 DEF RequestRecord, Statuses
+<1>2. requests' \in [Ids -> RequestRecord]
+  BY SMT, StateTypes, UpdateFunction, <1>1 DEF Start
+<1>3. a \in 0..Attempts
+  BY SMT, Parameters DEF Ids
+<1>4. active' \in [Owners -> 0..Attempts]
+  BY SMT, StateTypes, UpdateFunction, <1>3 DEF Start
+<1>5. valid' \in [Owners -> BOOLEAN]
+  BY SMT, StateTypes, UpdateFunction DEF Start
+<1> QED BY <1>2, <1>4, <1>5 DEF Start, Strong, TypeOK, RequestRecord
 
 THEOREM ApplyType ==
   ASSUME NEW a \in Ids, Strong, Apply(a)
@@ -237,7 +270,7 @@ THEOREM ApplyType ==
     BY SMT, <2>1 DEF Apply
   <2> QED BY SMT, <2>1, <2>2, <2>3 DEF Apply
 <1>3. applied' \subseteq Ids
-  BY SMT, Parameters, SequenceFacts, ReplacementType, ApplyShape DEF Apply, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Initial, Current
+  BY SMT, StateTypes DEF Apply
 <1>4. lateRejected' \in BOOLEAN
   BY SMT, Parameters, SequenceFacts, ReplacementType, ApplyShape DEF Apply, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Initial, Current
 <1> QED BY SMT, <1>1, <1>2, <1>3, <1>4, Parameters DEF Apply, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Initial, Current
@@ -253,38 +286,103 @@ THEOREM TimeoutType ==
   BY SMT, Parameters, SequenceFacts DEF Timeout, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses
 <1> QED BY SMT, <1>1, <1>2, <1>3, Parameters DEF Timeout, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses
 
+\* A reply's local root record, kept separate from coverage flags and maps.
+ReplyValue(a) ==
+  LET r == requests[a] IN LET p == r.owner IN
+  [phase |-> IF roots[p].phase = "fresh" THEN "draining"
+             ELSE IF r.result.open THEN "active" ELSE roots[p].phase,
+   expires |-> IF r.kind = "activate" THEN roots[p].expires
+               ELSE Max(roots[p].expires, (IF UnsafeLateExpiry THEN now ELSE r.started) + Lease),
+   drain |-> IF roots[p].phase = "fresh" THEN now ELSE roots[p].drain]
+
+THEOREM ReplyValueType ==
+  ASSUME NEW a \in Ids, Strong
+  PROVE ReplyValue(a) \in RootRecord
+<1>1. requests[a] \in RequestRecord /\ now \in Nat
+  BY TypedRequest, StateTypes
+<1>2. requests[a].owner \in Owners
+  BY SMT, <1>1 DEF RequestRecord
+<1>3. roots[requests[a].owner] \in RootRecord
+  BY TypedRoot, <1>2
+<1> QED BY SMT, Parameters, <1>1, <1>3 DEF ReplyValue, RootRecord, RequestRecord, Max
+
+THEOREM DeliverRootShape ==
+  ASSUME NEW a \in Ids, Strong, Deliver(a)
+  PROVE roots' = IF active[requests[a].owner] = a /\ requests[a].status = "ok"
+                 THEN [roots EXCEPT ![requests[a].owner] = ReplyValue(a)] ELSE roots
+  BY DEF Deliver, ReplyValue
+
+THEOREM RequestDoneType ==
+  ASSUME NEW r \in RequestRecord
+  PROVE [r EXCEPT !.status = "done"] \in RequestRecord
+  BY SMT DEF RequestRecord, Statuses
+
+THEOREM DeliverRequestShape ==
+  ASSUME NEW a \in Ids, Strong, Deliver(a)
+  PROVE requests' = [requests EXCEPT ![a] = [requests[a] EXCEPT !.status = "done"]]
+  BY SMT, StateTypes DEF Deliver, RequestRecord
+
 THEOREM DeliverType ==
   ASSUME NEW a \in Ids, Strong, Deliver(a)
   PROVE TypeOK'
-<1>1. roots' \in [Owners -> RootRecord]
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Max, RootValid
-<1>2. view' \in [Owners -> Metadata]
-  <2>1. requests[a].owner \in Owners /\ view \in [Owners -> Metadata]
-    BY SMT, Parameters DEF Strong, TypeOK, Metadata, RequestRecord, Owners, Ids
-  <2>2. view'[requests[a].owner] \in Metadata
-    <3>1. requests[a].result \in Metadata
-      BY SMT DEF Strong, TypeOK
-    <3> QED BY SMT, <2>1, <3>1, DeliverViewShape
-  <2>3. DOMAIN view' = Owners
-        /\ \A b \in Owners: b # requests[a].owner => view'[b] = view[b]
-    BY SMT, <2>1 DEF Deliver
-  <2> QED BY SMT, <2>1, <2>2, <2>3 DEF Deliver
-<1>3. valid' \in [Owners -> BOOLEAN]
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Max, RootValid
-<1>4. active' \in [Owners -> 0..Attempts]
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Max, RootValid
-<1>5. requests' \in [Ids -> RequestRecord]
-  <2>1. a \in Ids /\ requests \in [Ids -> RequestRecord]
-    BY SMT, Parameters DEF Strong, TypeOK, Metadata, RequestRecord, Owners, Ids
-  <2>2. requests'[a] \in RequestRecord
-    BY SMT, <2>1, Parameters, SequenceFacts DEF Deliver, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Max, RootValid
-  <2>3. DOMAIN requests' = Ids
+<1>1. requests[a].owner \in Owners /\ requests[a] \in RequestRecord
+  BY SMT, TypedRequest DEF RequestRecord
+<1>2. roots' \in [Owners -> RootRecord]
+  <2>1. roots \in [Owners -> RootRecord] /\ ReplyValue(a) \in RootRecord
+    BY StateTypes, ReplyValueType
+  <2>2. [roots EXCEPT ![requests[a].owner] = ReplyValue(a)] \in [Owners -> RootRecord]
+    BY UpdateFunction, <1>1, <2>1
+  <2> QED BY SMT, DeliverRootShape, <2>1, <2>2
+<1>3. view' \in [Owners -> Metadata]
+  <2>1. view \in [Owners -> Metadata] /\ requests[a].result \in Metadata
+    BY SMT, StateTypes, <1>1 DEF RequestRecord
+  <2>2. [view EXCEPT ![requests[a].owner] = requests[a].result] \in [Owners -> Metadata]
+    BY UpdateFunction, <1>1, <2>1
+  <2> QED BY SMT, DeliverViewShape, <2>1, <2>2
+<1>4. valid' \in [Owners -> BOOLEAN]
+  <2>1. valid \in [Owners -> BOOLEAN]
+    BY StateTypes
+  <2>2. [valid EXCEPT ![requests[a].owner] = TRUE] \in [Owners -> BOOLEAN]
+    BY SMT, UpdateFunction, <1>1, <2>1
+  <2> QED BY SMT, <2>1, <2>2 DEF Deliver
+<1>5. active' \in [Owners -> 0..Attempts]
+  <2>1. 0 \in 0..Attempts
+    BY SMT, Parameters
+  <2>2. (IF active[requests[a].owner] = a THEN 0 ELSE active[requests[a].owner]) \in 0..Attempts
+    BY SMT, StateTypes, <1>1, <2>1
+  <2> QED BY SMT, StateTypes, UpdateFunction, <1>1, <2>2 DEF Deliver
+<1>6. requests' \in [Ids -> RequestRecord]
+  BY SMT, StateTypes, DeliverRequestShape, RequestDoneType, UpdateFunction, <1>1
+<1>7. renewed' \in BOOLEAN /\ recovered' \in BOOLEAN
+      /\ activationRecovered' \in BOOLEAN /\ lateReply' \in BOOLEAN
+  BY SMT DEF Deliver, RootValid
+<1> QED BY <1>2, <1>3, <1>4, <1>5, <1>6, <1>7
+           DEF Deliver, Strong, TypeOK, RootRecord, RequestRecord
+
+THEOREM StartRows ==
+  ASSUME NEW p \in Owners, NEW a \in Ids, NEW kind \in Kinds, Strong,
+         NEW source \in Sources(p, kind), Start(p, a, kind, source)
+  PROVE /\ UNCHANGED <<history, roots, view, now, applied>>
+        /\ a \notin applied
+        /\ requests'[a] = [status |-> "pending", kind |-> kind, owner |-> p,
+             expected |-> source.revision, started |-> now,
+             open |-> IF kind = "fence" THEN FALSE ELSE IF kind = "activate" THEN TRUE ELSE source.open,
+             result |-> Initial]
         /\ \A b \in Ids: b # a => requests'[b] = requests[b]
-    BY SMT, <2>1 DEF Deliver
-  <2> QED BY SMT, <2>1, <2>2, <2>3 DEF Deliver
-<1>6. renewed' \in BOOLEAN /\ recovered' \in BOOLEAN /\ activationRecovered' \in BOOLEAN /\ lateReply' \in BOOLEAN
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Max, RootValid
-<1> QED BY SMT, <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, Parameters DEF Deliver, Strong, TypeOK, Metadata, RequestRecord, RootRecord, Owners, Ids, Kinds, Statuses, Max, RootValid
+<1>1. a \notin applied
+  BY SMT DEF Start, NextId, Strong, Applied
+<1>2. requests \in [Ids -> RequestRecord]
+  BY StateTypes
+<1> QED BY SMT, <1>1, <1>2 DEF Start
+
+THEOREM StartConditions ==
+  ASSUME NEW p \in Owners, NEW a \in Ids, NEW kind \in Kinds, Strong,
+         NEW source \in Sources(p, kind), Start(p, a, kind, source)
+  PROVE /\ (kind = "fence" => p = source.owner + 1)
+        /\ (kind = "validate" => p = source.owner)
+        /\ (kind = "activate" => roots[p].phase = "draining"
+                /\ now >= roots[p].drain + Lease /\ source.owner = p)
+  BY SMT, Parameters DEF Start, Sources, Strong, ViewOK
 
 THEOREM StartPreserves ==
   ASSUME NEW p \in Owners, NEW a \in Ids, NEW kind \in Kinds, Strong,
@@ -301,11 +399,26 @@ THEOREM StartPreserves ==
 <1>5. RootState'
   BY DEF Start, Strong, RootState, Current
 <1>6. Captured'
-  BY SMT, Parameters, SequenceFacts, SourceFacts DEF Start, NextId, Sources, Strong, TypeOK, Captured, ViewOK, Current, Metadata, Owners, Ids, Kinds
+  <2>1. ASSUME NEW b \in Ids, requests'[b].status # "fresh"
+        PROVE LET r == requests'[b] IN
+          /\ r.started <= now'
+          /\ r.expected \in 3..Current'.revision
+          /\ LET source == history'[r.expected - 2] IN
+                CASE r.kind = "fence" -> r.owner = source.owner + 1 /\ ~r.open
+                  [] r.kind = "validate" -> r.owner = source.owner /\ r.open = source.open
+                  [] OTHER -> r.owner = source.owner /\ r.open
+          /\ (r.kind = "activate" => roots'[r.owner].phase # "fresh"
+                                        /\ r.started >= roots'[r.owner].drain + Lease)
+    <3>1. CASE b = a
+      BY SMT, StateTypes, StartRows, StartConditions, SourceFacts, <3>1 DEF Current, Kinds
+    <3>2. CASE b # a
+      BY SMT, StartRows, CapturedEntry, <2>1, <3>2 DEF Current
+    <3> QED BY <3>1, <3>2
+  <2> QED BY <2>1 DEF Captured
 <1>7. Applied'
-  BY SMT, Parameters, SequenceFacts, SourceFacts DEF Start, NextId, Initial, Strong, TypeOK, Applied, Current, Owners, Ids
+  BY SMT, StateTypes, StartRows DEF Strong, Applied, Current
 <1>8. FenceBounds'
-  BY SMT, Parameters, SequenceFacts, SourceFacts DEF Start, NextId, Initial, Sources, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY SMT, StateTypes, StartRows DEF Strong, FenceBounds
 <1>9. now' >= Lease
   BY SMT DEF Start, Strong
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF Strong
@@ -485,33 +598,34 @@ THEOREM TimeoutPreserves ==
 <1>1. TypeOK'
   BY TimeoutType
 <1>2. HistoryOK'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, HistoryOK, EpochOrder
 <1>3. ViewOK'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, ViewOK
 <1>4. ClockOrder'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, ClockOrder
 <1>5. RootState'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, RootState, Current
 <1>6. Captured'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, Captured, Current
 <1>7. Applied'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, Applied, Current
 <1>8. FenceBounds'
-  BY SMT, Parameters, SequenceFacts DEF Timeout, Max, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY TimeoutStable DEF Strong, FenceBounds
 <1>9. now' >= Lease
   BY SMT DEF Timeout, Strong
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9 DEF Strong
 
 THEOREM DeliverRows ==
   ASSUME NEW a \in Ids, Strong, Deliver(a)
-  PROVE /\ now' = now /\ applied' = applied
+  PROVE /\ now' = now /\ applied' = applied /\ history' = history
         /\ \A b \in Ids: requests'[b].owner = requests[b].owner
                            /\ requests'[b].started = requests[b].started
         /\ \A p \in Owners: p # requests[a].owner => roots'[p] = roots[p]
         /\ \A p \in Owners: roots[p].phase # "fresh" => roots'[p].drain = roots[p].drain
+        /\ \A p \in Owners: roots[p].phase # "fresh" => roots'[p].phase # "fresh"
         /\ \A p \in Owners: roots[p].phase = "fresh" /\ roots'[p].phase # "fresh" =>
               p = requests[a].owner /\ roots'[p].drain = now
-<1>1. now' = now /\ applied' = applied
+<1>1. now' = now /\ applied' = applied /\ history' = history
   BY DEF Deliver
 <1>2. \A b \in Ids: requests'[b].owner = requests[b].owner
                      /\ requests'[b].started = requests[b].started
@@ -523,7 +637,82 @@ THEOREM DeliverRows ==
 <1>5. \A p \in Owners: roots[p].phase = "fresh" /\ roots'[p].phase # "fresh" =>
             p = requests[a].owner /\ roots'[p].drain = now
   BY SMT DEF Deliver, Strong, TypeOK
-<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5
+<1>6. \A p \in Owners: roots[p].phase # "fresh" => roots'[p].phase # "fresh"
+  BY SMT DEF Deliver, Strong, TypeOK
+<1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6
+
+THEOREM DeliverRequestFields ==
+  ASSUME NEW a \in Ids, Strong, Deliver(a)
+  PROVE /\ requests[a].status # "fresh"
+        /\ \A b \in Ids:
+              /\ requests'[b].status = IF b = a THEN "done" ELSE requests[b].status
+              /\ requests'[b].owner = requests[b].owner
+              /\ requests'[b].started = requests[b].started
+              /\ requests'[b].expected = requests[b].expected
+              /\ requests'[b].open = requests[b].open
+              /\ requests'[b].kind = requests[b].kind
+              /\ requests'[b].result = requests[b].result
+<1>1. requests[a].status # "fresh"
+  BY DEF Deliver
+<1>2. ASSUME NEW b \in Ids
+      PROVE /\ requests'[b].status = IF b = a THEN "done" ELSE requests[b].status
+            /\ requests'[b].owner = requests[b].owner
+            /\ requests'[b].started = requests[b].started
+            /\ requests'[b].expected = requests[b].expected
+            /\ requests'[b].open = requests[b].open
+            /\ requests'[b].kind = requests[b].kind
+            /\ requests'[b].result = requests[b].result
+  <2>1. requests[b] \in RequestRecord /\ requests \in [Ids -> RequestRecord]
+    BY TypedRequest, StateTypes
+  <2>2. requests'[b] = IF b = a THEN [requests[b] EXCEPT !.status = "done"] ELSE requests[b]
+    BY SMT, DeliverRequestShape, <2>1
+  <2> QED BY SMT, <2>1, <2>2 DEF RequestRecord
+<1> QED BY <1>1, <1>2
+
+THEOREM ReplyApplied ==
+  ASSUME NEW a \in Ids, Strong, requests[a].status = "ok"
+  PROVE a \in applied
+  BY DEF Strong, Applied
+
+THEOREM ReplyValueBounds ==
+  ASSUME NEW a \in Ids, Strong, Deliver(a)
+  PROVE ReplyValue(a).expires <= now + Lease /\ ReplyValue(a).drain <= now
+<1>1. requests[a].status # "fresh" /\ requests[a] \in RequestRecord /\ now \in Nat
+  BY DeliverRequestFields, TypedRequest, StateTypes
+<1>2. requests[a].owner \in Owners /\ requests[a].started \in Nat
+  BY SMT, <1>1 DEF RequestRecord
+<1>3. roots[requests[a].owner] \in RootRecord /\ requests[a].started <= now
+  BY TypedRoot, CapturedEntry, <1>1, <1>2
+<1>4. roots[requests[a].owner].expires <= now + Lease /\ roots[requests[a].owner].drain <= now
+  BY <1>2 DEF Strong, ClockOrder
+<1> QED BY SMT, Parameters, <1>1, <1>2, <1>3, <1>4 DEF ReplyValue, RootRecord, Max
+
+THEOREM ReplyValueState ==
+  ASSUME NEW a \in Ids, Strong, requests[a].status = "ok"
+  PROVE /\ ReplyValue(a).phase # "fresh"
+        /\ requests[a].owner <= Current.owner
+        /\ (ReplyValue(a).phase = "active" => now >= ReplyValue(a).drain + Lease)
+<1>1. a \in applied /\ requests[a].owner \in Owners
+  BY SMT, ReplyApplied, TypedRequest DEF RequestRecord
+<1>2. requests[a].owner <= Current.owner
+      /\ (requests[a].result.open => now >= roots[requests[a].owner].drain + Lease)
+  BY AppliedEntry, <1>1
+<1>3. roots[requests[a].owner].phase = "active" => now >= roots[requests[a].owner].drain + Lease
+  BY <1>1 DEF Strong, RootState
+<1> QED BY SMT, <1>2, <1>3 DEF ReplyValue
+
+THEOREM ReplyFenceBound ==
+  ASSUME NEW a \in Ids, NEW q \in Owners, Strong,
+         requests[a].status = "ok", requests[a].owner < q, roots[q].phase # "fresh"
+  PROVE ReplyValue(a).expires <= roots[q].drain + Lease
+<1>1. a \in applied /\ requests[a].owner \in Owners
+      /\ requests[a].started \in Nat /\ roots[q] \in RootRecord
+  BY SMT, ReplyApplied, TypedRequest, TypedRoot DEF RequestRecord
+<1>2. roots[requests[a].owner] \in RootRecord
+      /\ roots[requests[a].owner].expires <= roots[q].drain + Lease
+      /\ requests[a].started <= roots[q].drain
+  BY SMT, TypedRoot, <1>1 DEF Strong, FenceBounds
+<1> QED BY SMT, Parameters, <1>1, <1>2 DEF ReplyValue, RootRecord, Max
 
 THEOREM DeliverPreserves ==
   ASSUME NEW a \in Ids, Strong, Deliver(a)
@@ -531,17 +720,69 @@ THEOREM DeliverPreserves ==
 <1>1. TypeOK'
   BY DeliverType
 <1>2. HistoryOK'
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Max, RootValid, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  <2>1. \A i \in 1..Len(history'): history'[i].revision = i + 2
+    BY DeliverRows DEF Strong, HistoryOK
+  <2>2. EpochOrder'
+    BY DeliverRows DEF Strong, HistoryOK, EpochOrder
+  <2>3. ASSUME NEW i \in 1..Len(history'), history'[i].open
+        PROVE roots'[history'[i].owner].phase # "fresh"
+              /\ now' >= roots'[history'[i].owner].drain + Lease
+    <3>1. i \in 1..Len(history) /\ history[i].open /\ history' = history /\ now' = now
+      BY DeliverRows, <2>3
+    <3>2. history[i].owner \in Owners /\ roots[history[i].owner].phase # "fresh"
+          /\ now >= roots[history[i].owner].drain + Lease
+      BY SMT, TypedHistory, OpenHistory, <3>1 DEF Metadata
+    <3> QED BY SMT, DeliverRows, <3>1, <3>2
+  <2> QED BY <2>1, <2>2, <2>3 DEF HistoryOK
 <1>3. ViewOK'
-  BY SMT, Parameters, SequenceFacts, AppliedEntry DEF Deliver, Max, RootValid, Strong, TypeOK, ViewOK, Captured, Applied, HistoryOK, Current, Metadata, Owners, Ids
+  <2>1. requests[a].status = "ok" =>
+          requests[a].expected - 1 \in 1..Len(history)
+          /\ requests[a].result = history[requests[a].expected - 1]
+          /\ requests[a].result.owner = requests[a].owner
+    BY SMT, ReplyApplied, AppliedEntry DEF Strong, Applied
+  <2>2. \A p \in Owners: \E i \in 1..Len(history'): view'[p] = history'[i]
+    BY SMT, DeliverRows, DeliverViewShape, StateTypes, <2>1 DEF Strong, ViewOK
+  <2>3. \A p \in Owners: roots'[p].phase # "fresh" => view'[p].owner = p
+    BY SMT, DeliverRootShape, DeliverViewShape, StateTypes, <2>1 DEF Strong, ViewOK
+  <2> QED BY <2>2, <2>3 DEF ViewOK
 <1>4. ClockOrder'
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Max, RootValid, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  BY SMT, DeliverRows, DeliverRootShape, ReplyValueBounds, StateTypes
+     DEF Strong, ClockOrder, RequestRecord
 <1>5. RootState'
-  BY SMT, Parameters, SequenceFacts, AppliedEntry DEF Deliver, Max, RootValid, Strong, TypeOK, RootState, Captured, Applied, HistoryOK, EpochOrder, Current, Metadata, Owners, Ids
+  <2>1. \A p \in Owners: roots'[p].phase = "fresh" => roots'[p].expires = 0 /\ roots'[p].drain = 0
+    BY SMT, DeliverRows, DeliverRootShape, ReplyValueState, StateTypes DEF Strong, RootState, RequestRecord
+  <2>2. \A p \in Owners: roots'[p].phase # "fresh" => p <= Current'.owner
+    BY SMT, DeliverRows, DeliverRootShape, ReplyValueState, StateTypes DEF Strong, RootState, RequestRecord, Current
+  <2>3. \A p \in Owners: roots'[p].phase = "active" => now' >= roots'[p].drain + Lease
+    BY SMT, DeliverRows, DeliverRootShape, ReplyValueState, StateTypes DEF Strong, RootState, RequestRecord
+  <2> QED BY <2>1, <2>2, <2>3 DEF RootState
 <1>6. Captured'
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Max, RootValid, Strong, TypeOK, HistoryOK, EpochOrder, ViewOK, ClockOrder, RootState, Captured, Applied, FenceBounds, Current, Metadata, Owners, Ids, Kinds, Statuses
+  <2>1. ASSUME NEW b \in Ids, requests'[b].status # "fresh"
+        PROVE LET r == requests'[b] IN
+          /\ r.started <= now'
+          /\ r.expected \in 3..Current'.revision
+          /\ LET source == history'[r.expected - 2] IN
+                CASE r.kind = "fence" -> r.owner = source.owner + 1 /\ ~r.open
+                  [] r.kind = "validate" -> r.owner = source.owner /\ r.open = source.open
+                  [] OTHER -> r.owner = source.owner /\ r.open
+          /\ (r.kind = "activate" => roots'[r.owner].phase # "fresh"
+                                        /\ r.started >= roots'[r.owner].drain + Lease)
+    <3>1. requests[b].status # "fresh" /\ requests[b].owner \in Owners
+      BY SMT, DeliverRequestFields, TypedRequest, <2>1 DEF RequestRecord
+    <3>2. requests'[b].started <= now' /\ requests'[b].expected \in 3..Current'.revision
+      BY SMT, DeliverRows, DeliverRequestFields, CapturedEntry, <3>1 DEF Current
+    <3>3. LET r == requests'[b] IN LET source == history'[r.expected - 2] IN
+              CASE r.kind = "fence" -> r.owner = source.owner + 1 /\ ~r.open
+                [] r.kind = "validate" -> r.owner = source.owner /\ r.open = source.open
+                [] OTHER -> r.owner = source.owner /\ r.open
+      BY SMT, DeliverRows, DeliverRequestFields, CapturedEntry, <3>1
+    <3>4. requests'[b].kind = "activate" => roots'[requests'[b].owner].phase # "fresh"
+                  /\ requests'[b].started >= roots'[requests'[b].owner].drain + Lease
+      BY SMT, DeliverRows, DeliverRequestFields, CapturedEntry, <3>1
+    <3> QED BY <3>2, <3>3, <3>4
+  <2> QED BY <2>1 DEF Captured
 <1>7. Applied'
-  BY SMT, Parameters, SequenceFacts DEF Deliver, Max, RootValid, Strong, TypeOK, Applied, Current, Metadata, Owners, Ids
+  BY SMT, DeliverRows, DeliverRequestFields, StateTypes DEF Strong, Applied, Current
 <1>8. FenceBounds'
   <2>1. ASSUME NEW p \in Owners, NEW q \in Owners, p < q, roots'[q].phase # "fresh"
         PROVE /\ roots'[p].expires <= roots'[q].drain + Lease
@@ -565,10 +806,12 @@ THEOREM DeliverPreserves ==
               requests[a].started <= roots[q].drain
         BY SMT, <2>1, <3>3 DEF Strong, Applied, FenceBounds
       <4>3. roots'[p].expires <= roots'[q].drain + Lease
-        BY SMT, Parameters, TypedRequest, <2>1, <3>1, <4>1, <4>2
-           DEF Deliver, Max, RequestRecord, Strong, TypeOK
+        BY SMT, DeliverRootShape, ReplyFenceBound, StateTypes, <2>1, <3>3, <4>1
+           DEF RequestRecord
       <4>4. \A b \in applied': requests'[b].owner = p => requests'[b].started <= roots'[q].drain
-        BY SMT, DeliverRows, <2>1, <3>3, <4>1 DEF Strong, TypeOK, FenceBounds
+        <5>1. \A b \in applied: requests[b].owner = p => requests[b].started <= roots[q].drain
+          BY <2>1, <3>3 DEF Strong, FenceBounds
+        <5> QED BY SMT, DeliverRows, DeliverRequestFields, StateTypes, <4>1, <5>1
       <4> QED BY <4>3, <4>4
     <3> QED BY <3>2, <3>3
   <2> QED BY <2>1 DEF FenceBounds

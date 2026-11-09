@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "recorded_at": "2026-11-09T21:59:11.458700+00:00",
-  "base_commit": "79aff076eca2f80f2a7e958bb485bcb70e96cd8a",
+  "recorded_at": "2026-11-09T22:43:47.493730+00:00",
+  "base_commit": "d5439e120ae7a22c0aa2a7e881dcd7fd648864b8",
   "status": "Abstract root-request safety proof and finite regressions; no runtime adoption",
   "previous_finite_evidence": "root-requests-candidate-2026-11-09.json",
   "standard_model_checker_passed": true,
@@ -204,7 +204,7 @@
   ],
   "proof": {
     "theorem": "Spec => [](RootExclusive /\\ EpochOrder)",
-    "strict_obligations": 777,
+    "strict_obligations": 973,
     "fresh_fingerprints": true,
     "scope": "Arbitrary finite epoch and invocation counts, positive integer lifetimes, time bounds and execution lengths, from the active-first-root seed",
     "inductive_invariant": "Strong: types, history order, confirmed views, captured requests, applied results, clock order and bounds on older grants/requests at later confirmed fences",
@@ -215,34 +215,34 @@
         "required_action": "Apply(a)",
         "failed_obligations": 1,
         "checked_obligations": 6,
-        "log_sha256": "f5bab647016633bfbcfe6997b10f57341d0e4c9f35100912edd6f54ca008fec3"
+        "log_sha256": "a049199d9d82c3915fefb91972544686852679ed213eb5c78260e9be41e65cde"
       },
       {
         "name": "root-requests-timeout",
-        "theorem": "TimeoutPreserves",
+        "theorem": "TimeoutStable",
         "required_action": "Timeout(p, a)",
-        "failed_obligations": 2,
-        "checked_obligations": 42,
-        "log_sha256": "ef0d8e566cf38fa75da17c07fc95f58c9c57101573d90573cf3c6c52e5d2a9e0"
+        "failed_obligations": 1,
+        "checked_obligations": 2,
+        "log_sha256": "68be29ace1902bf5cd611304ade40c26e7898f20d07545376979c5a97c665a61"
       },
       {
         "name": "root-requests-reply",
-        "theorem": "DeliverPreserves",
+        "theorem": "DeliverRootShape",
         "required_action": "Deliver(a)",
         "failed_obligations": 1,
-        "checked_obligations": 93,
-        "log_sha256": "cb699ec76a64252dc7fe3a8d79bee2536b31f86b01cf36ebff6100e9c93d20d3"
+        "checked_obligations": 1,
+        "log_sha256": "2aabd17244be839366b98fd316cd4f799aa2eaea45979e3a13018733da8007a7"
       },
       {
         "name": "root-requests-drain",
-        "theorem": "StartPreserves",
+        "theorem": "StartConditions",
         "required_action": "Start(p, a, kind, source)",
         "failed_obligations": 1,
-        "checked_obligations": 33,
-        "log_sha256": "70dbbf74534a9c7c0142ecc9dfa699e5a77eac8a9093c5bc4c80b273509dfa09"
+        "checked_obligations": 3,
+        "log_sha256": "a8304858eecda40af9a222a94cf60ead4311cbb5a07c6b68c66f4740f501c6bc"
       }
     ],
-    "local_seconds": 260.216702,
+    "local_seconds": 207.983096,
     "standard_library_facts": [
       "SequenceTheorems.LenProperties",
       "SequenceTheorems.IsASeq",
@@ -277,17 +277,17 @@
     "Dockerfile": "fa0eee0948f4f1324312ec60f743ec23f4fcb5c1feedf1b6a7eb06bbc5a7c6dc",
     "scripts/check-candidate.sh": "90d976ae627b640fdf166e49bcb537ba4b39288729363fe9598d6582a9e27d9e",
     "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
-    "scripts/check-proof.sh": "6b9db0faca7462495923858fd86ff111bd2314fad3fb3c11087776ccc0021e53",
-    "scripts/install-tlaps.sh": "cb8d111a2d246c8cc9597d9e8a4a206b33f769c6b724d855a14c7c436d96df30",
+    "scripts/check-proof.sh": "4e0ec0797c53a4bc99eefd595daf6c0d33a174917195c68f19bf4589c2d8ee54",
+    "scripts/install-tlaps.sh": "95ddc6c9b7ea9afeba28b7c0fe658150595f18caa059e995b2861e30050d26bc",
     "site/build.mjs": "a577ecc1c6058add8c6f527e98a7c2950a73bea57d29985ad360eeca7946547f",
     "spec/candidates/RootRequests.cfg": "f893b6c9e980e8219a11ad1e870d94bdde02532cc7b8791410af78bb9e3a354f",
     "spec/candidates/RootRequests.checks": "b2ac0c998e75bdef031347e555c08848ee97b85d8b805cebf7f52130893b5a46",
-    "spec/candidates/RootRequests.proof": "9dfbd0cc51c4333c69547814519b9eea642f3be8817eddc1ae3beda7dc6cd404",
+    "spec/candidates/RootRequests.proof": "fb450225adfb761bea2771f19975e18c964c694718be17c9d0cad4ab93417e28",
     "spec/candidates/RootRequests.tla": "cbfa00e72abda8e2fcc6cb8990940ca0073e62bec7174a16d9d31caffa3c7948",
     "spec/candidates/RootRequestsActivationRecovered.cfg": "8f1500ee7de87768ef48cfb0150922ee03395e72b15eea184a93177d84163443",
     "spec/candidates/RootRequestsLateRejected.cfg": "06c26bfb1a900001a81498e2a8c87b7b29db19eb280664857d996c52ee3aa037",
     "spec/candidates/RootRequestsLateReply.cfg": "3c5321165f751f679d71584878259fff9d4e7772b2735b94df1ad7029783d8d7",
-    "spec/candidates/RootRequestsProof.tla": "3c73e06de674dd7c9a5fa1c6555427ce5c419b7d44ee0988fbd26a2acad19b82",
+    "spec/candidates/RootRequestsProof.tla": "d545d5433bd5825d905aaa45889ef0681386b14e48a7f894e59b060d602371a0",
     "spec/candidates/RootRequestsRecovered.cfg": "b8b7fbc55f6006476814972e21db0cdf810248e079483d25124ce5dedabfe283",
     "spec/candidates/RootRequestsRenewed.cfg": "4195f7a54cd4c2a58b98d5efa126bcaea71671eadb78b99d2028542fc772ae76",
     "spec/candidates/RootRequestsRepeated.cfg": "cd755169488a11cc7cf2186f7afa7ae0006d73207e66930498f89dfdcf8a390e",
@@ -310,13 +310,16 @@
     ".tools/candidates/RootRequests/model-root-requests-three-epochs.log": "8eb11087d4db5c3a47ce9773a2bfe748cbc97c0e3bb29bea8aa66e00cfbec54d",
     ".tools/candidates/RootRequests/model-root-requests-timeout.log": "4dc1cb33472a29304d2e71c1d27e7e0cb2e32ccafe3363cb0ee514887ae58311",
     ".tools/candidates/RootRequests/model-root-requests.log": "4fff22ab3a9313ec489f4ed49660f7611d4df5f904ff438ec36c99ccbbffee32",
-    ".tools/proof-negative-root-requests-compare.log": "f5bab647016633bfbcfe6997b10f57341d0e4c9f35100912edd6f54ca008fec3",
-    ".tools/proof-negative-root-requests-drain.log": "70dbbf74534a9c7c0142ecc9dfa699e5a77eac8a9093c5bc4c80b273509dfa09",
-    ".tools/proof-negative-root-requests-reply.log": "cb699ec76a64252dc7fe3a8d79bee2536b31f86b01cf36ebff6100e9c93d20d3",
-    ".tools/proof-negative-root-requests-timeout.log": "ef0d8e566cf38fa75da17c07fc95f58c9c57101573d90573cf3c6c52e5d2a9e0",
-    ".tools/proof-root-requests.log": "796dc9b4933fda71eac32422c3a8e2421e83b0749a3d091d0e63e502cce7768e",
+    ".tools/proof-negative-root-requests-compare.log": "a049199d9d82c3915fefb91972544686852679ed213eb5c78260e9be41e65cde",
+    ".tools/proof-negative-root-requests-drain.log": "a8304858eecda40af9a222a94cf60ead4311cbb5a07c6b68c66f4740f501c6bc",
+    ".tools/proof-negative-root-requests-reply.log": "2aabd17244be839366b98fd316cd4f799aa2eaea45979e3a13018733da8007a7",
+    ".tools/proof-negative-root-requests-timeout.log": "68be29ace1902bf5cd611304ade40c26e7898f20d07545376979c5a97c665a61",
+    ".tools/proof-root-requests.log": "bbb4cca39fb3d8b68a1d0b30bbf5db4239fc9415d93385f6c98e6518b33cad9c",
     ".tools/root-requests-general-maintained.log": "7b89c0b642c7880bb4c99e813b0b5d8505b157278a705e09f8b24fc03a579854",
-    ".tools/root-requests-proof-standard.log": "7a93c9fc66382e78b691efa1127800bcc51a58918c2e21d8dd37a643d9a18b8b"
+    ".tools/root-requests-proof-standard.log": "c95371a1ea74d0551701c8349d7ea78b9f048327db40cac5c62874a8c23149c2",
+    ".tools/tlaps-retained-install-verification.json": "6d5e9934972cccfef76186c6de045f924b047945548b7edfe5806d8f5e2106c1",
+    ".tools/tlaps-cold-check.log": "c1a709f7907b65f1ca2568672f901b7e4fc879bd40ce9a6e3b84c7c3293521dd",
+    ".tools/root-requests-builder-proof.log": "8398c36db619b2d1cbd760e6664a7a224185eba0080b26972463e16d966a52a4"
   },
   "toolchain": {
     "tlc_release": "1.7.4",
@@ -328,9 +331,57 @@
     "bundled_sequence_library_sha256": {
       "SequenceTheorems.tla": "1fdbed9077bba9db329e499535be29f8d2e6fba3a2b338e364c3b0ec56596bf9",
       "SequenceTheorems_proofs.tla": "8f30d6f458ac623df4db14c88ab758fcb2a97889e42427e67634dcfc61510b20"
-    }
+    },
+    "retained_release": "https://github.com/ericflo/durable-db-site/releases/tag/verification-tlapm-c8ddc44",
+    "cold_install": {
+      "cold_public_download_verified": true,
+      "checker_version": "c8ddc44",
+      "archive_sha256": "fa6d537fb62f8526e7dd0d716c88e3d18931cc5c6b5d9ba1949afdb8096fb758",
+      "checksum_tripwires": [
+        {
+          "case": "supplied",
+          "rejected": true,
+          "no_extraction": true,
+          "partial_removed": true
+        },
+        {
+          "case": "cached",
+          "rejected": true,
+          "no_extraction": true,
+          "partial_removed": true
+        }
+      ]
+    },
+    "retention_scope": "Exact former upstream binary archive, companion upstream sources and notices; no claim of reproducible source build"
   },
+  "previous_qualification_attempts": [
+    {
+      "source_commit": "d5439e120ae7a22c0aa2a7e881dcd7fd648864b8",
+      "woodpecker": {
+        "pipeline": 56,
+        "status": "failure",
+        "failed_obligations": 26,
+        "checked_obligations": 777,
+        "build_log_sha256": "a535490b268db5198117d33c5a90f367619aa60893c147f435ea531e4861ac55"
+      },
+      "public_pages_published": false,
+      "reason": "Broad proof queries did not discharge on the CI builder; local complete proof and mutations passed. No protocol or invariant relaxation is permitted."
+    }
+  ],
   "qualification": {
-    "status": "pending Woodpecker and public Pages verification"
+    "status": "pending",
+    "reason": "Full proof and four controls passed locally and in the exact Docker target on the builder that failed pipeline 56. Complete Woodpecker qualification and Pages publication remain required."
+  },
+  "builder_preflight": {
+    "status": "success",
+    "target": "proof-root-requests",
+    "same_builder_as_failed_pipeline": 56,
+    "strict_obligations": 973,
+    "required_unsafe_controls": 4,
+    "positive_seconds": 416.930907,
+    "stage_seconds": 528.7,
+    "cold_toolchain_download_verified": true,
+    "build_log_sha256": "8398c36db619b2d1cbd760e6664a7a224185eba0080b26972463e16d966a52a4",
+    "temporary_remote_context_removed": true
   }
 }
