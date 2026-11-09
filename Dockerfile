@@ -168,22 +168,29 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./
 COPY .cargo .cargo
 COPY src src
 COPY tests tests
-COPY examples examples
-COPY clients clients
-COPY scripts/test-client.sh scripts/test-client.sh
-COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
-COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
     cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings \
     && cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect \
     && cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect \
-    && DURABLE_DB_TEST_BINARY=/cache/target/debug/durable-db scripts/test-client.sh \
     && cargo build --locked --release --target x86_64-unknown-linux-musl \
-    && mkdir -p /out && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \
+    && mkdir -p /out /test-tools && cp /cache/target/debug/durable-db /test-tools/durable-db \
+    && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \
     && /out/durable-db --version && kache stats
+# Application-only edits must not invalidate the Rust checks/build layer.
+# This stage still tests against the executable built from this exact source.
+FROM build AS client-check
+COPY examples examples
+COPY clients clients
+COPY scripts/test-client.sh scripts/test-client.sh
+COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
+COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
+RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
+    && mkdir -p /checks && touch /checks/javascript.passed
+
 FROM build AS assembled
+COPY --from=client-check /checks/javascript.passed /out/checks/javascript.passed
 COPY --from=proof-tools /opt/proof-tools/toolchain.tar.gz /out/verification-tools/tlapm-c8ddc44-linux-x86_64.tar.gz
 COPY --from=proof-tools /opt/proof-tools/tlapm/doc/tlapm/LICENSE /out/verification-tools/LICENSE.tlapm
 COPY --from=model /checks /out/checks
