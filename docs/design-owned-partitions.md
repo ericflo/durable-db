@@ -56,7 +56,11 @@ The provider contract is a separate obligation from an experiment: [AWS document
 
 Write fencing alone does not prevent a paused old owner from answering stale reads. A peer quorum alone also does not explain how an isolated former single-node deployment is excluded after complete replacement.
 
-The existing `ServingLease` experiment makes one possible tradeoff explicit: a bounded-rate elapsed clock that continues advancing during process pauses, request-start-based expiry, and a takeover drain covering every old grant. It fails if a former owner's clock can stop while the replacement proceeds. Its commit operation still assumes atomic ownership checks; it is not yet composed with the log model above.
+The existing `ServingLease` experiment makes one possible tradeoff explicit: a bounded-rate elapsed clock that continues advancing during process pauses, request-start-based expiry, and a takeover drain covering every old grant. It fails if a former owner's clock can stop while the replacement proceeds. Its commit operation still assumes atomic ownership checks.
+
+The newer `OwnedWal` candidate combines that serving boundary with log upload, acknowledgement and recovery for one handoff. The old writer checks permission **after** upload, without an atomic global-owner check on each acknowledgement. It covers delayed grants, old-process pauses/loss, successor replacement with a different clock origin, stepwise recovery, a durable seal and one new acknowledged batch. An unfinished drain restarts on the replacement's own clock; completed drain decisions and seals are abstract durable records. Its two-position, two-time-step instance passes **570,280 states** and all seven required negative controls. See [the exact assumptions, limits and evidence](evidence/owned-wal-candidate-2026-11-09.json).
+
+This is initial bounded composition, not a complete cluster model. The successor remains the final owner after activation. Repeated epochs, many partitions, delegation, transaction/request semantics and liveness are still outside it. In particular, it does not yet establish a scalable renewal hierarchy or justify the deployment platform's clock behavior.
 
 The repository's current no-clock correctness rule was an implementation constraint, not a requirement in the original product brief. It remains in force for runtime code. Adopting elapsed-time authority would require a documented architecture decision, justified platform/timing assumptions, a composed model and fault tests. No clock-based runtime change is made by these experiments. No external coordinator is selected as a substitute.
 
@@ -76,7 +80,7 @@ This demonstrates useful provider concurrency and supports investigating batched
 
 ## Next implementation gate
 
-Compose serving authority with the log/acknowledgement boundary, then implement the smallest executable path with bounded memory and caches. Use the same HTTP transaction semantics and repeat the same workload on B2 and S3-compatible storage. Measure provider latency and end-to-end overhead separately.
+Extend the initial serving/log model to the renewal hierarchy and repeated ownership changes, state an implementable timing contract, then implement the smallest executable path with bounded memory and caches. Use the same HTTP transaction semantics and repeat the same workload on B2 and S3-compatible storage. Measure provider latency and end-to-end overhead separately.
 
 The first vertical run must combine warm reads without object-store control calls, independent databases, group commit, owner loss with the old process still alive, scale-down to one, total compute loss and recovery of every acknowledgement. Do not qualify throughput using a mock ownership boundary and describe it as a safe replacement. Only after this gate should the design expand to multilevel indexes, retained snapshots, compaction, physical admission, lifecycle APIs and the full production failure matrix.
 
