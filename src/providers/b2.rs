@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
+mod retry;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +55,7 @@ impl Native {
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .https_only(true)
+            .user_agent(concat!("durable-db/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let auth = authorize(&client, &key_id, &application_key).await?;
         for required in [
@@ -83,16 +85,21 @@ impl Native {
             .and_then(|h| h.strip_suffix(".backblazeb2.com"))
             .context("unexpected B2 S3 endpoint")?
             .to_owned();
-        let response = client
-            .post(format!(
-                "{}/b2api/v4/b2_list_buckets",
-                auth.api_info.storage_api.api_url
-            ))
-            .header("Authorization", &auth.authorization_token)
-            .json(&json!({"accountId":auth.account_id,"bucketName":bucket_name}))
-            .send()
+        let account = auth.account_id.clone();
+        let mut native = Self {
+            client,
+            key_id,
+            application_key,
+            auth: RwLock::new(auth),
+            bucket_id: String::new(),
+            prefix: format!("{prefix}/"),
+        };
+        let (status, body) = native
+            .call(
+                "b2_list_buckets",
+                &json!({"accountId":account,"bucketName":bucket_name}),
+            )
             .await?;
-        let (status, body) = json_response(response).await?;
         ensure_success(status, &body)?;
         let bucket = body["buckets"]
             .as_array()
@@ -102,7 +109,7 @@ impl Native {
         if bucket["bucketType"] != "allPrivate" {
             bail!("durable-db requires a private B2 bucket");
         }
-        let bucket_id = bucket["bucketId"]
+        native.bucket_id = bucket["bucketId"]
             .as_str()
             .context("missing bucket id")?
             .to_owned();
@@ -110,18 +117,11 @@ impl Native {
             .with_bucket_name(bucket_name)
             .with_region(region)
             .with_endpoint(endpoint)
-            .with_access_key_id(&key_id)
-            .with_secret_access_key(&application_key)
+            .with_access_key_id(&native.key_id)
+            .with_secret_access_key(&native.application_key)
             .build()?;
         let files = Arc::new(Remote::new(Arc::new(s3), prefix)?);
-        let native = Arc::new(Self {
-            client,
-            key_id,
-            application_key,
-            auth: RwLock::new(auth),
-            bucket_id,
-            prefix: format!("{prefix}/"),
-        });
+        let native = Arc::new(native);
         Published::open(files, native, prefix).await
     }
     async fn update(
@@ -151,6 +151,16 @@ impl Native {
         }))
     }
     async fn call(&self, operation: &str, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
+        let reply = if matches!(operation, "b2_list_buckets" | "b2_list_file_versions") {
+            retry::read(|| self.call_once(operation, body)).await?
+        } else {
+            // In particular, a lost updateBucket response must not become a
+            // definite conflict after an automatic transport/status retry.
+            self.call_once(operation, body).await?
+        };
+        Ok((reply.status, reply.body))
+    }
+    async fn call_once(&self, operation: &str, body: &Value) -> anyhow::Result<retry::Reply> {
         for attempt in 0..2 {
             let auth = self.auth.read().await.clone();
             let metric = match operation {
@@ -172,18 +182,18 @@ impl Native {
                     .json(body)
                     .send()
                     .await?;
-                json_response(response).await
+                retry::Reply::read(response).await
             }
             .await;
             timer.finish(match &response {
-                Ok((status, _)) => metrics::http_outcome(status.as_u16()),
+                Ok(reply) => metrics::http_outcome(reply.status.as_u16()),
                 Err(_) => Outcome::Error,
             });
             let result = response?;
             if attempt == 0
-                && result.0 == StatusCode::UNAUTHORIZED
+                && result.status == StatusCode::UNAUTHORIZED
                 && matches!(
-                    result.1["code"].as_str(),
+                    result.body["code"].as_str(),
                     Some("expired_auth_token" | "bad_auth_token")
                 )
             {
@@ -227,7 +237,14 @@ async fn json_response(mut response: reqwest::Response) -> anyhow::Result<(Statu
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok((status, serde_json::from_slice(&bytes)?))
+    let body = if status.is_success() {
+        serde_json::from_slice(&bytes)?
+    } else {
+        // A gateway may return an HTML error. Retain the HTTP status without
+        // exposing its body or losing the read-only retry classification.
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    Ok((status, body))
 }
 fn ensure_success(status: StatusCode, _body: &Value) -> anyhow::Result<()> {
     // Never print provider messages: they can contain sensitive names or request material.
@@ -309,21 +326,42 @@ mod tests {
     use axum::{Json, Router, extract::State, routing::post};
     use std::sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     struct Mock {
         stale: AtomicBool,
+        listing_failures: AtomicUsize,
+        listing_calls: AtomicUsize,
+        update_calls: AtomicUsize,
+        lose_update_ack: AtomicBool,
         bucket: Mutex<Bucket>,
         deleted: Mutex<Vec<String>>,
     }
-    async fn listing(State(s): State<Arc<Mock>>) -> Json<Value> {
+    async fn listing(State(s): State<Arc<Mock>>) -> (StatusCode, Json<Value>) {
+        s.listing_calls.fetch_add(1, Ordering::SeqCst);
+        if s.listing_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"code":"unavailable"})),
+            );
+        }
         let b = s.bucket.lock().unwrap();
         if s.stale.swap(false, Ordering::SeqCst) {
-            return Json(json!({"buckets":[{"revision":0,"bucketInfo":{"head":"obsolete"}}]}));
+            return (
+                StatusCode::OK,
+                Json(json!({"buckets":[{"revision":0,"bucketInfo":{"head":"obsolete"}}]})),
+            );
         }
-        Json(json!({"buckets":[{"revision":b.revision,"bucketInfo":b.info}]}))
+        (
+            StatusCode::OK,
+            Json(json!({"buckets":[{"revision":b.revision,"bucketInfo":b.info}]})),
+        )
     }
     async fn update(State(s): State<Arc<Mock>>, Json(v): Json<Value>) -> (StatusCode, Json<Value>) {
+        s.update_calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(v["bucketId"], "test-bucket");
         assert!(v.get("bucketType").is_none() && v.get("lifecycleRules").is_none());
         let mut b = s.bucket.lock().unwrap();
@@ -332,6 +370,12 @@ mod tests {
         }
         b.revision += 1;
         b.info = serde_json::from_value(v["bucketInfo"].clone()).unwrap();
+        if s.lose_update_ack.swap(false, Ordering::SeqCst) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"code":"lost_response"})),
+            );
+        }
         (
             StatusCode::OK,
             Json(json!({"revision":b.revision,"bucketInfo":b.info})),
@@ -354,6 +398,10 @@ mod tests {
     async fn native_http_barrier_rejects_stale_observation_and_deletes_exact_versions() {
         let state = Arc::new(Mock {
             stale: AtomicBool::new(true),
+            listing_failures: AtomicUsize::new(2),
+            listing_calls: AtomicUsize::new(0),
+            update_calls: AtomicUsize::new(0),
+            lose_update_ack: AtomicBool::new(false),
             bucket: Mutex::new(Bucket {
                 version: None,
                 revision: 1,
@@ -392,6 +440,7 @@ mod tests {
         };
         let read = native.read_fresh().await.unwrap();
         assert_eq!(read.revision, 2);
+        assert_eq!(state.listing_calls.load(Ordering::SeqCst), 4);
         assert_eq!(read.info["head"], "current");
         assert!(
             native
@@ -409,6 +458,25 @@ mod tests {
         );
         native.delete_versions("blocks/one").await.unwrap();
         assert_eq!(*state.deleted.lock().unwrap(), vec!["v1", "v2"]);
+        let updates = state.update_calls.load(Ordering::SeqCst);
+        state.lose_update_ack.store(true, Ordering::SeqCst);
+        let mut next = read.info.clone();
+        next.insert("head".into(), "changed".into());
+        assert!(native.replace(&read, next).await.is_err());
+        assert_eq!(
+            state.update_calls.load(Ordering::SeqCst),
+            updates + 1,
+            "uncertain writes are never retried as fresh comparisons"
+        );
+        assert_eq!(native.read().await.unwrap().info["head"], "changed");
+        let reads = state.listing_calls.load(Ordering::SeqCst);
+        state.listing_failures.store(9, Ordering::SeqCst);
+        assert!(native.read().await.is_err());
+        assert_eq!(
+            state.listing_calls.load(Ordering::SeqCst),
+            reads + 3,
+            "read retries have a hard attempt bound"
+        );
         server.abort();
     }
 }
