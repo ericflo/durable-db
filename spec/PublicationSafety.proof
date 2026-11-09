@@ -1,0 +1,2 @@
+tag|publication
+negative|fence||Fence(c, TRUE)|s!IF advance THEN fence + 1 ELSE fence!IF advance THEN fence ELSE fence!

@@ -1,0 +1,5 @@
+tag|partition-control
+dependency|RootControl
+negative|partition-assignment|IssueOwnerPreserves|IssueOwner(o)|s!(UnsafeAssignment \\/!(TRUE \\/!
+negative|partition-drain|FinishMoveDrain|FinishMove(p, d)|s!(UnsafeMoveDrain \\/!(TRUE \\/!
+negative|partition-reply|DeliverOwnerPreserves|DeliverOwner(o)|s!(IF UnsafeOwnerReply THEN now ELSE grants\[o\].requested)!now!

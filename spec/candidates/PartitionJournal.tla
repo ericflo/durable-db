@@ -127,8 +127,10 @@ CompleteHistory == \A j \in Journals: ready[j] =>
 ServingHistory == \A j \in Journals: (ready[j] /\ JournalValid(j)) =>
     \A g \in 1..Generations: acknowledged[Older(j, g)] <=
         IF g < j[2] THEN views[j][g] ELSE IF g = j[2] THEN consumed[j] ELSE 0
-HistoryInvariant == PartitionInvariant /\ HistoryTypeOK /\ DurableHistory
-                    /\ SelectedHistory /\ ImmutableHistory /\ CompleteHistory /\ ServingHistory
+HistoryInvariant == OwnerStrong /\ RootExclusive /\ ChildWithinRoot /\ ChildExclusive
+                    /\ OwnerWithinRoot /\ PartitionExclusive
+                    /\ HistoryTypeOK /\ DurableHistory /\ SelectedHistory
+                    /\ ImmutableHistory /\ CompleteHistory /\ ServingHistory
 HistorySmall == PartitionSmall /\ \A j \in Journals: planned[j] <= LogLength
 NotMovedHistory == ~\E j \in Journals:
     j[2] = 2 /\ ready[j] /\ JournalValid(j) /\ acknowledged[Older(j, 1)] > 0

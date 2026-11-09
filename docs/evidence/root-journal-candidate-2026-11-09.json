@@ -267,5 +267,13 @@
     ".tools/root-journal-builder-diagnostic.log": "866d32ea3176c2fd8722724791054093c7bd76e722554a025b5a588f0eccfef3",
     ".tools/root-journal-deduplicated-check.log": "95b0ca1e9a2b6b30632cc4475a29f4d49ee35dc575cea0ec43258d040528adf8",
     ".tools/root-journal-proof-decomposed.log": "62f4362671c6e2014d0107bff9d60d6ad4d63a4d2e4b22e34320432899513cdf"
+  },
+  "qualification": {
+    "source_commit": "e3b89aac376eab63f4319a19775a4432d4515abb",
+    "woodpecker": {
+      "pipeline": 46,
+      "status": "success"
+    },
+    "public_pages_evidence_matches_commit": true
   }
 }

@@ -74,6 +74,39 @@ OwnerTypeOK ==
           expires : Nat, requests : Nat, extended : BOOLEAN]]
 PartitionInvariant == Strong /\ RootExclusive /\ ChildWithinRoot /\ ChildExclusive
                       /\ OwnerTypeOK /\ OwnerWithinRoot /\ PartitionExclusive
+\* Inductive strengthening for arbitrary generations and root epochs. A
+\* frozen placement has advanced its generation, but the preceding generation
+\* may still hold permission. Every earlier generation has permanently ended.
+EffectiveGeneration(d) == IF placement[d].phase = "frozen"
+                          THEN placement[d].generation - 1 ELSE placement[d].generation
+GrantState == \A o \in Owners:
+    /\ grants[o].requested <= now
+    /\ grants[o].expires <= roots[o[1]].expires
+    /\ (grants[o].expires > 0 => roots[o[1]].phase = "active")
+    /\ (grants[o].pending = "reply" =>
+          roots[o[1]].phase = "active"
+          /\ grants[o].requested + grants[o].duration <= roots[o[1]].expires)
+PlacementState == \A d \in Partitions:
+    /\ placement[d].drain <= now
+    /\ placement[d].root <= authority.owner
+    /\ (placement[d].generation = 1 =>
+          placement[d].root = 0 /\ placement[d].phase = "open" /\ placement[d].drain = 0)
+    /\ (placement[d].generation > 1 =>
+          placement[d].root > 0 /\ roots[placement[d].root].phase = "active")
+    /\ (\A p \in Ids: (p > placement[d].root /\ roots[p].phase # "fresh") =>
+          placement[d].drain <= roots[p].drain)
+NoFutureGrants == \A o \in Owners:
+    (grants[o].expires > 0 \/ grants[o].pending = "reply") =>
+       o[3] <= EffectiveGeneration(o[2])
+FrozenBounds == \A o \in Owners: o[3] < placement[o[2]].generation =>
+    /\ grants[o].expires <= placement[o[2]].drain + Lease
+    /\ (grants[o].pending = "reply" =>
+          grants[o].requested + grants[o].duration <= placement[o[2]].drain + Lease)
+EndedGenerations == \A o \in Owners: o[3] < EffectiveGeneration(o[2]) =>
+    /\ grants[o].expires <= now
+    /\ (grants[o].pending = "reply" => grants[o].requested + grants[o].duration <= now)
+OwnerStrong == Strong /\ OwnerTypeOK /\ GrantState /\ PlacementState
+               /\ NoFutureGrants /\ FrozenBounds /\ EndedGenerations
 \* Reach a replacement and an unmoved partition with simultaneous permission
 \* under the same original root. This is coverage, not an availability theorem.
 NotIndependentMove == ~\E a, b \in Owners:

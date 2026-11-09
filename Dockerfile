@@ -169,32 +169,38 @@ RUN scripts/install-tlaps.sh /opt/proof-tools
 ENV TLAPM=/opt/proof-tools/tlapm/bin/tlapm
 FROM proof-tools AS proof
 COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY spec/PublicationSafety.tla spec/PublicationSafetyProof.tla spec/
+COPY spec/PublicationSafety.tla spec/PublicationSafetyProof.tla spec/PublicationSafety.proof spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM proof-tools AS proof-journal
 COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY spec/Journal.tla spec/JournalProof.tla spec/
+COPY spec/Journal.tla spec/JournalProof.tla spec/Journal.proof spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM proof-tools AS proof-grant-bounds
 COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY spec/candidates/GrantBounds.tla spec/candidates/GrantBoundsProof.tla spec/candidates/
+COPY spec/candidates/GrantBounds.tla spec/candidates/GrantBoundsProof.tla spec/candidates/GrantBounds.proof spec/candidates/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh GrantBounds && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM proof-tools AS proof-root-control
 COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY spec/candidates/RootControl.tla spec/candidates/RootControlProof.tla spec/candidates/
+COPY spec/candidates/RootControl.tla spec/candidates/RootControlProof.tla spec/candidates/RootControl.proof spec/candidates/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh RootControl && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM proof-root-control AS proof-root-journal
-COPY spec/candidates/RootJournal.tla spec/candidates/RootJournalProof.tla spec/candidates/
+COPY spec/candidates/RootJournal.tla spec/candidates/RootJournalProof.tla spec/candidates/RootJournal.proof spec/candidates/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    DURABLE_DB_ROOT_PROOF_CHECKED=1 scripts/check-proof.sh RootJournal \
+    DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh RootJournal \
+    && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
+FROM proof-root-control AS proof-partition-control
+COPY spec/candidates/PartitionControl.tla spec/candidates/PartitionControlProof.tla spec/candidates/PartitionControl.proof spec/candidates/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh PartitionControl \
     && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM model-tools AS model-candidate-rootjournal
@@ -216,6 +222,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=proof-partition-control /checks/ /checks/
 COPY --from=model-candidate-partitionjournal /checks/ /checks/
 COPY --from=model-candidate-partitioncontrol /checks/ /checks/
 COPY --from=model-provider-register /checks/ /checks/

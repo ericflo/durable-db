@@ -1,0 +1,2 @@
+tag|journal
+negative|journal-gap||Consume(n, TRUE)|s!n = writer\.durable + 1!TRUE!
