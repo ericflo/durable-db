@@ -1,0 +1,35 @@
+# Durable authorization lifecycle: working design
+
+Status: design work, not an implemented capability. Metrics-only credentials are implemented separately. Individual database-token revocation, overlapping signing-key rotation, and safe database creation retries remain production gates.
+
+## State and linearization
+
+A database policy belongs in its authoritative manifest, alongside data and receipts. It has a monotonically increasing credential generation and a bounded set of revoked token IDs. Revoking an ID or advancing the generation replaces the manifest without changing the user data revision. The manifest's unique identity changes, so every previously prepared write or proposal loses its expected-target comparison. A commit must authorize against the same manifest snapshot from which it builds its writes. An earlier authorization check followed by a fresh, unchecked data snapshot is unsafe.
+
+Reads authorize against their conditionally validated snapshot. A request starting after a completed revocation cannot use an older authorization snapshot. An already-running read may finish from an authorized earlier snapshot, consistent with linearization at its barrier. No pod-local policy cache, clock lease, or Kubernetes identity can authorize a database operation. Cryptographic verification and existing token expiration checks remain preliminary local checks; a valid signature alone does not establish current database authorization.
+
+New database tokens carry a fresh token ID, the database policy's fresh incarnation UUID, and its credential generation. Bind the incarnation from the start so a future deletion/recreation of the same database name cannot revive old credentials. The initial model abstracts one incarnation; deletion/recreation needs its own extension before implementation. The administrator token endpoint reads the database policy before issuing a token. Generation advancement invalidates all older tokens and permits discarding the previous generation's revocation set. Individual revocation entries must not expire based on one pod's clock: a lagging peer could still consider the token unexpired. Bound the set explicitly (initial proposal: 128 IDs); require a generation change when it fills. Repeating a revocation is idempotent. Token IDs are never reused.
+
+## Compatibility must fail closed
+
+The current manifest is format 1, and old code does not understand revocation. Enabling policy must use a new per-database manifest format which old engines explicitly reject. Merely adding optional JSON fields is unsafe because the old deserializer ignores unknown fields. Old writers prepared before policy activation still lose the manifest identity comparison; old helpers may carry opaque new manifests but cannot bypass their expected-target guard. The directory's format number is a separate concern.
+
+A legacy database can remain readable during a rolling code upgrade until policy activation. Preserve the old token envelope for legacy databases; issue generation/incarnation/ID claims only for enabled policies. Offline issuance needs the current policy incarnation and generation explicitly, while the administrator HTTP token endpoint reads them itself. After activation, downgrade must refuse that database instead of serving it without authorization. A cold old binary is not a valid rollback after activation; restore/upgrade guidance must state this. New clients and token issuance need explicit migration rules for old token envelopes. Test real old binaries, including delayed writes and collection, rather than relying only on the abstract model.
+
+## Engine/API boundary
+
+Keep trusted embedded/admin/maintenance operations available to internal callers. Add an explicit access context to public data operations so that signature-verified database claims are checked against the loaded manifest before reads, staging, or uploads. Return the authorized snapshot/version to the operation rather than performing a separate unchecked reload. API middleware still bounds request bodies, verifies signatures/scopes, and enforces per-principal admission before remote work.
+
+Administrative policy changes need idempotent identities and receipt recovery under the same uncertain-publication rules as writes. Keep a separate monotonically increasing policy revision and a bounded policy receipt window (initial proposal: 32). Each mutation supplies its expected policy revision. An evicted identical request still cannot reapply because that revision has advanced. Retain the original result in the receipt; do not merge policy receipts into user-write receipts, whose revisions have a different meaning. Creation also needs a durable creation request ID bound to the full initial configuration: an uncertain create must recover the original result even after the database has received writes, while a different create ID/configuration must conflict. Database deletion/export/retention are separate modeled lifecycle transitions and cannot be implemented as a raw directory removal.
+
+## Key rotation and audit
+
+Signing-key overlap needs a versioned keyring with a primary issuance key and explicit verification keys. Deploy verification overlap before changing the primary issuer; remove a retired verification key only after the declared transition. Tests must cover different pod configurations, signatures from the wrong key, unknown IDs, and fail-closed startup. A capability must never reveal a signing key. Existing administrator credentials require a deliberate compatibility/migration policy.
+
+Revocation and administrative changes need durable audit records with bounded delivery and retention. Logging a successful HTTP response is insufficient because a publication can commit after a lost response. Audit delivery must follow authoritative receipts/state and preserve uncertainty. Do not send audit data to an external service until the destination and authorization exist.
+
+## Model and qualification
+
+Start with an authorization model covering validated and stale observations, policy activation, legacy binaries, individual revocation, generation change, prepared/delayed writes, helper publication, and returning reads. Negative controls should expose stale policy authorization, generation omission, comparison of only the user revision, and skipping read validation. Composition with publication/directory/data-page models and cryptographic/clock assumptions must remain explicit.
+
+Then test authorization before any data access/upload, revocation racing a submitted proposal, already-running reads, cold peers with empty caches, repeated/uncertain administrative calls, revocation-table saturation, keyring overlap, and old-binary refusal. Provider unavailability must fail closed without serving from an old cached policy. None of these changes closes the separate cluster-wide physical/spend-admission gate.

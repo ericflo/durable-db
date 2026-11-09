@@ -1,0 +1,3 @@
+# kind config log-tag heap expected-counterexample
+safe ReadBarrier.cfg read 1g -
+unsafe UnsafeRead.cfg read-unsafe 1g ReadLinearizesAtValidation

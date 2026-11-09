@@ -10,4 +10,15 @@ The object-store client uses AWS-LC through rustls; source builds need a C toolc
 
 The network S3 test is opt-in; see `tests/s3.rs` for environment variables. Use a disposable bucket/prefix. The JavaScript package contains a bounded reference pi-durable 1.5.0 adapter and HTTP conformance tests; see [clients](clients.md).
 
-Woodpecker builds the static Linux executable and runtime image with kache, checks Rust formatting/lints/tests, runs all eight TLA+ models and negative controls, and runs the 32-case Pi HTTP conformance suite. After successful main builds it publishes the public documentation through a repository-scoped SSH deploy key. The pipeline is in `.woodpecker.yaml`; build steps are in `Dockerfile`. Run `scripts/test-client.sh` locally after building the debug executable. GitHub Actions are disabled. Changes go directly to main while this private project is developed.
+Woodpecker builds the static Linux executable and runtime image with kache, checks Rust formatting/lints/tests, runs all nine TLA+ models (including the authorization design model) and negative controls, and runs the 32-case Pi HTTP conformance suite. After successful main builds it publishes the public documentation through a repository-scoped SSH deploy key. The pipeline is in `.woodpecker.yaml`; build steps are in `Dockerfile`. Run `scripts/test-client.sh` locally after building the debug executable. GitHub Actions are disabled. Changes go directly to main while this private project is developed.
+
+
+Formal checks are cached per model in the container build. Each `spec/*.checks` descriptor lists its positive configuration and required negative controls. `scripts/check-model.sh` still runs every descriptor locally; pass a module name to run that model and its controls during iteration. The Docker build serializes TLC heaps with a shared cache lock, while retaining independent results for unchanged models.
+
+The 10,005-database regression keeps every assertion and runs in release mode in CI; the remaining Rust suite runs in debug mode. This cuts test execution overhead without reducing database count, collection coverage, or uncached verification. All Rust compilation, including release tests, uses kache. Reproduce the large test with:
+
+```sh
+cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect
+```
+
+One local qualification passed in 40.51 seconds in release mode versus 292 seconds in a full debug-suite run. These are test runtimes on the development laptop, not database latency/throughput benchmarks.

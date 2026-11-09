@@ -14,11 +14,76 @@ WORKDIR /src
 COPY scripts/install-kache.sh scripts/install-kache.sh
 RUN scripts/install-kache.sh /usr/local/bin
 ENV KACHE_CONFIG=/src/.kache.toml KACHE_CACHE_DIR=/cache/kache KACHE_RUNTIME_DIR=/tmp/kache-runtime CARGO_TARGET_DIR=/cache/target
-FROM tools AS model
-COPY spec spec
+# Cache each model independently. The shared lock bounds concurrent TLC heaps;
+# Rust may build alongside one checker without exhausting the builder's RAM.
+FROM tools AS model-tools
 COPY scripts/check-model.sh scripts/check-model.sh
-RUN scripts/check-model.sh && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+RUN scripts/check-model.sh prepare
+
+FROM model-tools AS model-cluster
+COPY spec/Cluster.tla spec/Cluster.checks spec/Cluster.cfg spec/UnsafeGC.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh Cluster && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-bucket
+COPY spec/Bucket.tla spec/Bucket.checks spec/Bucket.cfg spec/UnsafeBucket.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh Bucket && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-readbarrier
+COPY spec/ReadBarrier.tla spec/ReadBarrier.checks spec/ReadBarrier.cfg spec/UnsafeRead.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh ReadBarrier && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-directory
+COPY spec/Directory.tla spec/Directory.checks spec/Directory.cfg spec/UnsafeDirectory.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh Directory && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-publicationretry
+COPY spec/PublicationRetry.tla spec/PublicationRetry.checks spec/PublicationRetry.cfg spec/UnsafePublicationRetry.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PublicationRetry && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-publicationrebase
+COPY spec/PublicationRebase.tla spec/PublicationRebase.checks spec/PublicationRebase.cfg spec/UnsafeRebaseFence.cfg spec/UnsafeRebaseTarget.cfg spec/UnsafeRebaseMerge.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PublicationRebase && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-observationbatch
+COPY spec/ObservationBatch.tla spec/ObservationBatch.checks spec/ObservationBatch.cfg spec/UnsafeObservationBatch.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh ObservationBatch && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-publicationcombining
+COPY spec/PublicationCombining.tla spec/PublicationCombining.checks spec/PublicationCombining.cfg spec/UnsafeCombiningFence.cfg spec/UnsafeCombiningTarget.cfg spec/UnsafeCombiningMerge.cfg spec/UnsafeCombiningAbort.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PublicationCombining && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-authorizationlifecycle
+COPY spec/AuthorizationLifecycle.tla spec/AuthorizationLifecycle.checks spec/AuthorizationLifecycle.cfg spec/UnsafeStaleAuthorization.cfg spec/UnsafeGeneration.cfg spec/UnsafeUserRevision.cfg spec/UnsafeAuthorizationRead.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh AuthorizationLifecycle && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM scratch AS model
+COPY --from=model-cluster /checks/ /checks/
+COPY --from=model-bucket /checks/ /checks/
+COPY --from=model-readbarrier /checks/ /checks/
+COPY --from=model-directory /checks/ /checks/
+COPY --from=model-publicationretry /checks/ /checks/
+COPY --from=model-publicationrebase /checks/ /checks/
+COPY --from=model-observationbatch /checks/ /checks/
+COPY --from=model-publicationcombining /checks/ /checks/
+COPY --from=model-authorizationlifecycle /checks/ /checks/
 
 FROM tools AS build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./
@@ -33,7 +98,9 @@ COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
-    cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --all-targets \
+    cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings \
+    && cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect \
+    && cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect \
     && DURABLE_DB_TEST_BINARY=/cache/target/debug/durable-db scripts/test-client.sh \
     && cargo build --locked --release --target x86_64-unknown-linux-musl \
     && mkdir -p /out && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \

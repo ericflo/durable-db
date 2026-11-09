@@ -1,0 +1,3 @@
+# kind config log-tag heap expected-counterexample
+safe PublicationRetry.cfg retry 1g -
+unsafe UnsafePublicationRetry.cfg retry-unsafe 1g ReferencedManifestExists

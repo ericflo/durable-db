@@ -4,96 +4,40 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tools="$repo/.tools"
 mkdir -p "$tools"
 jar="$tools/tla2tools-1.7.4.jar"
+requested=${1:-all}
+case "$requested" in *[!A-Za-z0-9_-]*|'') echo 'Invalid model name' >&2; exit 2 ;; esac
 if [ ! -f "$jar" ]; then
   curl --proto '=https' --tlsv1.2 -fLsS https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar -o "$jar"
 fi
 expected=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 if command -v sha256sum >/dev/null; then actual=$(sha256sum "$jar" | cut -d ' ' -f1); else actual=$(shasum -a 256 "$jar" | cut -d ' ' -f1); fi
 [ "$actual" = "$expected" ] || { echo 'TLC checksum mismatch' >&2; exit 1; }
+[ "$requested" != prepare ] || exit 0
 cd "$repo/spec"
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx2g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-safe" -config Cluster.cfg Cluster.tla > "$tools/model-safe.log" 2>&1
-tail -n 9 "$tools/model-safe.log"
-set +e
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-unsafe" -config UnsafeGC.cfg Cluster.tla > "$tools/model-unsafe.log" 2>&1
-status=$?
-set -e
-[ "$status" = 12 ] && grep -q 'Invariant ReferencedObjectsExist is violated' "$tools/model-unsafe.log" || { cat "$tools/model-unsafe.log"; echo 'Negative control did not produce the expected counterexample' >&2; exit 1; }
-echo 'Negative control: missing collection fence produces the expected counterexample.'
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx2g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-bucket" -config Bucket.cfg Bucket.tla > "$tools/model-bucket.log" 2>&1
-tail -n 9 "$tools/model-bucket.log"
-set +e
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-bucket-unsafe" -config UnsafeBucket.cfg Bucket.tla > "$tools/model-bucket-unsafe.log" 2>&1
-status=$?
-set -e
-[ "$status" = 12 ] && grep -q 'Invariant ReferencedManifestsExist is violated' "$tools/model-bucket-unsafe.log" || { cat "$tools/model-bucket-unsafe.log"; exit 1; }
-echo 'B2 negative control: missing bucket fence deletes a published manifest.'
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-read" -config ReadBarrier.cfg ReadBarrier.tla > "$tools/model-read.log" 2>&1
-tail -n 9 "$tools/model-read.log"
-set +e
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-read-unsafe" -config UnsafeRead.cfg ReadBarrier.tla > "$tools/model-read-unsafe.log" 2>&1
-status=$?
-set -e
-[ "$status" = 12 ] && grep -q 'Invariant ReadLinearizesAtValidation is violated' "$tools/model-read-unsafe.log" || { cat "$tools/model-read-unsafe.log"; exit 1; }
-echo 'Read negative control: skipping CAS validation returns a stale snapshot.'
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-directory" -config Directory.cfg Directory.tla > "$tools/model-directory.log" 2>&1
-tail -n 9 "$tools/model-directory.log"
-set +e
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-directory-unsafe" -config UnsafeDirectory.cfg Directory.tla > "$tools/model-directory-unsafe.log" 2>&1
-status=$?
-set -e
-[ "$status" = 12 ] && grep -q 'Invariant WitnessReachability is violated' "$tools/model-directory-unsafe.log" || { cat "$tools/model-directory-unsafe.log"; exit 1; }
-echo 'Directory negative control: a wrong witness can hide a reachable page.'
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-retry" -config PublicationRetry.cfg PublicationRetry.tla > "$tools/model-retry.log" 2>&1
-tail -n 9 "$tools/model-retry.log"
-set +e
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-retry-unsafe" -config UnsafePublicationRetry.cfg PublicationRetry.tla > "$tools/model-retry-unsafe.log" 2>&1
-status=$?
-set -e
-[ "$status" = 12 ] && grep -q 'Invariant ReferencedManifestExists is violated' "$tools/model-retry-unsafe.log" || { cat "$tools/model-retry-unsafe.log"; exit 1; }
-echo 'Retry negative control: ignoring a collection fence publishes a deleted manifest.'
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-rebase" -config PublicationRebase.cfg PublicationRebase.tla > "$tools/model-rebase.log" 2>&1
-tail -n 9 "$tools/model-rebase.log"
-for case in Fence Target Merge; do
-  case "$case" in
-    Fence) invariant=ReferencedManifestExists ;;
-    Target) invariant=TargetWriteNotOverwritten ;;
-    Merge) invariant=OtherWritesPreserved ;;
-  esac
-  set +e
-  "${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-rebase-$case" -config "UnsafeRebase$case.cfg" PublicationRebase.tla > "$tools/model-rebase-$case.log" 2>&1
-  status=$?
-  set -e
-  [ "$status" = 12 ] && grep -q "Invariant $invariant is violated" "$tools/model-rebase-$case.log" || { cat "$tools/model-rebase-$case.log"; exit 1; }
-  echo "Rebase negative control: $case guard detects $invariant."
-done
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-observation" -config ObservationBatch.cfg ObservationBatch.tla > "$tools/model-observation.log" 2>&1
-tail -n 9 "$tools/model-observation.log"
-set +e
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-observation-unsafe" -config UnsafeObservationBatch.cfg ObservationBatch.tla > "$tools/model-observation-unsafe.log" 2>&1
-status=$?
-set -e
-[ "$status" = 12 ] && grep -q 'Invariant ObservationWithinInvocation is violated' "$tools/model-observation-unsafe.log" || { cat "$tools/model-observation-unsafe.log"; exit 1; }
-echo 'Observation negative control: joining an in-flight barrier can return a pre-invocation snapshot.'
-
-"${JAVA:-java}" -XX:+UseParallelGC -Xmx2g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-combining" -config PublicationCombining.cfg PublicationCombining.tla > "$tools/model-combining.log" 2>&1
-tail -n 9 "$tools/model-combining.log"
-for case in Fence Target Merge Abort; do
-  case "$case" in
-    Fence) invariant=ReferencedManifestsExist ;;
-    Target) invariant=ExpectedTargetsCompared ;;
-    Merge) invariant=UnrelatedWritesPreserved ;;
-    Abort) invariant=NoCommitAfterDefiniteAbort ;;
-  esac
-  set +e
-  "${JAVA:-java}" -XX:+UseParallelGC -Xmx1g -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-combining-$case" -config "UnsafeCombining$case.cfg" PublicationCombining.tla > "$tools/model-combining-$case.log" 2>&1
-  status=$?
-  set -e
-  [ "$status" = 12 ] && grep -q "Invariant $invariant is violated" "$tools/model-combining-$case.log" || { cat "$tools/model-combining-$case.log"; exit 1; }
-  echo "Combining negative control: $case guard detects $invariant."
-done
+check_model() {
+  checks=$1
+  [ -f "$checks" ] || { echo "Missing model descriptor: $checks" >&2; exit 1; }
+  module=$(basename "$checks" .checks)
+  # Each descriptor is independent, so adding/changing another model does not
+  # invalidate this model's Docker cache. Every negative control is mandatory.
+  while read -r kind config tag heap invariant; do
+    case "$kind" in ''|\#*) continue ;; safe|unsafe) ;; *) echo 'Invalid check kind' >&2; exit 1 ;; esac
+    log="$tools/model-$tag.log"
+    if [ "$kind" = safe ]; then
+      "${JAVA:-java}" -XX:+UseParallelGC "-Xmx$heap" -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-$tag" -config "$config" "$module.tla" > "$log" 2>&1
+      tail -n 9 "$log"
+    else
+      set +e
+      "${JAVA:-java}" -XX:+UseParallelGC "-Xmx$heap" -cp "$jar" tlc2.TLC -workers 2 -metadir "$tools/tlc-$tag" -config "$config" "$module.tla" > "$log" 2>&1
+      status=$?
+      set -e
+      [ "$status" = 12 ] && grep -q "Invariant $invariant is violated" "$log" || { cat "$log"; echo 'Missing expected negative-control counterexample' >&2; exit 1; }
+      echo "$module negative control: $config detects $invariant."
+    fi
+  done < "$checks"
+}
+if [ "$requested" = all ]; then
+  for checks in "$repo"/spec/*.checks; do check_model "$checks"; done
+else
+  check_model "$repo/spec/$requested.checks"
+fi
