@@ -173,7 +173,14 @@ COPY spec/Journal.tla spec/JournalProof.tla spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM proof-tools AS proof-grant-bounds
+COPY scripts/check-proof.sh scripts/check-proof.sh
+COPY spec/candidates/GrantBounds.tla spec/candidates/GrantBoundsProof.tla spec/candidates/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-proof.sh GrantBounds && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=proof-grant-bounds /checks/ /checks/
 COPY --from=model-candidate-rootcontrol /checks/ /checks/
 COPY --from=model-candidate-delegatedgrant /checks/ /checks/
 COPY --from=model-candidate-ownedwal /checks/ /checks/

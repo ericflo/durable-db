@@ -80,3 +80,10 @@ This component checks repeated renewal and takeover under an abstract elapsed-ti
 Run `scripts/check-candidate.sh RootControl`. The same descriptor is required in its own Woodpecker stage. The last two descriptor entries are forbidden-state coverage checks, not unsafe protocol variants. See `docs/verification.md` and `docs/evidence/root-control-candidate-2026-11-09.json` for exact bounds, assumptions and hashes.
 
 The abstract time coordinate is a specification device. The deployment clock conversion, arbitrary candidate elections, placement changes and journal composition are not established. Pauses and loss are represented by delaying or omitting an incarnation's actions; replacement uses a new epoch. The clock and WAL candidates retain distinct obligations and remain necessary research sources. This model does not change the runtime clock rule or implement a controller.
+
+
+## GrantBounds
+
+`GrantBoundsProof.tla` is an unbounded arithmetic proof of grant/drain margins, not another finite serving model. It permits a factor-two rate range and an additive elapsed-measurement error `E`. A drain needs `2L + 3E`; a child's request-anchored duration is at most `floor(max(0, R - 3E) / 2)`. All 19 obligations pass. Removing either margin fails its proof.
+
+Run `scripts/check-proof.sh GrantBounds`. The candidate has a separate cached proof stage. It does not prove a platform timing contract, implement a clock, or establish composition with the root/log models. See the maintained verification document for the exact assumptions and remaining obligations.
