@@ -179,7 +179,14 @@ COPY spec/candidates/GrantBounds.tla spec/candidates/GrantBoundsProof.tla spec/c
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh GrantBounds && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM proof-tools AS proof-root-control
+COPY scripts/check-proof.sh scripts/check-proof.sh
+COPY spec/candidates/RootControl.tla spec/candidates/RootControlProof.tla spec/candidates/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-proof.sh RootControl && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=proof-root-control /checks/ /checks/
 COPY --from=proof-grant-bounds /checks/ /checks/
 COPY --from=model-candidate-rootcontrol /checks/ /checks/
 COPY --from=model-candidate-delegatedgrant /checks/ /checks/

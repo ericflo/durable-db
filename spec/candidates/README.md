@@ -79,6 +79,8 @@ This component checks repeated renewal and takeover under an abstract elapsed-ti
 
 Run `scripts/check-candidate.sh RootControl`. The same descriptor is required in its own Woodpecker stage. The last two descriptor entries are forbidden-state coverage checks, not unsafe protocol variants. See `docs/verification.md` and `docs/evidence/root-control-candidate-2026-11-09.json` for exact bounds, assumptions and hashes.
 
+Run `scripts/check-proof.sh RootControl` for the unbounded abstract permission proof. Its 153 obligations establish root exclusion and child containment/exclusion for arbitrary finite epoch counts and arbitrary execution and renewal counts. The finite regressions also check its inductive strengthening. Removing the current-owner renewal condition must fail the proof; both checks run in an independent CI stage. The theorem assumes the abstract timing contract and does not establish journal safety or runtime refinement.
+
 The abstract time coordinate is a specification device. The deployment clock conversion, arbitrary candidate elections, placement changes and journal composition are not established. Pauses and loss are represented by delaying or omitting an incarnation's actions; replacement uses a new epoch. The clock and WAL candidates retain distinct obligations and remain necessary research sources. This model does not change the runtime clock rule or implement a controller.
 
 

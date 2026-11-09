@@ -6,10 +6,11 @@ case "${1:-PublicationSafety}" in
   PublicationSafety) module=PublicationSafety; tag=publication; negative=fence; action='Fence(c, TRUE)' ;;
   Journal) module=Journal; tag=journal; negative=journal-gap; action='Consume(n, TRUE)' ;;
   GrantBounds) module=GrantBounds; tag=grant-bounds ;;
-  *) echo 'Usage: scripts/check-proof.sh [PublicationSafety|Journal|GrantBounds]' >&2; exit 2 ;;
+  RootControl) module=RootControl; tag=root-control ;;
+  *) echo 'Usage: scripts/check-proof.sh [PublicationSafety|Journal|GrantBounds|RootControl]' >&2; exit 2 ;;
 esac
 proof_dir=spec
-[ "$module" != GrantBounds ] || proof_dir=spec/candidates
+case "$module" in GrantBounds|RootControl) proof_dir=spec/candidates ;; esac
 if [ -z "${TLAPM:-}" ]; then
   scripts/install-tlaps.sh "$repo/.tools/proof-tools"
   checker="$repo/.tools/proof-tools/tlapm/bin/tlapm"
@@ -54,4 +55,8 @@ case "$module" in
     sed 's/(remaining - 3 \* error) \\div 2/remaining \\div 2/' \
       spec/candidates/GrantBounds.tla > "$work/unsafe/GrantBounds.tla"
     check_negative grant-child 'ChildDuration(remaining, error)' ;;
+  RootControl)
+    sed 's/IF UnsafeStaleRenewal/IF TRUE/' \
+      spec/candidates/RootControl.tla > "$work/unsafe/RootControl.tla"
+    check_negative root-renewal 'ApplyRenew(p)' ;;
 esac

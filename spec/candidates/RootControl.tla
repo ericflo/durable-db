@@ -118,17 +118,46 @@ Next == Tick \/ (\E p \in Ids:
            \/ LoseReply(p) \/ RequestChild(p) \/ IssueChild(p) \/ DeliverChild(p))
 Spec == Init /\ [][Next]_vars
 TypeOK == /\ now \in Nat
-          /\ authority.owner \in 0..Epochs /\ authority.revision \in Nat
-          /\ authority.active \in BOOLEAN
-          /\ \A p \in Ids:
-               /\ roots[p].phase \in {"fresh", "draining", "active"}
-               /\ roots[p].pending \in {"none", "fence", "renew", "activate",
-                                        "reply-fence", "reply-renew", "reply-activate"}
-               /\ children[p].pending \in {"none", "request", "reply"}
-RootExclusive == Cardinality({p \in Ids: RootValid(p)}) <= 1
+          /\ authority \in [owner : 0..Epochs, revision : Nat, active : BOOLEAN]
+          /\ roots \in [Ids ->
+               [phase : {"fresh", "draining", "active"},
+                pending : {"none", "fence", "renew", "activate", "reply-fence",
+                           "reply-renew", "reply-activate"}, requested : Nat,
+                expected : Nat, expires : Nat, drain : Nat, renewals : Nat, extended : BOOLEAN]]
+          /\ children \in [Ids ->
+               [pending : {"none", "request", "reply"}, requested : Nat,
+                duration : Nat, expires : Nat, requests : Nat, extended : BOOLEAN]]
+RootExclusive == \A p, q \in Ids: (RootValid(p) /\ RootValid(q)) => p = q
 ChildWithinRoot == \A p \in Ids: ChildValid(p) => RootValid(p)
-ChildExclusive == Cardinality({p \in Ids: ChildValid(p)}) <= 1
+ChildExclusive == \A p, q \in Ids: (ChildValid(p) /\ ChildValid(q)) => p = q
 Invariant == TypeOK /\ RootExclusive /\ ChildWithinRoot /\ ChildExclusive
+
+\* Strengthening for induction. A later fence bounds every older outstanding
+\* permission and successful-but-undelivered renewal, for arbitrary epochs.
+ClockOrder == \A p \in Ids:
+    /\ roots[p].requested <= now /\ roots[p].drain <= now
+    /\ roots[p].expires <= now + Lease /\ children[p].requested <= now
+RootState == \A p \in Ids:
+    /\ (roots[p].phase = "fresh" => roots[p].expires = 0)
+    /\ (roots[p].phase # "fresh" => p <= authority.owner)
+    /\ (roots[p].pending \in {"fence", "reply-fence"} => roots[p].phase = "fresh")
+    /\ (roots[p].pending = "reply-fence" => p <= authority.owner)
+    /\ (roots[p].pending \in {"renew", "reply-renew"} => roots[p].phase # "fresh")
+    /\ (roots[p].pending \in {"activate", "reply-activate"} =>
+          roots[p].phase = "draining" /\ now >= roots[p].drain + Lease)
+    /\ (roots[p].phase = "active" => now >= roots[p].drain + Lease)
+FenceBounds == \A p, q \in Ids:
+    (p < q /\ roots[q].phase # "fresh") =>
+       /\ roots[p].expires <= roots[q].drain + Lease
+       /\ (roots[p].pending \in {"reply-fence", "reply-renew"} =>
+             roots[p].requested <= roots[q].drain)
+ChildState == \A p \in Ids:
+    /\ children[p].expires <= roots[p].expires
+    /\ (children[p].expires > 0 => roots[p].phase = "active")
+    /\ (children[p].pending = "reply" =>
+          roots[p].phase = "active" /\
+          children[p].requested + children[p].duration <= roots[p].expires)
+Strong == TypeOK /\ ClockOrder /\ RootState /\ FenceBounds /\ ChildState
 \* Coverage control: all three incarnations must be able to serve in one run.
 NotAllActivated == ~\A p \in Ids: roots[p].phase = "active"
 \* Ghost coverage flags record actual deadline extensions, not just requests.
