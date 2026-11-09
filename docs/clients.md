@@ -36,8 +36,11 @@ For provisioning with a current source build, persist a creation intent and call
 Current source builds include `clients/javascript/pi-indexed.mjs` and its `indexed/` modules:
 
 ```js
-import { openIndexedPiStorage } from './pi-indexed.mjs';
-const storage = await openIndexedPiStorage(db);
+import { DurableDb } from '@durable-db/client';
+import { openIndexedPiStorage } from '@durable-db/client/pi-indexed';
+
+const piDatabase = new DurableDb({ url, database: 'pi-app', token: scopedApplicationToken });
+const storage = await openIndexedPiStorage(piDatabase);
 // Pass storage to Harness.open(storage, options, context).
 // Close it after the Harness stops issuing operations.
 ```
@@ -46,7 +49,7 @@ Use a protected database and a scoped application token. The default prefix is `
 
 Conversations, entries, tasks, submissions, and documents have direct records and ordered indexes. Opening reads one metadata value and claims a fresh owner; it does not reconstruct a journal. Reads validate current ownership and use one database revision across all lookups. Fork-aware entry scans clip ancestor segments at their fork points. Document lookups use live-address and historical-incarnation indexes; rewindable content finds a base and applies its following deltas. Latest-only content is stored separately from document metadata, so scanning records does not read large values.
 
-One Session owns each prefix. After a crashed host, `openIndexedPiStorage(db, {takeover: true})` explicitly replaces it. Takeover pins the first observed owner: it can retry a definite fence conflict or that owner's ongoing writes, but refuses a different owner appearing during retry/backoff. Old owners cannot publish, serve fresh reads, or release the new owner's claim. API pods remain interchangeable; this owner belongs to the Harness Session. Host scheduling and external tool effects still need their own fencing protocol. Normal close drains admitted operations before releasing ownership.
+One Session owns each prefix. After a crashed host, `openIndexedPiStorage(piDatabase, {takeover: true})` explicitly replaces it. Takeover pins the first observed owner: it can retry a definite fence conflict or that owner's ongoing writes, but refuses a different owner appearing during retry/backoff. Old owners cannot publish, serve fresh reads, or release the new owner's claim. API pods remain interchangeable; this owner belongs to the Harness Session. Host scheduling and external tool effects still need their own fencing protocol. Normal close drains admitted operations before releasing ownership.
 
 A commit stages the valid prefix of the supplied batches and atomically writes its records, indexes, document content, and metadata. Receipts follow durable publication. Unknown responses retry the identical request; the adapter's last-commit nonce can resolve publication after the database's 128-receipt window rolls over. An unresolved provider or ownership error fails the adapter until reopen. A semantic refusal changes none of the refused batch while retaining earlier valid batches in that call. A callback throwing after publication does not undo the durable data.
 
@@ -69,7 +72,7 @@ Give the Harness the indexed adapter, a host-owned model collection and registry
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { Harness } from '@earendil-works/pi-durable';
 const context = BACKGROUND_CONTEXT;
-const storage = await openIndexedPiStorage(db);
+const storage = await openIndexedPiStorage(piDatabase);
 const harness = await Harness.open(storage, { models, registry }, context);
 const root = await harness.root(context, { agent: { model: selectedModel } });
 // Persist requestId in the host's admission record before submitting or retrying.
@@ -89,8 +92,8 @@ Pi records a tool's intent before executing it. After a crash, `replay: 'safe'` 
 ## Pi 1.5.0 reference adapter
 
 ```js
-import { openReferencePiStorage } from './pi-reference.mjs';
-const storage = await openReferencePiStorage(db);
+import { openReferencePiStorage } from '@durable-db/client/pi-reference';
+const storage = await openReferencePiStorage(piDatabase);
 // Pass storage to Harness.open(storage, options, context).
 ```
 

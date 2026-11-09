@@ -72,4 +72,4 @@ Retain the same request across uncertain retries. This layer makes one HTTP atte
 
 `src/` contains the JSON API, transaction scope, encoding and retry handling. `client.mjs` and `client.d.mts` define the wire API. `pi-indexed.mjs` and `indexed/` implement Pi storage; `pi-reference.mjs` is its reference adapter.
 
-`npm ci` builds the SDK. `npm run format:check` and `npm run typecheck` check the public API and executable examples. From the repository root, `scripts/test-client.sh` runs HTTP, lost-response, concurrent-update, Pi and application tests. Woodpecker requires these checks.
+`npm ci` builds the SDK. `npm run format:check` and `npm run typecheck` check the public API and executable examples. From the repository root, `scripts/test-client.sh` runs HTTP, lost-response, concurrent-update, Pi and application tests. For focused SDK/example work, use `scripts/test-client.sh sdk.test.mjs`; the full suite remains the default and the Woodpecker gate.

@@ -21,7 +21,7 @@ npm ci --no-audit --no-fund
 npm --prefix "$repo/examples/web-app" ci --no-audit --no-fund
 npm run format:check
 npm run typecheck
-npm test
+npm test -- "$@"
 cd "$repo"
 node --test examples/web-app/storage.test.ts
 node scripts/test-benchmark.mjs

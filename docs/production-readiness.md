@@ -28,7 +28,7 @@ Backup retention and recovery objectives are not yet selected. A proposed starti
 | Operations | Fixed-label request/provider latency and outcome metrics, cache/collection activity, cancellation accounting, synthetic alert tests, expiring metrics-only credentials, and initial runbooks | Measured cleanup backlog, end-to-end alert delivery and recovery drills, qualified latency/error budgets, and production dashboard review |
 | Upgrades | One old/new format-3 pair passes mixed writes, SIGKILL, and cold rollback/reopen on versioned MinIO and B2; broader upgrade campaign open | Mixed-version readers/writers/collectors, migration interruption, downgrade refusal where required, rollback and restore procedure, and compatibility fixtures from every supported release |
 | Supply chain and platforms | Static Linux x86_64 release; kache and Woodpecker; dependency auditing | Fresh Rust/npm advisory gates, image/toolchain review, signed release checksums/provenance/SBOM, installation and upgrade tests on each advertised platform, and independent security review |
-| Sustained operation | Short integration tests only | At least 72 hours at the selected steady and burst workload with failures injected; no acknowledged-data loss, quota bypass, unbounded memory/object growth, or unexplained history violations; report all failures |
+| Sustained operation | Short integration tests and a [one-hour physical B2 baseline](verification-results.md#one-hour-physical-b2-baseline--2026-11-09); no production-load qualification | At least 72 hours at the selected steady and burst workload with failures injected; no acknowledged-data loss, quota bypass, unbounded memory/object growth, or unexplained history violations; report all failures |
 
 ## Implementation order
 
