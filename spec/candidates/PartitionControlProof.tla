@@ -3,6 +3,17 @@ EXTENDS PartitionControl, RootControlProof, Integers
 ASSUME MovementParameters == /\ Generations \in Nat /\ Generations > 0
        /\ ~UnsafeAssignment /\ ~UnsafeMoveDrain /\ ~UnsafeOwnerReply
 
+\* Isolate record typing from the full inductive invariant. Broad quantified
+\* record queries were sensitive to the CI builder's CPU budget.
+PlacementRecords == [Partitions ->
+    [generation : 1..Generations, phase : {"open", "frozen"}, root : 0..Epochs, drain : Nat]]
+GrantRecords == [Owners ->
+    [pending : {"none", "request", "reply"}, requested : Nat, duration : Nat,
+     expires : Nat, requests : Nat, extended : BOOLEAN]]
+THEOREM OwnerTypes == OwnerStrong =>
+    recoveredMove \in BOOLEAN /\ placement \in PlacementRecords /\ grants \in GrantRecords
+  BY DEF OwnerStrong, OwnerTypeOK, PlacementRecords, GrantRecords
+
 THEOREM OwnerComponents ==
   ASSUME NEW o \in Owners
   PROVE o[1] \in Ids /\ o[2] \in Partitions /\ o[3] \in 1..Generations
@@ -112,7 +123,18 @@ THEOREM ApplyFenceProgress ==
 THEOREM DeliverFenceProgress ==
   ASSUME NEW p \in Ids, Strong, DeliverFence(p)
   PROVE RootProgress
-  BY SMT, Parameters DEF DeliverFence, RootProgress, Strong, TypeOK, Ids, RootState, RootReplyEnd
+<1>1. now' = now /\ authority' = authority
+  BY DEF DeliverFence
+<1>2. now \in Nat /\ authority.owner \in Nat
+  BY SMT, Parameters DEF Strong, TypeOK
+<1>3. \A q \in Ids: roots'[q].expires >= roots[q].expires
+  BY SMT, Parameters DEF DeliverFence, Strong, TypeOK, RootState, Ids, RootReplyEnd
+<1>4. \A q \in Ids: roots[q].phase = "active" => roots'[q].phase = "active"
+  BY SMT, Parameters DEF DeliverFence, Strong, TypeOK, Ids, RootState
+<1>5. \A q \in Ids: roots'[q].phase # "fresh" =>
+    (roots[q].phase # "fresh" /\ roots'[q].drain = roots[q].drain) \/ roots'[q].drain = now
+  BY SMT, Parameters DEF DeliverFence, Strong, TypeOK, Ids, RootState
+<1> QED BY SMT, <1>1, <1>2, <1>3, <1>4, <1>5 DEF RootProgress
 
 THEOREM StartRenewProgress ==
   ASSUME NEW p \in Ids, Strong, StartRenew(p)
@@ -142,7 +164,18 @@ THEOREM ApplyActivateProgress ==
 THEOREM DeliverActivateProgress ==
   ASSUME NEW p \in Ids, Strong, DeliverActivate(p)
   PROVE RootProgress
-  BY SMT, Parameters DEF DeliverActivate, RootProgress, Strong, TypeOK, Ids, RootState
+<1>1. now' = now /\ authority' = authority
+  BY DEF DeliverActivate
+<1>2. now \in Nat /\ authority.owner \in Nat
+  BY SMT, Parameters DEF Strong, TypeOK
+<1>3. \A q \in Ids: roots'[q].expires >= roots[q].expires
+  BY SMT, Parameters DEF DeliverActivate, Strong, TypeOK, RootState, Ids, RootReplyEnd
+<1>4. \A q \in Ids: roots[q].phase = "active" => roots'[q].phase = "active"
+  BY SMT, Parameters DEF DeliverActivate, Strong, TypeOK, Ids, RootState
+<1>5. \A q \in Ids: roots'[q].phase # "fresh" =>
+    (roots[q].phase # "fresh" /\ roots'[q].drain = roots[q].drain) \/ roots'[q].drain = now
+  BY SMT, Parameters DEF DeliverActivate, Strong, TypeOK, Ids, RootState
+<1> QED BY SMT, <1>1, <1>2, <1>3, <1>4, <1>5 DEF RootProgress
 
 THEOREM LoseReplyProgress ==
   ASSUME NEW p \in Ids, Strong, LoseReply(p)
@@ -162,7 +195,18 @@ THEOREM IssueChildProgress ==
 THEOREM DeliverChildProgress ==
   ASSUME NEW p \in Ids, Strong, DeliverChild(p)
   PROVE RootProgress
-  BY SMT, Parameters DEF DeliverChild, RootProgress, Strong, TypeOK, Ids
+<1>1. now' = now /\ authority' = authority
+  BY DEF DeliverChild
+<1>2. now \in Nat /\ authority.owner \in Nat
+  BY SMT, Parameters DEF Strong, TypeOK
+<1>3. \A q \in Ids: roots'[q].expires >= roots[q].expires
+  BY SMT, Parameters DEF DeliverChild, Strong, TypeOK, RootState, Ids, RootReplyEnd
+<1>4. \A q \in Ids: roots[q].phase = "active" => roots'[q].phase = "active"
+  BY SMT, Parameters DEF DeliverChild, Strong, TypeOK, Ids
+<1>5. \A q \in Ids: roots'[q].phase # "fresh" =>
+    (roots[q].phase # "fresh" /\ roots'[q].drain = roots[q].drain) \/ roots'[q].drain = now
+  BY SMT, Parameters DEF DeliverChild, Strong, TypeOK, Ids
+<1> QED BY SMT, <1>1, <1>2, <1>3, <1>4, <1>5 DEF RootProgress
 
 THEOREM NextProgress == Strong /\ Next => RootProgress
   BY TickProgress, StartFenceProgress, ApplyFenceProgress, DeliverFenceProgress, StartRenewProgress,
@@ -179,13 +223,36 @@ THEOREM ControlOwners ==
   BY SMT, <1>1, <1>2, OwnerArithmetic DEF OwnerStrong, GrantState, ControlStep, ownerVars, RootProgress,
      Strong, TypeOK, Ids
 <1>5. PlacementState'
-  BY SMT, <1>1, <1>2, PlacementArithmetic DEF OwnerStrong, PlacementState, ControlStep, ownerVars,
-     RootProgress, Strong, TypeOK, Ids
+  <2>0. now \in Nat /\ now' \in Nat /\ authority.owner \in Nat /\ authority'.owner \in Nat
+    BY SMT, Parameters, <1>1 DEF OwnerStrong, Strong, TypeOK
+  <2>1. now' >= now /\ authority'.owner >= authority.owner
+    BY <1>2 DEF RootProgress
+  <2>2. \A d \in Partitions: placement'[d].drain <= now'
+    BY SMT, <2>0, <2>1, PlacementArithmetic DEF OwnerStrong, PlacementState, ControlStep, ownerVars
+  <2>3. \A d \in Partitions: placement'[d].root <= authority'.owner
+    BY SMT, <2>0, <2>1, PlacementArithmetic DEF OwnerStrong, PlacementState, ControlStep, ownerVars
+  <2>4. \A d \in Partitions: placement'[d].generation = 1 =>
+      placement'[d].root = 0 /\ placement'[d].phase = "open" /\ placement'[d].drain = 0
+    BY DEF OwnerStrong, PlacementState, ControlStep, ownerVars
+  <2>5. \A d \in Partitions: placement'[d].generation > 1 =>
+      placement'[d].root > 0 /\ roots'[placement'[d].root].phase = "active"
+    BY SMT, <1>2, PlacementArithmetic
+      DEF OwnerStrong, PlacementState, ControlStep, ownerVars, RootProgress
+  <2>6. \A d \in Partitions, p \in Ids:
+      (p > placement'[d].root /\ roots'[p].phase # "fresh") => placement'[d].drain <= roots'[p].drain
+    BY SMT, <1>2, PlacementArithmetic
+      DEF OwnerStrong, PlacementState, ControlStep, ownerVars, RootProgress
+  <2> QED BY <2>2, <2>3, <2>4, <2>5, <2>6 DEF PlacementState
 <1>6. NoFutureGrants' /\ FrozenBounds'
   BY DEF OwnerStrong, NoFutureGrants, FrozenBounds, EffectiveGeneration, ControlStep, ownerVars
 <1>7. EndedGenerations'
-  BY SMT, <1>1, <1>2, OwnerArithmetic DEF OwnerStrong, EndedGenerations, EffectiveGeneration,
-     ControlStep, ownerVars, RootProgress, Strong, TypeOK, Ids
+  <2>0. now \in Nat /\ now' \in Nat BY <1>1 DEF OwnerStrong, Strong, TypeOK
+  <2>1. now' >= now BY <1>2 DEF RootProgress
+  <2>2. \A o \in Owners:
+      grants[o].expires \in Nat /\ grants[o].requested \in Nat /\ grants[o].duration \in Nat
+    BY SMT, OwnerTypes DEF GrantRecords
+  <2> QED BY SMT, <2>0, <2>1, <2>2 DEF OwnerStrong, EndedGenerations, EffectiveGeneration,
+     ControlStep, ownerVars
 <1> QED BY <1>1, <1>3, <1>4, <1>5, <1>6, <1>7 DEF OwnerStrong
 THEOREM RequestOwnerPreserves ==
   ASSUME NEW o \in Owners, OwnerStrong, RequestOwner(o)
@@ -194,8 +261,15 @@ THEOREM RequestOwnerPreserves ==
 <1>1. Strong' BY StutteringStrong DEF OwnerStrong, RequestOwner
 
 <1>2. OwnerTypeOK'
-  BY SMT, Parameters, MovementParameters DEF RequestOwner, vars, ownerVars, OwnerStrong, OwnerTypeOK,
-     Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. recoveredMove' \in BOOLEAN
+    BY SMT, OwnerTypes DEF RequestOwner
+  <2>2. placement' \in PlacementRecords
+    BY SMT, OwnerTypes, Parameters, MovementParameters
+      DEF RequestOwner, PlacementRecords
+  <2>3. grants' \in GrantRecords
+    BY SMT, OwnerTypes, OwnerArithmetic, Parameters, MovementParameters
+      DEF RequestOwner, RootValid, vars, GrantRecords, Owners, Ids, Max, OwnerReplyEnd
+  <2> QED BY <2>1, <2>2, <2>3 DEF OwnerTypeOK, PlacementRecords, GrantRecords
 
 <1>3. GrantState'
   BY SMT, OwnerArithmetic DEF RequestOwner, vars, OwnerStrong, OwnerTypeOK, GrantState
@@ -204,8 +278,13 @@ THEOREM RequestOwnerPreserves ==
   BY DEF RequestOwner, vars, OwnerStrong, PlacementState
 
 <1>5. NoFutureGrants'
-  BY SMT, Parameters, MovementParameters DEF RequestOwner, vars, ownerVars, OwnerStrong, NoFutureGrants,
-     EffectiveGeneration, OwnerTypeOK, Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. \A q \in Owners:
+      (grants'[q].expires > 0 \/ grants'[q].pending = "reply") =>
+      (grants[q].expires > 0 \/ grants[q].pending = "reply")
+    BY SMT, OwnerTypes DEF RequestOwner, GrantRecords, Max, OwnerReplyEnd
+  <2>2. UNCHANGED placement BY DEF RequestOwner, vars
+  <2> QED BY SMT, <2>1, <2>2
+    DEF OwnerStrong, NoFutureGrants, EffectiveGeneration
 
 <1>6. FrozenBounds'
   BY SMT DEF RequestOwner, vars, OwnerStrong, OwnerTypeOK, FrozenBounds, EffectiveGeneration
@@ -222,8 +301,15 @@ THEOREM IssueOwnerPreserves ==
 <1>1. Strong' BY StutteringStrong DEF OwnerStrong, IssueOwner
 
 <1>2. OwnerTypeOK'
-  BY SMT, Parameters, MovementParameters, OwnerComponents DEF IssueOwner, RootValid, vars, OwnerStrong,
-     OwnerTypeOK, Strong, TypeOK, Owners, Ids
+  <2>1. recoveredMove' \in BOOLEAN
+    BY SMT, OwnerTypes DEF IssueOwner
+  <2>2. placement' \in PlacementRecords
+    BY SMT, OwnerTypes, Parameters, MovementParameters
+      DEF IssueOwner, PlacementRecords
+  <2>3. grants' \in GrantRecords
+    BY SMT, OwnerTypes, OwnerArithmetic, Parameters, MovementParameters
+      DEF IssueOwner, RootValid, vars, GrantRecords, Owners, Ids, Max, OwnerReplyEnd
+  <2> QED BY <2>1, <2>2, <2>3 DEF OwnerTypeOK, PlacementRecords, GrantRecords
 
 <1>3. GrantState'
   BY SMT, OwnerArithmetic DEF IssueOwner, vars, OwnerStrong, OwnerTypeOK, GrantState, RootValid
@@ -232,8 +318,13 @@ THEOREM IssueOwnerPreserves ==
   BY DEF IssueOwner, vars, OwnerStrong, PlacementState
 
 <1>5. NoFutureGrants'
-  BY SMT, Parameters, MovementParameters DEF IssueOwner, vars, ownerVars, OwnerStrong, NoFutureGrants,
-     EffectiveGeneration, OwnerTypeOK, Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. o[3] = EffectiveGeneration(o[2])
+    BY SMT, MovementParameters DEF IssueOwner, EffectiveGeneration
+  <2>2. \A q \in Owners: q # o => grants'[q] = grants[q]
+    BY SMT, OwnerTypes DEF IssueOwner, GrantRecords
+  <2>3. UNCHANGED placement BY DEF IssueOwner, vars
+  <2> QED BY SMT, <2>1, <2>2, <2>3, OwnerArithmetic
+    DEF OwnerStrong, NoFutureGrants, EffectiveGeneration
 
 <1>6. FrozenBounds'
   BY SMT, MovementParameters, OwnerArithmetic DEF IssueOwner, vars, OwnerStrong, OwnerTypeOK,
@@ -252,8 +343,15 @@ THEOREM DeliverOwnerPreserves ==
 <1>1. Strong' BY StutteringStrong DEF OwnerStrong, DeliverOwner
 
 <1>2. OwnerTypeOK'
-  BY SMT, Parameters, MovementParameters DEF DeliverOwner, vars, ownerVars, OwnerStrong, OwnerTypeOK,
-     Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. recoveredMove' \in BOOLEAN
+    BY SMT, OwnerTypes DEF DeliverOwner
+  <2>2. placement' \in PlacementRecords
+    BY SMT, OwnerTypes, Parameters, MovementParameters
+      DEF DeliverOwner, PlacementRecords
+  <2>3. grants' \in GrantRecords
+    BY SMT, OwnerTypes, OwnerArithmetic, Parameters, MovementParameters
+      DEF DeliverOwner, RootValid, vars, GrantRecords, Owners, Ids, Max, OwnerReplyEnd
+  <2> QED BY <2>1, <2>2, <2>3 DEF OwnerTypeOK, PlacementRecords, GrantRecords
 
 <1>3. GrantState'
   <2>1. Max(grants[o].expires, OwnerReplyEnd(o)) <= roots[o[1]].expires
@@ -266,8 +364,13 @@ THEOREM DeliverOwnerPreserves ==
   BY DEF DeliverOwner, vars, OwnerStrong, PlacementState
 
 <1>5. NoFutureGrants'
-  BY SMT, Parameters, MovementParameters DEF DeliverOwner, vars, ownerVars, OwnerStrong, NoFutureGrants,
-     EffectiveGeneration, OwnerTypeOK, Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. \A q \in Owners:
+      (grants'[q].expires > 0 \/ grants'[q].pending = "reply") =>
+      (grants[q].expires > 0 \/ grants[q].pending = "reply")
+    BY SMT, OwnerTypes DEF DeliverOwner, GrantRecords, Max, OwnerReplyEnd
+  <2>2. UNCHANGED placement BY DEF DeliverOwner, vars
+  <2> QED BY SMT, <2>1, <2>2
+    DEF OwnerStrong, NoFutureGrants, EffectiveGeneration
 
 <1>6. FrozenBounds'
   <2>1. o[3] < placement[o[2]].generation =>
@@ -294,8 +397,15 @@ THEOREM LoseOwnerReplyPreserves ==
 <1>1. Strong' BY StutteringStrong DEF OwnerStrong, LoseOwnerReply
 
 <1>2. OwnerTypeOK'
-  BY SMT, Parameters, MovementParameters DEF LoseOwnerReply, vars, ownerVars, OwnerStrong, OwnerTypeOK,
-     Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. recoveredMove' \in BOOLEAN
+    BY SMT, OwnerTypes DEF LoseOwnerReply
+  <2>2. placement' \in PlacementRecords
+    BY SMT, OwnerTypes, Parameters, MovementParameters
+      DEF LoseOwnerReply, PlacementRecords
+  <2>3. grants' \in GrantRecords
+    BY SMT, OwnerTypes, OwnerArithmetic, Parameters, MovementParameters
+      DEF LoseOwnerReply, RootValid, vars, GrantRecords, Owners, Ids, Max, OwnerReplyEnd
+  <2> QED BY <2>1, <2>2, <2>3 DEF OwnerTypeOK, PlacementRecords, GrantRecords
 
 <1>3. GrantState'
   BY SMT DEF LoseOwnerReply, vars, OwnerStrong, OwnerTypeOK, GrantState
@@ -304,8 +414,13 @@ THEOREM LoseOwnerReplyPreserves ==
   BY DEF LoseOwnerReply, vars, OwnerStrong, PlacementState
 
 <1>5. NoFutureGrants'
-  BY SMT, Parameters, MovementParameters DEF LoseOwnerReply, vars, ownerVars, OwnerStrong,
-     NoFutureGrants, EffectiveGeneration, OwnerTypeOK, Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. \A q \in Owners:
+      (grants'[q].expires > 0 \/ grants'[q].pending = "reply") =>
+      (grants[q].expires > 0 \/ grants[q].pending = "reply")
+    BY SMT, OwnerTypes DEF LoseOwnerReply, GrantRecords, Max, OwnerReplyEnd
+  <2>2. UNCHANGED placement BY DEF LoseOwnerReply, vars
+  <2> QED BY SMT, <2>1, <2>2
+    DEF OwnerStrong, NoFutureGrants, EffectiveGeneration
 
 <1>6. FrozenBounds'
   BY SMT DEF LoseOwnerReply, vars, OwnerStrong, OwnerTypeOK, FrozenBounds
@@ -322,8 +437,18 @@ THEOREM StartMovePreserves ==
 <1>1. Strong' BY RevisionAdvanceStrong DEF OwnerStrong, StartMove
 
 <1>2. OwnerTypeOK'
-  BY SMT, Parameters, MovementParameters DEF StartMove, vars, ownerVars, OwnerStrong, OwnerTypeOK,
-     Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. recoveredMove' \in BOOLEAN
+    BY SMT, OwnerTypes DEF StartMove
+  <2>2. placement' \in PlacementRecords
+    <3>1. now \in Nat BY DEF OwnerStrong, Strong, TypeOK
+    <3>2. p \in 0..Epochs BY SMT, Parameters DEF Ids
+    <3>3. placement[d].generation \in Nat BY PlacementArithmetic
+    <3> QED BY SMT, <3>1, <3>2, <3>3, OwnerTypes, MovementParameters
+      DEF StartMove, PlacementRecords
+  <2>3. grants' \in GrantRecords
+    BY SMT, OwnerTypes, OwnerArithmetic, Parameters, MovementParameters
+      DEF StartMove, RootValid, vars, GrantRecords, Owners, Ids, Max, OwnerReplyEnd
+  <2> QED BY <2>1, <2>2, <2>3 DEF OwnerTypeOK, PlacementRecords, GrantRecords
 
 <1>3. GrantState'
   BY DEF StartMove, OwnerStrong, GrantState
@@ -334,7 +459,10 @@ THEOREM StartMovePreserves ==
   <2>2. \A q \in Ids: q > p => roots[q].phase = "fresh"
     BY SMT, Parameters, <2>1 DEF OwnerStrong, Strong, RootState, Ids
   <2>3. now \in Nat /\ authority'.owner = authority.owner
-    BY SMT DEF StartMove, OwnerStrong, Strong, TypeOK
+    <3>1. now \in Nat /\ authority \in [owner : 0..Epochs, revision : Nat, active : BOOLEAN]
+      BY DEF OwnerStrong, Strong, TypeOK
+    <3>2. authority' = [authority EXCEPT !.revision = @ + 1] BY DEF StartMove
+    <3> QED BY SMT, <3>1, <3>2
   <2>4. \A q \in Partitions: placement'[q].drain <= now'
     BY SMT, Parameters, MovementParameters, <2>1, <2>2, <2>3, PlacementArithmetic
       DEF StartMove, OwnerStrong, OwnerTypeOK, PlacementState
@@ -377,8 +505,15 @@ THEOREM FinishMovePreserves ==
 <1>1. Strong' BY RevisionAdvanceStrong DEF OwnerStrong, FinishMove
 
 <1>2. OwnerTypeOK'
-  BY SMT, Parameters, MovementParameters DEF FinishMove, vars, ownerVars, OwnerStrong, OwnerTypeOK,
-     Strong, TypeOK, Owners, Ids, Max, OwnerReplyEnd
+  <2>1. recoveredMove' \in BOOLEAN
+    BY SMT, OwnerTypes DEF FinishMove
+  <2>2. placement' \in PlacementRecords
+    BY SMT, OwnerTypes, Parameters, MovementParameters
+      DEF FinishMove, PlacementRecords
+  <2>3. grants' \in GrantRecords
+    BY SMT, OwnerTypes, OwnerArithmetic, Parameters, MovementParameters
+      DEF FinishMove, RootValid, vars, GrantRecords, Owners, Ids, Max, OwnerReplyEnd
+  <2> QED BY <2>1, <2>2, <2>3 DEF OwnerTypeOK, PlacementRecords, GrantRecords
 
 <1>3. GrantState'
   BY DEF FinishMove, OwnerStrong, GrantState

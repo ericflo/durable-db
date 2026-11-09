@@ -374,7 +374,7 @@ The clock arithmetic proof passes **19 obligations** with arbitrary nonnegative 
 
 ## Delegated ownership and journal history — 2026-11-09
 
-The replacement protocol now has an unbounded abstract proof of delegated ownership and journal recovery. The permission proof checks 486 obligations; the composed history proof checks 785. Both import the actual root transitions, and the history proof permits surviving writers to continue their journals after coordinator replacement. Replacing a writer requires a fresh generation.
+The replacement protocol now has an unbounded abstract proof of delegated ownership and journal recovery. The permission proof checks 687 obligations; the composed history proof checks 785. Both import the actual root transitions, and the history proof permits surviving writers to continue their journals after coordinator replacement. Replacing a writer requires a fresh generation.
 
 Four finite permission instances and five history instances remain mandatory regressions, with unsafe variants and reachability controls. The proofs also require three permission mutations and six journal mutations to fail. [The verification scope](verification.md#candidate-delegated-journal-recovery) records the bounds and assumptions; [the history evidence](evidence/partition-journal-candidate-2026-11-09.json) pins the inputs and results.
 
@@ -382,4 +382,10 @@ This establishes abstract history safety under a timing contract, atomic placeme
 
 ## Delayed control application — 2026-11-09
 
-The delegated permission and journal proofs now admit control updates that apply after their caller's permission expires. Their 486 and 785 obligations still pass, with all nine required proof mutations. Four reachability controls require actual late freezes, move completions and prefix selections with acknowledged history, while keeping the original safety invariants enabled. This expands the atomic model toward provider behavior; it does not complete the request/reply refinement or adopt a clock-based serving implementation. [Scope and evidence](verification.md#candidate-delayed-control-application).
+The delegated permission and journal proofs now admit control updates that apply after their caller's permission expires. Their 687 and 785 obligations still pass, with all nine required proof mutations. Four reachability controls require actual late freezes, move completions and prefix selections with acknowledged history, while keeping the original safety invariants enabled. This expands the atomic model toward provider behavior; it does not complete the request/reply refinement or adopt a clock-based serving implementation. [Scope and evidence](verification.md#candidate-delayed-control-application).
+
+## Bounded transaction validation — 2026-11-09
+
+The internal replacement-engine validator accepts disjoint-key writers from one snapshot while rejecting conflicting accepted predecessors, including writes awaiting durability. It checks scan phantoms, preserves strict whole-database revision conditions, expires snapshots when conflict history is reclaimed, and bounds metadata and range-validation work. Twelve Rust tests include 1,024 generated histories checked against a serial reference. Its preceding finite model checks 4,248,703 states, five unsafe controls and two concurrency/reclamation witnesses. [Evidence and limits](evidence/transaction-validation-2026-11-09.json).
+
+The component is not connected to the HTTP engine and establishes no database throughput or production-readiness claim. Durable value views, ownership, journal admission, receipts, authenticated snapshots and client/API support still need composition.

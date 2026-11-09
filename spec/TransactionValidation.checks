@@ -1,0 +1,8 @@
+safe TransactionValidation.cfg transaction-validation 1g -
+unsafe TransactionValidationUnsafeCommittedOnly.cfg transaction-validation-committedonly 1g SerialValidation
+unsafe TransactionValidationUnsafeExistingOnly.cfg transaction-validation-existingonly 1g SerialValidation
+unsafe TransactionValidationUnsafeExpired.cfg transaction-validation-expired 1g SerialValidation
+unsafe TransactionValidationUnsafeVisible.cfg transaction-validation-visible 1g DurableVisibility
+unsafe TransactionValidationConcurrent.cfg transaction-validation-concurrent 1g NotConcurrentDisjoint
+unsafe TransactionValidationReclaimed.cfg transaction-validation-reclaimed 1g NotReclaimedWindow
+unsafe TransactionValidationUnsafeDatabaseRevision.cfg transaction-validation-database 1g SerialValidation

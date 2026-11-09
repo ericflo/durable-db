@@ -11,6 +11,7 @@ mod observation;
 pub mod providers;
 pub mod publication;
 pub mod storage;
+pub mod transactions;
 pub mod upload_budget;
 
 use axum::{

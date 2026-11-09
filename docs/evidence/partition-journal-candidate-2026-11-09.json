@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "recorded_at": "2026-11-09T18:24:03.728266+00:00",
-  "base_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
+  "recorded_at": "2026-11-09T18:53:15.926767+00:00",
+  "base_commit": "f7a971a6433b370d1ccfc078d2960b6c1f611504",
   "status": "Unbounded abstract delegated permission and journal-history composition; no runtime adoption",
   "standard_checker_passed": true,
   "checks": [
@@ -390,13 +390,13 @@
     "No runtime clock dependency or replacement serving engine adopted"
   ],
   "source_sha256": {
-    "Dockerfile": "693d5ac8046f571647ff2d348cd1521fa08365374470da1d869bb6115da61c92",
+    "Dockerfile": "759501c9d6b2dd6fe5262fc9c11673b4f657951ec1df43da743220b560bf18f2",
     "scripts/check-candidate.sh": "10b9f4854ee7ac97edbcc5ce1fabb873ef066e0680d14df087a8a53dc7a38e6d",
     "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
     "scripts/check-proof.sh": "6b9db0faca7462495923858fd86ff111bd2314fad3fb3c11087776ccc0021e53",
     "spec/candidates/PartitionControl.proof": "063aa254b791650becd973d4be7cdbc45913f16298be83d01810173f18b42b79",
     "spec/candidates/PartitionControl.tla": "3483f1a8bbc348322b4030e95302651a4f27d9e9a1e5e2a1e3f2e4dda7a42b7c",
-    "spec/candidates/PartitionControlProof.tla": "95d077dd734f09924461ceaa7ec012825c4f156c7ab044c259ff5fc2cbe687ae",
+    "spec/candidates/PartitionControlProof.tla": "5ab72fa4195e1ac9d4b6419255e5cb99b64cc5baab1cabf880d59654c608fadf",
     "spec/candidates/PartitionJournal.cfg": "cbefbe4089e2579c9534c392803b6c57f32343ffd3ba6a024fe6df7db6055aa1",
     "spec/candidates/PartitionJournal.checks": "ed7433c113fdd51c9c51f36d3b4972496c346ca95077bed219b77e0247084b7e",
     "spec/candidates/PartitionJournal.proof": "6519625c447fc239980611d401eff97df4faa062197f3ba5331ee8b26cbf364d",
@@ -440,15 +440,16 @@
     ".tools/candidates/PartitionJournal/model-partition-journal-independentcoverage.log": "b3898d6f9ed05d66c54029501b58833f57682d05ca3f72eca8ccb8457c3dcb50",
     ".tools/candidates/PartitionJournal/model-partition-journal-repeatedcoverage.log": "2e0a3d4cdae4348e4e1e9339cd3f068a8dfeb86c48149f8d9afb6c84b800aa52",
     ".tools/candidates/PartitionJournal/model-partition-journal-resumecoverage.log": "992d37d097760d678747c3f889ba6c36a27feff6ae9103f9bc5162070303ba53",
-    ".tools/proof-partition-journal.log": "b0a11e27e32691ed0a8a715d03f12d63a1be54afba30f2026b8e34c857b03ffd",
-    ".tools/proof-negative-partition-journal-permission.log": "e7baefa0b0362edaad53dfffb69adf218a0faeb5cf46274fc6477c846ca85f04",
-    ".tools/proof-negative-partition-journal-gap.log": "ca21c897c3f3c02ec0b69379b2111eea3a038d47d4024fe8c37a80bd1b47e065",
-    ".tools/proof-negative-partition-journal-early.log": "a019d8bec62d17757c0a117c553d93eb70a39181f3dc0c00de3312761f471a22",
-    ".tools/proof-negative-partition-journal-missing.log": "1f07bf80f3ac24a42c3f633d604202d88ff106d9c563b277acf72de9ff4c2d9f",
-    ".tools/proof-negative-partition-journal-reseal.log": "ffcf8e05d7b0579f53748b0701cb7f78558e784c26cdc92badf4d0bac7729d3f",
-    ".tools/proof-negative-partition-journal-ready.log": "100d770b929b12912fcd6c0536bbfed18ca335572f6dedb65fdd43460e726ba1",
-    ".tools/late-control-proof-standard.log": "3ed2aae6b56ddbbc288afbcc673c09b5f78a3f26d8ce4d61bc4bfe2da7a6d7d0",
-    ".tools/late-control-model-standard.log": "46672fb8169a204c9c128008b1550ef56a5b2d3df9bca8ef37e9d79f9af154ed"
+    ".tools/proof-partition-journal.log": "c2598cf8a3065526668936032d2628919ac90bcd190de6daa5fbe4aafdd46cdc",
+    ".tools/permission-proof-split-builder.log": "8f4c0594f8bf5fc90817ab83b3aa408ad53db1c21d10a2f6481795614864f64d",
+    ".tools/permission-proof-split-final.log": "e05e1a77cf2752bbae31829e4470a74f3d69a49211f25f1cc0358aaff8ad8361",
+    ".tools/transaction-validation-journal-proof.log": "8f3ab62b218d146a7ca3f5641ac5c05d25f48d1c00de178247e6f50282bf997b",
+    ".tools/proof-negative-partition-journal-permission.log": "550d3c672e77337bec6b5fec63a42e0554e60c43fe8e0232c29eb3809cf053ac",
+    ".tools/proof-negative-partition-journal-gap.log": "9cd336b91e41eea0e45bedbb518137d657eb649c92e74a00e41b3d91d3dd1128",
+    ".tools/proof-negative-partition-journal-early.log": "b76a1c42af6ca46ef1f98de308789850655a3f387355e3cfe4f924aaf57a5bf6",
+    ".tools/proof-negative-partition-journal-missing.log": "c8ebbae714849ec46a6e36fc3d704d4b6c14abae7ac91f46fa3f6cb5ec41a945",
+    ".tools/proof-negative-partition-journal-reseal.log": "cadcb7745d06bd8ccab645a2099224d8e2c5a4ebfb20f379a87e225f309b7f0f",
+    ".tools/proof-negative-partition-journal-ready.log": "d53a7d513f0950d902c2e7dcb274c98716491c3d64f343d727ec7aa332ab225f"
   },
   "checker": {
     "version": "TLC 1.7.4",
@@ -463,18 +464,18 @@
     },
     "public_pages_evidence_matches_commit": true
   },
-  "previous_source_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
-  "previous_recorded_at": "2026-11-09T18:03:33.668218+00:00",
+  "previous_source_commit": "f7a971a6433b370d1ccfc078d2960b6c1f611504",
+  "previous_recorded_at": "2026-11-09T18:24:03.728266+00:00",
   "strengthening": {
     "invariant": "HistoryStrong: OwnerStrong plus journal generation ordering and recovery bounds",
-    "actions_changed": true,
-    "finite_state_counts_unchanged": false,
     "all_positive_unsafe_and_coverage_checks_passed": true,
     "invariant_deduplication": {
       "scope": "Positive configurations require HistoryStrong and every original HistoryInvariant clause without duplicate evaluation",
       "equivalence_theorem": "PartitionJournalProof.FiniteChecksEquivalent",
       "checked_in_full_strict_proof": true
-    }
+    },
+    "actions_changed_since_base_commit": false,
+    "finite_state_counts_unchanged_since_base_commit": true
   },
   "proof": {
     "checker_version": "c8ddc44",
@@ -485,7 +486,7 @@
     "dependencies": [
       {
         "module": "PartitionControlProof",
-        "strict_obligations": 486
+        "strict_obligations": 687
       },
       {
         "module": "RootControlProof",
@@ -493,7 +494,7 @@
       }
     ],
     "dependency_positive_and_negative_checks_previously_passed_for_exact_sources": true,
-    "positive_seconds": 92.281002,
+    "positive_seconds": 94.274899,
     "standard_checker_passed": true,
     "runtime_adopted": false,
     "negative_controls": [
@@ -528,7 +529,20 @@
         "checked_obligations": 59
       }
     ],
-    "finite_checks_equivalence_theorem": "FiniteChecksEquivalent"
+    "finite_checks_equivalence_theorem": "FiniteChecksEquivalent",
+    "builder_diagnostic": {
+      "recorded_at": "2026-11-09T18:53:15.926767+00:00",
+      "status": "success",
+      "strict_obligations": 785,
+      "positive_seconds": 189.884618,
+      "checked_composition": {
+        "permission_obligations": 687,
+        "journal_obligations": 785,
+        "negative_controls": 9
+      },
+      "scope": "Exact-source combined proof stage on the Woodpecker BuildKit builder, inheriting the exact checked root stage; full pipeline qualification remains separate",
+      "log_sha256": "8f4c0594f8bf5fc90817ab83b3aa408ad53db1c21d10a2f6481795614864f64d"
+    }
   },
   "late_application": {
     "changes": [
@@ -537,13 +551,24 @@
       "Select"
     ],
     "permission_guards_for_grants_recovery_and_acknowledgement_unchanged": true,
-    "proof_bodies_unchanged": true,
+    "proof_bodies_unchanged": false,
     "request_reply_and_local_view_refinement_complete": false,
-    "coverage_evidence": "late-control-candidate-2026-11-09.json"
+    "coverage_evidence": "late-control-candidate-2026-11-09.json",
+    "introduced_in": "f7a971a6433b370d1ccfc078d2960b6c1f611504"
   },
   "previous_abstract_qualification": {
     "source_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
     "woodpecker_pipeline": 49,
-    "status_at_recording": "running; not qualified by this record"
+    "status": "killed automatically when the next main commit arrived; no full qualification or Pages publication"
+  },
+  "prior_late_application_ci_failure": {
+    "pipeline": 50,
+    "source_commit": "f7a971a6433b370d1ccfc078d2960b6c1f611504",
+    "status": "failure",
+    "checked_obligations": 486,
+    "failed_obligations": 16,
+    "scope": "Proof queries did not discharge on the CI builder; the local full proof passed",
+    "log_sha256": "f3869957185aa57f8020aff422814a6fd86eed797c09bdd69aafb23b44483b72",
+    "repair": "Split record typing, root-progress fields and preservation clauses into explicit typed steps. No action, invariant, solver limit or required control changes."
   }
 }

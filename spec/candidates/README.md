@@ -67,7 +67,7 @@ Run `scripts/check-candidate.sh PartitionControl`. Four positive instances cover
 
 These finite checks exercise permission composition with an atomic placement/issuance boundary and the abstract root timing contract. They do not prove the clock contract, uncertainty/refinement of placement updates, data recovery, early release, routing, admission, collection, liveness or the Rust implementation. The exact bounds and remaining obligations are in `docs/verification.md`; no runtime clock rule changes.
 
-Run `scripts/check-proof.sh PartitionControl` for its unbounded abstract permission theorem: 486 obligations plus assignment, drain and reply mutations. The command checks the root proof dependency first. The strengthening is also required by the positive permission and journal configurations. Arbitrary finite partition/generation counts are covered under the abstract timing and placement contracts; journal history, wire uncertainty and platform correctness are separate obligations.
+Run `scripts/check-proof.sh PartitionControl` for its unbounded abstract permission theorem: 687 obligations plus assignment, drain and reply mutations. The command checks the root proof dependency first. The strengthening is also required by the positive permission and journal configurations. Arbitrary finite partition/generation counts are covered under the abstract timing and placement contracts; journal history, wire uncertainty and platform correctness are separate obligations.
 
 ## PartitionJournal
 

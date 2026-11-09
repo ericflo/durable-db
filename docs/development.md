@@ -22,6 +22,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 
 | Change | Focused checks |
 | --- | --- |
+| Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
@@ -41,7 +42,7 @@ scripts/check-candidate.sh PartitionJournal
 scripts/check-proof.sh PartitionJournal
 ```
 
-The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl` and `RootJournal`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
+The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal` and `LateControlCoverage`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
 
 ## Formal check inputs
 
@@ -83,7 +84,7 @@ For component work, `Native::connect_storage` and `S3::connect_storage` return t
 
 ## CI and publication
 
-[Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds publish the public documentation with a repository-scoped SSH deploy key.
+[Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds publish the public documentation with a repository-scoped SSH deploy key. A newer push cancels the previous running pipeline in this setup; finish local iteration before pushing and let the required run complete so verification and publication can finish.
 
 The [Docker build](https://github.com/ericflo/durable-db/blob/main/Dockerfile) requires Rust formatting, lints and tests; the full client/Pi suite; every maintained model and its controls; and the publication, journal and candidate proofs. It builds the static Linux executable, runtime image and documentation artifacts. The 10,005-database regression retains every assertion and runs in release mode; the rest of the Rust suite runs in debug mode.
 

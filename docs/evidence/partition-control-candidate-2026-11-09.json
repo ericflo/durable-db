@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "recorded_at": "2026-11-09T18:24:03.728266+00:00",
-  "base_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
+  "recorded_at": "2026-11-09T18:53:15.926767+00:00",
+  "base_commit": "f7a971a6433b370d1ccfc078d2960b6c1f611504",
   "status": "Unbounded abstract root and partition permission theorem; no runtime adoption",
   "standard_checker_passed": true,
   "checks": [
@@ -248,7 +248,7 @@
     "No Rust controller or runtime clock dependency adopted"
   ],
   "source_sha256": {
-    "Dockerfile": "693d5ac8046f571647ff2d348cd1521fa08365374470da1d869bb6115da61c92",
+    "Dockerfile": "759501c9d6b2dd6fe5262fc9c11673b4f657951ec1df43da743220b560bf18f2",
     "scripts/check-candidate.sh": "10b9f4854ee7ac97edbcc5ce1fabb873ef066e0680d14df087a8a53dc7a38e6d",
     "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
     "scripts/check-proof.sh": "6b9db0faca7462495923858fd86ff111bd2314fad3fb3c11087776ccc0021e53",
@@ -257,7 +257,7 @@
     "spec/candidates/PartitionControl.proof": "063aa254b791650becd973d4be7cdbc45913f16298be83d01810173f18b42b79",
     "spec/candidates/PartitionControl.tla": "3483f1a8bbc348322b4030e95302651a4f27d9e9a1e5e2a1e3f2e4dda7a42b7c",
     "spec/candidates/PartitionControlCoverage.cfg": "4e16749c73896ed732f9a88f76306b343e76e3b5bac25b5d8d64825d084eda57",
-    "spec/candidates/PartitionControlProof.tla": "95d077dd734f09924461ceaa7ec012825c4f156c7ab044c259ff5fc2cbe687ae",
+    "spec/candidates/PartitionControlProof.tla": "5ab72fa4195e1ac9d4b6419255e5cb99b64cc5baab1cabf880d59654c608fadf",
     "spec/candidates/PartitionControlRecovery.cfg": "a0e6b14ccaf7e79f09739b1fc92b5c3b7c9e1a9e3415a344b50347a05a9e22c6",
     "spec/candidates/PartitionControlRecoveryCoverage.cfg": "74b5295d9db956c8c773bc076780a87b4a2fe91d42228f1bed7c4cbf05a7fd7d",
     "spec/candidates/PartitionControlRenewal.cfg": "0099c7ba34e817989e9279381c88815378eb1a86bc6f0a2baa2780cad8312806",
@@ -283,12 +283,13 @@
     ".tools/candidates/PartitionControl/model-partition-control-recovery-coverage.log": "f3f769b83dee5b80fa847989ba34f08248adb846c00101423d240df22586919b",
     ".tools/candidates/PartitionControl/model-partition-control-repeated-coverage.log": "ee47109aa19f4167ac09321d8f1405b4ca47154a8b515649ff94ed3999775b6d",
     ".tools/candidates/PartitionControl/model-partition-control-renewal-coverage.log": "9611e506217d6c4d678daceec07936f58d68613fc21214dbc61fd350c55e6bcd",
-    ".tools/proof-partition-control.log": "23d6ac1828e0ae514512bdf01aff522838151a48ac2c90f2903ce4903ac979f0",
-    ".tools/proof-negative-partition-assignment.log": "0112c381f14f8842727161efe93b1e4f330a63ae9d7c6a2ef93b8e324cf4bf89",
-    ".tools/proof-negative-partition-drain.log": "54bfc637211b16fa08b9bc4793791f8207e3ce3adf4181275d0e296a12b76fec",
-    ".tools/proof-negative-partition-reply.log": "0777f3524a6292dee6e6c8f2b645e66e705e4bd830e3af3c82173950430c63d0",
-    ".tools/late-control-proof-standard.log": "3ed2aae6b56ddbbc288afbcc673c09b5f78a3f26d8ce4d61bc4bfe2da7a6d7d0",
-    ".tools/late-control-model-standard.log": "46672fb8169a204c9c128008b1550ef56a5b2d3df9bca8ef37e9d79f9af154ed"
+    ".tools/proof-partition-control.log": "b528ab8e08f1e706b08e465f36bf0f0e4b71b78ae9b9af88b8aaa62d26d283f0",
+    ".tools/permission-proof-split-builder.log": "8f4c0594f8bf5fc90817ab83b3aa408ad53db1c21d10a2f6481795614864f64d",
+    ".tools/permission-proof-split-final.log": "e05e1a77cf2752bbae31829e4470a74f3d69a49211f25f1cc0358aaff8ad8361",
+    ".tools/transaction-validation-journal-proof.log": "8f3ab62b218d146a7ca3f5641ac5c05d25f48d1c00de178247e6f50282bf997b",
+    ".tools/proof-negative-partition-assignment.log": "281cf60d58d22b8014411461a418a7c245431373e73c59072168348f095fe7ae",
+    ".tools/proof-negative-partition-drain.log": "03cd692a0923e016d42f1f2fff4d726f7e14610258140c02d3b3e832f94db0e2",
+    ".tools/proof-negative-partition-reply.log": "8d2d1aab042c7e8c32536883e41a3a081083a5c115a8f1fc9d253faa5d8c7651"
   },
   "previous_bounded_qualification": {
     "source_commit": "e3b89aac376eab63f4319a19775a4432d4515abb",
@@ -298,18 +299,18 @@
     },
     "public_pages_evidence_matches_commit": true
   },
-  "previous_source_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
-  "previous_recorded_at": "2026-11-09T18:03:33.667108+00:00",
+  "previous_source_commit": "f7a971a6433b370d1ccfc078d2960b6c1f611504",
+  "previous_recorded_at": "2026-11-09T18:24:03.728266+00:00",
   "strengthening": {
     "invariant": "OwnerStrong",
-    "actions_changed": true,
-    "finite_state_counts_unchanged": false,
-    "all_positive_unsafe_and_coverage_checks_passed": true
+    "all_positive_unsafe_and_coverage_checks_passed": true,
+    "actions_changed_since_base_commit": false,
+    "finite_state_counts_unchanged_since_base_commit": true
   },
   "proof": {
     "checker_version": "c8ddc44",
     "theorem": "PartitionSafety",
-    "strict_obligations": 486,
+    "strict_obligations": 687,
     "scope": "Arbitrary finite root, partition and generation counts; unbounded executions and renewal counts under the abstract timing and atomic placement contracts; control application may finish after caller permission expires",
     "induction_invariant": "OwnerStrong: root permission bounds, pending grants, placement ordering, frozen-generation bounds and permanently ended generations",
     "dependency": {
@@ -317,7 +318,7 @@
       "strict_obligations": 153,
       "positive_and_negative_checked": true
     },
-    "positive_seconds": 104.910301,
+    "positive_seconds": 106.893319,
     "standard_checker_passed": true,
     "runtime_adopted": false,
     "negative_controls": [
@@ -325,7 +326,7 @@
         "mutation": "assignment",
         "theorem": "IssueOwnerPreserves",
         "failed_obligations": 3,
-        "checked_obligations": 31
+        "checked_obligations": 53
       },
       {
         "mutation": "drain",
@@ -337,9 +338,22 @@
         "mutation": "reply",
         "theorem": "DeliverOwnerPreserves",
         "failed_obligations": 3,
-        "checked_obligations": 42
+        "checked_obligations": 60
       }
-    ]
+    ],
+    "builder_diagnostic": {
+      "recorded_at": "2026-11-09T18:53:15.926767+00:00",
+      "status": "success",
+      "strict_obligations": 687,
+      "positive_seconds": 210.789836,
+      "checked_composition": {
+        "permission_obligations": 687,
+        "journal_obligations": 785,
+        "negative_controls": 9
+      },
+      "scope": "Exact-source combined proof stage on the Woodpecker BuildKit builder, inheriting the exact checked root stage; full pipeline qualification remains separate",
+      "log_sha256": "8f4c0594f8bf5fc90817ab83b3aa408ad53db1c21d10a2f6481795614864f64d"
+    }
   },
   "late_application": {
     "changes": [
@@ -347,9 +361,10 @@
       "FinishMove"
     ],
     "permission_guards_for_grants_recovery_and_acknowledgement_unchanged": true,
-    "proof_bodies_unchanged": true,
+    "proof_bodies_unchanged": false,
     "request_reply_and_local_view_refinement_complete": false,
-    "coverage_evidence": "late-control-candidate-2026-11-09.json"
+    "coverage_evidence": "late-control-candidate-2026-11-09.json",
+    "introduced_in": "f7a971a6433b370d1ccfc078d2960b6c1f611504"
   },
   "prior_ci_failure": {
     "pipeline": 48,
@@ -363,6 +378,16 @@
   "previous_abstract_qualification": {
     "source_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
     "woodpecker_pipeline": 49,
-    "status_at_recording": "running; not qualified by this record"
+    "status": "killed automatically when the next main commit arrived; no full qualification or Pages publication"
+  },
+  "prior_late_application_ci_failure": {
+    "pipeline": 50,
+    "source_commit": "f7a971a6433b370d1ccfc078d2960b6c1f611504",
+    "status": "failure",
+    "checked_obligations": 486,
+    "failed_obligations": 16,
+    "scope": "Proof queries did not discharge on the CI builder; the local full proof passed",
+    "log_sha256": "f3869957185aa57f8020aff422814a6fd86eed797c09bdd69aafb23b44483b72",
+    "repair": "Split record typing, root-progress fields and preservation clauses into explicit typed steps. No action, invariant, solver limit or required control changes."
   }
 }
