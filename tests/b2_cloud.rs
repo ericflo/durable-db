@@ -1,5 +1,5 @@
 //! Explicit opt-in: requires a DEDICATED disposable B2 bucket, never a production bucket.
-use durable_db::{Error, cache::Cache, engine::*, providers::b2::Native};
+use durable_db::{Error, cache::Cache, engine::*, providers::b2::Native, storage::Storage};
 use std::sync::Arc;
 
 // Both opt-in tests share a bucket and run concurrently. A collector in one
@@ -56,7 +56,22 @@ async fn real_b2_conditional_authority_versions_and_cache_free_recovery() {
         assert!(engine.commit(&db, &req).await.unwrap().replayed);
     }
     assert!(engine.gc(&db).await.unwrap().deleted >= 4);
-    assert!(storage.collect_manifests().await.unwrap() >= 5);
+    // Another collector may already have reclaimed our old manifests, and the
+    // shared bounded cursor can start anywhere. Check the reclamation result,
+    // not which concurrent collector received credit for doing the work.
+    let prefix = format!("manifests/{db}.");
+    let mut reclaimed = false;
+    for _ in 0..32 {
+        storage.collect_manifests().await.unwrap();
+        if storage.list(&prefix, None, 8).await.unwrap().len() == 1 {
+            reclaimed = true;
+            break;
+        }
+    }
+    assert!(
+        reclaimed,
+        "obsolete manifests survived 32 bounded collection passes"
+    );
     let reopened = Engine::new(
         Arc::new(
             Native::connect(&bucket, "durable-db-cloud-test")
@@ -83,7 +98,6 @@ async fn real_b2_conditional_authority_versions_and_cache_free_recovery() {
 #[tokio::test]
 #[ignore = "requires a disposable real B2 bucket and scoped workload credentials"]
 async fn real_b2_directory_split_and_cache_free_reopen() {
-    use durable_db::storage::Storage;
     let bucket = std::env::var("DURABLE_DB_TEST_B2_BUCKET").unwrap();
     let storage = Arc::new(
         Native::connect(&bucket, "durable-db-cloud-test")
