@@ -18,8 +18,11 @@ export DURABLE_DB_TEST_URL="http://127.0.0.1:$port"
 export DURABLE_DB_TEST_TOKEN_FILE="$tmp/token"
 cd "$repo/clients/javascript"
 npm ci --no-audit --no-fund
+npm run format:check
+npm run typecheck
 npm test
 cd "$repo"
+node --test examples/web-app/storage.test.ts
 node scripts/test-benchmark.mjs
 node scripts/benchmark-http.mjs --urls "$DURABLE_DB_TEST_URL" \
   --token-file "$DURABLE_DB_TEST_TOKEN_FILE" --databases 4 --workers 1,4 --operations 4 \

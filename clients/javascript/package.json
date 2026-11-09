@@ -5,12 +5,24 @@
   "type": "module",
   "license": "Apache-2.0",
   "exports": {
-    ".": "./client.mjs",
-    "./pi-reference": "./pi-reference.mjs",
-    "./pi-indexed": "./pi-indexed.mjs"
+    ".": {
+      "types": "./client.d.mts",
+      "import": "./client.mjs"
+    },
+    "./pi-reference": {
+      "types": "./pi-reference.d.mts",
+      "import": "./pi-reference.mjs"
+    },
+    "./pi-indexed": {
+      "types": "./pi-indexed.d.mts",
+      "import": "./pi-indexed.mjs"
+    }
   },
   "scripts": {
-    "test": "vitest run --testTimeout=30000 --hookTimeout=30000"
+    "test": "vitest run --testTimeout=30000 --hookTimeout=30000",
+    "format": "prettier --config .prettierrc.json --write \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\"",
+    "format:check": "prettier --config .prettierrc.json --check \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\"",
+    "typecheck": "tsc --project ../../examples/web-app/tsconfig.json"
   },
   "dependencies": {
     "@earendil-works/pi-durable": "1.5.0"
@@ -18,6 +30,10 @@
   "devDependencies": {
     "@earendil-works/chord": "1.5.0",
     "@earendil-works/pi-ai": "1.5.0",
+    "@types/node": "24.19.2",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2",
     "vitest": "4.1.12"
-  }
+  },
+  "types": "./client.d.mts"
 }

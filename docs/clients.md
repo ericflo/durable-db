@@ -2,6 +2,9 @@
 
 `clients/javascript/client.mjs` is a small fetch-based client. It keeps revision and request-ID semantics explicit and refuses redirects: a redirected response cannot acknowledge the original mutation. Connect directly to the intended HTTPS origin; an HTTP-to-HTTPS redirect is not a substitute. The initial API works with any HTTP client.
 
+
+The client exports TypeScript declarations for its wire contract and Pi adapters. The [general web application example](web-app.md) covers settings, pagination and atomic record/index changes with persistent application intent IDs. Its readable TypeScript storage module, local API and integration tests live in `examples/web-app/`.
+
 ```js
 import { DurableDb, encode } from './client.mjs';
 const db = new DurableDb({ url, database: 'demo', token });

@@ -82,6 +82,7 @@ Pods add request concurrency, but directory publication serializes within a buck
 - [Security and resource isolation](docs/security.md)
 - [Formal model and verification evidence](docs/verification.md)
 - [Client and pi-durable integration](docs/clients.md)
+- [TypeScript web application example](examples/web-app/README.md)
 - [Development and Woodpecker CI](docs/development.md)
 - [Public documentation website](https://ericflo.github.io/durable-db-site/)
 - [Production readiness and release gates](docs/production-readiness.md)
