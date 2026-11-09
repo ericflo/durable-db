@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use durable_db::{
-    api::{App, router},
+    api::{App, RateLimits, router},
     auth::Auth,
     cache::Cache,
     engine::Engine,
@@ -68,6 +68,12 @@ enum Command {
         disk_cache_mib: usize,
         #[arg(long, default_value_t = 8, env = "DURABLE_DB_CONCURRENCY")]
         concurrency: usize,
+        /// Per-principal, per-pod budget refill. A commit costs 5 units; other requests cost 1.
+        #[arg(long, default_value_t = RateLimits::DEFAULT_UNITS_PER_SECOND, env = "DURABLE_DB_REQUEST_UNITS_PER_SECOND")]
+        request_units_per_second: u32,
+        /// Maximum accumulated request units per principal, including the initial burst.
+        #[arg(long, default_value_t = RateLimits::DEFAULT_BURST_UNITS, env = "DURABLE_DB_REQUEST_BURST_UNITS")]
+        request_burst_units: u32,
         #[arg(long, default_value_t = 60, env = "DURABLE_DB_MAINTENANCE_SECONDS")]
         maintenance_seconds: u64,
     },
@@ -248,6 +254,8 @@ async fn main() -> anyhow::Result<()> {
             disk_cache,
             disk_cache_mib,
             concurrency,
+            request_units_per_second,
+            request_burst_units,
             maintenance_seconds,
         } => {
             if concurrency == 0
@@ -258,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 bail!("invalid resource configuration");
             }
+            let rate_limits = RateLimits::new(request_units_per_second, request_burst_units)?;
             let cluster = bucket.is_some() || b2_bucket.is_some();
             let upload_limits = match (upload_budget_bytes, upload_budget_attempts) {
                 (Some(bytes), Some(attempts)) if cluster => {
@@ -310,7 +319,12 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(local)
             };
             let engine = Arc::new(Engine::new(storage, cache));
-            let app = Arc::new(App::new(engine, auth, concurrency));
+            let app = Arc::new(App::with_rate_limits(
+                engine,
+                auth,
+                concurrency,
+                rate_limits,
+            ));
             let listener = tokio::net::TcpListener::bind(listen).await?;
             tracing::info!(address = %listener.local_addr()?, cluster, "durable-db ready");
             let maintenance = tokio::spawn(maintain(app.clone(), maintenance_seconds));

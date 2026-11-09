@@ -26,6 +26,8 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 
 Readiness does not continuously probe the object provider; provider outages return 503 from data requests. Liveness never depends on storage availability, avoiding restart storms.
 
+Authenticated requests share a weighted [request budget](deployment.md#request-budgets) per principal and pod. Commits cost five units; other requests cost one. Default refill is 20 units/second with a burst of 40. HTTP 429 means admission rejected the request before its handler ran; back off before retrying. These configurable policy limits are separate from database quotas and measured engine capacity.
+
 ## Create a protected database
 
 Use `PUT /v1/databases/{db}` with an administrator credential:

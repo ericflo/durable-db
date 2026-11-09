@@ -147,6 +147,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh UploadCredits && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-requestbudget
+COPY spec/RequestBudget.tla spec/RequestBudget.checks spec/RequestBudget*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh RequestBudget && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-globalcollection
 COPY spec/GlobalCollection.tla spec/GlobalCollection.checks spec/GlobalCollection.cfg spec/GlobalCollectionConcurrent.cfg spec/UnsafeGlobalOrigin.cfg spec/UnsafeGlobalFence.cfg spec/UnsafeGlobalLateList.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -303,6 +309,7 @@ COPY --from=model-databasecreation /checks/ /checks/
 COPY --from=model-pisession /checks/ /checks/
 COPY --from=model-signingrotation /checks/ /checks/
 COPY --from=model-uploadcredits /checks/ /checks/
+COPY --from=model-requestbudget /checks/ /checks/
 
 FROM tools AS build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./

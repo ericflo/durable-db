@@ -6,7 +6,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use durable_db::{
-    api::{App, router},
+    api::{App, RateLimits, router},
     auth::Auth,
     backup,
     cache::Cache,
@@ -102,15 +102,21 @@ impl Fixture {
         let token = temp.path().join("token");
         std::fs::write(&token, auth.administrator_token(3600).unwrap()).unwrap();
         let faults = Arc::new(Faults::default());
-        let app = router(Arc::new(App::new(engine.clone(), auth, 64))).layer(
-            middleware::from_fn_with_state(
-                Hooks {
-                    faults: faults.clone(),
-                    engine: engine.clone(),
-                },
-                inject,
-            ),
-        );
+        // Exercise backup recovery over HTTP without spending a minute on the
+        // default overload policy. Admission behavior has its own tests.
+        let app = router(Arc::new(App::with_rate_limits(
+            engine.clone(),
+            auth,
+            64,
+            RateLimits::new(1_000_000, 1_000_000).unwrap(),
+        )))
+        .layer(middleware::from_fn_with_state(
+            Hooks {
+                faults: faults.clone(),
+                engine: engine.clone(),
+            },
+            inject,
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {

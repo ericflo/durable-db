@@ -37,6 +37,21 @@ The multi-process integration test (`scripts/test-process-scaling.py`) exercised
 Use a registry address reachable by the **nodes' container runtime**, not just by pods. For example, a build may push through a cluster DNS service while the nodes pull the same registry through a configured NodePort alias. The qualification run used this arrangement; it did not modify cluster-wide registry or metrics settings.
 
 
+## Request budgets
+
+Current source builds expose two per-principal, per-pod overload settings:
+
+| Flag | Environment variable | Default | Accepted range |
+| --- | --- | --- | --- |
+| `--request-units-per-second` | `DURABLE_DB_REQUEST_UNITS_PER_SECOND` | 20 | 1–1,000,000 |
+| `--request-burst-units` | `DURABLE_DB_REQUEST_BURST_UNITS` | 40 | 5–1,000,000 |
+
+A commit attempt costs five units; other authenticated requests cost one. A new principal starts with the burst allowance, which refills continuously up to that ceiling. With defaults, an otherwise idle principal can attempt eight commits immediately and sustain at most four per second. Mixed requests share the same budget. Raising concurrency alone does not raise this ceiling.
+
+All tokens for one database share its budget. All administrator credentials share one administrator budget across databases; metrics-only credentials have their own budget. Applications should use database-scoped credentials. Rate or concurrency rejection returns HTTP 429 before the handler runs; clients should back off. Invalid configuration fails before storage initialization.
+
+Choose these settings alongside concurrency, memory and measured provider capacity, and keep them consistent across the pod template. They are policy limits, not measured database throughput. Scaling and process restarts create additional initial allowances; these transient limits do not replace durable quotas or cluster-wide spending controls. See [security](security.md).
+
 ## Signing-key changes
 
 Current source builds read either the original hex key file or a bounded JSON keyring through the same `--admin-key-file` setting. Follow the [expansion, promotion, and retirement procedure](design-signing-rotation.md). Key files are loaded at startup: update the Secret and complete the corresponding rolling restart, including the template used by new autoscaled pods. A still-serving process outside the current control-plane view must be fenced from clients or included in the completion check. Keep the old key trusted during an availability rollback; a compromised or deliberately retired key must not be reintroduced by restoring an old Secret.

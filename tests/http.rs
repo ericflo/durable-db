@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use durable_db::{
-    api::{App, router},
+    api::{App, RateLimits, router},
     auth::Auth,
     cache::Cache,
     engine::{Engine, Limits},
@@ -12,6 +12,83 @@ use durable_db::{
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+#[tokio::test(start_paused = true)]
+async fn configured_request_budgets_weight_commits_and_share_by_identity() {
+    let auth = Auth::new(&"aa".repeat(32)).unwrap();
+    let writer = auth.issue("alpha".into(), true, 3600).unwrap();
+    let reader = auth.issue("alpha".into(), false, 3600).unwrap();
+    let other = auth.issue("beta".into(), false, 3600).unwrap();
+    let admin = auth.admin_token();
+    let metrics = auth.metrics_token(3600).unwrap();
+    let storage =
+        Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "budget").unwrap());
+    let engine = Arc::new(Engine::new(storage, Arc::new(Cache::new(0, None).unwrap())));
+    engine.create("alpha", Limits::default()).await.unwrap();
+    engine.create("beta", Limits::default()).await.unwrap();
+    let app = router(Arc::new(App::with_rate_limits(
+        engine,
+        auth,
+        8,
+        RateLimits::new(1, 5).unwrap(),
+    )));
+    async fn call(app: &axum::Router, path: &str, token: &str, body: Option<String>) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(if body.is_some() { "POST" } else { "GET" })
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.unwrap_or_default()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+    let commit = |revision| {
+        Some(format!(
+            r#"{{"expected_revision":{revision},"request_id":"write-{revision}","writes":[{{"key":"x","value":"eA=="}}]}}"#
+        ))
+    };
+    assert_eq!(
+        call(&app, "/v1/databases/alpha/commit", &writer, commit(0)).await,
+        StatusCode::OK
+    );
+    // A fresh token or a different path cannot select a fresh budget.
+    for path in ["/v1/databases/alpha", "/v1/databases/beta"] {
+        assert_eq!(
+            call(&app, path, &reader, None).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    for (path, token) in [
+        ("/v1/databases/beta", &other),
+        ("/metrics", &admin),
+        ("/metrics", &metrics),
+    ] {
+        assert_eq!(call(&app, path, token, None).await, StatusCode::OK);
+    }
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert_eq!(
+        call(&app, "/v1/databases/alpha", &reader, None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, "/v1/databases/alpha/commit", &writer, commit(1)).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    assert_eq!(
+        call(&app, "/v1/databases/alpha/commit", &writer, commit(1)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, "/v1/databases/alpha", &reader, None).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
 
 #[tokio::test]
 async fn http_enforces_auth_scopes_body_limits_and_consistent_results() {
@@ -367,4 +444,58 @@ async fn a_full_principal_table_keeps_administrator_and_metrics_access() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn principal_churn_does_not_reset_a_slowly_refilling_budget() {
+    let auth = Auth::new(&"ae".repeat(32)).unwrap();
+    let tokens: Vec<_> = (0..4097)
+        .map(|n| auth.issue(format!("tenant-{n}"), false, 3600).unwrap())
+        .collect();
+    let storage =
+        Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "eviction").unwrap());
+    let engine = Arc::new(Engine::new(storage, Arc::new(Cache::new(0, None).unwrap())));
+    let app = router(Arc::new(App::with_rate_limits(
+        engine,
+        auth,
+        8,
+        RateLimits::new(1, 100).unwrap(),
+    )));
+    async fn call(app: &axum::Router, token: &str, tenant: usize) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/databases/tenant-{tenant}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+    for _ in 0..100 {
+        assert_eq!(call(&app, &tokens[0], 0).await, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        call(&app, &tokens[0], 0).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for (n, token) in tokens.iter().enumerate().take(4096).skip(1) {
+        assert_eq!(call(&app, token, n).await, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        call(&app, &tokens[4096], 4096).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    // Churn evicts fully refilled principals, but tenant zero is still depleted.
+    assert_eq!(call(&app, &tokens[4096], 4096).await, StatusCode::NOT_FOUND);
+    for _ in 0..60 {
+        assert_eq!(call(&app, &tokens[0], 0).await, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(
+        call(&app, &tokens[0], 0).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
 }

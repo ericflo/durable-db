@@ -1,0 +1,4 @@
+safe RequestBudget.cfg request-budget 256m -
+safe RequestBudgetFast.cfg request-budget-fast 256m -
+unsafe RequestBudgetUnsafeSample.cfg request-budget-sample 256m NoFreeCredit
+unsafe RequestBudgetUnsafeEviction.cfg request-budget-eviction 256m NoFreeCredit

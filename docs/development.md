@@ -15,6 +15,8 @@ scripts/check-model.sh
 scripts/check-proof.sh
 ```
 
+The backup recovery fixture uses a larger bounded request budget so its 16,641-key interrupted restore tests recovery rather than waiting for the default four-commit-per-second allowance. Admission tests retain default-policy coverage and use a controlled clock for exact refill and eviction checks.
+
 The two Rust test commands match Woodpecker: run the capacity regression in release mode instead of paying for its large directory sweep in debug mode. Both commands are required for the complete suite.
 
 The model command checks every current-engine model and its required controls. The proof command above checks abstract publication safety; journal and research proofs have separate commands below. These checks do not establish that the Rust implementation refines the models. See [verification](verification.md) for each theorem's assumptions and scope.
@@ -25,6 +27,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 
 | Change | Focused checks |
 | --- | --- |
+| HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |

@@ -1,3 +1,6 @@
+mod rate;
+pub use rate::RateLimits;
+
 use crate::{
     Error, Result,
     auth::Auth,
@@ -19,13 +22,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{Mutex, Semaphore};
+use tokio::time::Instant;
 
 struct Bucket {
-    tokens: f64,
-    time: Instant,
+    budget: rate::Budget,
     permits: Arc<Semaphore>,
 }
 #[derive(Hash, Eq, PartialEq)]
@@ -40,18 +43,31 @@ pub struct App {
     pub ready: AtomicBool,
     pub permits: Arc<Semaphore>,
     rates: Mutex<HashMap<Principal, Bucket>>,
+    rate_limits: RateLimits,
     principal_concurrency: usize,
     pub requests: AtomicU64,
     pub rejected: AtomicU64,
 }
 impl App {
     pub fn new(engine: Arc<Engine>, auth: Auth, concurrency: usize) -> Self {
+        Self::with_rate_limits(engine, auth, concurrency, RateLimits::default())
+    }
+
+    /// Construct a server with an explicit per-principal request budget.
+    /// Concurrency limits and database quotas remain independent of this budget.
+    pub fn with_rate_limits(
+        engine: Arc<Engine>,
+        auth: Auth,
+        concurrency: usize,
+        rate_limits: RateLimits,
+    ) -> Self {
         Self {
             engine,
             auth,
             ready: AtomicBool::new(true),
             permits: Arc::new(Semaphore::new(concurrency)),
             rates: Mutex::new(HashMap::new()),
+            rate_limits,
             principal_concurrency: (concurrency / 4).max(1),
             requests: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
@@ -144,16 +160,18 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
         }
     };
     let weight = if request.uri().path().ends_with("/commit") {
-        5.0
+        rate::COMMIT_COST
     } else {
-        1.0
+        1
     };
-    let now = Instant::now();
     // The owned permit survives every await and is returned on cancellation,
     // timeout, extractor failure, or normal completion. All tokens for a
     // database share one allowance; request paths cannot select another one.
     let _principal_permit = {
         let mut rates = app.rates.lock().await;
+        // Sampling before the lock can reuse elapsed time or credit an old
+        // interval after a later request has already consumed its budget.
+        let now = Instant::now();
         // Two fixed control principals may always create their entries even
         // when tenants fill the bounded map. Otherwise churn can lock out
         // administrative recovery and monitoring. At most 4,098 entries exist.
@@ -161,30 +179,23 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
             && rates.len() >= 4096
             && !rates.contains_key(&bucket)
         {
-            rates.retain(|_, b| {
-                now.duration_since(b.time) < Duration::from_secs(60)
-                    || Arc::strong_count(&b.permits) > 1
-            });
+            rates.retain(|_, b| !b.budget.can_evict(now) || Arc::strong_count(&b.permits) > 1);
             if rates.len() >= 4096 {
                 return Error::Busy.into_response();
             }
         }
-        let rate = rates.entry(bucket).or_insert(Bucket {
-            tokens: 40.0,
-            time: now,
+        let rate = rates.entry(bucket).or_insert_with(|| Bucket {
+            budget: rate::Budget::new(now, app.rate_limits),
             permits: Arc::new(Semaphore::new(app.principal_concurrency)),
         });
         let Ok(permit) = rate.permits.clone().try_acquire_owned() else {
             app.rejected.fetch_add(1, Ordering::Relaxed);
             return Error::Busy.into_response();
         };
-        rate.tokens = (rate.tokens + now.duration_since(rate.time).as_secs_f64() * 20.0).min(40.0);
-        rate.time = now;
-        if rate.tokens < weight {
+        if !rate.budget.take(now, weight) {
             app.rejected.fetch_add(1, Ordering::Relaxed);
             return Error::Busy.into_response();
         }
-        rate.tokens -= weight;
         permit
     };
     let Ok(_permit) = app.permits.clone().try_acquire_owned() else {
