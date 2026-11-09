@@ -90,7 +90,9 @@ This candidate composes `RootControl` with journal recovery across repeated epoc
 
 Run `scripts/check-candidate.sh RootJournal`. The wrapper copies its `RootControl` dependency, checks two positive instances, requires six unsafe variants to fail and requires a repeated-history coverage trace. The two-epoch/two-batch instance explores 12,474 states; the three-epoch/one-batch instance explores 2,230,369. Coverage shows the third owner retaining both predecessors' acknowledged prefixes. Exact bounds, assumptions and remaining obligations are in `docs/verification.md` and `docs/evidence/root-journal-candidate-2026-11-09.json`.
 
-The abstract timing contract and atomic durable selection remain assumptions. This is bounded composition, not an unbounded theorem or a clock/platform/Rust proof. It does not replace `OwnedWal`, which checks independently advancing clocks for one handoff, or the isolated grant/clock proofs.
+Run `scripts/check-proof.sh RootJournal` for the unbounded abstract composition theorem. All 1,020 obligations pass for arbitrary finite epoch counts and unbounded histories; removing acknowledgement permission fails the changed induction step. The checker verifies the imported 153-obligation root proof and its negative control first. Both finite positive instances also check the combined inductive strengthening.
+
+The abstract timing contract and atomic durable selection remain assumptions. The theorem does not establish delegated movement, transactions, admission, reclamation, liveness or clock/platform/Rust correctness. It does not replace `OwnedWal`, which checks independently advancing clocks for one handoff, or the isolated grant/clock proofs.
 
 ## GrantBounds
 

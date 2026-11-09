@@ -38,6 +38,8 @@ impl Connection {
 
     /// Raw observations may be stale. A successful replacement is durable, but
     /// neither an observation nor a replacement alone establishes serving permission.
+    /// Each replacement needs a fresh mutation identity in its metadata: B2 can
+    /// accept an identical-metadata no-op even with a stale comparison revision.
     pub fn authority(&self) -> Arc<dyn Authority> {
         Arc::new(crate::measured::Register(self.authority.clone()))
     }

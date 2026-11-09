@@ -116,6 +116,24 @@ CompleteHistory == \A p \in Ids: ready[p] =>
 ServingHistory == \A p \in Ids: (ready[p] /\ RootValid(p)) =>
     \A e \in Ids: acknowledged[e] <=
         IF e < p THEN views[p][e] ELSE IF e = p THEN consumed[p] ELSE 0
+\* Inductive facts: active phases are permanent historical facts even after
+\* their permission expires. A later active phase excludes every earlier grant.
+DataOrder == \A p \in Ids:
+    /\ acknowledged[p] <= consumed[p] /\ consumed[p] <= planned[p]
+    /\ cuts[p] >= -1 /\ cuts[p] <= planned[p]
+    /\ (ready[p] => roots[p].phase = "active")
+    /\ (acknowledged[p] > 0 => ready[p])
+    /\ (cuts[p] >= 0 => \E q \in Ids: p < q /\ roots[q].phase = "active")
+RecoveryState == \A p \in Ids:
+    IF scans[p].epoch = 0 THEN scans[p] = IdleScan
+    ELSE LET e == scans[p].epoch IN
+         /\ e < p /\ roots[p].phase = "active"
+         /\ scans[p].position <= planned[e]
+         /\ 1..scans[p].position \subseteq objects[e]
+         /\ (scans[p].finished => acknowledged[e] <= scans[p].position)
+DataStrong == DataTypeOK /\ DurableKnowledge /\ SelectedHistory
+              /\ ImmutableSelection /\ CompleteHistory /\ DataOrder /\ RecoveryState
+CompositeStrong == Strong /\ DataStrong
 CombinedInvariant == Invariant /\ Strong /\ DataTypeOK /\ DurableKnowledge
                      /\ SelectedHistory /\ ImmutableSelection /\ CompleteHistory /\ ServingHistory
 CombinedSmall == Small /\ \A p \in Ids: planned[p] <= LogLength

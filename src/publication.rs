@@ -56,6 +56,9 @@ pub trait Authority: Send + Sync {
         })
         .await
     }
+    /// Every attempt must include a fresh, never-reused mutation identity in `info`.
+    /// B2 may accept identical metadata despite a stale revision; callers must not
+    /// treat a repeated payload as a new conditional validation or serving grant.
     /// None only for a definite comparison mismatch. Errors may have committed.
     async fn replace(
         &self,

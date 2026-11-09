@@ -168,5 +168,12 @@
     "negative_control": "Ignoring current-owner comparison in ApplyRenew fails the required obligation",
     "finite_regression": "Both positive configurations also check Strong; state counts unchanged",
     "runtime_adopted": false
+  },
+  "qualification": {
+    "source_commit": "735393a9298e737447f7445d33d65af9571591cd",
+    "woodpecker": {
+      "pipeline": 42,
+      "status": "success"
+    }
   }
 }

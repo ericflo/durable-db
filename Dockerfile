@@ -185,6 +185,12 @@ COPY spec/candidates/RootControl.tla spec/candidates/RootControlProof.tla spec/c
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh RootControl && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM proof-root-control AS proof-root-journal
+COPY spec/candidates/RootJournal.tla spec/candidates/RootJournalProof.tla spec/candidates/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    DURABLE_DB_ROOT_PROOF_CHECKED=1 scripts/check-proof.sh RootJournal \
+    && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM model-tools AS model-candidate-rootjournal
 COPY spec/candidates/RootControl.tla spec/candidates/RootJournal.tla spec/candidates/RootJournal.checks spec/candidates/RootJournal*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -192,6 +198,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=proof-root-journal /checks/ /checks/
 COPY --from=model-candidate-rootjournal /checks/ /checks/
 COPY --from=proof-root-control /checks/ /checks/
 COPY --from=proof-grant-bounds /checks/ /checks/
