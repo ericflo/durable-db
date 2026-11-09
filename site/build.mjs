@@ -84,6 +84,7 @@ for (const file of [
   'placement-requests-candidate-2026-11-09.json',
   'placement-takeover-candidate-2026-11-09.json',
   'control-session-2026-11-09.json',
+  'root-requests-candidate-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',

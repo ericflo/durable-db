@@ -98,3 +98,11 @@ This does not replace the root, permission or journal models: it does not yet co
 Run `scripts/check-candidate.sh PlacementTakeover`. This composes the actual `RootControl` actions with placement request start, provider application, timeout, stale observations and delayed replies. Root and placement operations compare the same revision. The positive instance checks 3,379,987 states; four faulty variants and a recovery witness are required. The witness issues replacement-generation permission after a timed-out predecessor freeze actually applied.
 
 The seed is an already-active first root, followed by one successor; it does not model arbitrary repeated replacement or establish an unbounded refinement. The original root timing/epoch contracts remain assumptions. There is no journal or runtime adoption. [Bounds and limitations](../../docs/verification.md#candidate-placement-requests-across-root-replacement).
+
+## Root request uncertainty
+
+Run `scripts/check-candidate.sh RootRequests`. The model captures root fence, renewal/revalidation and activation invocations, including timeout before provider application and overlapping abandoned requests. An existing permission interval survives an attempted renewal but cannot be extended by its timeout. Exact revalidation recovers an uncertain fence or activation; a newly confirmed fence starts a drain, while recovering activation uses the drain completed before its original request.
+
+The unrestricted two-root/four-request instance checks 2,319,263 states. Four faulty controls and five actual-event witnesses are mandatory. Three longer recovery witnesses and two fault cases use action constraints that only remove schedules; the positive instance remains unrestricted. The fence and activation traces require actual application after timeout. Raw observations can be any historical version, selected when the invocation captures its comparison. This collapses observational interleavings without requiring fresh reads.
+
+This extends the wire checks without replacing `RootControl` or its proof: it does not establish their unbounded refinement, competing candidates, repeated takeover, physical clock behavior, child/placement/journal composition or a runtime controller. [Bounds and limitations](../../docs/verification.md#candidate-root-requests-and-revalidation).

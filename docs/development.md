@@ -29,6 +29,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
+| Candidate root request lifecycle | `scripts/check-candidate.sh RootRequests` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
 | SDK or web-app example | `scripts/test-client.sh sdk.test.mjs` |
@@ -46,7 +47,7 @@ scripts/check-candidate.sh PartitionJournal
 scripts/check-proof.sh PartitionJournal
 ```
 
-The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal`, `LateControlCoverage`, `PlacementRequests` and `PlacementTakeover`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
+The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal`, `LateControlCoverage`, `PlacementRequests`, `PlacementTakeover` and `RootRequests`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
 
 ## Formal check inputs
 
