@@ -365,6 +365,10 @@ mod tests {
         listing_calls: AtomicUsize,
         update_calls: AtomicUsize,
         lose_update_ack: AtomicBool,
+        pause_update: AtomicBool,
+        update_started: tokio::sync::Notify,
+        release_update: tokio::sync::Notify,
+        update_finished: tokio::sync::Notify,
         bucket: Mutex<Bucket>,
         deleted: Mutex<Vec<String>>,
     }
@@ -393,6 +397,32 @@ mod tests {
     }
     async fn update(State(s): State<Arc<Mock>>, Json(v): Json<Value>) -> (StatusCode, Json<Value>) {
         s.update_calls.fetch_add(1, Ordering::SeqCst);
+        if s.pause_update.swap(false, Ordering::SeqCst) {
+            // A provider can keep processing after its HTTP client disconnects.
+            // Keep that operation separate from the response handler's lifetime.
+            return tokio::spawn(async move {
+                struct Finished(Arc<Mock>);
+                impl Drop for Finished {
+                    fn drop(&mut self) {
+                        self.0.update_finished.notify_one();
+                    }
+                }
+                let _finished = Finished(s.clone());
+                s.update_started.notify_one();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    s.release_update.notified(),
+                )
+                .await
+                .expect("test must release the delayed provider operation");
+                apply_update(&s, v)
+            })
+            .await
+            .unwrap();
+        }
+        apply_update(&s, v)
+    }
+    fn apply_update(s: &Mock, v: Value) -> (StatusCode, Json<Value>) {
         assert_eq!(v["bucketId"], "test-bucket");
         assert!(v.get("bucketType").is_none() && v.get("lifecycleRules").is_none());
         let mut b = s.bucket.lock().unwrap();
@@ -440,6 +470,10 @@ mod tests {
             listing_calls: AtomicUsize::new(0),
             update_calls: AtomicUsize::new(0),
             lose_update_ack: AtomicBool::new(false),
+            pause_update: AtomicBool::new(false),
+            update_started: tokio::sync::Notify::new(),
+            release_update: tokio::sync::Notify::new(),
+            update_finished: tokio::sync::Notify::new(),
             bucket: Mutex::new(Bucket {
                 version: None,
                 revision: 1,
@@ -477,6 +511,69 @@ mod tests {
             }),
         };
         (Arc::new(native), state, server)
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_http_request_requires_revalidation_and_fences_late_application() {
+        for apply_before_revalidation in [false, true] {
+            cancelled_control_request(apply_before_revalidation).await;
+        }
+    }
+
+    async fn cancelled_control_request(apply_before_revalidation: bool) {
+        use crate::providers::control::Outcome;
+        let (native, state, server) = fixture().await;
+        let files =
+            Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
+        let connection = super::super::Connection::new(files, native, "test");
+        let mut session = connection.control();
+        let observed = session.observe().await.unwrap();
+        let mut proposed = observed.metadata().clone();
+        proposed.insert("head".into(), "late freeze".into());
+        state.pause_update.store(true, Ordering::SeqCst);
+        let request = session.begin(observed, proposed).unwrap();
+        let work = tokio::spawn(request.execute());
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            state.update_started.notified().await;
+            session.abandon();
+            work.abort();
+            assert!(work.await.err().unwrap().is_cancelled());
+
+            if apply_before_revalidation {
+                state.release_update.notify_one();
+                state.update_finished.notified().await;
+            }
+            // Revalidation either discovers the abandoned write or fences it
+            // before it applies. Neither cancellation nor a raw read does that.
+            let observed = session.observe().await.unwrap();
+            let metadata = observed.metadata().clone();
+            let request = session.begin(observed, metadata).unwrap();
+            assert!(matches!(
+                session.finish(request.execute().await),
+                Outcome::Confirmed
+            ));
+            if !apply_before_revalidation {
+                state.release_update.notify_one();
+                state.update_finished.notified().await;
+            }
+            let expected = if apply_before_revalidation {
+                "late freeze"
+            } else {
+                "current"
+            };
+            assert_eq!(session.confirmed().unwrap().metadata()["head"], expected);
+            let bucket = state.bucket.lock().unwrap();
+            assert_eq!(bucket.info["head"], expected);
+            assert_eq!(
+                bucket.revision,
+                if apply_before_revalidation { 3 } else { 2 }
+            );
+            assert_eq!(state.update_calls.load(Ordering::SeqCst), 2);
+        })
+        .await;
+        server.abort();
+        result.unwrap();
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 pub mod b2;
+pub mod control;
 mod register;
 pub mod s3;
 mod transport;
@@ -44,6 +45,12 @@ impl Connection {
     /// The returned metadata includes that identity. Uncertain writes are not retried.
     pub fn authority(&self) -> Arc<dyn Authority> {
         Arc::new(crate::measured::Register(self.authority.clone()))
+    }
+
+    /// Start a fresh control caller with explicit invocation and uncertainty
+    /// handling. This establishes no ownership or permission to serve data.
+    pub fn control(&self) -> control::Session {
+        control::Session::new(self.authority())
     }
 
     /// Explicitly initialize or open the current publication engine.
