@@ -1,53 +1,103 @@
 # Development
 
-Install Rust using the pinned `rust-toolchain.toml`, then run `scripts/install-kache.sh`. Put `.tools/bin` on PATH and set `KACHE_CONFIG` to the absolute project `.kache.toml`. The Cargo configuration always invokes the kache wrapper.
-
-Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked --all-targets`. Java 11+ is needed by `scripts/check-model.sh`; it downloads a checksum-pinned TLC and checks both the safe protocol and an intentionally broken collector.
-
-Run `scripts/audit-dependencies.sh` on Linux x86_64. It verifies a pinned cargo-audit 0.22.2 binary, fetches the current RustSec advisory database, and rejects vulnerabilities and warnings without exemptions. The JSON report includes the advisory database commit. Run `npm --prefix clients/javascript audit` `npm --prefix examples/web-app audit` and `npm --prefix site audit` for JavaScript dependencies. Woodpecker runs these gates outside Docker's layer cache, so a newly reported advisory can block an unchanged lockfile. The audit tools failing to fetch data fails the gate. Audit success is not a guarantee that undiscovered vulnerabilities are absent.
-
-The object-store client uses AWS-LC through rustls; source builds need a C toolchain and CMake. The static binary includes these runtime components and needs no compiler on the user's machine. CI installs build prerequisites in its tools image.
-
-The network S3 test is opt-in; see `tests/s3.rs` for environment variables. Use a disposable bucket/prefix. The JavaScript package contains indexed and bounded-reference pi-durable 1.5.0 adapters with HTTP conformance and fault tests; see [clients](clients.md).
-
-Woodpecker builds the static Linux executable and runtime image with kache, checks Rust formatting/lints/tests, and requires the nineteen current-engine models, the journal component model, their negative controls, and the unbounded abstract publication and journal proofs. The research-only serving/log, delegated-grant and root-renewal models each have a separate cached stage and mandatory negative controls; passing them does not adopt a candidate runtime protocol. JavaScript checks include all 32 upstream Pi cases against both adapters, twelve indexed-adapter fault/resource cases, real Harness workflows, and HTTP transport regressions. After successful main builds it publishes the public documentation through a repository-scoped SSH deploy key. The pipeline is in `.woodpecker.yaml`; build steps are in `Dockerfile`. Rust checks/builds and JavaScript checks have separate Docker cache stages: changing the client or example reruns its checks against the same source-built executable without repeating unchanged Rust work. Each TLA+ model also has an independent cache stage. Run `scripts/test-client.sh` locally after building the debug executable. For SDK/example iteration, `scripts/test-client.sh sdk.test.mjs` selects the ten SDK cases while retaining type/format, application and benchmark-accounting checks; the default and CI still run the full Pi/client suite. GitHub Actions are disabled. Changes go directly to main while this private project is developed.
-
-Formal checks are cached per model in the container build. Each `spec/*.checks` descriptor lists its positive configuration and required negative controls. `scripts/check-model.sh` still runs every descriptor locally; pass a module name to run that model and its controls during iteration. The Docker build serializes TLC heaps with a shared cache lock, while retaining independent results for unchanged models. Research candidates live separately in `spec/candidates/`: use `scripts/check-candidate.sh OwnedWal`, `scripts/check-candidate.sh DelegatedGrant`, or `scripts/check-candidate.sh RootControl` for one candidate and all its controls. Their complete local checks take seconds to several minutes; they do not build Rust or rerun unrelated models. RootControl also requires two forbidden-state invariants to fail as evidence that successive owners activate and renewal actually extends deadlines. See the [candidate design](design-owned-partitions.md) for assumptions and status.
-
-Woodpecker builds an archive of the exact pipeline commit with canonical file permissions matching the existing CI cache. Uncommitted files and mutable checkout metadata are excluded from the build context; the archive tree sits inside a private temporary directory and is removed when the build step exits. This keeps the source input stable across CI volumes while retaining already verified layers. Docker also hashes file metadata for COPY cache checks, so identical file contents alone are insufficient for cache reuse. See [Docker cache invalidation](https://docs.docker.com/build/cache/invalidation/) and [Git archive](https://git-scm.com/docs/git-archive).
-
-The 10,005-database regression keeps every assertion and runs in release mode in CI; the remaining Rust suite runs in debug mode. This cuts test execution overhead without reducing database count, collection coverage, or uncached verification. All Rust compilation, including release tests, uses kache. Reproduce the large test with:
+Use the pinned Rust toolchain in `rust-toolchain.toml`. All Rust builds use [kache](https://github.com/kunobi-ninja/kache), including local tests. Source builds also need a C toolchain and CMake for AWS-LC; the installed static executable needs neither. Java 11+ runs TLC, and Node 24 runs the client, examples and documentation tools.
 
 ```sh
-cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect
+scripts/install-kache.sh
+export PATH="$PWD/.tools/bin:$PATH"
+export KACHE_CONFIG="$PWD/.kache.toml"
+
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+scripts/check-model.sh
+scripts/check-proof.sh
 ```
 
-The extended directory campaign is opt-in: `cargo test --locked --release --test publication hundred_thousand_databases_with_incremental_collection -- --ignored --nocapture`. It exercises 100,005 entries in a format-5 namespace, permuted insertion, deeper splits, bounded point/paginated reads, periodic collection, and an uncached reopen that checks every head. Its in-memory provider and sequential collection do not measure cloud throughput or concurrent creation capacity. The regular 10,005-entry regression still runs for both formats 3 and 5.
+The model command checks every current-engine model and its required controls. The proof command above checks abstract publication safety; journal and research proofs have separate commands below. These checks do not establish that the Rust implementation refines the models. See [verification](verification.md) for each theorem's assumptions and scope.
 
-One local qualification passed in 40.51 seconds in release mode versus 292 seconds in a full debug-suite run. These are test runtimes on the development laptop, not database latency/throughput benchmarks.
+## Work on one component
 
-The unbounded abstract page-safety proof runs with `scripts/check-proof.sh`; its pinned Linux checker and assumptions are documented in [the proof procedure](proof-publication.md). `docker build --target proof .` runs the same gate in its isolated Ubuntu verification stage without compiling the database. The journal prefix proof runs with `scripts/check-proof.sh Journal` and its finite/unsafe configurations with `scripts/check-model.sh Journal`. The normal artifact build requires both unbounded abstract proofs and every TLC model. The journal proof assumes controller handoff and provider semantics; see [verification](verification.md#journal-prefix-safety).
+Run the checks affected by a change while iterating. Woodpecker retains the complete required suite.
 
-Run `cargo test --locked --lib journal` for the journal component. The opt-in provider check is `cargo test --locked --test journal_cloud -- --ignored --exact journal_reconnect_unknown_responses_and_late_uploads`. It requires `DURABLE_DB_DISPOSABLE=1`, `DURABLE_DB_TEST_PROVIDER=b2` or `s3`, `DURABLE_DB_TEST_BUCKET` beginning with `durable-db-test-`, `DURABLE_DB_TEST_CONTEXT` describing placement, and `DURABLE_DB_JOURNAL_REPORT` naming a report file. Supply the corresponding provider credentials through the environment. Its hard journal budget is seventeen PUT attempts of at most 33 KiB each; initialization, selection, verification and cleanup incur additional operations. The caller must delete all physical versions, remove the dedicated bucket and revoke temporary credentials afterward. MinIO exercises the S3 binding but does not qualify AWS.
+| Change | Focused checks |
+| --- | --- |
+| Rust journal | `cargo test --locked --lib journal` |
+| Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
+| An implemented protocol model | `scripts/check-model.sh MODULE` |
+| Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
+| SDK or web-app example | `scripts/test-client.sh sdk.test.mjs` |
+| Pi adapter or HTTP client transport | `scripts/test-client.sh` |
+| Public documentation | `npm --prefix site ci` and `node site/build.mjs` |
 
-For engine-component work, `Native::connect_storage` and `S3::connect_storage` return the same `providers::Connection`. `objects()` and `authority()` expose the measured transports without probing or initializing publication metadata. Calling `into_published` explicitly opens the existing engine. The journal provider fixture uses raw object transports for writing, discovery and replay, and initializes publication only for its separate prefix-selection fixture. Its budgets are enforced by the fixture; raw connections do not provide tenant admission or serving permission. HTTP regressions verify that raw object writes leave control metadata untouched and that redirects or lost replies do not trigger a second PUT.
+Build the debug executable before running the client script. Its focused SDK mode still checks types, formatting, the application example and benchmark accounting. Its default mode runs the full client and Pi suite, including both adapters, the 32 upstream Pi cases, indexed-adapter fault/resource tests and real Harness workflows.
 
-The research timing arithmetic runs with `scripts/check-proof.sh GrantBounds`. It proves grant/drain inequalities under a stated rate and measurement-error contract and requires two margin-removal variants to fail. Its independent container stage is `proof-grant-bounds`; the artifact build requires it alongside the publication and journal proofs. It does not establish the deployment clock contract or adopt a timed runtime protocol.
+Research models live in `spec/candidates/`. They are separate from the implemented serving protocol and do not authorize runtime assumption changes.
 
-The root permission proof runs with `scripts/check-proof.sh RootControl`, independently cached as `proof-root-control`. It proves abstract root exclusion and child containment/exclusion for arbitrary finite epoch counts and execution lengths, and requires a stale-owner renewal mutation to fail. The artifact build requires this research gate too. The proof assumes an elapsed-time upper bound; it does not adopt a runtime clock dependency or establish log/controller composition.
+```sh
+scripts/check-candidate.sh PartitionControl
+scripts/check-proof.sh PartitionControl
+scripts/check-candidate.sh PartitionJournal
+scripts/check-proof.sh PartitionJournal
+```
 
-The repeated root/journal composition runs with `scripts/check-candidate.sh RootJournal`, independently cached as `model-candidate-rootjournal`. It imports the actual root protocol and adds journal and recovery actions. Both positive instances, six unsafe controls and the repeated-history reachability control are required. The unbounded composition runs with `scripts/check-proof.sh RootJournal`: 1,047 obligations plus an acknowledgement-permission mutation. Imported theorems must be checked separately, so the command first runs the root permission proof and its negative control. CI inherits that exact verified stage before checking the composition. Every positive obligation runs with fresh fingerprints; the mutation focuses on the changed induction theorem. See [the theorem and its limits](verification.md#candidate-repeated-root-and-journal-recovery).
+The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl` and `RootJournal`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
 
-The common provider register is checked with `scripts/check-model.sh ProviderRegister` and `cargo test --locked --lib providers::`. The opt-in `cargo test --locked --test provider_register -- --ignored --exact unchanged_metadata_still_requires_an_exact_comparison` uses the same disposable-bucket/provider/context variables as the journal fixture and writes `DURABLE_DB_REGISTER_REPORT`. It performs at most thirteen conditional attempts, including the bounded reconnect barrier; provisioning and cleanup are additional operations. It does not initialize a publication format. Each provider connection adds a fresh identity to replacement metadata automatically, using the existing reserved probe field. Raw read barriers may precede explicit publication initialization; unknown protocol metadata still prevents initialization. Remove every physical version, the dedicated bucket and its temporary credentials after qualification.
+## Formal check inputs
 
-Partition movement runs with `scripts/check-candidate.sh PartitionControl` in its own `model-candidate-partitioncontrol` stage. The gate includes four positive instances, three unsafe variants and four reachability controls.
+Each model's `.checks` descriptor declares every positive configuration, unsafe variant and reachability control. An unsafe variant must violate its named invariant. A reachability control forbids a desired scenario and must produce a counterexample reaching it; this is coverage, not a liveness proof. The candidate wrapper copies the maintained dependencies into a temporary directory and removes it on exit. Logs remain under `.tools/candidates/`.
 
-Positive root/root-journal configurations list their shared invariant clauses once; this preserves the same conjunction and state bounds while avoiding repeated evaluation of large type maps. Compiler builds stop their kache daemon on exit, including failure, while retaining the compilation cache.
+Each proof's `.proof` descriptor declares:
 
-Proof failures print their failed obligations into CI output before returning the checker's failure status. The root/journal proof splits type preservation and unaffected recovery references into explicit lemmas so verification does not depend on one large solver query completing on the development host. Strict checking, fresh fingerprints and the required negative control remain unchanged.
+```text
+tag|log-name
+dependency|ImportedModule
+negative|control-name|focused-theorem|expected-action|sed-mutation
+```
 
-Delegated journal composition runs with `scripts/check-candidate.sh PartitionJournal` in `model-candidate-partitionjournal`. Its five positive instances, seven unsafe variants and five reachability controls are mandatory. The wrapper copies both permission dependencies, so the check exercises the maintained root and movement protocols.
+Dependencies are optional; every proof requires a negative control. An empty theorem field checks the entire mutated proof. Every positive proof uses strict checking and fresh fingerprints. A mutation must change its source and fail its expected obligation; a parser or tool-launch error cannot pass. The runner requires all declared controls to execute and keeps checker input separate from descriptor input.
 
-Proof inputs are declared beside each model in a `.proof` descriptor: `tag|log-name`, optional `dependency|Module`, and `negative|name|focused-theorem|expected-action|sed-mutation`. The theorem field may be empty to check the whole mutated proof. A mutation must change its source and fail the expected obligation; parse/tool errors do not pass. Adding a proof requires its own Docker stage and descriptor, without changing the shared runner or invalidating unrelated proof stages. CI may skip dependency execution only by inheriting their exact checked stage; local commands check dependencies first.
+Focus a mutation on the first lemma affected by the changed protocol. Checking only a caller could accidentally assume the broken lemma. Large solver queries should be split into explicit proof steps so checks remain reliable on the CI builder; do not hide failures by weakening a property or reusing old fingerprints.
 
-The unbounded movement proof runs with `scripts/check-proof.sh PartitionControl` in `proof-partition-control`, inheriting the checked root stage. It requires all 473 obligations and all three mutations. Focused mutation checks target the first changed lemma, so they cannot accidentally assume that lemma through an unchecked caller. Checker input is separate from descriptor input, and the runner rejects an incomplete negative-control count.
+Adding a proof needs a descriptor and its own Docker stage. It should not require changing the common runner or invalidating unrelated proofs. CI may skip repeated dependency execution only when the stage inherits the exact checked dependency. Local commands check dependencies by default.
+
+## Real provider checks
+
+Cloud checks are opt-in and require a dedicated disposable bucket. Never run them against application data. Configure credentials privately through the provider environment; do not put them in commands, reports or logs.
+
+```sh
+export DURABLE_DB_DISPOSABLE=1
+export DURABLE_DB_TEST_PROVIDER=b2 # or s3
+export DURABLE_DB_TEST_BUCKET=durable-db-test-UNIQUE
+export DURABLE_DB_TEST_CONTEXT='Client placement and provider region'
+export DURABLE_DB_REGISTER_REPORT="$PWD/register-report.json"
+export DURABLE_DB_JOURNAL_REPORT="$PWD/journal-report.json"
+
+cargo test --locked --test provider_register -- --ignored --exact unchanged_metadata_still_requires_an_exact_comparison
+cargo test --locked --test journal_cloud -- --ignored --exact journal_reconnect_unknown_responses_and_late_uploads
+```
+
+The register fixture permits at most thirteen conditional attempts, including a bounded reconnect barrier. The journal fixture permits seventeen PUT attempts of at most 33 KiB each. Provisioning, reads, verification and cleanup are additional operations. After success or failure, remove every physical version, the bucket and its temporary credentials. MinIO exercises the S3 binding; it does not qualify AWS. The older publication fixture has its own environment contract in `tests/s3.rs`.
+
+For component work, `Native::connect_storage` and `S3::connect_storage` return the same `providers::Connection`. Its `objects()` and `authority()` expose transports without initializing publication metadata. `into_published` explicitly opens the current engine. Each conditional register replacement receives a fresh mutation identity, including replacements with otherwise identical metadata. Raw connections do not grant serving permission or provide tenant admission. HTTP regressions check that immutable writes leave authority metadata untouched and that redirects or lost replies do not cause a second PUT.
+
+## CI and publication
+
+[Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds publish the public documentation with a repository-scoped SSH deploy key.
+
+The [Docker build](https://github.com/ericflo/durable-db/blob/main/Dockerfile) requires Rust formatting, lints and tests; the full client/Pi suite; every maintained model and its controls; and the publication, journal and candidate proofs. It builds the static Linux executable, runtime image and documentation artifacts. The 10,005-database regression retains every assertion and runs in release mode; the rest of the Rust suite runs in debug mode.
+
+Rust, JavaScript, individual models and individual proofs have separate cache stages. Changing the client reuses the same source-built executable without repeating unchanged Rust work. A shared lock serializes formal-check heaps on the builder. Compiler stages stop their kache daemon on exit while preserving the compilation cache.
+
+The pipeline archives its exact commit with canonical file permissions. Uncommitted files and checkout metadata are excluded, and the temporary context is removed on exit. File metadata matters to Docker cache reuse as well as content. [Docker cache invalidation](https://docs.docker.com/build/cache/invalidation/), [Git archive](https://git-scm.com/docs/git-archive).
+
+## Dependency audits
+
+```sh
+scripts/audit-dependencies.sh
+npm --prefix clients/javascript audit
+npm --prefix examples/web-app audit
+npm --prefix site audit
+```
+
+The Rust audit verifies the pinned cargo-audit binary, fetches current advisories, rejects vulnerabilities and warnings without exemptions, and records the advisory database commit. CI runs dependency audits outside Docker's layer cache, so new advisories can block an unchanged lockfile. A failed advisory fetch fails the gate. Audit success does not rule out undiscovered vulnerabilities.

@@ -203,6 +203,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh PartitionControl \
     && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM proof-partition-control AS proof-partition-journal
+COPY spec/candidates/PartitionJournal.tla spec/candidates/PartitionJournalProof.tla spec/candidates/PartitionJournal.proof spec/candidates/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh PartitionJournal \
+    && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM model-tools AS model-candidate-rootjournal
 COPY spec/candidates/RootControl.tla spec/candidates/RootJournal.tla spec/candidates/RootJournal.checks spec/candidates/RootJournal*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -222,6 +228,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=proof-partition-journal /checks/ /checks/
 COPY --from=proof-partition-control /checks/ /checks/
 COPY --from=model-candidate-partitionjournal /checks/ /checks/
 COPY --from=model-candidate-partitioncontrol /checks/ /checks/

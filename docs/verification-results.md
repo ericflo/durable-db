@@ -371,3 +371,11 @@ The root must renew through the exact current-epoch conditional register, anchor
 ## Candidate timing margins — 2026-11-09
 
 The clock arithmetic proof passes **19 obligations** with arbitrary nonnegative integer durations and measurement-error allowances. It derives a `2L + 3E` takeover drain and a conservatively rounded child grant from a factor-two rate contract with additive interval error `E`. Two temporary mutations remove the required drain/child margins and fail their proof obligations. [The evidence](evidence/grant-bounds-2026-11-09.json) records exact sources and logs. These are implications of an assumed clock contract; platform bounds, implementation and full protocol composition remain unestablished. No runtime timing rule changes.
+
+## Delegated ownership and journal history — 2026-11-09
+
+The replacement protocol now has an unbounded abstract proof of delegated ownership and journal recovery. The permission proof checks 486 obligations; the composed history proof checks 785. Both import the actual root transitions, and the history proof permits surviving writers to continue their journals after coordinator replacement. Replacing a writer requires a fresh generation.
+
+Four finite permission instances and five history instances remain mandatory regressions, with unsafe variants and reachability controls. The proofs also require three permission mutations and six journal mutations to fail. [The verification scope](verification.md#candidate-delegated-journal-recovery) records the bounds and assumptions; [the history evidence](evidence/partition-journal-candidate-2026-11-09.json) pins the inputs and results.
+
+This establishes abstract history safety under a timing contract, atomic placement/prefix selection and fresh immutable object observations. It does not establish an implementation of those contracts, a replacement transaction engine, performance, resource isolation or liveness. Production status remains open.

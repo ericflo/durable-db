@@ -131,6 +131,23 @@ HistoryInvariant == OwnerStrong /\ RootExclusive /\ ChildWithinRoot /\ ChildExcl
                     /\ OwnerWithinRoot /\ PartitionExclusive
                     /\ HistoryTypeOK /\ DurableHistory /\ SelectedHistory
                     /\ ImmutableHistory /\ CompleteHistory /\ ServingHistory
+\* Induction facts for arbitrary repeated writer generations. Permission
+\* may stop and resume under another coordinator without changing a journal.
+HistoryOrder == \A j \in Journals:
+    /\ (ready[j] => j[2] <= EffectiveGeneration(j[1]))
+    /\ (planned[j] > 0 => ready[j])
+    /\ cuts[j] >= -1
+    /\ (cuts[j] >= 0 => j[2] < EffectiveGeneration(j[1]))
+    /\ (scans[j].generation = 0 => scans[j] = IdleScan)
+    /\ (scans[j] # IdleScan =>
+          j[2] <= EffectiveGeneration(j[1]) /\ 0 < scans[j].generation
+          /\ scans[j].generation < j[2])
+RecoveryState == \A j \in Journals: scans[j] # IdleScan =>
+    /\ 1..scans[j].position \subseteq objects[Older(j, scans[j].generation)]
+    /\ (scans[j].finished =>
+          acknowledged[Older(j, scans[j].generation)] <= scans[j].position)
+HistoryStrong == OwnerStrong /\ HistoryTypeOK /\ DurableHistory /\ SelectedHistory
+                 /\ ImmutableHistory /\ CompleteHistory /\ HistoryOrder /\ RecoveryState
 HistorySmall == PartitionSmall /\ \A j \in Journals: planned[j] <= LogLength
 NotMovedHistory == ~\E j \in Journals:
     j[2] = 2 /\ ready[j] /\ JournalValid(j) /\ acknowledged[Older(j, 1)] > 0

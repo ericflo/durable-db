@@ -16,7 +16,7 @@ durable-db is an ordered key-value database written in Rust. Keep authoritative 
 | Automatic maintenance | Cooperative fenced garbage collection and incremental page compaction |
 | A checkable design | TLA+ specification, intentional broken-model counterexample, failure-injection tests |
 
-The current shared object-store read/publication path does not meet the performance brief and will be replaced before production. The [owned-partition candidate](docs/design-owned-partitions.md) explores locally served reads and independent durable log batches. A bounded journal component has an abstract prefix proof and B2/MinIO recovery checks. Ownership and the replacement transaction engine remain under development.
+The current shared object-store read/publication path does not meet the performance brief and will be replaced before production. The [owned-partition candidate](docs/design-owned-partitions.md) explores locally served reads and independent durable log batches. The journal component has B2/MinIO recovery checks, and the owned-partition protocol has unbounded abstract permission/history proofs under explicit timing and storage contracts. The runtime controller and replacement transaction engine remain under development.
 
 ## Start locally
 

@@ -384,7 +384,20 @@ THEOREM FinishMovePreserves ==
   BY DEF FinishMove, OwnerStrong, GrantState
 
 <1>4. PlacementState'
-  BY SMT DEF FinishMove, OwnerStrong, PlacementState, OwnerTypeOK, Strong, TypeOK
+  <2>1. authority \in [owner : 0..Epochs, revision : Nat, active : BOOLEAN]
+    BY DEF OwnerStrong, Strong, TypeOK
+  <2>2. authority' = [authority EXCEPT !.revision = @ + 1]
+    BY DEF FinishMove
+  <2>3. authority'.owner = authority.owner BY SMT, <2>1, <2>2
+  <2>4. \A q \in Partitions:
+      placement'[q].generation = placement[q].generation
+      /\ placement'[q].root = placement[q].root
+      /\ placement'[q].drain = placement[q].drain
+    BY SMT DEF FinishMove, OwnerStrong, OwnerTypeOK
+  <2>5. \A q \in Partitions:
+      placement[q].phase = "open" => placement'[q].phase = "open"
+    BY SMT DEF FinishMove, OwnerStrong, OwnerTypeOK
+  <2> QED BY SMT, <2>3, <2>4, <2>5 DEF FinishMove, OwnerStrong, PlacementState
 
 <1>5. NoFutureGrants'
   <2>1. \A q \in Partitions:

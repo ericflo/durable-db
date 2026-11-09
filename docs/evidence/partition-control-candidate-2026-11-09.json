@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "recorded_at": "2026-11-09T17:18:59.989831+00:00",
-  "base_commit": "b0acc9851bc6803e70a28a294d10c99b53de4b44",
+  "recorded_at": "2026-11-09T18:03:33.667108+00:00",
+  "base_commit": "19032d5da65217e0c75f6c2eb0f2989d2966e66a",
   "status": "Unbounded abstract root and partition permission theorem; no runtime adoption",
   "standard_checker_passed": true,
   "checks": [
@@ -160,7 +160,7 @@
     "No Rust controller or runtime clock dependency adopted"
   ],
   "source_sha256": {
-    "Dockerfile": "c786d6fe3225c3451b493e4cae506fea77939d77773a603f1d7297a1d56b7d64",
+    "Dockerfile": "d132641cee8dc2cabaade38bc0c22511c37d320c30f3a88c28dbbcb14bf4933f",
     "scripts/check-candidate.sh": "32171890813c066698858115be54ff809f9f6ceeb71501ad2193b3fa6ac3b963",
     "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
     "scripts/check-proof.sh": "6b9db0faca7462495923858fd86ff111bd2314fad3fb3c11087776ccc0021e53",
@@ -169,7 +169,7 @@
     "spec/candidates/PartitionControl.proof": "063aa254b791650becd973d4be7cdbc45913f16298be83d01810173f18b42b79",
     "spec/candidates/PartitionControl.tla": "1b7ee70776e26d957ed9aa915b4ebf502ea971dad71b9adaadbab39542554774",
     "spec/candidates/PartitionControlCoverage.cfg": "4e16749c73896ed732f9a88f76306b343e76e3b5bac25b5d8d64825d084eda57",
-    "spec/candidates/PartitionControlProof.tla": "8e5bbb7f5e6968ac86fd6fac02d5fa47023048ec9713d1df31c83a05287113b8",
+    "spec/candidates/PartitionControlProof.tla": "95d077dd734f09924461ceaa7ec012825c4f156c7ab044c259ff5fc2cbe687ae",
     "spec/candidates/PartitionControlRecovery.cfg": "a0e6b14ccaf7e79f09739b1fc92b5c3b7c9e1a9e3415a344b50347a05a9e22c6",
     "spec/candidates/PartitionControlRecoveryCoverage.cfg": "74b5295d9db956c8c773bc076780a87b4a2fe91d42228f1bed7c4cbf05a7fd7d",
     "spec/candidates/PartitionControlRenewal.cfg": "0099c7ba34e817989e9279381c88815378eb1a86bc6f0a2baa2780cad8312806",
@@ -196,13 +196,13 @@
     ".tools/candidates/PartitionControl/model-partition-control-reply.log": "62f275639ccbe54e41578c8a4449406626ebba69ac090cf997c37678f04c8487",
     ".tools/candidates/PartitionControl/model-partition-control.log": "e19d5de6593eb51f978c7e8035da0b1dddaca0d762a69122b23fd6e201f55861",
     ".tools/partition-control-strengthening.log": "f72f80009721ca5a72d2c7715e26616b39b92dc3708f4696bb05e80720d21290",
-    ".tools/proof-negative-partition-assignment.log": "2daae0ec0927296effec7e47faaa2cdd7f9fe5cea7dbb7b985320e21b5e82091",
-    ".tools/proof-negative-partition-drain.log": "9b05d2b13edd294d5c485cf49ae1f2b468f1ed0ebf484370000f14e34e2f03e7",
-    ".tools/proof-negative-partition-reply.log": "d306ada5e110097df092ad18c0001d0508a9fab35794594c5b42e7c0ac2dd9fc",
-    ".tools/proof-partition-control.log": "c3d20c2f0b930e0bfce036e3f642652453aa895e99753e43a41cf2552e0428ee",
-    ".tools/partition-control-proof-final.log": "22ac68726e51b3657e2b7294f48efba1c58a990998ca052ad6586d9d64d93508",
+    ".tools/proof-negative-partition-assignment.log": "8611cd4540662c3f38890c501563ffc39f5f15609122a7e0c9ce3f71d048d4ce",
+    ".tools/proof-negative-partition-drain.log": "36d1a2ab6643bac85a41f79dc410acacc3763d9e1346ecc4373dc8305b98d56e",
+    ".tools/proof-negative-partition-reply.log": "20c9f67e1a10c457c439174ecc4fb44274e20c4711256a4f7a02669d8a6a8570",
+    ".tools/proof-partition-control.log": "0f944310093c57e74467b77b55b9749b5b80fd60dee64e9c9380478fe50789f6",
     ".tools/proof-root-control.log": "e6e4bd547b9decc012a745a28c4a8015b9218d54c1058831cf267db288e64333",
-    ".tools/proof-negative-root-renewal.log": "0849898ad3f641203c10993c70df78912cd92fec4aff5f3357516e57c76e9e8e"
+    ".tools/proof-negative-root-renewal.log": "0849898ad3f641203c10993c70df78912cd92fec4aff5f3357516e57c76e9e8e",
+    ".tools/partition-control-proof-ci-repair.log": "44c16cbc6508c857c714516733b3324dec60f79c4c590c95b2b395de6e460449"
   },
   "previous_bounded_qualification": {
     "source_commit": "e3b89aac376eab63f4319a19775a4432d4515abb",
@@ -221,6 +221,55 @@
     "all_positive_unsafe_and_coverage_checks_passed": true
   },
   "proof": {
+    "checker_version": "c8ddc44",
+    "theorem": "PartitionSafety",
+    "strict_obligations": 486,
+    "scope": "Arbitrary finite root, partition and generation counts; unbounded executions and renewal counts under the abstract timing and atomic placement contracts",
+    "induction_invariant": "OwnerStrong: root permission bounds, pending grants, placement ordering, frozen-generation bounds and permanently ended generations",
+    "dependency": {
+      "module": "RootControlProof",
+      "strict_obligations": 153,
+      "positive_and_negative_checked": true
+    },
+    "positive_seconds": 104.440016,
+    "standard_checker_passed": true,
+    "runtime_adopted": false,
+    "negative_controls": [
+      {
+        "mutation": "assignment",
+        "theorem": "IssueOwnerPreserves",
+        "failed_obligations": 3,
+        "checked_obligations": 31
+      },
+      {
+        "mutation": "drain",
+        "theorem": "FinishMoveDrain",
+        "failed_obligations": 1,
+        "checked_obligations": 15
+      },
+      {
+        "mutation": "reply",
+        "theorem": "DeliverOwnerPreserves",
+        "failed_obligations": 3,
+        "checked_obligations": 42
+      }
+    ],
+    "builder_diagnostic": {
+      "recorded_at": "2026-11-09T18:03:33.667108+00:00",
+      "status": "success",
+      "strict_obligations": 486,
+      "positive_seconds": 205.634178,
+      "required_negative_controls_passed": 3,
+      "checked_composition": {
+        "permission_obligations": 486,
+        "journal_obligations": 785,
+        "negative_controls": 9
+      },
+      "scope": "Exact-source combined proof stage on the Woodpecker BuildKit builder, inheriting the exact checked root stage; full pipeline qualification remains separate",
+      "log_sha256": "716e92fbe12ddf9271df3fef5c1d340d4330485c82b5fca23cdc30d5032df1bc"
+    }
+  },
+  "previous_proof": {
     "checker_version": "c8ddc44",
     "theorem": "PartitionSafety",
     "strict_obligations": 473,
@@ -262,6 +311,15 @@
       "all_three_negative_controls_passed": true,
       "scope": "Exact-source targeted proof stage on the Woodpecker BuildKit builder; full pipeline qualification remains separate",
       "log_sha256": "bc2be27dd4e818a5666057d91f63719423e124d26353683835bb3b9131def459"
+    },
+    "woodpecker": {
+      "pipeline": 48,
+      "source_commit": "19032d5da65217e0c75f6c2eb0f2989d2966e66a",
+      "status": "failure",
+      "failed_step": "FinishMovePreserves / PlacementState",
+      "failed_obligations": 1,
+      "checked_obligations": 473,
+      "detail": "Targeted and local checks passed; a full pipeline could not discharge the broad placement-preservation query. The repair splits unchanged record fields and the authority revision update into explicit steps. No actions, invariants or solver limits change."
     }
   }
 }
