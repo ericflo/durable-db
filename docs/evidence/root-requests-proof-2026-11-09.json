@@ -1,0 +1,336 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-11-09T21:59:11.458700+00:00",
+  "base_commit": "79aff076eca2f80f2a7e958bb485bcb70e96cd8a",
+  "status": "Abstract root-request safety proof and finite regressions; no runtime adoption",
+  "previous_finite_evidence": "root-requests-candidate-2026-11-09.json",
+  "standard_model_checker_passed": true,
+  "standard_proof_checker_passed": true,
+  "checks": [
+    {
+      "kind": "safe",
+      "config": "RootRequests.cfg",
+      "expected_invariant": null,
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 4,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": null,
+      "generated": 7021103,
+      "states": 2319263,
+      "depth": 19,
+      "log_sha256": "4fff22ab3a9313ec489f4ed49660f7611d4df5f904ff438ec36c99ccbbffee32",
+      "optimistic_collision_estimate": 5.9e-07
+    },
+    {
+      "kind": "unsafe",
+      "config": "RootRequestsUnsafeCompare.cfg",
+      "expected_invariant": "EpochOrder",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 2,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": null,
+      "generated": 242,
+      "states": 178,
+      "depth": 6,
+      "log_sha256": "e8b34c2c277311c220b37c753f62d2b322562dc658e609f0dd78e8a758dad030"
+    },
+    {
+      "kind": "unsafe",
+      "config": "RootRequestsUnsafeTimeout.cfg",
+      "expected_invariant": "RootExclusive",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 4,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": "TimeoutActions",
+      "generated": 44,
+      "states": 17,
+      "depth": 15,
+      "log_sha256": "4dc1cb33472a29304d2e71c1d27e7e0cb2e32ccafe3363cb0ee514887ae58311"
+    },
+    {
+      "kind": "unsafe",
+      "config": "RootRequestsUnsafeLateExpiry.cfg",
+      "expected_invariant": "RootExclusive",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 4,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": "DelayedReplyActions",
+      "generated": 115,
+      "states": 29,
+      "depth": 16,
+      "log_sha256": "f979f71b36478725684c7da4aeea78fbbb30a6be2990ef13703351d9326e456e"
+    },
+    {
+      "kind": "unsafe",
+      "config": "RootRequestsUnsafeDrain.cfg",
+      "expected_invariant": "RootExclusive",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 2,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": null,
+      "generated": 1774,
+      "states": 1068,
+      "depth": 8,
+      "log_sha256": "24eca29dc9df829f58e7b3d83dbb5e6f566603b58d5393fabcc6974919e275ba"
+    },
+    {
+      "kind": "coverage",
+      "config": "RootRequestsRenewed.cfg",
+      "expected_invariant": "NotRenewed",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 2,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": null,
+      "generated": 1753,
+      "states": 1038,
+      "depth": 8,
+      "log_sha256": "84d0bda37ffa77ad4e4641660ef333b89cbc4ad3bff4a57be3ca7aa382a0dbf6"
+    },
+    {
+      "kind": "coverage",
+      "config": "RootRequestsRecovered.cfg",
+      "expected_invariant": "NotRecovered",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 4,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": "RecoveryActions",
+      "generated": 97,
+      "states": 27,
+      "depth": 16,
+      "log_sha256": "f5c375638cf87033afd4d21b126da28239ec6f8ec03894501a64201f0e0965ce"
+    },
+    {
+      "kind": "coverage",
+      "config": "RootRequestsLateRejected.cfg",
+      "expected_invariant": "NotLateRejected",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 2,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": null,
+      "generated": 664,
+      "states": 440,
+      "depth": 7,
+      "log_sha256": "7eae545d2dcf3e03eda51180e10e2627a3ee7d5bd8486ed2f8a6c1952556fa20"
+    },
+    {
+      "kind": "coverage",
+      "config": "RootRequestsLateReply.cfg",
+      "expected_invariant": "NotLateReply",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 4,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": "DelayedReplyActions",
+      "generated": 116,
+      "states": 29,
+      "depth": 16,
+      "log_sha256": "96ca9eaf13321419af6292cb243fe3f16cc5931e2a8dd359d2ef84766485ceaa"
+    },
+    {
+      "kind": "coverage",
+      "config": "RootRequestsActivationRecovered.cfg",
+      "expected_invariant": "NotActivationRecovered",
+      "bounds": {
+        "Epochs": 2,
+        "Attempts": 4,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": "ActivationRecoveryActions",
+      "generated": 63,
+      "states": 26,
+      "depth": 16,
+      "log_sha256": "cb21ced7fe1aa2b9531b3cb9659afba8d62085410d00d29978357261253274bc"
+    },
+    {
+      "kind": "safe",
+      "config": "RootRequestsThreeEpochs.cfg",
+      "expected_invariant": null,
+      "bounds": {
+        "Epochs": 3,
+        "Attempts": 3,
+        "Lease": 2,
+        "MaxTime": 4
+      },
+      "action_constraint": null,
+      "generated": 277973,
+      "states": 109007,
+      "depth": 15,
+      "log_sha256": "8eb11087d4db5c3a47ce9773a2bfe748cbc97c0e3bb29bea8aa66e00cfbec54d",
+      "optimistic_collision_estimate": 1e-09
+    },
+    {
+      "kind": "coverage",
+      "config": "RootRequestsRepeated.cfg",
+      "expected_invariant": "NotRepeated",
+      "bounds": {
+        "Epochs": 3,
+        "Attempts": 6,
+        "Lease": 2,
+        "MaxTime": 6
+      },
+      "action_constraint": "RepeatedActions",
+      "generated": 234,
+      "states": 43,
+      "depth": 23,
+      "log_sha256": "382deef7c4c9315f165ae6d8e9a77d9c85d29f589174087eabe21141ec22a2fa"
+    }
+  ],
+  "proof": {
+    "theorem": "Spec => [](RootExclusive /\\ EpochOrder)",
+    "strict_obligations": 777,
+    "fresh_fingerprints": true,
+    "scope": "Arbitrary finite epoch and invocation counts, positive integer lifetimes, time bounds and execution lengths, from the active-first-root seed",
+    "inductive_invariant": "Strong: types, history order, confirmed views, captured requests, applied results, clock order and bounds on older grants/requests at later confirmed fences",
+    "negative_controls": [
+      {
+        "name": "root-requests-compare",
+        "theorem": "ApplyShape",
+        "required_action": "Apply(a)",
+        "failed_obligations": 1,
+        "checked_obligations": 6,
+        "log_sha256": "f5bab647016633bfbcfe6997b10f57341d0e4c9f35100912edd6f54ca008fec3"
+      },
+      {
+        "name": "root-requests-timeout",
+        "theorem": "TimeoutPreserves",
+        "required_action": "Timeout(p, a)",
+        "failed_obligations": 2,
+        "checked_obligations": 42,
+        "log_sha256": "ef0d8e566cf38fa75da17c07fc95f58c9c57101573d90573cf3c6c52e5d2a9e0"
+      },
+      {
+        "name": "root-requests-reply",
+        "theorem": "DeliverPreserves",
+        "required_action": "Deliver(a)",
+        "failed_obligations": 1,
+        "checked_obligations": 93,
+        "log_sha256": "cb699ec76a64252dc7fe3a8d79bee2536b31f86b01cf36ebff6100e9c93d20d3"
+      },
+      {
+        "name": "root-requests-drain",
+        "theorem": "StartPreserves",
+        "required_action": "Start(p, a, kind, source)",
+        "failed_obligations": 1,
+        "checked_obligations": 33,
+        "log_sha256": "70dbbf74534a9c7c0142ecc9dfa699e5a77eac8a9093c5bc4c80b273509dfa09"
+      }
+    ],
+    "local_seconds": 260.216702,
+    "standard_library_facts": [
+      "SequenceTheorems.LenProperties",
+      "SequenceTheorems.IsASeq",
+      "SequenceTheorems.AppendProperties"
+    ],
+    "trusted_computing_base": "Pinned TLAPS translation/backends and logical libraries; no independent certificate replay"
+  },
+  "initial_state": "An already-active first root at time Lease, revision three, expiry 2*Lease and drain zero; later roots are fresh. Bootstrap acquisition is outside the model.",
+  "coverage": [
+    "Live root renewal after a prior applied renewal lost its response",
+    "Fence applies after timeout; exact revalidation, a new drain and activation recover permission",
+    "Abandoned predecessor request rejected after a successor fence",
+    "Old successful response ignored while successor permission is live",
+    "Activation applies after timeout; exact revalidation recovers it using its previously completed drain",
+    "Three successive roots have live permission at times two, four and six, with expiries four, six and eight"
+  ],
+  "guided_witnesses": "Constraints only remove schedules from Spec and keep all safety invariants. Both positive instances are unrestricted. Coverage is not liveness.",
+  "assumptions": [
+    "Ordered winning epochs represent never-reused root incarnations; competing election candidates are not modeled",
+    "Never-reused invocation identities; one current invocation per root; abandoned operations may still apply",
+    "Every register update makes an exact revision comparison, including otherwise unchanged metadata",
+    "Raw observations may be any historical metadata version",
+    "A grant expires by request-start plus Lease; first confirmation starts a drain of at least Lease in the abstract time coordinate"
+  ],
+  "limitations": [
+    "No competing-candidate election, empty-register bootstrap, process restart or RootControl refinement theorem",
+    "No physical clock guarantee, platform conversion or restored-process snapshot contract",
+    "No composition with child grants, placement requests, journal prefix selection, transactions, admission or reclamation",
+    "No liveness or implementation-refinement proof; current HTTP engine still has conditional read barriers"
+  ],
+  "source_sha256": {
+    "Dockerfile": "fa0eee0948f4f1324312ec60f743ec23f4fcb5c1feedf1b6a7eb06bbc5a7c6dc",
+    "scripts/check-candidate.sh": "90d976ae627b640fdf166e49bcb537ba4b39288729363fe9598d6582a9e27d9e",
+    "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
+    "scripts/check-proof.sh": "6b9db0faca7462495923858fd86ff111bd2314fad3fb3c11087776ccc0021e53",
+    "scripts/install-tlaps.sh": "cb8d111a2d246c8cc9597d9e8a4a206b33f769c6b724d855a14c7c436d96df30",
+    "site/build.mjs": "a577ecc1c6058add8c6f527e98a7c2950a73bea57d29985ad360eeca7946547f",
+    "spec/candidates/RootRequests.cfg": "f893b6c9e980e8219a11ad1e870d94bdde02532cc7b8791410af78bb9e3a354f",
+    "spec/candidates/RootRequests.checks": "b2ac0c998e75bdef031347e555c08848ee97b85d8b805cebf7f52130893b5a46",
+    "spec/candidates/RootRequests.proof": "9dfbd0cc51c4333c69547814519b9eea642f3be8817eddc1ae3beda7dc6cd404",
+    "spec/candidates/RootRequests.tla": "cbfa00e72abda8e2fcc6cb8990940ca0073e62bec7174a16d9d31caffa3c7948",
+    "spec/candidates/RootRequestsActivationRecovered.cfg": "8f1500ee7de87768ef48cfb0150922ee03395e72b15eea184a93177d84163443",
+    "spec/candidates/RootRequestsLateRejected.cfg": "06c26bfb1a900001a81498e2a8c87b7b29db19eb280664857d996c52ee3aa037",
+    "spec/candidates/RootRequestsLateReply.cfg": "3c5321165f751f679d71584878259fff9d4e7772b2735b94df1ad7029783d8d7",
+    "spec/candidates/RootRequestsProof.tla": "3c73e06de674dd7c9a5fa1c6555427ce5c419b7d44ee0988fbd26a2acad19b82",
+    "spec/candidates/RootRequestsRecovered.cfg": "b8b7fbc55f6006476814972e21db0cdf810248e079483d25124ce5dedabfe283",
+    "spec/candidates/RootRequestsRenewed.cfg": "4195f7a54cd4c2a58b98d5efa126bcaea71671eadb78b99d2028542fc772ae76",
+    "spec/candidates/RootRequestsRepeated.cfg": "cd755169488a11cc7cf2186f7afa7ae0006d73207e66930498f89dfdcf8a390e",
+    "spec/candidates/RootRequestsThreeEpochs.cfg": "e435112b2120b8f0bb16093ec46d6d42c0707d820b67a2f3256a667a3fea1b2d",
+    "spec/candidates/RootRequestsUnsafeCompare.cfg": "cc0db2092c9aa956ca0cda2ec8115c1880b431fe079031ea9b8c76f69c7d3bd3",
+    "spec/candidates/RootRequestsUnsafeDrain.cfg": "5ac5100f4d9a94dd8e109247f522ea434e34e5d17b21b75791eeaef3c16fbc50",
+    "spec/candidates/RootRequestsUnsafeLateExpiry.cfg": "f35ed2ffa2c4a49119f1df1b1a38b746b0598d76d9d89f5ea888546882212010",
+    "spec/candidates/RootRequestsUnsafeTimeout.cfg": "e0395f6e8406fd805bf18244869878c018caf7ce19a7c9b2298a45cec3691d9b"
+  },
+  "local_log_sha256": {
+    ".tools/candidates/RootRequests/model-root-requests-activation-recovered.log": "cb21ced7fe1aa2b9531b3cb9659afba8d62085410d00d29978357261253274bc",
+    ".tools/candidates/RootRequests/model-root-requests-compare.log": "e8b34c2c277311c220b37c753f62d2b322562dc658e609f0dd78e8a758dad030",
+    ".tools/candidates/RootRequests/model-root-requests-drain.log": "24eca29dc9df829f58e7b3d83dbb5e6f566603b58d5393fabcc6974919e275ba",
+    ".tools/candidates/RootRequests/model-root-requests-lateexpiry.log": "f979f71b36478725684c7da4aeea78fbbb30a6be2990ef13703351d9326e456e",
+    ".tools/candidates/RootRequests/model-root-requests-laterejected.log": "7eae545d2dcf3e03eda51180e10e2627a3ee7d5bd8486ed2f8a6c1952556fa20",
+    ".tools/candidates/RootRequests/model-root-requests-latereply.log": "96ca9eaf13321419af6292cb243fe3f16cc5931e2a8dd359d2ef84766485ceaa",
+    ".tools/candidates/RootRequests/model-root-requests-recovered.log": "f5c375638cf87033afd4d21b126da28239ec6f8ec03894501a64201f0e0965ce",
+    ".tools/candidates/RootRequests/model-root-requests-renewed.log": "84d0bda37ffa77ad4e4641660ef333b89cbc4ad3bff4a57be3ca7aa382a0dbf6",
+    ".tools/candidates/RootRequests/model-root-requests-repeated.log": "382deef7c4c9315f165ae6d8e9a77d9c85d29f589174087eabe21141ec22a2fa",
+    ".tools/candidates/RootRequests/model-root-requests-three-epochs.log": "8eb11087d4db5c3a47ce9773a2bfe748cbc97c0e3bb29bea8aa66e00cfbec54d",
+    ".tools/candidates/RootRequests/model-root-requests-timeout.log": "4dc1cb33472a29304d2e71c1d27e7e0cb2e32ccafe3363cb0ee514887ae58311",
+    ".tools/candidates/RootRequests/model-root-requests.log": "4fff22ab3a9313ec489f4ed49660f7611d4df5f904ff438ec36c99ccbbffee32",
+    ".tools/proof-negative-root-requests-compare.log": "f5bab647016633bfbcfe6997b10f57341d0e4c9f35100912edd6f54ca008fec3",
+    ".tools/proof-negative-root-requests-drain.log": "70dbbf74534a9c7c0142ecc9dfa699e5a77eac8a9093c5bc4c80b273509dfa09",
+    ".tools/proof-negative-root-requests-reply.log": "cb699ec76a64252dc7fe3a8d79bee2536b31f86b01cf36ebff6100e9c93d20d3",
+    ".tools/proof-negative-root-requests-timeout.log": "ef0d8e566cf38fa75da17c07fc95f58c9c57101573d90573cf3c6c52e5d2a9e0",
+    ".tools/proof-root-requests.log": "796dc9b4933fda71eac32422c3a8e2421e83b0749a3d091d0e63e502cce7768e",
+    ".tools/root-requests-general-maintained.log": "7b89c0b642c7880bb4c99e813b0b5d8505b157278a705e09f8b24fc03a579854",
+    ".tools/root-requests-proof-standard.log": "7a93c9fc66382e78b691efa1127800bcc51a58918c2e21d8dd37a643d9a18b8b"
+  },
+  "toolchain": {
+    "tlc_release": "1.7.4",
+    "tlc_workers": 2,
+    "tlc_jar_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+    "tlapm_version": "c8ddc44",
+    "z3_version": "4.8.9",
+    "tlaps_archive_sha256": "fa6d537fb62f8526e7dd0d716c88e3d18931cc5c6b5d9ba1949afdb8096fb758",
+    "bundled_sequence_library_sha256": {
+      "SequenceTheorems.tla": "1fdbed9077bba9db329e499535be29f8d2e6fba3a2b338e364c3b0ec56596bf9",
+      "SequenceTheorems_proofs.tla": "8f30d6f458ac623df4db14c88ab758fcb2a97889e42427e67634dcfc61510b20"
+    }
+  },
+  "qualification": {
+    "status": "pending Woodpecker and public Pages verification"
+  }
+}

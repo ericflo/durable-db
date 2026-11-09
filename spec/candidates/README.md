@@ -83,10 +83,6 @@ This wrapper records actual late control applications in the delegated journal m
 
 Run `scripts/check-candidate.sh LateControlCoverage`. The wrapper does not change the underlying transitions. Those transitions now admit late control application while still requiring the active coordinator identity to match; service and grant issuance retain their permission guards. This broadens the abstract proof scope but does not implement request/version/reply refinement. Woodpecker requires all four traces.
 
-## Retired experiments
-
-The initial `ServingLease` model used atomic authority-checked commits. Its pause, drain and delayed-grant controls now run in the maintained `OwnedWal` composition with immutable uploads. Its [historical evidence](../../docs/evidence/serving-authority-candidate-2026-11-09.json) identifies the source commit; the obsolete source and direct-run configurations are removed. The former `WalHandoff` model was similarly replaced by `Journal`; its [evidence](../../docs/evidence/wal-handoff-candidate-2026-11-09.json) remains available.
-
 ## Placement request uncertainty
 
 Run `scripts/check-candidate.sh PlacementRequests` for the one-coordinator request/reply component. Its 359,761-state instance allows stale metadata observations, timed-out writes that apply later and stale replies after movement. It requires four faulty variants and four actual-event reachability traces. Invocation IDs are never reused; an uncertain result cannot restore issuance; a confirmed frozen view starts a conservative drain. The provider register must compare exactly even for an otherwise unchanged payload.
@@ -103,6 +99,12 @@ The seed is an already-active first root, followed by one successor; it does not
 
 Run `scripts/check-candidate.sh RootRequests`. The model captures root fence, renewal/revalidation and activation invocations, including timeout before provider application and overlapping abandoned requests. An existing permission interval survives an attempted renewal but cannot be extended by its timeout. Exact revalidation recovers an uncertain fence or activation; a newly confirmed fence starts a drain, while recovering activation uses the drain completed before its original request.
 
-The unrestricted two-root/four-request instance checks 2,319,263 states. Four faulty controls and five actual-event witnesses are mandatory. Three longer recovery witnesses and two fault cases use action constraints that only remove schedules; the positive instance remains unrestricted. The fence and activation traces require actual application after timeout. Raw observations can be any historical version, selected when the invocation captures its comparison. This collapses observational interleavings without requiring fresh reads.
+Two unrestricted instances check 2,319,263 states with two epochs/four requests and 109,007 with three epochs/three requests. Four faulty controls and six actual-event witnesses are mandatory. Guided action constraints only remove schedules; both positive instances remain unrestricted. The fence and activation traces require actual application after timeout. A six-request trace reaches three successive live roots without overlapping permission. Raw observations can be any historical version, selected when the invocation captures its comparison.
 
-This extends the wire checks without replacing `RootControl` or its proof: it does not establish their unbounded refinement, competing candidates, repeated takeover, physical clock behavior, child/placement/journal composition or a runtime controller. [Bounds and limitations](../../docs/verification.md#candidate-root-requests-and-revalidation).
+Run `scripts/check-proof.sh RootRequests` for the separate unbounded abstract theorem: 777 strict obligations establish root exclusion and monotone authoritative epochs for arbitrary finite epoch/request counts, positive integer lifetimes and execution lengths. All four safety-guard mutations must fail; the comparison mutation targets the first affected helper. Both positive finite instances also check the inductive strengthening.
+
+The theorem starts from an already-active first root and assumes ordered winning incarnations and abstract elapsed-time bounds. It is not a refinement of `RootControl`, a competing-candidate election proof, physical-clock qualification or a composition with child grants, placement requests and journal history. No runtime controller is adopted. [Bounds, assumptions and evidence](../../docs/verification.md#candidate-root-requests-and-revalidation).
+
+## Retired experiments
+
+The initial `ServingLease` model used atomic authority-checked commits. Its pause, drain and delayed-grant controls now run in the maintained `OwnedWal` composition with immutable uploads. Its [historical evidence](../../docs/evidence/serving-authority-candidate-2026-11-09.json) identifies the source commit; the obsolete source and direct-run configurations are removed. The former `WalHandoff` model was similarly replaced by `Journal`; its [evidence](../../docs/evidence/wal-handoff-candidate-2026-11-09.json) remains available.

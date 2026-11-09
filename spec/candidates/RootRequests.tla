@@ -1,6 +1,6 @@
 --------------------------- MODULE RootRequests ---------------------------
 EXTENDS Naturals, Sequences
-CONSTANTS Attempts, Lease, MaxTime,
+CONSTANTS Epochs, Attempts, Lease, MaxTime,
           UnsafeCompare, UnsafeTimeout, UnsafeLateExpiry, UnsafeDrain
 
 \* Explicit root-control invocations, starting from a reachable active root.
@@ -13,7 +13,7 @@ VARIABLES history, roots, view, valid, active, requests, now,
 vars == <<history, roots, view, valid, active, requests, now,
           timedOut, applied, renewed, recovered, activationRecovered, lateRejected, lateReply>>
 Ids == 1..Attempts
-Owners == 1..2
+Owners == 1..Epochs
 Kinds == {"fence", "validate", "activate"}
 Statuses == {"fresh", "pending", "ok", "conflict", "done"}
 Metadata == [owner : Owners, revision : Nat, open : BOOLEAN]
@@ -153,6 +153,49 @@ TypeOK ==
     /\ lateRejected \in BOOLEAN /\ lateReply \in BOOLEAN
 RootExclusive == \A p, q \in Owners: (RootValid(p) /\ RootValid(q)) => p = q
 EpochOrder == \A i, j \in 1..Len(history): i <= j => history[i].owner <= history[j].owner
+\* Inductive strengthening for arbitrary finite epochs and invocation counts.
+\* The pending wire request retains its source relation even after timeout.
+HistoryOK ==
+    /\ \A i \in 1..Len(history): history[i].revision = i + 2
+    /\ EpochOrder
+    /\ \A i \in 1..Len(history): history[i].open =>
+          /\ roots[history[i].owner].phase # "fresh"
+          /\ now >= roots[history[i].owner].drain + Lease
+ViewOK == \A p \in Owners:
+    /\ \E i \in 1..Len(history): view[p] = history[i]
+    /\ (roots[p].phase # "fresh" => view[p].owner = p)
+ClockOrder == \A p \in Owners:
+    /\ roots[p].expires <= now + Lease /\ roots[p].drain <= now
+RootState == \A p \in Owners:
+    /\ (roots[p].phase = "fresh" => roots[p].expires = 0 /\ roots[p].drain = 0)
+    /\ (roots[p].phase # "fresh" => p <= Current.owner)
+    /\ (roots[p].phase = "active" => now >= roots[p].drain + Lease)
+Captured == \A a \in Ids: requests[a].status # "fresh" =>
+    LET r == requests[a] IN
+    /\ r.started <= now
+    /\ r.expected \in 3..Current.revision
+    /\ LET source == history[r.expected - 2] IN
+          CASE r.kind = "fence" -> r.owner = source.owner + 1 /\ ~r.open
+            [] r.kind = "validate" -> r.owner = source.owner /\ r.open = source.open
+            [] OTHER -> r.owner = source.owner /\ r.open
+    /\ (r.kind = "activate" => roots[r.owner].phase # "fresh"
+                                  /\ r.started >= roots[r.owner].drain + Lease)
+Applied ==
+    /\ \A a \in Ids: requests[a].status = "ok" => a \in applied
+    /\ \A a \in applied:
+          LET r == requests[a] IN
+          /\ r.status \in {"ok", "done"}
+          /\ r.result = history[r.expected - 1]
+          /\ r.result.revision = r.expected + 1
+          /\ r.result.owner = r.owner /\ r.result.open = r.open
+          /\ r.result.revision <= Current.revision
+FenceBounds == \A p, q \in Owners:
+    (p < q /\ roots[q].phase # "fresh") =>
+       /\ roots[p].expires <= roots[q].drain + Lease
+       /\ \A a \in applied: requests[a].owner = p => requests[a].started <= roots[q].drain
+Strong == TypeOK /\ now >= Lease /\ HistoryOK /\ ViewOK /\ ClockOrder
+          /\ RootState /\ Captured /\ Applied /\ FenceBounds
+
 NotRenewed == ~renewed
 NotRecovered == ~recovered
 NotActivationRecovered == ~activationRecovered
@@ -189,4 +232,16 @@ TimeoutActions ==
     \/ ActivateSuccessor(3) \/ Apply(3) \/ Deliver(3)
     \/ (Start(1, 4, "validate", Initial) /\ RootValid(2))
     \/ Apply(4) \/ Timeout(1, 4) \/ Deliver(4)
+\* Require the second root to have live permission before fencing it, and
+\* require live third-root permission at the final witness.
+NotRepeated == ~(RootValid(3) /\ roots[2].phase = "active")
+RepeatedActions ==
+    (Start(2, 1, "fence", Initial) /\ now = Lease) \/ Apply(1) \/ Deliver(1)
+    \/ (Tick /\ (roots[2].phase = "draining" \/ roots[3].phase = "draining"))
+    \/ RenewSuccessor(2) \/ Apply(2) \/ Deliver(2)
+    \/ ActivateSuccessor(3) \/ Apply(3) \/ Deliver(3)
+    \/ (Start(3, 4, "fence", Current) /\ RootValid(2) /\ now = 2 * Lease)
+    \/ Apply(4) \/ Deliver(4)
+    \/ (Start(3, 5, "validate", Current) /\ now = 3 * Lease) \/ Apply(5) \/ Deliver(5)
+    \/ Start(3, 6, "activate", view[3]) \/ Apply(6) \/ Deliver(6)
 =============================================================================

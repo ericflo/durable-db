@@ -197,6 +197,12 @@ COPY spec/candidates/RootControl.tla spec/candidates/RootControlProof.tla spec/c
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh RootControl && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM proof-tools AS proof-root-requests
+COPY scripts/check-proof.sh scripts/check-proof.sh
+COPY spec/candidates/RootRequests.tla spec/candidates/RootRequestsProof.tla spec/candidates/RootRequests.proof spec/candidates/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-proof.sh RootRequests && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM proof-root-control AS proof-root-journal
 COPY spec/candidates/RootJournal.tla spec/candidates/RootJournalProof.tla spec/candidates/RootJournal.proof spec/candidates/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -258,6 +264,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=proof-root-requests /checks/ /checks/
 COPY --from=model-candidate-rootrequests /checks/ /checks/
 COPY --from=model-candidate-placementtakeover /checks/ /checks/
 COPY --from=model-candidate-placementrequests /checks/ /checks/
