@@ -8,7 +8,7 @@ One shared publication implementation on B2 and S3, with a persistent B+tree dat
 
 ## Before a hosted preview
 
-- Finish the indexed Pi storage adapter and run its full conformance/recovery suite.
+- Complete cloud/restart and sustained-load qualification of the indexed Pi adapter; local upstream conformance and adversarial HTTP tests pass.
 - Add durable cluster-wide physical allocation/spend admission, request and bandwidth budgets, and abuse tests across replicas.
 - Add tenant export, deletion/retention, overlapping signing-key rotation, and durable audit delivery. Durable token revocation and idempotent protected provisioning are implemented in current source builds; complete their broader rollout qualification.
 - Extend the passing Kubernetes HPA-bound and pod-replacement tests with CPU-load triggers, node drains, network partitions, and provider errors. Report timelines, not only final success.
