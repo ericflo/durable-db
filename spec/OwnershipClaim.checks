@@ -1,0 +1,3 @@
+safe OwnershipClaim.cfg ownership-claim 1g -
+unsafe UnsafeClaimRetarget.cfg claim-retarget 1g PinnedTarget
+unsafe UnsafeClaimComparison.cfg claim-comparison 1g PinnedTarget

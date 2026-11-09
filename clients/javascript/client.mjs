@@ -18,6 +18,9 @@ export class DurableDb {
   }
   async #request(url, body, method = "POST") {
     const response = await fetch(url, {
+      // A redirect can change POST to GET or replay a mutation at another path.
+      // It cannot establish whether this exact operation committed.
+      redirect: 'error',
       method, headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
       ...(method === "GET" ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(35_000),
     });

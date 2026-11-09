@@ -36,8 +36,17 @@ export async function openIndexedPiStorage(client, { prefix = 'pi-indexed/', tak
   }
   for (const name of Object.keys(options)) if (!(name in DEFAULT_BOUNDS)) throw new StorageRequestError('Unknown indexed adapter option');
   const owner = crypto.randomUUID();
+  let targetOwner;
   for (let attempt = 0; attempt < 12; attempt++) {
     const current = await observe(client, prefix);
+    const held = current.meta?.owner ?? null;
+    if (attempt === 0) targetOwner = held;
+    else {
+      if (held === owner) return new IndexedStorage(client, prefix, owner, current.encoded, bounds);
+      // A takeover targets the first observed owner. Recheck after backoff too:
+      // a third host may have claimed between conflict resolution and this read.
+      if (held !== null && held !== targetOwner) throw new Error('Pi storage ownership changed during open');
+    }
     if (current.meta?.owner !== undefined && current.meta.owner !== null && !takeover) throw new Error('Pi storage already has an owner; explicit takeover is required after a crash');
     const tx = new Snapshot(client, prefix, current.revision, bounds);
     if (current.meta === undefined && (await tx.scan('', { limit: 1 })).items.length !== 0) throw new Error('Uninitialized indexed prefix is not empty');
@@ -53,7 +62,10 @@ export async function openIndexedPiStorage(client, { prefix = 'pi-indexed/', tak
       const observed = await observe(client, prefix);
       if (observed.meta?.owner === owner) return new IndexedStorage(client, prefix, owner, observed.encoded, bounds);
       if (!(error instanceof DbError) || error.status !== 409) throw error;
-      if (observed.meta?.owner !== null && observed.meta?.owner !== undefined) throw new Error('Pi storage ownership changed during open');
+      // A fence or a write by the SAME target can cause a definite conflict.
+      // Retry its fresh snapshot without silently targeting another Session.
+      const held = observed.meta?.owner ?? null;
+      if (held !== null && held !== targetOwner) throw new Error('Pi storage ownership changed during open');
       await pause(attempt);
     }
   }

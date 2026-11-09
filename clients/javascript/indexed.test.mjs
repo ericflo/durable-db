@@ -38,6 +38,53 @@ async function noise(client, n) {
 }
 
 suite('indexed adapter failure and resource boundaries', () => {
+  it('retries an explicit takeover when the original owner advances or a fence conflicts', async () => {
+    const { client } = await fixture(); const old = await openIndexedPiStorage(client);
+    await commit(old, [root]); let attempts = 0;
+    const contended = { read: request => client.read(request), commit: async request => {
+      attempts++;
+      if (attempts === 1) {
+        await commit(old, [entry(2)]);
+        throw new DbError(409, { error: 'revision_conflict' });
+      }
+      if (attempts === 2) throw new DbError(409, { error: 'collection_fence_conflict' });
+      return client.commit(request);
+    } };
+    let replacement;
+    try {
+      replacement = await openIndexedPiStorage(contended, { takeover: true });
+      expect(attempts).toBe(3);
+      expect((await replacement.entry(2, {})).entry.id).toBe(2);
+      await expect(old.conversation(1)).rejects.toThrow('ownership');
+      await commit(replacement, [entry(3)]);
+    } finally {
+      await old.close(); if (replacement) await replacement.close();
+    }
+  }, 60000);
+
+  it('pins the takeover target across backoff instead of stealing a new competing owner', async () => {
+    const { client } = await fixture(); const old = await openIndexedPiStorage(client);
+    await commit(old, [root]); let reads = 0, attempts = 0, competitor, unexpected;
+    const contended = { read: async request => {
+      if (++reads === 3) competitor = await openIndexedPiStorage(client, { takeover: true });
+      return client.read(request);
+    }, commit: request => {
+      if (++attempts === 1) throw new DbError(409, { error: 'collection_fence_conflict' });
+      return client.commit(request);
+    } };
+    try {
+      await expect(openIndexedPiStorage(contended, { takeover: true }).then(value => { unexpected = value; return value; })).rejects.toThrow('ownership changed');
+      expect(competitor).toBeDefined(); expect(attempts).toBe(1);
+      await commit(competitor, [entry(2)]);
+      expect((await competitor.entry(2, {})).entry.id).toBe(2);
+      await expect(old.conversation(1)).rejects.toThrow('ownership');
+    } finally {
+      // Cleanup also runs when deliberately testing the broken implementation.
+      if (unexpected) await unexpected.close();
+      await old.close().catch(() => {}); if (competitor) await competitor.close().catch(() => {});
+    }
+  }, 60000);
+
   it('opens without scanning or replaying unrelated history and preserves ordered indexes', async () => {
     const { client } = await fixture();
     let reads = 0, scans = 0;

@@ -92,6 +92,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh SigningRotation && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-ownershipclaim
+COPY spec/OwnershipClaim.tla spec/OwnershipClaim.checks spec/OwnershipClaim.cfg spec/UnsafeClaimRetarget.cfg spec/UnsafeClaimComparison.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh OwnershipClaim && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-uploadcredits
 COPY spec/UploadCredits.tla spec/UploadCredits.checks spec/UploadCredits.cfg spec/UnsafeUploadRefund.cfg spec/UnsafeUploadRestore.cfg spec/UnsafeUploadBeforeCharge.cfg spec/UnsafeUploadRefillReset.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -131,6 +137,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-proof.sh && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=model-ownershipclaim /checks/ /checks/
 COPY --from=proof /checks/ /checks/
 COPY --from=model-publicationsafety /checks/ /checks/
 COPY --from=model-logicalbackup /checks/ /checks/

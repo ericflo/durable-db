@@ -10,7 +10,7 @@ The object-store client uses AWS-LC through rustls; source builds need a C toolc
 
 The network S3 test is opt-in; see `tests/s3.rs` for environment variables. Use a disposable bucket/prefix. The JavaScript package contains indexed and bounded-reference pi-durable 1.5.0 adapters with HTTP conformance and fault tests; see [clients](clients.md).
 
-Woodpecker builds the static Linux executable and runtime image with kache, checks Rust formatting/lints/tests, runs all thirteen TLA+ models (including the proposed upload-credit allocator, signing-key rollout, protected creation, authorization, and the indexed Pi Session design) and negative controls, and runs all 32 upstream Pi cases against both adapters plus ten indexed-adapter fault/resource cases. After successful main builds it publishes the public documentation through a repository-scoped SSH deploy key. The pipeline is in `.woodpecker.yaml`; build steps are in `Dockerfile`. Run `scripts/test-client.sh` locally after building the debug executable. GitHub Actions are disabled. Changes go directly to main while this private project is developed.
+Woodpecker builds the static Linux executable and runtime image with kache, checks Rust formatting/lints/tests, and requires all seventeen finite TLA+ models, their negative controls, and the unbounded abstract publication proof. JavaScript checks include all 32 upstream Pi cases against both adapters, twelve indexed-adapter fault/resource cases, real Harness workflows, and HTTP transport regressions. After successful main builds it publishes the public documentation through a repository-scoped SSH deploy key. The pipeline is in `.woodpecker.yaml`; build steps are in `Dockerfile`. Run `scripts/test-client.sh` locally after building the debug executable. GitHub Actions are disabled. Changes go directly to main while this private project is developed.
 
 
 Formal checks are cached per model in the container build. Each `spec/*.checks` descriptor lists its positive configuration and required negative controls. `scripts/check-model.sh` still runs every descriptor locally; pass a module name to run that model and its controls during iteration. The Docker build serializes TLC heaps with a shared cache lock, while retaining independent results for unchanged models.
@@ -20,6 +20,8 @@ The 10,005-database regression keeps every assertion and runs in release mode in
 ```sh
 cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect
 ```
+
+The extended directory campaign is opt-in: `cargo test --locked --release --test publication hundred_thousand_databases_with_incremental_collection -- --ignored --nocapture`. It exercises 100,005 entries in a format-5 namespace, permuted insertion, deeper splits, bounded point/paginated reads, periodic collection, and an uncached reopen that checks every head. Its in-memory provider and sequential collection do not measure cloud throughput or concurrent creation capacity. The regular 10,005-entry regression still runs for both formats 3 and 5.
 
 One local qualification passed in 40.51 seconds in release mode versus 292 seconds in a full debug-suite run. These are test runtimes on the development laptop, not database latency/throughput benchmarks.
 
