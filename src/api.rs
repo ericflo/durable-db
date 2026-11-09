@@ -31,6 +31,7 @@ struct Bucket {
 #[derive(Hash, Eq, PartialEq)]
 enum Principal {
     Administrator,
+    Metrics,
     Database(String),
 }
 pub struct App {
@@ -117,6 +118,11 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
     };
     let bucket = if app.auth.is_admin(token) {
         Principal::Administrator
+    } else if app.auth.is_metrics(token) {
+        if request.uri().path() != "/metrics" || request.method() != axum::http::Method::GET {
+            return Error::Unauthorized.into_response();
+        }
+        Principal::Metrics
     } else {
         match app.auth.claims(token) {
             Ok(c) => Principal::Database(c.database),
@@ -134,7 +140,13 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
     // database share one allowance; request paths cannot select another one.
     let _principal_permit = {
         let mut rates = app.rates.lock().await;
-        if rates.len() >= 4096 && !rates.contains_key(&bucket) {
+        // Two fixed control principals may always create their entries even
+        // when tenants fill the bounded map. Otherwise churn can lock out
+        // administrative recovery and monitoring. At most 4,098 entries exist.
+        if matches!(&bucket, Principal::Database(_))
+            && rates.len() >= 4096
+            && !rates.contains_key(&bucket)
+        {
             rates.retain(|_, b| {
                 now.duration_since(b.time) < Duration::from_secs(60)
                     || Arc::strong_count(&b.permits) > 1
@@ -180,7 +192,8 @@ async fn ready(State(app): State<Arc<App>>) -> StatusCode {
     }
 }
 async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<String> {
-    if !app.auth.is_admin(bearer(&headers)?) {
+    let token = bearer(&headers)?;
+    if !app.auth.is_admin(token) && !app.auth.is_metrics(token) {
         return Err(Error::Unauthorized);
     }
     Ok(format!(

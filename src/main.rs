@@ -64,6 +64,9 @@ enum Command {
         ttl_seconds: u64,
         #[arg(long, conflicts_with = "database")]
         admin: bool,
+        /// Mint a credential that can only scrape GET /metrics.
+        #[arg(long, conflicts_with_all = ["database", "admin", "write"])]
+        metrics: bool,
     },
     /// Generate a signing key file with restrictive permissions.
     Keygen {
@@ -91,15 +94,18 @@ async fn main() -> anyhow::Result<()> {
             write,
             ttl_seconds,
             admin,
+            metrics,
         } => {
             let auth = Auth::new(&std::fs::read_to_string(key_file)?)?;
             if admin {
                 println!("{}", auth.admin_token());
+            } else if metrics {
+                println!("{}", auth.metrics_token(ttl_seconds)?);
             } else {
                 println!(
                     "{}",
                     auth.issue(
-                        database.context("--database or --admin required")?,
+                        database.context("--database, --admin, or --metrics required")?,
                         write,
                         ttl_seconds
                     )?

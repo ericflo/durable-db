@@ -13,6 +13,11 @@ pub struct Claims {
     pub write: bool,
     pub expires: u64,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricsClaims {
+    expires: u64,
+}
 pub struct Auth {
     key: Vec<u8>,
 }
@@ -27,6 +32,52 @@ impl Auth {
     }
     pub fn admin_token(&self) -> String {
         format!("ddb_admin_{}", URL_SAFE_NO_PAD.encode(&self.key))
+    }
+    /// A separate MAC domain prevents a monitoring capability from being
+    /// interpreted as a database token, even if its prefix is removed.
+    pub fn metrics_token(&self, ttl: u64) -> Result<String> {
+        if ttl == 0 || ttl > 86400 * 30 {
+            return Err(Error::Invalid(
+                "token TTL must be 1 second to 30 days".into(),
+            ));
+        }
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&MetricsClaims {
+                expires: now().saturating_add(ttl),
+            })
+            .map_err(anyhow::Error::from)?,
+        );
+        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC key");
+        mac.update(b"durable-db.metrics.v1\0");
+        mac.update(payload.as_bytes());
+        Ok(format!(
+            "ddb_metrics_{payload}.{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        ))
+    }
+    pub fn is_metrics(&self, token: &str) -> bool {
+        if token.len() > 2048 {
+            return false;
+        }
+        let Some((payload, signature)) = token
+            .strip_prefix("ddb_metrics_")
+            .and_then(|t| t.split_once('.'))
+        else {
+            return false;
+        };
+        let Ok(signature) = URL_SAFE_NO_PAD.decode(signature) else {
+            return false;
+        };
+        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC key");
+        mac.update(b"durable-db.metrics.v1\0");
+        mac.update(payload.as_bytes());
+        if mac.verify_slice(&signature).is_err() {
+            return false;
+        }
+        let Ok(payload) = URL_SAFE_NO_PAD.decode(payload) else {
+            return false;
+        };
+        serde_json::from_slice::<MetricsClaims>(&payload).is_ok_and(|claims| claims.expires > now())
     }
     pub fn is_admin(&self, token: &str) -> bool {
         // Constant-time MAC comparison; do not compare secret strings directly.
@@ -98,4 +149,24 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn an_expired_but_correctly_signed_metrics_token_is_rejected() {
+        let auth = Auth::new(&"19".repeat(32)).unwrap();
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"expires":1}"#);
+        let mut mac = HmacSha256::new_from_slice(&auth.key).unwrap();
+        mac.update(b"durable-db.metrics.v1\0");
+        mac.update(payload.as_bytes());
+        let token = format!(
+            "ddb_metrics_{payload}.{}",
+            URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+        );
+        assert!(!auth.is_metrics(&token));
+        let tenant = auth.issue("a".into(), true, 3600).unwrap();
+        assert!(!auth.is_metrics(&format!("ddb_metrics_{tenant}")));
+    }
 }

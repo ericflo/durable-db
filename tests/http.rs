@@ -227,3 +227,144 @@ async fn a_database_cannot_hold_every_slot_and_cancelled_requests_release_capaci
         let _ = task.await;
     }
 }
+
+#[tokio::test]
+async fn metrics_capabilities_cannot_access_data_or_mint_other_credentials() {
+    let auth = Auth::new(&"ef".repeat(32)).unwrap();
+    let metrics = auth.metrics_token(3600).unwrap();
+    let tenant = auth.issue("_metrics".into(), false, 3600).unwrap();
+    assert!(auth.is_metrics(&metrics));
+    assert!(!auth.is_admin(&metrics));
+    assert!(
+        auth.claims(metrics.strip_prefix("ddb_metrics_").unwrap())
+            .is_err()
+    );
+    assert!(!Auth::new(&"ee".repeat(32)).unwrap().is_metrics(&metrics));
+    assert!(auth.metrics_token(0).is_err());
+    assert!(auth.metrics_token(86400 * 30 + 1).is_err());
+    let storage = Arc::new(
+        Remote::new(
+            Arc::new(object_store::memory::InMemory::new()),
+            "metrics-scope",
+        )
+        .unwrap(),
+    );
+    let engine = Arc::new(Engine::new(storage, Arc::new(Cache::new(0, None).unwrap())));
+    engine.create("_metrics", Limits::default()).await.unwrap();
+    let app = router(Arc::new(App::new(engine, auth, 8)));
+    for (method, path, token, status) in [
+        ("GET", "/metrics", metrics.as_str(), StatusCode::OK),
+        ("GET", "/metrics", tenant.as_str(), StatusCode::UNAUTHORIZED),
+        (
+            "GET",
+            "/v1/databases/_metrics",
+            metrics.as_str(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "POST",
+            "/v1/databases/new",
+            metrics.as_str(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "POST",
+            "/v1/databases/_metrics/read",
+            metrics.as_str(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "POST",
+            "/v1/databases/_metrics/commit",
+            metrics.as_str(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "POST",
+            "/v1/databases/_metrics/gc",
+            metrics.as_str(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "POST",
+            "/v1/tokens",
+            metrics.as_str(),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "GET",
+            "/v1/databases/_metrics",
+            tenant.as_str(),
+            StatusCode::OK,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{method} {path}");
+    }
+}
+
+#[tokio::test]
+async fn a_full_principal_table_keeps_administrator_and_metrics_access() {
+    let auth = Auth::new(&"ad".repeat(32)).unwrap();
+    let admin = auth.admin_token();
+    let metrics = auth.metrics_token(3600).unwrap();
+    let tokens: Vec<_> = (0..4097)
+        .map(|n| auth.issue(format!("tenant-{n}"), false, 3600).unwrap())
+        .collect();
+    let storage = Arc::new(
+        Remote::new(
+            Arc::new(object_store::memory::InMemory::new()),
+            "full-table",
+        )
+        .unwrap(),
+    );
+    let engine = Arc::new(Engine::new(storage, Arc::new(Cache::new(0, None).unwrap())));
+    let app = router(Arc::new(App::new(engine, auth, 8)));
+    for (n, token) in tokens.iter().enumerate() {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/databases/tenant-{n}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if n < 4096 {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+        );
+    }
+    for token in [&admin, &metrics] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}

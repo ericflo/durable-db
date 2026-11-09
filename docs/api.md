@@ -12,7 +12,7 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 | `POST /v1/databases/{db}/commit` | Revision-checked atomic writes and optional value checks |
 | `POST /v1/databases/{db}/gc` | Admin: one bounded maintenance sweep |
 | `POST /v1/tokens` | Admin: mint a database-scoped token |
-| `GET /metrics` | Admin: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
+| `GET /metrics` | Administrator or metrics-only credential: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
 | `GET /health/live` | Process is serving HTTP |
 | `GET /health/ready` | Startup completed and server is not draining |
 

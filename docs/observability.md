@@ -1,6 +1,27 @@
 # Observability and incident response
 
-The administrator-only `GET /metrics` endpoint exports Prometheus text metrics. Scrape each process separately, use `job="durable-db"`, and attach cluster/instance labels in the monitoring configuration. Protect the administrator credential and keep the endpoint behind the deployment's TLS and network controls. A separate metrics-only credential is not yet implemented.
+`GET /metrics` exports Prometheus text metrics. Scrape each process separately, use `job="durable-db"`, and attach cluster/instance labels in the monitoring configuration. Issue a metrics-only credential on the server side:
+
+```sh
+umask 077
+durable-db token --key-file /run/secrets/admin.key --metrics \
+  --ttl-seconds 2592000 > /secure/path/metrics.token
+```
+
+Mount only the resulting token into the scraper. It expires after the requested lifetime (at most 30 days); renew it before expiration. It can access only `GET /metrics`, and cannot read data, write, run collection, or mint credentials. Its HMAC domain is separate from database capabilities and it does not contain the signing key. Administrator tokens remain accepted for compatibility. Keep both the endpoint and credential behind TLS and network controls.
+
+For example, the Prometheus scrape configuration can use:
+
+```yaml
+scrape_configs:
+  - job_name: durable-db
+    authorization:
+      credentials_file: /run/secrets/durable-db-metrics-token
+    static_configs:
+      - targets: [durable-db.internal:7654]
+```
+
+Configure the deployment's actual service discovery and TLS endpoint; the example alone does not install monitoring. Metrics credentials share a distinct bounded admission allowance. Filling the tenant admission table does not prevent the fixed administrator and metrics principals from creating their entries. Global request capacity remains shared, so this is not a guarantee of metrics availability under every overload.
 
 Metrics use fixed operation, outcome, and event names. They contain no database names, object paths, keys, values, tokens, or provider response messages. All series have bounded cardinality. Counters reset when the process restarts; aggregate `rate` or `increase` across replicas rather than subtracting counters across restarts.
 
