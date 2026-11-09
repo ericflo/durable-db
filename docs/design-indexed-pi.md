@@ -1,0 +1,31 @@
+# Indexed Pi adapter: implementation design
+
+Target: pinned `@earendil-works/pi-durable` 1.5.0, with its full storage conformance suite and additional crash/ownership tests. The existing bounded journal remains an explicitly separate reference adapter. Do not depend on private fields of upstream `MemoryStorage`. Follow the documented contract and its published implementation, retaining the upstream MIT notice for adapted portions. The repository stays Apache-2.0.
+
+## Protocol before implementation
+
+`PiSession.tla` models two fresh Session identities, two batches per call, and four database-version advances. Claim/takeover changes the authoritative owner; prepared writes compare both their owner and exact snapshot version. A caller may disappear after preparation or publication. Receipts are delivered only for a durably published valid prefix; batch sequences remain ordered. All 5,055 distinct states (12,415 generated, depth nine) pass. Negative controls omit ownership fencing, deliver a receipt before publication, or persist an invalid suffix. This abstracts record validation, index integrity, document deltas, retries, and physical database publication; it is not a composition/refinement proof.
+
+Each adapter prefix has one small metadata value: format, fresh owner UUID or null, next ID, next sequence, and last commit nonce. Open reads only this metadata, checks that an uninitialized prefix is empty, and claims ownership with a revision-checked transaction. Existing ownership requires explicit takeover. No clock or pod membership is involved. Every read checks current ownership and uses one database revision across all subsequent point reads and scans. A changed revision restarts the whole read, within a fixed budget. A stale owner cannot keep serving its cached state.
+
+Commit stages a detached valid prefix in a bounded overlay against one snapshot, then writes records, indexes, document revisions, and updated metadata in one database commit. The first semantic refusal ends the prefix; a provider failure remains an unknown outcome. Only after durable success does the adapter invoke receipt callbacks and update its local allocator/metadata. Empty valid batches still receive their own sequence; a zero-length valid prefix needs no write. Queue methods within the Session; another process is excluded by the durable owner and version comparison.
+
+Retry the identical database request after an ambiguous result. Before rebuilding after a 409, inspect the current adapter metadata: a matching fresh last-commit nonce proves the original publication even if the database's bounded receipt window rolled over. An unchanged owner/metadata permits rebuilding after a definite unrelated revision conflict. Changed metadata without that proof fails the Session; never issue a new mutation after unresolved uncertainty. Once a provider/ownership failure escapes, refuse further operations until reopen. Close drains admitted work and conditionally releases ownership; a failed Session must not overwrite unknown state merely to release a claim.
+
+## Indexed representation
+
+Use a distinct default prefix, such as `pi-indexed/`. Keys are ASCII, with fixed-width nonnegative numeric components. Preserve indexed string identities (including NUL and lone UTF-16 surrogates) using JSON encoding followed by a cryptographic digest. Records retain the original strings; verify identities when following unique lookup keys. Use one global record key per numeric ID to enforce cross-record-type uniqueness.
+
+- Conversations: primary record, all-conversation index, owner-conversation and owner-task indexes.
+- Entries: primary record including commit sequence, per-conversation ordered index, and a head-marker-only index. Follow bounded fork ancestry, clip each ancestor at its fork point, and reverse segments for ascending scans.
+- Tasks: primary record plus useful all/status/conversation/composite indexes. Residual filters use bounded reads rather than retaining the entire task table.
+- Submissions: analogous ordered indexes plus a conversation/request identity lookup. Replacing a record removes its old lookup only if that lookup still names the record.
+- Documents: primary metadata, live address lookup, address incarnation history ordered by creation sequence, and scope/kind indexes. Rewindable content uses sequence-ordered revision records and a separate base index. Materialization finds the latest base at/before the requested point and applies only its following deltas. Latest-only documents can store their current materialized value and delta count directly, avoiding retained obsolete history. Copies resolve from the same snapshot and reject a source changed anywhere in the batch.
+
+Prepare each batch's global IDs, document actions, address-liveness constraints, copy content, and version transitions before applying it to the overlay. Earlier valid batches are visible to later batches. A refused batch changes nothing. Retire/create at the same address in one batch is checked as a whole, independent of command order. Index replacement and record writes publish atomically.
+
+## Bounds and qualification
+
+Use explicit request/memory/scan/ancestry/document-replay limits. The underlying database permits at most 128 checks+writes, 64 KiB per value, and 1 MiB per JSON request; reserve room for metadata and ownership checks. Plan chunked record values where needed, with every chunk/reference update in the same bounded transaction; do not silently stage an unbounded multi-transaction commit. Reject before sending writes when the full commit cannot fit. Point reads should batch a small bounded number of values so responses stay below 1 MiB; indexes can use larger pages because their values are small.
+
+Qualify all 32 upstream cases against both the reference and indexed adapters, using protected databases and scoped credentials. Add independent tests for restart without journal replay, many unrelated historical records, sparse/forward/reverse scans, fork ancestry, copy and document-version boundaries, historical/latest semantics, index updates, large records, input detachment, unknown responses, receipt eviction, stale-owner writes/reads/close, read restart, callback failure, and resource-budget rejection. Record limitations; passing conformance alone does not close the production gate.
