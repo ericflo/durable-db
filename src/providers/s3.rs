@@ -416,11 +416,12 @@ mod tests {
         assert_eq!(state.lock().unwrap().puts, 1);
         let observed = binding.read().await.unwrap();
         assert_eq!(observed.revision, 1);
-        assert_eq!(observed.info, next);
-        // A separately invoked, genuinely stale comparison is still definite.
+        assert_eq!(observed.info["fixture"], next["fixture"]);
+        assert!(observed.info.contains_key("durable-db-probe"));
+        // Even identical logical metadata must compare the exact revision.
         assert!(
             binding
-                .replace(&before, BTreeMap::new())
+                .replace(&before, observed.info.clone())
                 .await
                 .unwrap()
                 .is_none()

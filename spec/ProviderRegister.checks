@@ -1,0 +1,5 @@
+# kind config log-tag heap expected-counterexample
+safe ProviderRegister.cfg provider-register 1g -
+unsafe ProviderRegisterUnsafeReuse.cfg provider-register-reuse 1g ExactComparison
+# Reachability: unchanged logical metadata at a stale revision is rejected.
+unsafe ProviderRegisterCoverage.cfg provider-register-coverage 1g NotStaleNoOpRejected

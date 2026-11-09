@@ -11,6 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 pub mod b2;
+mod register;
 pub mod s3;
 mod transport;
 
@@ -24,7 +25,7 @@ impl Connection {
     fn new(files: Arc<dyn Storage>, authority: Arc<dyn Authority>, prefix: &str) -> Self {
         Self {
             files,
-            authority,
+            authority: Arc::new(register::Register(authority)),
             prefix: prefix.into(),
         }
     }
@@ -38,8 +39,9 @@ impl Connection {
 
     /// Raw observations may be stale. A successful replacement is durable, but
     /// neither an observation nor a replacement alone establishes serving permission.
-    /// Each replacement needs a fresh mutation identity in its metadata: B2 can
-    /// accept an identical-metadata no-op even with a stale comparison revision.
+    /// Each replacement adds a fresh identity in the reserved `durable-db-probe`
+    /// field, so repeated logical metadata still requires an exact comparison.
+    /// The returned metadata includes that identity. Uncertain writes are not retried.
     pub fn authority(&self) -> Arc<dyn Authority> {
         Arc::new(crate::measured::Register(self.authority.clone()))
     }

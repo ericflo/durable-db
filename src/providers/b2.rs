@@ -396,11 +396,19 @@ mod tests {
         assert_eq!(v["bucketId"], "test-bucket");
         assert!(v.get("bucketType").is_none() && v.get("lifecycleRules").is_none());
         let mut b = s.bucket.lock().unwrap();
+        let proposed = serde_json::from_value(v["bucketInfo"].clone()).unwrap();
+        // Real B2 accepts an identical-info no-op before checking ifRevisionIs.
+        if b.info == proposed {
+            return (
+                StatusCode::OK,
+                Json(json!({"revision":b.revision,"bucketInfo":b.info})),
+            );
+        }
         if v["ifRevisionIs"] != b.revision {
             return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
         }
         b.revision += 1;
-        b.info = serde_json::from_value(v["bucketInfo"].clone()).unwrap();
+        b.info = proposed;
         if s.lose_update_ack.swap(false, Ordering::SeqCst) {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -425,11 +433,10 @@ mod tests {
             .push(v["fileId"].as_str().unwrap().to_owned());
         Json(v)
     }
-    #[tokio::test]
-    async fn native_http_barrier_rejects_stale_observation_and_deletes_exact_versions() {
+    async fn fixture() -> (Arc<Native>, Arc<Mock>, tokio::task::JoinHandle<()>) {
         let state = Arc::new(Mock {
-            stale: AtomicBool::new(true),
-            listing_failures: AtomicUsize::new(2),
+            stale: AtomicBool::new(false),
+            listing_failures: AtomicUsize::new(0),
             listing_calls: AtomicUsize::new(0),
             update_calls: AtomicUsize::new(0),
             lose_update_ack: AtomicBool::new(false),
@@ -469,6 +476,133 @@ mod tests {
                 },
             }),
         };
+        (Arc::new(native), state, server)
+    }
+
+    #[tokio::test]
+    async fn publication_initialization_accepts_probes_but_rejects_unknown_protocols() {
+        for foreign_protocol in [false, true] {
+            let (native, state, server) = fixture().await;
+            let files = Arc::new(
+                Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap(),
+            );
+            let connection = super::super::Connection::new(files, native, "test");
+            let register = connection.authority();
+            let read = register.read_fresh().await.unwrap();
+            assert!(read.info.contains_key("durable-db-read-fence"));
+            if foreign_protocol {
+                let mut info = read.info.clone();
+                info.insert("durable-db-other-engine".into(), "initialized".into());
+                register.replace(&read, info).await.unwrap().unwrap();
+            }
+            let result = connection.into_published(None).await;
+            if foreign_protocol {
+                assert!(result.is_err());
+                assert!(
+                    !state
+                        .bucket
+                        .lock()
+                        .unwrap()
+                        .info
+                        .contains_key("durable-db-format")
+                );
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(state.bucket.lock().unwrap().info["durable-db-format"], "3");
+            }
+            server.abort();
+            server.await.unwrap_err();
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_requires_fresh_comparison_for_identical_logical_metadata() {
+        let (native, state, server) = fixture().await;
+        let stale = Bucket {
+            revision: 0,
+            version: None,
+            info: BTreeMap::new(),
+        };
+        let initial = native.read().await.unwrap();
+        // Pin the provider quirk: even the revision-advance response check alone
+        // cannot distinguish this stale, identical-info success from a mutation.
+        let noop = native
+            .replace(&stale, initial.info.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(noop.revision, initial.revision);
+
+        let files =
+            Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
+        let connection = super::super::Connection::new(files, native, "test");
+        let register = connection.authority();
+        drop(connection);
+        assert!(
+            register
+                .replace(&stale, initial.info.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let first = register
+            .replace(&initial, initial.info.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = register
+            .replace(&first, first.info.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.info["head"], initial.info["head"]);
+        assert_eq!(second.info["head"], initial.info["head"]);
+        assert_ne!(
+            first.info["durable-db-probe"],
+            second.info["durable-db-probe"]
+        );
+        assert!(second.revision > first.revision);
+        // This payload is byte-for-byte equal to the live metadata before the
+        // common layer stamps it. Replaying it must not validate an old revision.
+        assert!(
+            register
+                .replace(&initial, second.info.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let calls = state.update_calls.load(Ordering::SeqCst);
+        state.lose_update_ack.store(true, Ordering::SeqCst);
+        assert!(
+            register
+                .replace(&second, second.info.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(state.update_calls.load(Ordering::SeqCst), calls + 1);
+        let observed = register.read().await.unwrap();
+        assert!(observed.revision > second.revision);
+        assert_ne!(
+            observed.info["durable-db-probe"],
+            second.info["durable-db-probe"]
+        );
+        assert!(
+            register
+                .replace(&second, observed.info)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.abort();
+        server.await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn native_http_barrier_rejects_stale_observation_and_deletes_exact_versions() {
+        let (native, state, server) = fixture().await;
+        state.stale.store(true, Ordering::SeqCst);
+        state.listing_failures.store(2, Ordering::SeqCst);
         let read = native.read_fresh().await.unwrap();
         assert_eq!(read.revision, 2);
         assert_eq!(state.listing_calls.load(Ordering::SeqCst), 4);

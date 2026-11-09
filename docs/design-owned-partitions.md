@@ -88,6 +88,8 @@ The model assumes fresh per-key reads: a negative result must not conceal an upl
 
 The provider contract is a separate obligation from an experiment: [AWS documents strong object read-after-write consistency](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html#ConsistencyModel), while [Backblaze describes confirmed file writes as immediately visible](https://www.backblaze.com/blog/design-thinking-b2-apis-the-hidden-costs-of-s3-compatibility/). Neither statement should be generalized to fresh bucket-metadata observations. The candidate's exact negative-read and error-classification assumptions must stay explicit.
 
+The provider control interface now stamps a fresh mutation identity on every conditional replacement, using the same code for B2 and S3. This handles B2's identical-metadata no-op behavior without requiring the future controller to remember a wire-level precaution. It does not turn raw observations into fresh permission or anchor grant expiry; those remain controller obligations. See [the contract and qualification](verification.md#common-provider-register).
+
 ## Serving authority remains the central decision
 
 Write fencing alone does not prevent a paused old owner from answering stale reads. A peer quorum alone also does not explain how an isolated former single-node deployment is excluded after complete replacement.

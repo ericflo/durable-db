@@ -138,7 +138,7 @@ impl Published {
             if bucket
                 .info
                 .keys()
-                .any(|k| k.starts_with("durable-db-") && k.as_str() != "durable-db-probe")
+                .any(|k| k.starts_with("durable-db-") && !control::is_probe(k))
             {
                 bail!("unrecognized durable-db bucket metadata");
             }

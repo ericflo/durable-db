@@ -38,6 +38,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh ReadBarrier && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-provider-register
+COPY spec/ProviderRegister.tla spec/ProviderRegister.checks spec/ProviderRegister*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh ProviderRegister && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-directory
 COPY spec/Directory.tla spec/Directory.checks spec/Directory.cfg spec/UnsafeDirectory.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -198,6 +204,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=model-provider-register /checks/ /checks/
 COPY --from=proof-root-journal /checks/ /checks/
 COPY --from=model-candidate-rootjournal /checks/ /checks/
 COPY --from=proof-root-control /checks/ /checks/

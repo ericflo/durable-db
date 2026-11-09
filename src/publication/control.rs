@@ -7,6 +7,10 @@ const FORMAT: &str = "durable-db-format";
 const CONTROL: &str = "durable-db-control";
 const LEGACY_PROBES: [&str; 2] = ["durable-db-probe", "durable-db-read-fence"];
 
+pub(super) fn is_probe(key: &str) -> bool {
+    LEGACY_PROBES.contains(&key)
+}
+
 pub(crate) fn encode(info: &BTreeMap<String, String>) -> anyhow::Result<BTreeMap<String, String>> {
     if super::budgeted_format(info).is_none() {
         return Ok(info.clone());
@@ -59,7 +63,7 @@ pub(crate) fn decode(
         ensure!(
             !key.starts_with("durable-db-")
                 || [HEAD, FORMAT].contains(&key.as_str())
-                || LEGACY_PROBES.contains(&key.as_str()),
+                || is_probe(&key),
             "unrecognized outer control field"
         );
         control.insert(key, value);
