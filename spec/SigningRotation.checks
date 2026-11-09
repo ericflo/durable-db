@@ -1,0 +1,4 @@
+# kind config log-tag heap expected-counterexample
+safe SigningRotation.cfg signing-rotation 1g -
+unsafe UnsafeSigningPromotion.cfg signing-promotion 1g RollingInteroperability
+unsafe UnsafeSigningRetirement.cfg signing-retirement 1g RollingInteroperability
