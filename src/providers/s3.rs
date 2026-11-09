@@ -47,6 +47,14 @@ impl S3 {
         prefix: &str,
         limits: Option<crate::upload_budget::UploadLimits>,
     ) -> anyhow::Result<Published> {
+        Self::connect_storage(bucket, prefix)
+            .await?
+            .into_published(limits)
+            .await
+    }
+
+    /// Bind S3's object and metadata transports without initializing a serving engine.
+    pub async fn connect_storage(bucket: &str, prefix: &str) -> anyhow::Result<super::Connection> {
         let region = std::env::var("AWS_REGION")
             .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
             .unwrap_or_else(|_| "us-east-1".into());
@@ -54,7 +62,7 @@ impl S3 {
             .with_bucket_name(bucket)
             .with_region(&region);
         let this = Self::bind(builder, prefix, region)?;
-        Published::open_with_budget(this.files.clone(), this, prefix, limits).await
+        Ok(super::Connection::new(this.files.clone(), this, prefix))
     }
     fn bind(builder: AmazonS3Builder, prefix: &str, region: String) -> anyhow::Result<Arc<Self>> {
         // A conditional PUT that committed but returned 503 must remain
@@ -257,9 +265,37 @@ mod tests {
 
     struct Wire {
         puts: usize,
+        object_puts: usize,
+        object: Bytes,
         bucket: Bucket,
         etag: String,
         acknowledgement: u16,
+    }
+
+    async fn read_object(State(state): State<Arc<Mutex<Wire>>>) -> Response {
+        let state = state.lock().unwrap();
+        Response::builder()
+            .header("etag", "\"object\"")
+            .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
+            .body(Body::from(state.object.clone()))
+            .unwrap()
+    }
+
+    async fn write_object(
+        State(state): State<Arc<Mutex<Wire>>>,
+        headers: HeaderMap,
+        bytes: Bytes,
+    ) -> Response {
+        assert!(headers.get("if-match").is_none());
+        assert!(headers.get("if-none-match").is_none());
+        let mut state = state.lock().unwrap();
+        state.object_puts += 1;
+        state.object = bytes;
+        Response::builder()
+            .status(state.acknowledgement)
+            .header("location", "/test/prefix/journal/frame")
+            .body(Body::from("<Error><Code>InternalError</Code></Error>"))
+            .unwrap()
     }
 
     async fn read(State(state): State<Arc<Mutex<Wire>>>) -> Response {
@@ -315,6 +351,8 @@ mod tests {
         };
         let state = Arc::new(Mutex::new(Wire {
             puts: 0,
+            object_puts: 0,
+            object: Bytes::new(),
             bucket: initial,
             etag: "\"old\"".into(),
             acknowledgement,
@@ -323,6 +361,10 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new()
             .route("/test/prefix/authority.json", get(read).put(write))
+            .route(
+                "/test/prefix/journal/frame",
+                get(read_object).put(write_object),
+            )
             .with_state(state.clone());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -339,6 +381,35 @@ mod tests {
             "us-east-1".into(),
         )
         .unwrap();
+        let connection = super::super::Connection::new(binding.files.clone(), binding, "prefix");
+        assert_eq!(
+            state.lock().unwrap().puts,
+            0,
+            "binding must not initialize metadata"
+        );
+        let binding = connection.authority();
+        let objects = connection.objects();
+        drop(connection);
+        let payload = Bytes::from_static(b"immutable frame");
+        assert!(objects.put("journal/frame", payload.clone()).await.is_err());
+        assert_eq!(
+            objects
+                .get("journal/frame", 64)
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+            payload
+        );
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.object_puts, 1, "uncertain data PUT must not retry");
+            assert_eq!(state.puts, 0, "data must not mutate the metadata register");
+            assert!(
+                state.bucket.info.is_empty(),
+                "no publication format was initialized"
+            );
+        }
         let before = binding.read().await.unwrap();
         let next = BTreeMap::from([("fixture".into(), "committed".into())]);
         assert!(binding.replace(&before, next.clone()).await.is_err());

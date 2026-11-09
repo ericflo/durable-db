@@ -4,8 +4,7 @@ use bytes::Bytes;
 use durable_db::{
     journal::{Prefix, QueueLimits, Reader, Resolution, Writer},
     metrics::REGISTRY,
-    providers::{b2::Native, s3::S3},
-    publication::Published,
+    providers::{Connection, b2::Native, s3::S3},
     storage::{Object, Storage, Version},
 };
 use futures::{StreamExt, stream};
@@ -19,7 +18,7 @@ use std::{
 };
 
 struct LostReplies {
-    store: Arc<Published>,
+    store: Arc<dyn Storage>,
     attempts: AtomicUsize,
 }
 
@@ -52,13 +51,13 @@ impl Storage for LostReplies {
     }
 }
 
-async fn connect(provider: &str, bucket: &str, namespace: &str) -> Arc<Published> {
+async fn connect(provider: &str, bucket: &str, namespace: &str) -> Connection {
     let result = match provider {
-        "b2" => Native::connect(bucket, namespace).await,
-        "s3" => S3::connect(bucket, namespace).await,
+        "b2" => Native::connect_storage(bucket, namespace).await,
+        "s3" => S3::connect_storage(bucket, namespace).await,
         _ => panic!("provider must be b2 or s3"),
     };
-    Arc::new(result.unwrap_or_else(|_| panic!("provider initialization failed")))
+    result.unwrap_or_else(|_| panic!("provider connection failed"))
 }
 
 fn save(path: &Path, report: &Value) {
@@ -101,16 +100,16 @@ async fn journal_reconnect_unknown_responses_and_late_uploads() {
         "durable_batches": 0, "resolved_unknown_responses": 0,
         "limitations": [
             "Journal component qualification, not transaction throughput or a serving prototype.",
-            "Existing conditional publication stores the selected prefix as a fixture control record.",
+            "Raw transports carry the journal; existing publication initializes only to store the fixture selection.",
             "No distributed ownership, permission expiry, concurrent handoff or tenant admission is implemented here.",
             "Initialization, conditional selection, verification and bucket cleanup are additional operations.",
             "MinIO is an S3-compatible fixture, not AWS qualification."
         ]
     });
     save(output, &report);
-    let store = connect(&provider, &bucket, &namespace).await;
+    let connection = connect(&provider, &bucket, &namespace).await;
     let faults = Arc::new(LostReplies {
-        store: store.clone(),
+        store: connection.objects(),
         attempts: AtomicUsize::new(0),
     });
     let mut writer =
@@ -171,6 +170,12 @@ async fn journal_reconnect_unknown_responses_and_late_uploads() {
         .is_some()
     {}
     assert_eq!(discovery.finished_prefix(), Some(expected));
+    // Explicit fixture control, after the raw journal has been written and recovered.
+    // The publication engine is not a dependency of that data path.
+    let store = connection
+        .into_published(None)
+        .await
+        .unwrap_or_else(|_| panic!("fixture publication initialization failed"));
     assert!(
         store
             .cas("heads/journal-selection.json", None, expected.encode())
@@ -184,7 +189,12 @@ async fn journal_reconnect_unknown_responses_and_late_uploads() {
     drop(faults);
     drop(store);
 
-    let reopened = connect(&provider, &bucket, &namespace).await;
+    let connection = connect(&provider, &bucket, &namespace).await;
+    let objects = connection.objects();
+    let reopened = connection
+        .into_published(None)
+        .await
+        .unwrap_or_else(|_| panic!("fixture publication reconnect failed"));
     let selected = reopened
         .get("heads/journal-selection.json", 112)
         .await
@@ -192,7 +202,8 @@ async fn journal_reconnect_unknown_responses_and_late_uploads() {
         .expect("selected prefix exists");
     let selected = Prefix::decode(&selected.bytes).unwrap();
     assert_eq!(selected, expected);
-    let mut replay = Reader::replay(reopened, selected);
+    drop(reopened);
+    let mut replay = Reader::replay(objects, selected);
     let mut verified = 0;
     while let Some(batch) = replay
         .read_next()

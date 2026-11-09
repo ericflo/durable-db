@@ -67,6 +67,8 @@ Discovery reads one frame at a time and stops at the first fresh missing positio
 
 The journal reports durability, not transaction success or serving permission. It does not implement ownership, seal publication, transaction evaluation, admission or collection. Those remain controller/engine obligations. The earlier handoff models preceded this component. `Journal.tla` now models durability knowledge and ordered consumption as well as recovery; its unbounded abstract proof assumes an external end to old acknowledgement permission and atomic prefix selection. `OwnedWal` explores one realization of that boundary. Executing the journal does not establish the complete serving protocol or adopt a clock dependency.
 
+The B2 and S3 bindings now return the same `providers::Connection` without initializing the publication engine. It exposes measured object operations and the conditional metadata register separately. The journal can write and recover through these transports before any database format is initialized; the existing engine is an explicit consumer through `into_published`. Raw object CAS is not part of the portable B2 contract, and a metadata observation is not serving permission. A repeated provider check recovered 512 records on each backend, resolved three lost replies and excluded a late suffix; its batch paths made zero authority calls. The S3 run used versioned MinIO, not AWS. The fixture still explicitly uses the existing publication engine to persist its prefix selection.
+
 ## Handoff fixes an exact old prefix
 
 A successor must:

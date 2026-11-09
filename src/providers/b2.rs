@@ -53,6 +53,17 @@ impl Native {
         prefix: &str,
         limits: Option<crate::upload_budget::UploadLimits>,
     ) -> anyhow::Result<Published> {
+        Self::connect_storage(bucket_name, prefix)
+            .await?
+            .into_published(limits)
+            .await
+    }
+
+    /// Bind B2's object and metadata transports without initializing a serving engine.
+    pub async fn connect_storage(
+        bucket_name: &str,
+        prefix: &str,
+    ) -> anyhow::Result<super::Connection> {
         let key_id =
             std::env::var("B2_APPLICATION_KEY_ID").context("B2_APPLICATION_KEY_ID is required")?;
         let application_key =
@@ -139,7 +150,7 @@ impl Native {
             .with_uploads(uploads),
         );
         let native = Arc::new(native);
-        Published::open_with_budget(files, native, prefix, limits).await
+        Ok(super::Connection::new(files, native, prefix))
     }
     async fn update(
         &self,

@@ -4,7 +4,6 @@ use bytes::Bytes;
 use durable_db::{
     metrics::REGISTRY,
     providers::{b2::Native, s3::S3},
-    publication::Published,
     storage::Storage,
 };
 use futures::{StreamExt, stream};
@@ -34,18 +33,20 @@ fn control_counts() -> Vec<u64> {
         .collect()
 }
 
-async fn connect(provider: &str, bucket: &str, prefix: &str) -> Arc<Published> {
+async fn connect(provider: &str, bucket: &str, prefix: &str) -> Arc<dyn Storage> {
     let result = match provider {
-        "b2" => Native::connect(bucket, prefix).await,
-        "s3" => S3::connect(bucket, prefix).await,
+        "b2" => Native::connect_storage(bucket, prefix).await,
+        "s3" => S3::connect_storage(bucket, prefix).await,
         _ => panic!("provider must be b2 or s3"),
     };
     // Never put a provider error body or credential-bearing request in the report/log.
-    Arc::new(result.unwrap_or_else(|_| panic!("provider initialization failed")))
+    result
+        .unwrap_or_else(|_| panic!("provider connection failed"))
+        .objects()
 }
 
 async fn phase(
-    storage: Arc<Published>,
+    storage: Arc<dyn Storage>,
     items: &[(String, Bytes)],
     concurrency: usize,
     write: bool,
