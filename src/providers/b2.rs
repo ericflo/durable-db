@@ -1,4 +1,5 @@
 //! B2 native metadata and physical version deletion; S3 API carries immutable bytes.
+use crate::metrics::{self, Operation, Outcome};
 use crate::publication::{Authority, Bucket, Published};
 use crate::storage::Remote;
 use anyhow::{Context, bail};
@@ -152,17 +153,33 @@ impl Native {
     async fn call(&self, operation: &str, body: &Value) -> anyhow::Result<(StatusCode, Value)> {
         for attempt in 0..2 {
             let auth = self.auth.read().await.clone();
-            let response = self
-                .client
-                .post(format!(
-                    "{}/b2api/v4/{operation}",
-                    auth.api_info.storage_api.api_url
-                ))
-                .header("Authorization", &auth.authorization_token)
-                .json(body)
-                .send()
-                .await?;
-            let result = json_response(response).await?;
+            let metric = match operation {
+                "b2_list_buckets" => Operation::NativeListBuckets,
+                "b2_update_bucket" => Operation::NativeUpdateBucket,
+                "b2_list_file_versions" => Operation::NativeListVersions,
+                "b2_delete_file_version" => Operation::NativeDeleteVersion,
+                _ => Operation::NativeOther,
+            };
+            let timer = metrics::REGISTRY.start(metric);
+            let response = async {
+                let response = self
+                    .client
+                    .post(format!(
+                        "{}/b2api/v4/{operation}",
+                        auth.api_info.storage_api.api_url
+                    ))
+                    .header("Authorization", &auth.authorization_token)
+                    .json(body)
+                    .send()
+                    .await?;
+                json_response(response).await
+            }
+            .await;
+            timer.finish(match &response {
+                Ok((status, _)) => metrics::http_outcome(status.as_u16()),
+                Err(_) => Outcome::Error,
+            });
+            let result = response?;
             if attempt == 0
                 && result.0 == StatusCode::UNAUTHORIZED
                 && matches!(
@@ -182,14 +199,24 @@ impl Native {
     }
 }
 async fn authorize(client: &Client, key_id: &str, key: &str) -> anyhow::Result<Authorization> {
-    let response = client
-        .get("https://api.backblazeb2.com/b2api/v4/b2_authorize_account")
-        .basic_auth(key_id, Some(key))
-        .send()
-        .await?;
-    let (status, body) = json_response(response).await?;
-    ensure_success(status, &body)?;
-    Ok(serde_json::from_value(body)?)
+    let timer = metrics::REGISTRY.start(Operation::NativeAuthorize);
+    let result = async {
+        let response = client
+            .get("https://api.backblazeb2.com/b2api/v4/b2_authorize_account")
+            .basic_auth(key_id, Some(key))
+            .send()
+            .await?;
+        let (status, body) = json_response(response).await?;
+        ensure_success(status, &body)?;
+        Ok(serde_json::from_value(body)?)
+    }
+    .await;
+    timer.finish(if result.is_ok() {
+        Outcome::Ok
+    } else {
+        Outcome::Error
+    });
+    result
 }
 async fn json_response(mut response: reqwest::Response) -> anyhow::Result<(StatusCode, Value)> {
     let status = response.status();

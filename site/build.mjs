@@ -1,7 +1,7 @@
 import {readFile,writeFile,mkdir,copyFile,rm} from 'node:fs/promises';
 import MarkdownIt from 'markdown-it';
 const out=new URL('../.site/',import.meta.url);
-const docs=['architecture','b2','api','deployment','security','verification','verification-results','clients','development','production-readiness','roadmap'];
+const docs=['architecture','b2','api','deployment','observability','security','verification','verification-results','clients','development','production-readiness','roadmap'];
 await rm(out,{recursive:true,force:true});
 await mkdir(out,{recursive:true});
 const md=new MarkdownIt({html:false,linkify:false,typographer:true});
@@ -29,6 +29,10 @@ for(const file of ['b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json
  await copyFile(new URL(`../docs/evidence/${file}`,import.meta.url),new URL(`evidence/${file}`,out));
 }
 await copyFile(new URL('../scripts/install.sh',import.meta.url),new URL('install.sh',out));
+await mkdir(new URL('prometheus/',out),{recursive:true});
+for(const file of ['alerts.yml','alerts.test.yml']) {
+ await copyFile(new URL(`../deploy/prometheus/${file}`,import.meta.url),new URL(`prometheus/${file}`,out));
+}
 await writeFile(new URL('.nojekyll',out),'');
 // Explicit whitelist: integration plans and private source never enter the public site.
 console.log(`Built ${docs.length+1} public pages into .site/`);

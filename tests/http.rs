@@ -104,6 +104,51 @@ async fn http_enforces_auth_scopes_body_limits_and_consistent_results() {
         .status(),
         StatusCode::UNAUTHORIZED
     );
+    let metrics = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header("authorization", format!("Bearer {admin}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(metrics.status(), StatusCode::OK);
+    let metrics = String::from_utf8(
+        metrics
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(metrics.contains(
+        "durable_db_operation_duration_seconds_bucket{operation=\"http_read\",le=\"+Inf\"}"
+    ));
+    let unauthorized = metrics
+        .lines()
+        .find(|line| {
+            line.starts_with(
+                "durable_db_operations_total{operation=\"http_read\",outcome=\"unauthorized\"}",
+            )
+        })
+        .unwrap();
+    assert!(
+        unauthorized
+            .rsplit_once(' ')
+            .unwrap()
+            .1
+            .parse::<u64>()
+            .unwrap()
+            >= 2
+    );
+    for private in ["alpha", "beta", &admin, &read, "aGk="] {
+        assert!(!metrics.contains(private));
+    }
 }
 
 #[tokio::test]

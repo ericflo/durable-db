@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1.7
 FROM docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4 AS node
+FROM quay.io/prometheus/prometheus:v3.16.0-distroless@sha256:9764044e09eb2c9e1abdb12d0f0188d4efb7384b0262d3c080f0fc59045c89ba AS alert-check
+WORKDIR /rules
+COPY deploy/prometheus .
+RUN ["/bin/promtool", "test", "rules", "alerts.test.yml"]
 FROM docker.io/library/rust:1.90-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS tools
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools cmake openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl && rustup component add clippy rustfmt
@@ -36,8 +40,10 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     && /out/durable-db --version && kache stats
 FROM build AS assembled
 COPY --from=model /checks /out/checks
+COPY --from=alert-check /rules /out/checks/prometheus
 COPY site site
 COPY docs docs
+COPY deploy/prometheus deploy/prometheus
 COPY scripts/install.sh scripts/install.sh
 COPY LICENSE README.md ./
 RUN npm --prefix site ci --no-audit --no-fund && npm --prefix site run build \

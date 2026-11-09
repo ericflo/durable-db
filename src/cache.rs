@@ -131,6 +131,18 @@ impl Cache {
         })
     }
     pub async fn get(&self, key: &str, digest: &str) -> Option<Bytes> {
+        let result = self.load(key, digest).await;
+        crate::metrics::REGISTRY.event(
+            if result.is_some() {
+                crate::metrics::Event::CacheHit
+            } else {
+                crate::metrics::Event::CacheMiss
+            },
+            1,
+        );
+        result
+    }
+    async fn load(&self, key: &str, digest: &str) -> Option<Bytes> {
         if let Some(value) = self.memory.lock().await.get(key).cloned()
             && value.digest == digest
         {

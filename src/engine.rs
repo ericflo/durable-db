@@ -571,6 +571,7 @@ impl Engine {
             .storage
             .list(&prefix, before.gc_after.as_deref(), 256)
             .await?;
+        crate::metrics::REGISTRY.event(crate::metrics::Event::DataCandidates, candidates.len());
         let next_cursor = if candidates.len() == 256 {
             candidates.last().cloned()
         } else {
@@ -612,6 +613,7 @@ impl Engine {
         for key in candidates {
             if !live.contains(&key) {
                 self.storage.delete(&key).await?;
+                crate::metrics::REGISTRY.event(crate::metrics::Event::DataDeleteAck, 1);
                 result.deleted += 1;
             }
         }

@@ -3,6 +3,8 @@ pub mod auth;
 pub mod cache;
 mod directory;
 pub mod engine;
+mod measured;
+pub mod metrics;
 mod observation;
 pub mod providers;
 pub mod publication;

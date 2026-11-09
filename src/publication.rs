@@ -2,6 +2,7 @@
 use crate::{
     cache::Cache,
     directory::{Directory, MissingNode, Pointer, Root, witness},
+    metrics::{self, Event, Operation, Outcome},
     observation::Observations,
     storage::{Object, Storage, Version},
 };
@@ -31,18 +32,21 @@ pub trait Authority: Send + Sync {
     async fn read(&self) -> anyhow::Result<Bucket>;
     /// Read barrier shared by every provider; raw observations may be stale.
     async fn read_fresh(&self) -> anyhow::Result<Bucket> {
-        for attempt in 0..8 {
-            let old = self.read().await?;
-            let mut info = old.info.clone();
-            info.insert("durable-db-read-fence".into(), Uuid::new_v4().to_string());
-            budget(&info)?;
-            if let Some(current) = self.replace(&old, info).await? {
-                return Ok(current);
+        metrics::measure(Operation::ReadBarrier, async {
+            for attempt in 0..8 {
+                let old = self.read().await?;
+                let mut info = old.info.clone();
+                info.insert("durable-db-read-fence".into(), Uuid::new_v4().to_string());
+                budget(&info)?;
+                if let Some(current) = self.replace(&old, info).await? {
+                    return Ok(current);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
-        }
-        tracing::warn!("publication read barrier contention budget exceeded");
-        bail!("publication read barrier contention budget exceeded")
+            tracing::warn!("publication read barrier contention budget exceeded");
+            bail!("publication read barrier contention budget exceeded")
+        })
+        .await
     }
     /// None only for a definite comparison mismatch. Errors may have committed.
     async fn replace(
@@ -70,6 +74,8 @@ impl Published {
         authority: Arc<dyn Authority>,
         prefix: &str,
     ) -> anyhow::Result<Self> {
+        let files: Arc<dyn Storage> = Arc::new(crate::measured::Files(files));
+        let authority: Arc<dyn Authority> = Arc::new(crate::measured::Register(authority));
         let before = authority.read().await?;
         let mut probe = before.info.clone();
         probe.insert("durable-db-probe".into(), Uuid::new_v4().to_string());
@@ -127,6 +133,96 @@ impl Published {
         self.cache = Some(cache);
         self
     }
+    async fn publish(
+        &self,
+        key: &str,
+        old: Option<&Version>,
+        bytes: Bytes,
+    ) -> anyhow::Result<bool> {
+        let slot = slot(key)?;
+        let bucket = self.authority.read().await?;
+        let base_root = root(&bucket.info)?;
+        let current = match self.directory.get(base_root.as_ref(), &slot).await {
+            Err(e) if e.is::<MissingNode>() => return Ok(false),
+            other => other?,
+        };
+        let identity = current.as_ref().map(serde_json::to_string).transpose()?;
+        let matches = match old {
+            None => current.is_none(),
+            Some(v) => identity.as_ref() == v.0.e_tag.as_ref(),
+        };
+        if !matches {
+            return Ok(false);
+        }
+        let pointer = Pointer {
+            key: format!("manifests/{slot}.{}", Uuid::new_v4()),
+            sha256: hex::encode(Sha256::digest(&bytes)),
+        };
+        let mut info = bucket.info.clone();
+        budget(&info)?; // Reserve the bounded root and all maintenance fields before upload.
+        self.files.put(&pointer.key, bytes.clone()).await?;
+        if let Some(cache) = &self.cache {
+            cache.insert(&pointer.key, bytes).await;
+        }
+        let mut updated = match self
+            .directory
+            .insert(base_root.as_ref(), &slot, pointer.clone())
+            .await
+        {
+            Err(e) if e.is::<MissingNode>() => return Ok(false),
+            other => other?,
+        };
+        info.insert(HEAD.into(), serde_json::to_string(&updated)?);
+        budget(&info)?;
+        let mut observed = bucket.clone();
+        for attempt in 0..8 {
+            // An error has an unknown outcome and must go back to receipt recovery.
+            if self.authority.replace(&observed, info).await?.is_some() {
+                return Ok(true);
+            }
+            if attempt == 7 {
+                return Ok(false);
+            }
+            let latest = self.authority.read().await?;
+            // A collector may have deleted our unpublished manifest or path.
+            // Never reuse an upload across a collection fence, even when our
+            // database pointer did not change. Fence identities cannot be reused.
+            if latest.info.get("durable-db-fence") != bucket.info.get("durable-db-fence") {
+                return Ok(false);
+            }
+            if latest.info.get(HEAD) != observed.info.get(HEAD) {
+                let latest_root = root(&latest.info)?;
+                let target = match self.directory.get(latest_root.as_ref(), &slot).await {
+                    Err(e) if e.is::<MissingNode>() => return Ok(false),
+                    other => other?,
+                };
+                // Engine-level collection and competing writes to this database
+                // also change its immutable pointer. They must cause a restart.
+                if target != current {
+                    return Ok(false);
+                }
+                metrics::REGISTRY.event(Event::PublicationRebase, 1);
+                // Only unrelated entries changed. Rebuild from the NEW root;
+                // retaining the old path would erase their acknowledged writes.
+                // All path objects are fresh. A later fence/root race is caught
+                // by the next CAS; an ambiguous response still returns an error.
+                updated = match self
+                    .directory
+                    .insert(latest_root.as_ref(), &slot, pointer.clone())
+                    .await
+                {
+                    Err(e) if e.is::<MissingNode>() => return Ok(false),
+                    other => other?,
+                };
+            }
+            info = latest.info.clone();
+            info.insert(HEAD.into(), serde_json::to_string(&updated)?);
+            budget(&info)?;
+            observed = latest;
+            tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
+        }
+        Ok(false)
+    }
     /// List before fencing. Test membership using bounded paths, never a full scan.
     /// Returns manifests removed; obsolete directory pages are collected as well.
     pub async fn collect_manifests(&self) -> anyhow::Result<usize> {
@@ -159,16 +255,20 @@ impl Published {
         }
         let mut deleted = 0;
         for key in manifests {
+            metrics::REGISTRY.event(Event::ManifestCandidates, 1);
             let db = witness(&key, "manifests/")?;
             let pointer = self.directory.get(protected.as_ref(), db).await?;
             if pointer.is_none_or(|p| p.key != key) {
                 self.authority.delete_versions(&key).await?;
+                metrics::REGISTRY.event(Event::ManifestDeleteAck, 1);
                 deleted += 1;
             }
         }
         for key in indexes {
+            metrics::REGISTRY.event(Event::IndexCandidates, 1);
             if !self.directory.reachable(protected.as_ref(), &key).await? {
                 self.authority.delete_versions(&key).await?;
+                metrics::REGISTRY.event(Event::IndexDeleteAck, 1);
             }
         }
         Ok(deleted)
@@ -274,88 +374,14 @@ impl Storage for Published {
         bail!("published manifest changed repeatedly or is unavailable")
     }
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool> {
-        let slot = slot(key)?;
-        let bucket = self.authority.read().await?;
-        let base_root = root(&bucket.info)?;
-        let current = match self.directory.get(base_root.as_ref(), &slot).await {
-            Err(e) if e.is::<MissingNode>() => return Ok(false),
-            other => other?,
-        };
-        let identity = current.as_ref().map(serde_json::to_string).transpose()?;
-        let matches = match old {
-            None => current.is_none(),
-            Some(v) => identity.as_ref() == v.0.e_tag.as_ref(),
-        };
-        if !matches {
-            return Ok(false);
-        }
-        let pointer = Pointer {
-            key: format!("manifests/{slot}.{}", Uuid::new_v4()),
-            sha256: hex::encode(Sha256::digest(&bytes)),
-        };
-        let mut info = bucket.info.clone();
-        budget(&info)?; // Reserve the bounded root and all maintenance fields before upload.
-        self.files.put(&pointer.key, bytes.clone()).await?;
-        if let Some(cache) = &self.cache {
-            cache.insert(&pointer.key, bytes).await;
-        }
-        let mut updated = match self
-            .directory
-            .insert(base_root.as_ref(), &slot, pointer.clone())
-            .await
-        {
-            Err(e) if e.is::<MissingNode>() => return Ok(false),
-            other => other?,
-        };
-        info.insert(HEAD.into(), serde_json::to_string(&updated)?);
-        budget(&info)?;
-        let mut observed = bucket.clone();
-        for attempt in 0..8 {
-            // An error has an unknown outcome and must go back to receipt recovery.
-            if self.authority.replace(&observed, info).await?.is_some() {
-                return Ok(true);
-            }
-            if attempt == 7 {
-                return Ok(false);
-            }
-            let latest = self.authority.read().await?;
-            // A collector may have deleted our unpublished manifest or path.
-            // Never reuse an upload across a collection fence, even when our
-            // database pointer did not change. Fence identities cannot be reused.
-            if latest.info.get("durable-db-fence") != bucket.info.get("durable-db-fence") {
-                return Ok(false);
-            }
-            if latest.info.get(HEAD) != observed.info.get(HEAD) {
-                let latest_root = root(&latest.info)?;
-                let target = match self.directory.get(latest_root.as_ref(), &slot).await {
-                    Err(e) if e.is::<MissingNode>() => return Ok(false),
-                    other => other?,
-                };
-                // Engine-level collection and competing writes to this database
-                // also change its immutable pointer. They must cause a restart.
-                if target != current {
-                    return Ok(false);
-                }
-                // Only unrelated entries changed. Rebuild from the NEW root;
-                // retaining the old path would erase their acknowledged writes.
-                // All path objects are fresh. A later fence/root race is caught
-                // by the next CAS; an ambiguous response still returns an error.
-                updated = match self
-                    .directory
-                    .insert(latest_root.as_ref(), &slot, pointer.clone())
-                    .await
-                {
-                    Err(e) if e.is::<MissingNode>() => return Ok(false),
-                    other => other?,
-                };
-            }
-            info = latest.info.clone();
-            info.insert(HEAD.into(), serde_json::to_string(&updated)?);
-            budget(&info)?;
-            observed = latest;
-            tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
-        }
-        Ok(false)
+        let timer = metrics::REGISTRY.start(Operation::Publication);
+        let result = self.publish(key, old, bytes).await;
+        timer.finish(match &result {
+            Ok(true) => Outcome::Ok,
+            Ok(false) => Outcome::Conflict,
+            Err(_) => Outcome::Error,
+        });
+        result
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.files.put(key, bytes).await

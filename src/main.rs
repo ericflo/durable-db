@@ -212,7 +212,13 @@ async fn maintain(app: Arc<App>, seconds: u64) {
         let Ok(_permit) = app.permits.clone().try_acquire_owned() else {
             continue;
         };
-        if app.engine.maintain_storage().await.is_err() {
+        if durable_db::metrics::measure(
+            durable_db::metrics::Operation::StorageMaintenance,
+            app.engine.maintain_storage(),
+        )
+        .await
+        .is_err()
+        {
             tracing::warn!("provider maintenance deferred; will retry on a later sweep");
         }
         match app.engine.databases(after.as_deref()).await {
@@ -223,7 +229,13 @@ async fn maintain(app: Arc<App>, seconds: u64) {
                     None
                 };
                 for db in dbs {
-                    if app.engine.maintain_database(&db).await.is_err() {
+                    if durable_db::metrics::measure(
+                        durable_db::metrics::Operation::DatabaseMaintenance,
+                        app.engine.maintain_database(&db),
+                    )
+                    .await
+                    .is_err()
+                    {
                         tracing::warn!("maintenance deferred; will retry on a later sweep");
                     }
                 }

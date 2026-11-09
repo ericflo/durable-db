@@ -1,4 +1,5 @@
 //! Bounded groups of readers sealed before their shared remote read barrier.
+use crate::metrics::{Event, REGISTRY};
 use crate::publication::{Authority, Bucket};
 use anyhow::Context;
 use std::{sync::Arc, time::Duration};
@@ -30,6 +31,8 @@ impl Observations {
                 if members.is_empty() {
                     continue;
                 }
+                REGISTRY.event(Event::ReadGroups, 1);
+                REGISTRY.event(Event::ReadGroupMembers, members.len());
                 // Membership is now sealed. Readers arriving during ANY part of
                 // read_fresh, including after its CAS but before its reply, must
                 // wait for the NEXT barrier. Sharing an in-flight future or a
@@ -53,9 +56,10 @@ impl Observations {
 
     pub async fn read(&self) -> anyhow::Result<Bucket> {
         let (reply, result) = oneshot::channel();
-        self.queue
-            .try_send(reply)
-            .map_err(|_| anyhow::anyhow!("publication observation queue unavailable"))?;
+        self.queue.try_send(reply).map_err(|_| {
+            REGISTRY.event(Event::ObservationQueueRejected, 1);
+            anyhow::anyhow!("publication observation queue unavailable")
+        })?;
         result
             .await
             .context("publication observation worker stopped")?

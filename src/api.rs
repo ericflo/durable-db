@@ -2,6 +2,7 @@ use crate::{
     Error, Result,
     auth::Auth,
     engine::{CommitRequest, Engine, Limits, MAX_BODY, ReadRequest},
+    metrics::{self as telemetry, Operation},
 };
 use axum::{
     Json, Router,
@@ -79,6 +80,31 @@ fn bearer(headers: &HeaderMap) -> Result<&str> {
         .ok_or(Error::Unauthorized)
 }
 async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {
+    if request.uri().path().starts_with("/health/") {
+        return next.run(request).await;
+    }
+    // MatchedPath contains the route template, never the tenant's path value.
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|p| p.as_str());
+    let operation = match route {
+        Some("/v1/databases/{db}/read") => Operation::HttpRead,
+        Some("/v1/databases/{db}/commit") => Operation::HttpCommit,
+        Some("/v1/databases/{db}/gc") => Operation::HttpGc,
+        Some("/v1/databases/{db}") if request.method() == axum::http::Method::POST => {
+            Operation::HttpCreate
+        }
+        Some("/v1/databases/{db}") => Operation::HttpInfo,
+        Some("/v1/tokens") => Operation::HttpToken,
+        _ => Operation::HttpOther,
+    };
+    let timer = telemetry::REGISTRY.start(operation);
+    let response = admit(app, request, next).await;
+    timer.finish(telemetry::http_outcome(response.status().as_u16()));
+    response
+}
+async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
     if request.uri().path().starts_with("/health/") {
         return next.run(request).await;
     }
@@ -162,7 +188,7 @@ async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Stri
         app.requests.load(Ordering::Relaxed),
         app.rejected.load(Ordering::Relaxed),
         app.engine.cache().memory_bytes().await
-    ))
+    ) + &telemetry::REGISTRY.render())
 }
 async fn create(
     State(app): State<Arc<App>>,
