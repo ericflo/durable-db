@@ -1,6 +1,6 @@
 # Architecture reassessment
 
-**Decision: the current object-per-transaction publication path has not earned a production role. Performance and scaling feasibility take priority over expanding its release qualification.** The existing engine remains a reference implementation and a source of tested API, authorization, recovery, provider and fault-injection components.
+**Decision: replace the current shared per-request authority and publication path before production. The performance criticism remains accurate; it is not merely an outdated website description.** The existing engine remains a reference implementation and a source of tested API, authorization, recovery, provider and fault-injection components.
 
 ## Requirements remain unchanged
 
@@ -46,6 +46,12 @@ Use small deterministic model instances and targeted tests during development. R
 A research-only `ServingLease` model explores local reads with explicitly bounded-rate clocks, delayed grants, pauses, takeover and process loss. Its small instance passes 4,884,220 states. Removing takeover drain, allowing a paused clock to stop, or starting expiry at delayed response delivery each produces a stale-read counterexample. [Candidate evidence](evidence/serving-authority-candidate-2026-11-09.json) records exact bounds, assumptions and source hashes.
 
 This is **not an adopted protocol**. It deliberately explores a timing assumption that the current runtime rules prohibit. Supporting that assumption on the deployment platforms would need a separate architecture decision and justification. The model's commit operation still atomically checks authoritative ownership; it does not establish a WAL-only write path or independent partition throughput. The experiment identifies both a possible way to remove the per-read object-store barrier and a concrete condition under which that way fails. Runtime reads remain unchanged.
+
+## Log handoff and raw provider measurements
+
+The [owned-partition design](design-owned-partitions.md) now spells out the acknowledgement and recovery boundary: immutable batch identities, a contiguous durable prefix, expiration of old acknowledgement permission, and a durable seal before a successor serves. Its stepwise recovery model passes 1,214 states and rejects five unsafe variants. It assumes the serving-authority boundary; the models are not yet composed and no replacement runtime is adopted.
+
+A bounded raw-provider experiment passes on B2 and versioned MinIO, with all 194 objects verified after reconnecting and both buckets cleaned up. B2 64 KiB uploads reach 23.67 objects/second at concurrency 16, with median/p95 latency of 387.7/1,100.5 ms. This is raw object throughput, not database transaction throughput or a production SLO. It supports independent batched publication while exposing the durable-write latency floor. Full measurements, failures, exact bounds and reproduction are in the design and linked evidence.
 
 ## Public API and examples
 

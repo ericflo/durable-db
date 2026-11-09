@@ -39,3 +39,14 @@ java -XX:+UseParallelGC -Xmx2g -cp ../../.tools/tla2tools-1.7.4.jar tlc2.TLC \
 ```
 
 Repeat with each unsafe configuration and a separate `-metadir`; each must exit with TLC status 12 and report `Invariant NoStaleRead is violated`. The recorded source and log hashes are in `docs/evidence/serving-authority-candidate-2026-11-09.json`.
+
+
+## WalHandoff
+
+The candidate acknowledges only a contiguous durable prefix of an old epoch. After an externally established end to old acknowledgement permission, recovery probes deterministic sequence positions one at a time. Uploads may complete before, during or after this scan. The successor durably seals the chosen prefix before activation and retains that decision across controller crashes/restarts.
+
+The three-position instance explores **1,214 distinct states**, 3,720 generated, depth 21. All five unsafe controls produce their expected invariant violation: acknowledging across a missing position, scanning before the old permission has ended, trusting a stale negative read, acknowledging after handoff, or reopening a durable seal when a late upload appears. `WalHandoff.checks` records the exact required failures. Woodpecker copies this candidate into an isolated checker stage and runs the existing pinned `check-model.sh`; it remains separate from models of implemented runtime behavior.
+
+For a local run, prepare TLC as above, then use `-config WalHandoff.cfg WalHandoff.tla` in this directory. Repeat with the five unsafe configurations listed in the descriptor; each must exit 12 and identify the stated invariant. Source/log hashes are in `docs/evidence/wal-handoff-candidate-2026-11-09.json`.
+
+This model **assumes** the `Drain` boundary prevents old acknowledgements and that negative point reads are fresh. It does not implement that boundary or compose the clock/serving model, prove a provider consistency contract, implement a database, or model transactions, request deduplication, compaction, collection or admission. Old-writer process loss and successor-controller restart are included; general membership and a new epoch's transaction execution are not. See `docs/design-owned-partitions.md` for the proposed protocol and remaining gates.

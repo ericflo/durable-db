@@ -1,0 +1,6 @@
+safe WalHandoff.cfg candidate-wal-handoff 512m -
+unsafe UnsafeAckGap.cfg candidate-wal-ack-gap 512m AcknowledgedPrefixPreserved
+unsafe UnsafeEarlySnapshot.cfg candidate-wal-early-snapshot 512m AcknowledgedPrefixPreserved
+unsafe UnsafeStaleSnapshot.cfg candidate-wal-stale-snapshot 512m AcknowledgedPrefixPreserved
+unsafe UnsafeLateAck.cfg candidate-wal-late-ack 512m AcknowledgedPrefixPreserved
+unsafe UnsafeReopenSeal.cfg candidate-wal-reopen-seal 512m SealedPrefixImmutable
