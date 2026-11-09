@@ -51,86 +51,76 @@ THEOREM EarlierInactive ==
 THEOREM TickKeepsActive ==
   ASSUME Strong, Tick
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF Tick, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF Tick, Strong, TypeOK, Ids
 
 THEOREM StartFenceKeepsActive ==
   ASSUME NEW q \in Ids, Strong, StartFence(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF StartFence, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF StartFence, Strong, TypeOK, Ids
 
 THEOREM ApplyFenceKeepsActive ==
   ASSUME NEW q \in Ids, Strong, ApplyFence(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF ApplyFence, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF ApplyFence, Strong, TypeOK, Ids
 
 THEOREM DeliverFenceKeepsActive ==
   ASSUME NEW q \in Ids, Strong, DeliverFence(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF DeliverFence, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+<1>1. roots[q].phase = "fresh"
+  BY SMT DEF DeliverFence, Strong, RootState
+<1>2. \A p \in Ids: p # q => roots'[p].phase = roots[p].phase
+  BY SMT, Parameters DEF DeliverFence, Strong, TypeOK, Ids
+<1> QED BY SMT, <1>1, <1>2
 
 THEOREM StartRenewKeepsActive ==
   ASSUME NEW q \in Ids, Strong, StartRenew(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF StartRenew, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF StartRenew, Strong, TypeOK, Ids
 
 THEOREM ApplyRenewKeepsActive ==
   ASSUME NEW q \in Ids, Strong, ApplyRenew(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF ApplyRenew, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF ApplyRenew, Strong, TypeOK, Ids
 
 THEOREM DeliverRenewKeepsActive ==
   ASSUME NEW q \in Ids, Strong, DeliverRenew(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF DeliverRenew, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF DeliverRenew, Strong, TypeOK, Ids
 
 THEOREM StartActivateKeepsActive ==
   ASSUME NEW q \in Ids, Strong, StartActivate(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF StartActivate, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF StartActivate, Strong, TypeOK, Ids
 
 THEOREM ApplyActivateKeepsActive ==
   ASSUME NEW q \in Ids, Strong, ApplyActivate(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF ApplyActivate, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF ApplyActivate, Strong, TypeOK, Ids
 
 THEOREM DeliverActivateKeepsActive ==
   ASSUME NEW q \in Ids, Strong, DeliverActivate(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF DeliverActivate, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF DeliverActivate, Strong, TypeOK, Ids
 
 THEOREM LoseReplyKeepsActive ==
   ASSUME NEW q \in Ids, Strong, LoseReply(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF LoseReply, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF LoseReply, Strong, TypeOK, Ids
 
 THEOREM RequestChildKeepsActive ==
   ASSUME NEW q \in Ids, Strong, RequestChild(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF RequestChild, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF RequestChild, Strong, TypeOK, Ids
 
 THEOREM IssueChildKeepsActive ==
   ASSUME NEW q \in Ids, Strong, IssueChild(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF IssueChild, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF IssueChild, Strong, TypeOK, Ids
 
 THEOREM DeliverChildKeepsActive ==
   ASSUME NEW q \in Ids, Strong, DeliverChild(q)
   PROVE \A p \in Ids: roots[p].phase = "active" => roots'[p].phase = "active"
-  BY SMT, Parameters DEF DeliverChild, Strong, TypeOK, RootState, Ids, Max,
-     RootReplyEnd, ChildReplyEnd, RootValid
+  BY SMT, Parameters DEF DeliverChild, Strong, TypeOK, Ids
 
 THEOREM ActivePhasePersists ==
   ASSUME Strong, Next
@@ -645,7 +635,12 @@ THEOREM SelectPrefixPreserves ==
   BY SMT, <1>frame DEF CompositeStrong, Strong, TypeOK
 <1>1. Strong'
   <2>1. TypeOK'
-    BY SMT, Parameters, <1>frame DEF CompositeStrong, Strong, TypeOK, Ids
+    <3>1. TypeOK BY DEF CompositeStrong, Strong
+    <3>2. authority \in [owner : 0..Epochs, revision : Nat, active : BOOLEAN]
+      BY <3>1 DEF TypeOK
+    <3>3. authority' \in [owner : 0..Epochs, revision : Nat, active : BOOLEAN]
+      BY SMT, <1>frame, <3>2, Parameters
+    <3> QED BY <1>frame, <3>1, <3>3 DEF TypeOK
   <2>2. ClockOrder' BY <1>frame DEF CompositeStrong, Strong, ClockOrder
   <2>3. RootState' BY <1>frame, <1>owner DEF CompositeStrong, Strong, RootState
   <2>4. FenceBounds' BY <1>frame DEF CompositeStrong, Strong, FenceBounds
