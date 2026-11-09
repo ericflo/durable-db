@@ -1,6 +1,16 @@
 # Owned partitions and durable log batches
 
-**Status: candidate design, not the runtime engine.** Replace the shared per-request authority path before production. The existing engine remains the compatibility and correctness reference while this design is evaluated. The [architecture reassessment](architecture-reassessment.md) explains why a change is necessary.
+**Status: candidate design, not the runtime engine.** Replace the shared per-request authority path before production. The existing engine remains the compatibility and correctness reference while this design is evaluated.
+
+## Why the current engine must change
+
+Replaceable compute does not require every request to reconstruct authority independently. Treating those as equivalent was an architectural overconstraint. A running node can retain useful state when ownership, handoff, recovery and resource bounds make that state safely replaceable.
+
+`Authority::read_fresh` conditionally updates the shared bucket authority even for a cache-hit read. Grouping amortizes this operation but does not remove it. Writes and collectors also contend on the same authority revision. The directory removes the former database-count cap without creating independent write capacity: its 100,005-entry correctness test is not evidence of 100,005 concurrently useful databases.
+
+The [B2 combiner measurement](verification-results.md#publication-combining-qualification) completed four-writer phases at 1.051 operations/second with second-scale latency. The later [one-hour baseline](evidence/physical-memory-hour-2026-11-09.json) also remains far below the intended operating envelope. Safety checks cannot establish performance suitability. The replacement must meet both requirements.
+
+The current [engine protocol](architecture.md) remains the compatibility reference while the replacement is built. Provider bindings, API behavior, authorization and adversarial fixtures remain useful; the shared per-request publication path will be retired when its replacement passes the same behavioral checks and the new performance gates.
 
 ## Preserve the original contract
 
@@ -43,7 +53,17 @@ Assign each batch a fresh identity from its partition, unique writer epoch and n
 
 Uploads may be pipelined, but acknowledgement advances only through a contiguous durable prefix. A completed upload at position three cannot justify acknowledging it while position two is unresolved. Before acknowledgement, the writer must also verify its serving permission. Merely having started the upload while permission was valid is insufficient. If permission expires after a PUT might have landed, the response is uncertain, not a definite conflict or rollback: recovery may still retain that batch.
 
-This creates a possible one-immutable-PUT path per batch, with no shared authority update per transaction. It is still a proposal: request receipts, transaction evaluation, hash-chain validation, partial recovery and the ownership protocol must compose before this is a valid implementation.
+This creates a possible one-immutable-PUT path per batch, with no shared authority update per transaction. The journal implements the immutable byte path, hash-chain validation and prefix replay. Request receipts, transaction evaluation and ownership must compose with it before this becomes a serving engine.
+
+### Journal implementation boundary
+
+The first Rust component is a bounded immutable journal in `src/journal/`. Its objects live under `journal/`, outside the existing page collector's `blocks/` namespace. A writer always receives a fresh random epoch and never reopens an old epoch for writing. Frames bind the partition, epoch, sequence, previous digest, length-delimited records and a SHA-256 digest. Decoding validates lengths before allocating record views.
+
+A prepared upload is single-use. Lost or cancelled responses retain an unresolved position; resolution performs a point GET and compares the exact bytes, never a second PUT. A missing result remains uncertain because an upload can still arrive. Completed positions become consumable only in contiguous order. A count and byte budget bound frames held by the queue, uploads and consumers, including unresolved work. Record views borrow their frame, so a small retained record cannot silently pin an unaccounted whole-frame allocation. Each replay reader permits one live frame, reserving its buffer before GET; the caller releases it before requesting another. A frame is at most 4 MiB, a record at most 1 MiB, and a frame contains at most 1,024 records; these are internal journal bounds, not a revised public API contract. Resolving one uncertain writer position needs one additional read buffer of at most 4 MiB; record-offset tables and provider transport buffers add bounded overhead. These component limits do not establish a process-wide RSS or tenant admission bound.
+
+Discovery reads one frame at a time and stops at the first fresh missing position. That result is provisional until the ownership controller durably selects it after ending old acknowledgement permission. Replay of a selected prefix requires every frame and the exact terminal digest, and never extends the prefix when late uploads appear. Provider errors and corruption fail closed.
+
+The journal reports durability, not transaction success or serving permission. It does not implement ownership, seal publication, transaction evaluation, admission or collection. Those remain controller/engine obligations. The earlier handoff models preceded this component. `Journal.tla` now models durability knowledge and ordered consumption as well as recovery; its unbounded abstract proof assumes an external end to old acknowledgement permission and atomic prefix selection. `OwnedWal` explores one realization of that boundary. Executing the journal does not establish the complete serving protocol or adopt a clock dependency.
 
 ## Handoff fixes an exact old prefix
 
@@ -56,9 +76,9 @@ A successor must:
 
 A late upload beyond the sealed prefix is unacknowledged garbage. Including it opportunistically after new work has begun could change the history underneath the replacement. An old upload included before the decision may represent a pending operation with a lost response; normal request-identity recovery must resolve that uncertainty.
 
-`WalHandoff.tla` checks this boundary with three old log positions, arbitrary upload completion order, a stepwise recovery scan, old-process loss, successor crashes/restarts and a persistent seal. Its **1,214-state** instance preserves all acknowledged positions and the chosen seal. Five negative controls detect gaps in acknowledged prefixes, recovery before the drain boundary, stale negative reads, acknowledgement after the boundary, and reopening a seal. See [the experiment record](evidence/wal-handoff-candidate-2026-11-09.json).
+`Journal.tla` checks this boundary with three prepared positions, arbitrary upload completion order, uncertain responses resolved through positive observations, contiguous consumption, stepwise recovery, process loss and controller restart. Its **4,134-state** instance passes six negative controls. `JournalProof.tla` proves abstract prefix durability, acknowledgement preservation and seal immutability for unbounded log lengths under the stated controller/provider assumptions; all **88 proof obligations** pass. Removing contiguous consumption makes the proof fail. The old handoff-only model has been retired. See [the component evidence](evidence/journal-2026-11-09.json) and [proof scope](verification.md#journal-prefix-safety).
 
-The model assumes fresh per-key reads: a negative result must not conceal an upload completed before that read began. Transport errors and unresolved responses must never count as end-of-log. The raw provider experiment exercises successful reconnect/read/list behavior; it cannot prove the provider's consistency contract or the absence of stale negative reads in every failure mode.
+The model assumes fresh per-key reads: a negative result must not conceal an upload completed before that read began. Transport errors and unresolved responses must never count as end-of-log. The provider experiments exercise successful reconnect/read/list behavior and journal replay; they cannot prove the provider's consistency contract or the absence of stale negative reads in every failure mode.
 
 The provider contract is a separate obligation from an experiment: [AWS documents strong object read-after-write consistency](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html#ConsistencyModel), while [Backblaze describes confirmed file writes as immediately visible](https://www.backblaze.com/blog/design-thinking-b2-apis-the-hidden-costs-of-s3-compatibility/). Neither statement should be generalized to fresh bucket-metadata observations. The candidate's exact negative-read and error-classification assumptions must stay explicit.
 

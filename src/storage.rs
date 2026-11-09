@@ -219,7 +219,7 @@ impl Local {
         lock.try_lock_exclusive()
             .context("local directory already owned; multi-node mode requires object storage")?;
         // Fixed directory structure: no per-tenant mkdir durability ambiguity during writes.
-        for dir in ["heads", "blocks"] {
+        for dir in ["heads", "blocks", "journal"] {
             std::fs::create_dir_all(root.join(dir))?;
         }
         std::fs::File::open(&root)?.sync_all()?;

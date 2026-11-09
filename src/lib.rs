@@ -4,6 +4,7 @@ pub mod backup;
 pub mod cache;
 mod directory;
 pub mod engine;
+pub mod journal;
 mod measured;
 pub mod metrics;
 mod observation;

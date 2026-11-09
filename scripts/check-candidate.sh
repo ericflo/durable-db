@@ -4,8 +4,8 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 candidate=${1:-}
 case "$candidate" in
-  WalHandoff|OwnedWal|DelegatedGrant) ;;
-  *) echo 'Usage: scripts/check-candidate.sh WalHandoff|OwnedWal|DelegatedGrant' >&2; exit 2 ;;
+  OwnedWal|DelegatedGrant) ;;
+  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant' >&2; exit 2 ;;
 esac
 
 "$repo/scripts/check-model.sh" prepare

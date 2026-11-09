@@ -1,0 +1,7 @@
+safe Journal.cfg journal 2g -
+unsafe UnsafeJournalKnowledge.cfg journal-knowledge 2g KnownDurable
+unsafe UnsafeJournalGap.cfg journal-gap 2g ConsumedDurable
+unsafe UnsafeJournalEarly.cfg journal-early 2g AcknowledgedPrefixPreserved
+unsafe UnsafeJournalMissing.cfg journal-missing 2g AcknowledgedPrefixPreserved
+unsafe UnsafeJournalPermission.cfg journal-permission 2g AcknowledgedPrefixPreserved
+unsafe UnsafeJournalReopen.cfg journal-reopen 2g SealedPrefixImmutable

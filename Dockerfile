@@ -105,10 +105,10 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh OwnedWal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
-FROM model-tools AS model-candidate-walhandoff
-COPY spec/candidates/WalHandoff.tla spec/candidates/WalHandoff.checks spec/candidates/WalHandoff.cfg spec/candidates/UnsafeAckGap.cfg spec/candidates/UnsafeEarlySnapshot.cfg spec/candidates/UnsafeStaleSnapshot.cfg spec/candidates/UnsafeLateAck.cfg spec/candidates/UnsafeReopenSeal.cfg spec/
+FROM model-tools AS model-journal
+COPY spec/Journal.tla spec/Journal.checks spec/Journal.cfg spec/UnsafeJournal*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh WalHandoff && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    scripts/check-model.sh Journal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-transactionclient
@@ -161,10 +161,17 @@ COPY spec/PublicationSafety.tla spec/PublicationSafetyProof.tla spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM proof-tools AS proof-journal
+COPY scripts/check-proof.sh scripts/check-proof.sh
+COPY spec/Journal.tla spec/JournalProof.tla spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM scratch AS model
 COPY --from=model-candidate-delegatedgrant /checks/ /checks/
 COPY --from=model-candidate-ownedwal /checks/ /checks/
-COPY --from=model-candidate-walhandoff /checks/ /checks/
+COPY --from=model-journal /checks/ /checks/
+COPY --from=proof-journal /checks/ /checks/
 COPY --from=model-transactionclient /checks/ /checks/
 COPY --from=model-ownershipclaim /checks/ /checks/
 COPY --from=proof /checks/ /checks/

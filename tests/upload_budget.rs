@@ -175,6 +175,54 @@ async fn paused(notify: &Notify) {
 }
 
 #[tokio::test]
+async fn existing_page_collection_never_reclaims_the_new_journal_namespace() {
+    use durable_db::journal::{QueueLimits, Reader, Writer};
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 64,
+        }),
+    )
+    .await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    for revision in 0..3 {
+        db.commit("sample", &write(revision)).await.unwrap();
+    }
+    // Candidate journal bytes use a separate namespace and are not referenced
+    // by the existing page manifests. Its future admission/collector is separate.
+    let mut writer = Writer::new(
+        metadata.files.clone(),
+        uuid::Uuid::new_v4(),
+        QueueLimits::default(),
+    )
+    .unwrap();
+    let upload = writer
+        .prepare(&[Bytes::from_static(b"candidate journal")])
+        .unwrap();
+    writer.complete(upload.send().await).unwrap();
+    drop(writer.pop_durable().unwrap().unwrap());
+    let prefix = writer.durable_prefix();
+    assert_eq!(storage.collect_data().await.unwrap().deleted, 2);
+    storage.maintenance().await.unwrap();
+    let mut replay = Reader::replay(metadata.files.clone(), prefix);
+    assert_eq!(
+        replay
+            .read_next()
+            .await
+            .unwrap()
+            .unwrap()
+            .records()
+            .collect::<Vec<_>>(),
+        vec![b"candidate journal".as_slice()]
+    );
+    assert!(replay.read_next().await.unwrap().is_none());
+    assert_eq!(replay.finished_prefix(), Some(prefix));
+}
+
+#[tokio::test]
 async fn exhausted_global_collection_reclaims_pages_without_uploads_and_preserves_reads() {
     let metadata = fixture();
     let storage = open(
