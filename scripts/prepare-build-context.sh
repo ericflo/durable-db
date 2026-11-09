@@ -14,10 +14,14 @@ success=no
 trap 'if [ "$success" != yes ]; then rm -rf "$context"; fi' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-git -c safe.directory="$repo" -c tar.umask=0022 -C "$repo" \
+git -c safe.directory="$repo" -c tar.umask=0000 -C "$repo" \
   archive --format=tar --output="$archive" "$commit"
 mkdir "$context/tree"
+# Match existing Woodpecker cache inputs without inheriting PVC metadata.
+# mktemp's outer directory remains private (0700).
+umask 0000
 tar -xf "$archive" -C "$context/tree"
+find "$context/tree" -type d -exec chmod 2777 {} +
 rm "$archive"
 success=yes
 printf '%s\n' "$context"
