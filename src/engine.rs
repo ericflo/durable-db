@@ -20,7 +20,7 @@ pub use access::{PolicyAction, PolicyInfo, PolicyRequest, PolicyResult};
 pub use creation::{CreateRequest, CreateResult};
 
 pub const MAX_BODY: usize = 1024 * 1024;
-const MAX_HEAD: usize = 512 * 1024;
+pub(crate) const MAX_HEAD: usize = 512 * 1024;
 const TARGET_BLOCK: usize = 128 * 1024;
 const MAX_BLOCK: usize = 256 * 1024;
 const MAX_PAGES: usize = 2048;
@@ -263,6 +263,17 @@ pub struct GcResult {
 pub struct Engine {
     storage: Arc<dyn Storage>,
     cache: Arc<Cache>,
+}
+/// A collector must validate the complete protected manifest before treating
+/// any absent page as unreachable. Missing/corrupt metadata is never emptiness.
+pub(crate) fn protected_pages(db: &str, bytes: &[u8]) -> anyhow::Result<BTreeSet<String>> {
+    ensure!(
+        bytes.len() <= MAX_HEAD,
+        "manifest exceeds collector read bound"
+    );
+    let manifest: Manifest = serde_json::from_slice(bytes)?;
+    manifest.validate(db)?;
+    Ok(manifest.pages.into_iter().map(|p| p.object).collect())
 }
 impl Engine {
     pub fn new(storage: Arc<dyn Storage>, cache: Arc<Cache>) -> Self {

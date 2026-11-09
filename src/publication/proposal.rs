@@ -93,6 +93,25 @@ impl Published {
             "manifest exceeds publication bound"
         );
         let initial = self.authority.read().await?;
+        if self.global_collection
+            && let Some(old) = old
+        {
+            let observation: DataObservation = serde_json::from_str(
+                old.0
+                    .version
+                    .as_deref()
+                    .context("missing data collection observation")?,
+            )?;
+            ensure!(
+                observation.format == 5,
+                "unsupported data collection observation"
+            );
+            // The engine captured this before preparing any pages. Adopting a
+            // later fence here could publish pages already collected as orphans.
+            if observation.fence.as_ref() != initial.info.get("durable-db-fence") {
+                return Ok(false);
+            }
+        }
         let initial_root = root(&initial.info)?;
         let expected = match self.directory.get(initial_root.as_ref(), &database).await {
             Err(e) if e.is::<MissingNode>() => return Ok(false),

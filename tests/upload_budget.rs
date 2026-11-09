@@ -3,7 +3,7 @@ use bytes::Bytes;
 use durable_db::{
     Error,
     cache::Cache,
-    engine::{Engine, Limits},
+    engine::{CommitRequest, Engine, Limits, ReadRequest, Write},
     publication::{Authority, Bucket, Published},
     storage::{Object, Remote, Storage, Version},
     upload_budget::{UploadLimits, UploadRequest},
@@ -23,12 +23,20 @@ struct Files {
     calls: AtomicUsize,
     bytes: AtomicUsize,
     pause: AtomicBool,
+    pause_after: AtomicBool,
+    hide_manifests: AtomicBool,
+    hide_indexes: AtomicBool,
     paused: Notify,
     resume: Notify,
 }
 #[async_trait]
 impl Storage for Files {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
+        if (key.starts_with("manifests/") && self.hide_manifests.load(Ordering::SeqCst))
+            || (key.starts_with("indexes/") && self.hide_indexes.load(Ordering::SeqCst))
+        {
+            return Ok(None);
+        }
         self.inner.get(key, max).await
     }
     async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
@@ -41,7 +49,12 @@ impl Storage for Files {
         }
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.bytes.fetch_add(bytes.len(), Ordering::SeqCst);
-        self.inner.put(key, bytes).await
+        self.inner.put(key, bytes).await?;
+        if self.pause_after.swap(false, Ordering::SeqCst) {
+            self.paused.notify_one();
+            self.resume.notified().await;
+        }
+        Ok(())
     }
     async fn list(
         &self,
@@ -60,6 +73,10 @@ struct Metadata {
     files: Arc<Files>,
     lose_allocation: AtomicBool,
     lose_refill: AtomicBool,
+    pause_data_fence: AtomicBool,
+    data_fence_paused: Notify,
+    data_fence_resume: Notify,
+    lose_data_fence: AtomicBool,
 }
 fn counter(info: &BTreeMap<String, String>, field: &str) -> serde_json::Value {
     info.get(FIELD)
@@ -76,6 +93,12 @@ impl Authority for Metadata {
         old: &Bucket,
         info: BTreeMap<String, String>,
     ) -> anyhow::Result<Option<Bucket>> {
+        let data_fence = info.contains_key("durable-db-data-gc")
+            && info.get("durable-db-fence") != old.info.get("durable-db-fence");
+        if data_fence && self.pause_data_fence.swap(false, Ordering::SeqCst) {
+            self.data_fence_paused.notify_one();
+            self.data_fence_resume.notified().await;
+        }
         let mut state = self.state.lock().await;
         if state.revision != old.revision {
             return Ok(None);
@@ -87,6 +110,7 @@ impl Authority for Metadata {
         state.info = info;
         if (allocated && self.lose_allocation.swap(false, Ordering::SeqCst))
             || (refilled && self.lose_refill.swap(false, Ordering::SeqCst))
+            || (data_fence && self.lose_data_fence.swap(false, Ordering::SeqCst))
         {
             anyhow::bail!("injected lost authority acknowledgement");
         }
@@ -108,11 +132,18 @@ fn fixture() -> Arc<Metadata> {
             calls: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
             pause: AtomicBool::new(false),
+            pause_after: AtomicBool::new(false),
+            hide_manifests: AtomicBool::new(false),
+            hide_indexes: AtomicBool::new(false),
             paused: Notify::new(),
             resume: Notify::new(),
         }),
         lose_allocation: AtomicBool::new(false),
         lose_refill: AtomicBool::new(false),
+        pause_data_fence: AtomicBool::new(false),
+        data_fence_paused: Notify::new(),
+        data_fence_resume: Notify::new(),
+        lose_data_fence: AtomicBool::new(false),
     })
 }
 async fn open(metadata: &Arc<Metadata>, limits: Option<UploadLimits>) -> Arc<Published> {
@@ -124,6 +155,528 @@ async fn open(metadata: &Arc<Metadata>, limits: Option<UploadLimits>) -> Arc<Pub
 }
 fn engine(storage: Arc<Published>) -> Engine {
     Engine::new(storage, Arc::new(Cache::new(0, None).unwrap()))
+}
+fn write(revision: u64) -> CommitRequest {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    CommitRequest {
+        expected_revision: revision,
+        request_id: format!("write-{revision}"),
+        checks: vec![],
+        writes: vec![Write {
+            key: "key".into(),
+            value: Some(STANDARD.encode(format!("value-{revision}"))),
+        }],
+    }
+}
+async fn paused(notify: &Notify) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn exhausted_global_collection_reclaims_pages_without_uploads_and_preserves_reads() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 15,
+        }),
+    )
+    .await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    for n in 0..3 {
+        db.commit("sample", &write(n)).await.unwrap();
+    }
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 15);
+    drop(db);
+    drop(storage);
+    let storage = open(&metadata, None).await;
+    let before = storage.upload_budget().await.unwrap().unwrap();
+    assert!(storage.put("blocks/refused", Bytes::new()).await.is_err());
+    let result = storage.collect_data().await.unwrap();
+    assert_eq!((result.examined, result.deleted), (3, 2));
+    storage.maintenance().await.unwrap();
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 15);
+    assert_eq!(storage.upload_budget().await.unwrap().unwrap(), before);
+    let db = engine(storage);
+    let read = db
+        .read(
+            "sample",
+            &ReadRequest {
+                keys: vec!["key".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.revision, 3);
+    assert_eq!(read.values[0], write(2).writes[0].value);
+    assert_eq!(db.gc("sample").await.unwrap().deleted, 0);
+}
+
+#[tokio::test]
+async fn writer_cannot_adopt_a_fence_after_its_uploaded_page_was_collected() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1 << 24,
+            attempts: 100,
+        }),
+    )
+    .await;
+    let db = Arc::new(engine(storage.clone()));
+    db.create("sample", Limits::default()).await.unwrap();
+    metadata.files.pause_after.store(true, Ordering::SeqCst);
+    let writer = db.clone();
+    let pending = tokio::spawn(async move { writer.commit("sample", &write(0)).await });
+    paused(&metadata.files.paused).await;
+    let collector = open(&metadata, None).await;
+    assert_eq!(collector.collect_data().await.unwrap().deleted, 1);
+    metadata.files.resume.notify_one();
+    assert!(matches!(pending.await.unwrap(), Err(Error::Conflict)));
+    assert_eq!(db.info("sample").await.unwrap().revision, 0);
+    db.commit("sample", &write(0)).await.unwrap();
+    assert_eq!(
+        db.read(
+            "sample",
+            &ReadRequest {
+                keys: vec!["key".into()],
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap()
+        .values[0],
+        write(0).writes[0].value
+    );
+}
+
+#[tokio::test]
+async fn exhausted_submitted_proposal_cannot_resurrect_pages_after_global_collection() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 6,
+        }),
+    )
+    .await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    assert!(matches!(
+        db.commit("sample", &write(0)).await,
+        Err(Error::Storage(_))
+    ));
+    assert_eq!(storage.collect_data().await.unwrap().deleted, 1);
+    storage
+        .replenish_upload_budget(&UploadRequest {
+            request_id: "fund".into(),
+            expected_configuration_revision: 0,
+            limits: UploadLimits {
+                bytes: 1 << 24,
+                attempts: 100,
+            },
+        })
+        .await
+        .unwrap();
+    db.create("helper", Limits::default()).await.unwrap();
+    assert_eq!(db.info("sample").await.unwrap().revision, 0);
+    db.commit("sample", &write(0)).await.unwrap();
+    assert_eq!(db.info("sample").await.unwrap().revision, 1);
+}
+
+#[tokio::test]
+async fn exhausted_sweeps_resume_the_global_cursor_after_each_process_disappears() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 260,
+        }),
+    )
+    .await;
+    engine(storage.clone())
+        .create("sample", Limits::default())
+        .await
+        .unwrap();
+    for n in 0..257 {
+        let name = if n % 2 == 0 { "sample" } else { "uncreated" };
+        storage
+            .put(
+                &format!("blocks/{name}.{}", uuid::Uuid::new_v4()),
+                Bytes::new(),
+            )
+            .await
+            .unwrap();
+    }
+    drop(storage);
+    for expected in [128, 128, 1, 0] {
+        let storage = open(&metadata, None).await;
+        let result = storage.collect_data().await.unwrap();
+        assert_eq!((result.examined, result.deleted), (expected, expected));
+    }
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 260);
+    assert!(
+        metadata
+            .files
+            .list("blocks/", None, 128)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        engine(open(&metadata, None).await)
+            .info("sample")
+            .await
+            .unwrap()
+            .revision,
+        0
+    );
+}
+
+#[tokio::test]
+async fn concurrent_collectors_and_lost_fence_responses_never_delete_without_protection() {
+    let metadata = fixture();
+    let a = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1 << 24,
+            attempts: 100,
+        }),
+    )
+    .await;
+    let db = engine(a.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    db.commit("sample", &write(0)).await.unwrap();
+    db.commit("sample", &write(1)).await.unwrap();
+    let b = open(&metadata, None).await;
+    metadata.lose_data_fence.store(true, Ordering::SeqCst);
+    assert!(a.collect_data().await.is_err());
+    assert_eq!(
+        metadata
+            .files
+            .list("blocks/", None, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    metadata.pause_data_fence.store(true, Ordering::SeqCst);
+    let first = a.clone();
+    let pending = tokio::spawn(async move { first.collect_data().await });
+    paused(&metadata.data_fence_paused).await;
+    assert_eq!(b.collect_data().await.unwrap().deleted, 1);
+    metadata.data_fence_resume.notify_one();
+    assert_eq!(pending.await.unwrap().unwrap().deleted, 0);
+    assert_eq!(
+        db.read(
+            "sample",
+            &ReadRequest {
+                keys: vec!["key".into()],
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap()
+        .values[0],
+        write(1).writes[0].value
+    );
+}
+
+#[tokio::test]
+async fn missing_protected_metadata_is_not_an_empty_database() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1 << 24,
+            attempts: 100,
+        }),
+    )
+    .await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    db.commit("sample", &write(0)).await.unwrap();
+    db.commit("sample", &write(1)).await.unwrap();
+    for missing in [&metadata.files.hide_indexes, &metadata.files.hide_manifests] {
+        missing.store(true, Ordering::SeqCst);
+        assert!(storage.collect_data().await.is_err());
+        assert_eq!(
+            metadata
+                .files
+                .list("blocks/", None, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        missing.store(false, Ordering::SeqCst);
+    }
+    assert_eq!(storage.collect_data().await.unwrap().deleted, 1);
+    assert_eq!(db.info("sample").await.unwrap().revision, 2);
+}
+
+#[tokio::test]
+async fn prototype_format4_remains_budgeted_without_enabling_the_new_collector() {
+    let metadata = fixture();
+    drop(
+        open(
+            &metadata,
+            Some(UploadLimits {
+                bytes: 1 << 24,
+                attempts: 100,
+            }),
+        )
+        .await,
+    );
+    // Historical empty format-4 fixture, before any data or in-flight request.
+    let mut state = metadata.state.lock().await;
+    state.info.insert("durable-db-format".into(), "4".into());
+    state.info.insert(
+        "durable-db-root".into(),
+        r#"{"upload_format":4,"directory":null}"#.into(),
+    );
+    drop(state);
+    let storage = open(&metadata, None).await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    db.commit("sample", &write(0)).await.unwrap();
+    assert!(storage.collect_data().await.is_err());
+    assert!(storage.upload_budget().await.unwrap().is_some());
+    assert_eq!(db.info("sample").await.unwrap().revision, 1);
+}
+
+#[tokio::test]
+async fn collector_preserves_pages_retained_from_an_earlier_manifest() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1 << 26,
+            attempts: 128,
+        }),
+    )
+    .await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    let a = STANDARD.encode(vec![1; 60_000]);
+    let b = STANDARD.encode(vec![2; 60_000]);
+    let replacement = STANDARD.encode(vec![3; 60_000]);
+    db.commit(
+        "sample",
+        &CommitRequest {
+            expected_revision: 0,
+            request_id: "two-pages".into(),
+            checks: vec![],
+            writes: vec![
+                Write {
+                    key: "a".into(),
+                    value: Some(a),
+                },
+                Write {
+                    key: "b".into(),
+                    value: Some(b.clone()),
+                },
+                Write {
+                    key: "c".into(),
+                    value: Some(b.clone()),
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(db.info("sample").await.unwrap().pages, 2);
+    db.commit(
+        "sample",
+        &CommitRequest {
+            expected_revision: 1,
+            request_id: "replace-a".into(),
+            checks: vec![],
+            writes: vec![Write {
+                key: "a".into(),
+                value: Some(replacement.clone()),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let result = storage.collect_data().await.unwrap();
+    assert_eq!((result.examined, result.deleted), (3, 1));
+    let read = db
+        .read(
+            "sample",
+            &ReadRequest {
+                keys: vec!["a".into(), "b".into(), "c".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.values, [Some(replacement), Some(b.clone()), Some(b)]);
+}
+
+#[tokio::test]
+async fn collector_validates_manifest_semantics_even_when_its_digest_matches() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1 << 24,
+            attempts: 128,
+        }),
+    )
+    .await;
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    db.commit("sample", &write(0)).await.unwrap();
+    let before = storage
+        .get("heads/sample.json", 512 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut malformed: serde_json::Value = serde_json::from_slice(&before.bytes).unwrap();
+    malformed["pages"][0]["object"] =
+        serde_json::Value::String(format!("blocks/foreign.{}", uuid::Uuid::new_v4()));
+    // Deliberately bypass Engine validation through the trusted internal
+    // publication boundary, yielding a correct digest over invalid content.
+    assert!(
+        storage
+            .cas(
+                "heads/sample.json",
+                Some(&before.version),
+                serde_json::to_vec(&malformed).unwrap().into()
+            )
+            .await
+            .unwrap()
+    );
+    assert!(storage.collect_data().await.is_err());
+    assert_eq!(
+        metadata
+            .files
+            .list("blocks/", None, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let current = storage
+        .get("heads/sample.json", 512 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        storage
+            .cas("heads/sample.json", Some(&current.version), before.bytes)
+            .await
+            .unwrap()
+    );
+    assert_eq!(storage.collect_data().await.unwrap().deleted, 0);
+    assert_eq!(db.info("sample").await.unwrap().revision, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn format5_writers_and_both_collectors_race_then_reopen_without_caches() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let metadata = fixture();
+    let a = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 1 << 27,
+            attempts: 8192,
+        }),
+    )
+    .await;
+    let b = open(&metadata, None).await;
+    for name in ["alpha", "beta"] {
+        engine(a.clone())
+            .create(name, Limits::default())
+            .await
+            .unwrap();
+    }
+    let mut tasks = vec![];
+    for (name, storage) in [("alpha", a.clone()), ("beta", b.clone())] {
+        tasks.push(tokio::spawn(async move {
+            let db = engine(storage);
+            for revision in 0..30 {
+                let request = CommitRequest {
+                    expected_revision: revision,
+                    request_id: format!("{name}-{revision}"),
+                    checks: vec![],
+                    writes: vec![Write {
+                        key: format!("key-{revision:03}"),
+                        value: Some(STANDARD.encode(format!("{name}-{revision}"))),
+                    }],
+                };
+                let mut committed = false;
+                for _ in 0..200 {
+                    match db.commit(name, &request).await {
+                        Ok(_) => {
+                            committed = true;
+                            break;
+                        }
+                        Err(Error::Conflict | Error::Storage(_)) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(2)).await
+                        }
+                        Err(error) => panic!("unexpected writer error: {error}"),
+                    }
+                }
+                assert!(committed, "writer did not resolve its original request");
+            }
+        }));
+    }
+    for storage in [a.clone(), b.clone()] {
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..60 {
+                for result in [
+                    storage.collect_data().await.map(|_| ()),
+                    storage.collect_manifests().await.map(|_| ()),
+                ] {
+                    if let Err(error) = result {
+                        let message = error.to_string();
+                        assert!(
+                            message.contains("snapshot was collected")
+                                || message.contains("protected collector manifest is unavailable"),
+                            "unexpected collector error: {message}"
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    drop(a);
+    drop(b);
+    let fresh = engine(open(&metadata, None).await);
+    for name in ["alpha", "beta"] {
+        let read = fresh
+            .read(
+                name,
+                &ReadRequest {
+                    keys: (0..30).map(|n| format!("key-{n:03}")).collect(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(read.revision, 30);
+        assert_eq!(
+            read.values,
+            (0..30)
+                .map(|n| Some(STANDARD.encode(format!("{name}-{n}"))))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[tokio::test]
@@ -379,7 +932,7 @@ async fn exhaustion_preserves_reads_and_metadata_collection_and_refuses_format3_
     // required root fields; test the actual previous release separately too.
     let root: serde_json::Value =
         serde_json::from_str(&metadata.state.lock().await.info["durable-db-root"]).unwrap();
-    assert_eq!(root["upload_format"], 4);
+    assert_eq!(root["upload_format"], 5);
     assert!(root.get("object").is_none());
     let legacy = fixture();
     drop(open(&legacy, None).await);
@@ -486,6 +1039,73 @@ async fn payload_and_attempt_ceilings_are_independent() {
         UploadLimits {
             bytes: 5,
             attempts: 100
+        }
+    );
+}
+
+#[tokio::test]
+async fn replenishing_one_dimension_retains_previously_confirmed_credit_in_the_other() {
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 100,
+            attempts: 64,
+        }),
+    )
+    .await;
+    for n in 0..64 {
+        storage
+            .put(&format!("blocks/{n}"), Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 64);
+    assert_eq!(metadata.files.bytes.load(Ordering::SeqCst), 64);
+    assert!(storage.put("blocks/refused", Bytes::new()).await.is_err());
+
+    let metadata = fixture();
+    let storage = open(
+        &metadata,
+        Some(UploadLimits {
+            bytes: 100,
+            attempts: 64,
+        }),
+    )
+    .await;
+    storage
+        .put("blocks/first", Bytes::from_static(b"x"))
+        .await
+        .unwrap();
+    storage
+        .replenish_upload_budget(&UploadRequest {
+            request_id: "bytes".into(),
+            expected_configuration_revision: 0,
+            limits: UploadLimits {
+                bytes: 300,
+                attempts: 64,
+            },
+        })
+        .await
+        .unwrap();
+    metadata.lose_allocation.store(true, Ordering::SeqCst);
+    assert!(
+        storage
+            .put("blocks/uncertain-allocation", Bytes::from(vec![0; 200]))
+            .await
+            .is_err()
+    );
+    // The lost grant is unusable. Previously confirmed rights survive it.
+    storage
+        .put("blocks/previous-credit", Bytes::from_static(b"y"))
+        .await
+        .unwrap();
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        storage.upload_budget().await.unwrap().unwrap().allocated,
+        UploadLimits {
+            bytes: 300,
+            attempts: 32
         }
     );
 }

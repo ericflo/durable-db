@@ -98,7 +98,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh UploadCredits && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-globalcollection
+COPY spec/GlobalCollection.tla spec/GlobalCollection.checks spec/GlobalCollection.cfg spec/GlobalCollectionConcurrent.cfg spec/UnsafeGlobalOrigin.cfg spec/UnsafeGlobalFence.cfg spec/UnsafeGlobalLateList.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh GlobalCollection && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-globalcollection /checks/ /checks/
 COPY --from=model-cluster /checks/ /checks/
 COPY --from=model-bucket /checks/ /checks/
 COPY --from=model-readbarrier /checks/ /checks/

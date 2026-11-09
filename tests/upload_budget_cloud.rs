@@ -111,3 +111,75 @@ async fn cloud_budget_survives_exhaustion_reopen_collection_and_refill() {
     assert_eq!(engine(storage).info("sample").await.unwrap().revision, 2);
     eprintln!("Upload admission qualification passed. Disposable prefix: {prefix}");
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh disposable bucket and provider credentials"]
+async fn cloud_data_collection_progresses_after_exhaustion_and_complete_reopen() {
+    let bucket = std::env::var("DURABLE_DB_TEST_BUCKET").unwrap();
+    let prefix = format!("budget-{}", uuid::Uuid::new_v4());
+    let limits = UploadLimits {
+        bytes: 1024 * 1024,
+        attempts: 142,
+    };
+    let storage = Arc::new(connect(&bucket, &prefix, Some(limits)).await);
+    let db = engine(storage.clone());
+    db.create("sample", Limits::default()).await.unwrap();
+    for revision in 0..3 {
+        db.commit(
+            "sample",
+            &CommitRequest {
+                expected_revision: revision,
+                request_id: format!("write-{revision}"),
+                checks: vec![],
+                writes: vec![Write {
+                    key: "key".into(),
+                    value: Some(STANDARD.encode(format!("value-{revision}"))),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for _ in 0..127 {
+        storage
+            .put(
+                &format!("blocks/uncreated.{}", uuid::Uuid::new_v4()),
+                Bytes::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let before = storage.upload_budget().await.unwrap().unwrap();
+    assert_eq!(before.allocated, limits);
+    drop(db);
+    drop(storage);
+    let storage = Arc::new(connect(&bucket, &prefix, None).await);
+    assert!(storage.put("blocks/refused", Bytes::new()).await.is_err());
+    let swept = storage.collect_data().await.unwrap();
+    assert_eq!((swept.examined, swept.deleted), (128, 127));
+    drop(storage);
+    let storage = Arc::new(connect(&bucket, &prefix, None).await);
+    // The regular cluster maintenance path resumes the durable cursor and
+    // removes the remaining two orphans, without obtaining upload credit.
+    storage.maintenance().await.unwrap();
+    assert_eq!(storage.upload_budget().await.unwrap().unwrap(), before);
+    let remaining = storage.list("blocks/", None, 128).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].starts_with("blocks/sample."));
+    let read = engine(storage.clone())
+        .read(
+            "sample",
+            &ReadRequest {
+                keys: vec!["key".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.revision, 3);
+    assert_eq!(read.values, [Some(STANDARD.encode(b"value-2"))]);
+    assert_eq!(storage.collect_data().await.unwrap().deleted, 0);
+    eprintln!(
+        "Upload-free data collection passed: 142 allocated attempts, 129 orphan pages reclaimed, revision 3 intact. Disposable prefix: {prefix}"
+    );
+}

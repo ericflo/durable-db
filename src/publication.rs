@@ -17,6 +17,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 pub(crate) mod control;
+mod data_collection;
 mod proposal;
 
 const HEAD: &str = "durable-db-root";
@@ -24,6 +25,7 @@ const CURSOR: &str = "durable-db-gc";
 const INDEX_CURSOR: &str = "durable-db-index-gc";
 const PROPOSAL_CURSOR: &str = "durable-db-proposal-gc";
 const HELP_CURSOR: &str = "durable-db-proposal-scan";
+const DATA_CURSOR: &str = "durable-db-data-gc";
 const MAX_INFO: usize = 9000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +78,7 @@ pub struct Published {
     helpers: Semaphore,
     proposal_cleanup: proposal::Cleanup,
     upload_budget: Option<Arc<Allocator>>,
+    global_collection: bool,
 }
 impl Published {
     pub async fn open(
@@ -113,7 +116,7 @@ impl Published {
         for _ in 0..8 {
             let bucket = authority.read().await?;
             if let Some(format) = bucket.info.get("durable-db-format") {
-                if !["3", "4"].contains(&format.as_str())
+                if !["3", "4", "5"].contains(&format.as_str())
                     || bucket.info.get("durable-db-prefix").map(String::as_str) != Some(prefix)
                 {
                     bail!("publication directory is initialized with a different format or prefix");
@@ -124,10 +127,10 @@ impl Published {
                     );
                 }
                 root(&bucket.info)?;
-                if format == "4" {
+                if format != "3" {
                     upload_budget::validate(&bucket)?;
                 }
-                return Ok(Self::initialized(files, authority, format == "4"));
+                return Ok(Self::initialized(files, authority, format));
             }
             if bucket
                 .info
@@ -137,24 +140,22 @@ impl Published {
                 bail!("unrecognized durable-db bucket metadata");
             }
             let mut info = bucket.info.clone();
-            info.insert(
-                "durable-db-format".into(),
-                if limits.is_some() { "4" } else { "3" }.into(),
-            );
+            let format = if limits.is_some() { "5" } else { "3" };
+            info.insert("durable-db-format".into(), format.into());
             info.insert("durable-db-prefix".into(), prefix.into());
             if let Some(limits) = limits {
                 info.insert(upload_budget::FIELD.into(), upload_budget::initial(limits)?);
                 info.insert(
                     HEAD.into(),
                     serde_json::to_string(&BudgetRoot {
-                        upload_format: 4,
+                        upload_format: 5,
                         directory: None,
                     })?,
                 );
             }
             budget(&info)?;
             if authority.replace(&bucket, info).await?.is_some() {
-                return Ok(Self::initialized(files, authority, limits.is_some()));
+                return Ok(Self::initialized(files, authority, format));
             }
         }
         bail!("publication directory initialization is contended; retry startup")
@@ -162,9 +163,9 @@ impl Published {
     fn initialized(
         mut files: Arc<dyn Storage>,
         authority: Arc<dyn Authority>,
-        budgeted: bool,
+        format: &str,
     ) -> Self {
-        let upload_budget = budgeted.then(|| Arc::new(Allocator::new(authority.clone())));
+        let upload_budget = (format != "3").then(|| Arc::new(Allocator::new(authority.clone())));
         if let Some(allocator) = &upload_budget {
             files = Arc::new(upload_budget::Files {
                 inner: files,
@@ -180,6 +181,7 @@ impl Published {
             files,
             authority,
             upload_budget,
+            global_collection: format == "5",
         }
     }
     /// Shares the engine's bounded cache; no extra unaccounted index cache.
@@ -269,10 +271,13 @@ struct BudgetRoot {
     directory: Option<Root>,
 }
 fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
-    if info.get("durable-db-format").map(String::as_str) == Some("4") {
+    if let Some(format) = budgeted_format(info) {
         let envelope: BudgetRoot =
             serde_json::from_str(info.get(HEAD).context("missing budgeted root")?)?;
-        anyhow::ensure!(envelope.upload_format == 4, "unsupported budgeted root");
+        anyhow::ensure!(
+            envelope.upload_format == format,
+            "unsupported budgeted root"
+        );
         if let Some(root) = &envelope.directory {
             root.validate()?;
         }
@@ -287,9 +292,9 @@ fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
         .transpose()
 }
 fn write_root(info: &mut BTreeMap<String, String>, root: Root) -> anyhow::Result<()> {
-    let encoded = if info.get("durable-db-format").map(String::as_str) == Some("4") {
+    let encoded = if let Some(format) = budgeted_format(info) {
         serde_json::to_string(&BudgetRoot {
-            upload_format: 4,
+            upload_format: format,
             directory: Some(root),
         })?
     } else {
@@ -297,6 +302,19 @@ fn write_root(info: &mut BTreeMap<String, String>, root: Root) -> anyhow::Result
     };
     info.insert(HEAD.into(), encoded);
     Ok(())
+}
+fn budgeted_format(info: &BTreeMap<String, String>) -> Option<u8> {
+    match info.get("durable-db-format").map(String::as_str) {
+        Some("4") => Some(4),
+        Some("5") => Some(5),
+        _ => None,
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DataObservation {
+    format: u8,
+    fence: Option<String>,
 }
 fn cursor<'a>(bucket: &'a Bucket, field: &str) -> Option<&'a str> {
     bucket
@@ -317,6 +335,14 @@ pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
         (INDEX_CURSOR, 109),
         (PROPOSAL_CURSOR, 111),
         (HELP_CURSOR, 111),
+        (
+            DATA_CURSOR,
+            if info.get("durable-db-format").map(String::as_str) == Some("5") {
+                111
+            } else {
+                0
+            },
+        ),
         (HEAD, 1024),
         (
             upload_budget::FIELD,
@@ -401,7 +427,14 @@ impl Storage for Published {
                 bytes,
                 version: Version(UpdateVersion {
                     e_tag: Some(value.clone()),
-                    version: Some(bucket.revision.to_string()),
+                    version: Some(if self.global_collection {
+                        serde_json::to_string(&DataObservation {
+                            format: 5,
+                            fence: bucket.info.get("durable-db-fence").cloned(),
+                        })?
+                    } else {
+                        bucket.revision.to_string()
+                    }),
                 }),
             }));
         }
@@ -455,6 +488,9 @@ impl Storage for Published {
     async fn maintenance(&self) -> anyhow::Result<()> {
         self.authority.maintenance().await?;
         self.collect_manifests().await?;
+        if self.global_collection {
+            self.collect_data().await?;
+        }
         Ok(())
     }
 }

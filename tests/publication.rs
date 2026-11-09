@@ -93,6 +93,11 @@ impl Authority for Metadata {
     }
 }
 async fn setup() -> (Arc<Published>, Arc<Metadata>) {
+    setup_with_budget(None).await
+}
+async fn setup_with_budget(
+    limits: Option<durable_db::upload_budget::UploadLimits>,
+) -> (Arc<Published>, Arc<Metadata>) {
     let files =
         Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
     let gets = Arc::new(AtomicUsize::new(0));
@@ -118,7 +123,7 @@ async fn setup() -> (Arc<Published>, Arc<Metadata>) {
     });
     (
         Arc::new(
-            Published::open(files, metadata.clone(), "test")
+            Published::open_with_budget(files, metadata.clone(), "test", limits)
                 .await
                 .unwrap(),
         ),
@@ -470,7 +475,18 @@ async fn lost_bucket_ack_recovers_receipt_after_both_collectors_and_empty_cache(
 }
 #[tokio::test]
 async fn ten_thousand_databases_split_page_recover_and_collect() {
-    let (store, metadata) = setup().await;
+    for limits in [
+        None,
+        Some(durable_db::upload_budget::UploadLimits {
+            bytes: 1 << 30,
+            attempts: 100_000,
+        }),
+    ] {
+        qualify_large_directory(limits).await;
+    }
+}
+async fn qualify_large_directory(limits: Option<durable_db::upload_budget::UploadLimits>) {
+    let (store, metadata) = setup_with_budget(limits).await;
     // Permute insertion order to exercise both sides of splits and first-key changes.
     let mut expected = Vec::new();
     for n in 0..10_000 {
@@ -498,6 +514,11 @@ async fn ten_thousand_databases_split_page_recover_and_collect() {
     expected.sort();
     let state = metadata.read().await.unwrap();
     let root: serde_json::Value = serde_json::from_str(&state.info["durable-db-root"]).unwrap();
+    let root = if limits.is_some() {
+        &root["directory"]
+    } else {
+        &root
+    };
     assert_eq!(root["count"], expected.len());
     assert!(root["height"].as_u64().unwrap() >= 3);
     assert!(serde_json::to_vec(&state.info).unwrap().len() < 1500);

@@ -1,0 +1,6 @@
+# kind config log-tag heap expected-counterexample
+safe GlobalCollection.cfg global-collection 2g -
+unsafe UnsafeGlobalOrigin.cfg global-origin 1g LiveObjects
+unsafe UnsafeGlobalFence.cfg global-fence 1g LiveObjects
+unsafe UnsafeGlobalLateList.cfg global-late-list 1g LiveObjects
+safe GlobalCollectionConcurrent.cfg global-collection-concurrent 2g -

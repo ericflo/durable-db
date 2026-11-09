@@ -106,7 +106,7 @@ Info, reads, writes, and write-receipt replay authorize against the same validat
 
 ## Cumulative upload admission
 
-Current source builds support [format-4 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
+Current source builds support [format-5 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
 
 The administrator GET returns `configuration_revision`, `limits: {bytes, attempts}`, and `allocated: {bytes, attempts}`. Allocation includes whole grants, uncertain allocations, and unused credit lost with a process. It is deliberately conservative. POST takes absolute replacement ceilings:
 
@@ -114,7 +114,7 @@ The administrator GET returns `configuration_revision`, `limits: {bytes, attempt
 {"request_id":"fund-next","expected_configuration_revision":0,"limits":{"bytes":2147483648,"attempts":200000}}
 ```
 
-At least one ceiling must increase and neither may decrease. The result contains current `status` and `replayed`. Eight administrative receipts retain exact request identity; an evicted request's stale expected revision conflicts. Retry an uncertain change with its identical ID and body. Startup flags never reset an initialized ledger. Reads and metadata collection remain possible when exhausted; data-page GC and compaction currently require funded uploads. Exhaustion returns `503 storage_unavailable` because a previously submitted proposal may still commit. Resolve the original write identity after a refill; do not reinterpret exhaustion as a definite abort.
+At least one ceiling must increase and neither may decrease. The result contains current `status` and `replayed`. Eight administrative receipts retain exact request identity; an evicted request's stale expected revision conflicts. Retry an uncertain change with its identical ID and body. Startup flags never reset an initialized ledger. Reads, metadata collection, and the format-5 global data-page sweep remain possible when exhausted. Compaction and the older format-4 page collector require funded uploads. Exhaustion returns `503 storage_unavailable` because a previously submitted proposal may still commit. Resolve the original write identity after a refill; do not reinterpret exhaustion as a definite abort.
 
 ## Errors and bounds
 

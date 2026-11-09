@@ -8,6 +8,7 @@ vars == <<running, allocated, ceiling, issued, owner, amount, current, remaining
           charged, delivered, refunded>>
 None == "none"
 ChargedUnits == Cardinality(charged) * MaxAttempts
+AvailableUnits == Cardinality(UNION {{<<n,u>>: u \in 1..remaining[n]}: n \in Nodes})
 DeliveredUnits == Cardinality({p \in Operations \X (1..MaxAttempts): p[2] <= delivered[p[1]]})
 
 Init == /\ running = Nodes /\ allocated = 0 /\ ceiling = InitialCapacity /\ issued = {}
@@ -18,12 +19,12 @@ Init == /\ running = Nodes /\ allocated = 0 /\ ceiling = InitialCapacity /\ issu
 \* The authority spends the entire grant before any local credit is usable.
 \* A lost acknowledgement can strand the grant; it cannot create more credit.
 Reserve(n,g,units,ack) ==
-    /\ n \in running /\ remaining[n] = 0 /\ g \notin issued
+    /\ n \in running /\ g \notin issued
     /\ units \in 1..Capacity /\ allocated + units <= ceiling
     /\ allocated' = allocated + units /\ issued' = issued \cup {g}
     /\ owner' = [owner EXCEPT ![g] = n] /\ amount' = [amount EXCEPT ![g] = units]
-    /\ current' = [current EXCEPT ![n] = IF ack THEN g ELSE None]
-    /\ remaining' = [remaining EXCEPT ![n] = IF ack THEN units ELSE 0]
+    /\ current' = [current EXCEPT ![n] = IF ack THEN g ELSE @]
+    /\ remaining' = [remaining EXCEPT ![n] = IF ack THEN @ + units ELSE @]
     /\ UNCHANGED <<running, ceiling, charged, delivered, refunded>>
 Charge(n,o) ==
     /\ n \in running /\ o \notin charged /\ remaining[n] >= MaxAttempts
@@ -76,7 +77,7 @@ TypeOK == /\ running \subseteq Nodes /\ allocated \in 0..ceiling /\ ceiling \in 
           /\ current \in [Nodes -> Grants \cup {None}] /\ remaining \in [Nodes -> 0..Capacity]
           /\ charged \subseteq Operations /\ delivered \in [Operations -> 0..MaxAttempts]
           /\ refunded \subseteq issued
-DurableCoverage == ChargedUnits <= allocated
+DurableCoverage == ChargedUnits + AvailableUnits <= allocated
 DeliveryCovered == DeliveredUnits <= ChargedUnits
 UploadBound == DeliveredUnits <= ceiling
 Spec == Init /\ [][Next]_vars

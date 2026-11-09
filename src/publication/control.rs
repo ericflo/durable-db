@@ -8,7 +8,7 @@ const CONTROL: &str = "durable-db-control";
 const LEGACY_PROBES: [&str; 2] = ["durable-db-probe", "durable-db-read-fence"];
 
 pub(crate) fn encode(info: &BTreeMap<String, String>) -> anyhow::Result<BTreeMap<String, String>> {
-    if info.get(FORMAT).map(String::as_str) != Some("4") {
+    if super::budgeted_format(info).is_none() {
         return Ok(info.clone());
     }
     ensure!(!info.contains_key(CONTROL), "nested control envelope");
@@ -35,13 +35,13 @@ pub(crate) fn decode(
         // Legacy format 3 remains byte-compatible. No released format-4
         // namespace exists without the packed control document.
         ensure!(
-            wire.get(FORMAT).map(String::as_str) != Some("4"),
+            super::budgeted_format(&wire).is_none(),
             "missing control envelope"
         );
         return Ok(wire);
     };
     ensure!(
-        wire.get(FORMAT).map(String::as_str) == Some("4") && wire.contains_key(HEAD),
+        super::budgeted_format(&wire).is_some() && wire.contains_key(HEAD),
         "invalid control envelope markers"
     );
     let mut control: BTreeMap<String, String> =
@@ -71,7 +71,7 @@ pub(super) fn reserved_wire(
     info: &BTreeMap<String, String>,
 ) -> anyhow::Result<BTreeMap<String, String>> {
     let mut wire = encode(info)?;
-    if info.get(FORMAT).map(String::as_str) == Some("4") {
+    if super::budgeted_format(info).is_some() {
         for key in LEGACY_PROBES {
             wire.insert(key.into(), "0".repeat(36));
         }

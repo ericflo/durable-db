@@ -102,8 +102,11 @@ fn valid_id(id: &str) -> bool {
 }
 fn record(bucket: &Bucket) -> anyhow::Result<Record> {
     ensure!(
-        bucket.info.get("durable-db-format").map(String::as_str) == Some("4"),
-        "upload budget requires publication format 4"
+        matches!(
+            bucket.info.get("durable-db-format").map(String::as_str),
+            Some("4" | "5")
+        ),
+        "upload budget requires publication format 4 or 5"
     );
     let record: Record = serde_json::from_str(
         bucket
@@ -153,9 +156,12 @@ impl Allocator {
             charged(bytes);
             return Ok(());
         }
-        // Discard the unused tail of an insufficient grant. Keeping or
-        // transferring it would require additional accounting; no refunds.
-        *remaining = UploadLimits::default();
+        // Replenish only the deficient dimensions. Existing rights remain
+        // confirmed and usable even if the additional grant response is lost.
+        let needed = UploadLimits {
+            bytes: bytes.saturating_sub(remaining.bytes),
+            attempts: u64::from(remaining.attempts == 0),
+        };
         for attempt in 0..8 {
             let before = self.authority.read().await?;
             let mut record = record(&before)?;
@@ -163,13 +169,21 @@ impl Allocator {
                 bytes: record.status.limits.bytes - record.status.allocated.bytes,
                 attempts: record.status.limits.attempts - record.status.allocated.attempts,
             };
-            if available.bytes < bytes || available.attempts == 0 {
+            if available.bytes < needed.bytes || available.attempts < needed.attempts {
                 REGISTRY.event(Event::UploadBudgetExhausted, 1);
                 bail!("immutable upload budget exhausted");
             }
             let grant = UploadLimits {
-                bytes: GRANT_BYTES.max(bytes).min(available.bytes),
-                attempts: GRANT_ATTEMPTS.min(available.attempts),
+                bytes: if needed.bytes > 0 {
+                    GRANT_BYTES.max(needed.bytes).min(available.bytes)
+                } else {
+                    0
+                },
+                attempts: if needed.attempts > 0 {
+                    GRANT_ATTEMPTS.min(available.attempts)
+                } else {
+                    0
+                },
             };
             record.status.allocated.bytes += grant.bytes;
             record.status.allocated.attempts += grant.attempts;
@@ -179,10 +193,10 @@ impl Allocator {
             if self.authority.replace(&before, info).await?.is_some() {
                 // No await/cancellation point between confirmed allocation
                 // and spending this request's charge. An unknown CAS result
-                // exits above with zero usable local rights.
+                // exits above without adding any unconfirmed local rights.
                 *remaining = UploadLimits {
-                    bytes: grant.bytes - bytes,
-                    attempts: grant.attempts - 1,
+                    bytes: remaining.bytes + grant.bytes - bytes,
+                    attempts: remaining.attempts + grant.attempts - 1,
                 };
                 REGISTRY.event(Event::UploadGrantBytes, grant.bytes as usize);
                 REGISTRY.event(Event::UploadGrantAttempts, grant.attempts as usize);
