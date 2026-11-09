@@ -2,7 +2,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve, join } from 'node:path';
-import { DurableDb } from '../../clients/javascript/client.mjs';
+import { DurableDb } from '@durable-db/client';
 
 const adminFile = process.env.DURABLE_DB_ADMIN_TOKEN_FILE;
 if (!adminFile)

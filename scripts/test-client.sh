@@ -18,6 +18,7 @@ export DURABLE_DB_TEST_URL="http://127.0.0.1:$port"
 export DURABLE_DB_TEST_TOKEN_FILE="$tmp/token"
 cd "$repo/clients/javascript"
 npm ci --no-audit --no-fund
+npm --prefix "$repo/examples/web-app" ci --no-audit --no-fund
 npm run format:check
 npm run typecheck
 npm test

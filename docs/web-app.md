@@ -1,42 +1,41 @@
-# General web application storage
+# Web application storage
 
-The repository includes a [TypeScript web application example](https://github.com/ericflo/durable-db/tree/main/examples/web-app) with a local HTTP API and real-database integration tests. Repository access is required while the source is private. Its storage layer demonstrates settings, a task board, explicit indexes and pagination; it uses Node.js 24 without a TypeScript build step.
+Use the JSON SDK for ordinary application data:
 
 ```ts
-import { DurableDb } from '../../clients/javascript/client.mjs';
-import { TaskStore } from './storage.ts';
+import { Database } from '@durable-db/client';
 
-const database = new DurableDb({
-  url: 'http://127.0.0.1:7654',
-  database: 'my-application',
-  token: scopedApplicationToken,
-});
-const tasks = new TaskStore(database);
-
-// Retain this identity once per user intent, across HTTP retries.
-const requestId = crypto.randomUUID();
-const created = await tasks.createTask(requestId, 'Draft the release notes');
-const page = await tasks.listOpen(undefined, 20);
+const db = new Database({ url, database: 'my-app', token });
+await db.set('settings', { theme: 'dark' });
+const settings = await db.get<{ theme: string }>('settings');
+const tasks = await db.list<Task>({ prefix: 'tasks/', limit: 20 });
 ```
 
-The example keeps database credentials on the application server. A scoped token permits access to its database; application authentication and per-user authorization remain the web application's responsibility.
+The private source repository includes `examples/web-app/`: a short typed storage module, Hono routes, Zod validation, local setup and HTTP integration tests. Its README has complete startup and curl commands. The client package is linked locally while the project remains private.
 
-## Records and atomic changes
+## Related changes
 
-Creating a task writes its record, its open-task index entry and an application receipt in one transaction. Completing it changes the record and removes the index entry atomically. This illustrates application-maintained indexes and related-record changes without cross-database transactions.
+Completing a task and incrementing a counter takes one transaction:
 
-An application receipt binds an intent ID to its input fingerprint and original result. A retry reads that receipt first. If it is absent, the transaction checks the same revision and writes the receipt with the business effect. Competing or delayed attempts cannot both publish an absent-receipt transition. Reusing an intent ID with different input fails.
+```ts
+await db.transaction(async (tx) => {
+  const task = await tx.get<Task>(`tasks/${id}`);
+  if (!task || task.completed) return;
 
-These receipts consume the database's quota. Their retention must cover the application's accepted retry lifetime; deleting a receipt prematurely can make a delayed retry apply again. The pattern protects database changes, not external payments or messages. The example injects a lost successful commit response and checks that replay changes the database exactly once.
+  const count = (await tx.get<number>('stats/completed')) ?? 0;
+  tx.set(`tasks/${id}`, { ...task, completed: true });
+  tx.set('stats/completed', count + 1);
+});
+```
 
-## Edits and pagination
+Concurrent completions preserve both updates. Repeating completion does not increment the counter again. Task creation uses a stable task ID, so retrying the same creation returns the existing task. Settings use a simple last-write-wins replacement.
 
-Settings demonstrate optimistic editing: read a value and revision, prepare one request with an operation ID, then commit against that revision. A conflicting edit returns 409 so the UI can reload and reconcile. An uncertain response requires the same saved request. The database's recent HTTP receipt window is bounded, so late unresolved edits can require application reconciliation.
+The SDK handles JSON encoding, snapshot revisions and safe transport retries. Definite conflicts can rerun the callback; keep external side effects outside it. Lost commit responses retry the original request. An unresolved outcome raises `UncertainCommitError` rather than silently rerunning an operation that may already have committed. See [clients](clients.md) for limits and recovery behavior.
 
-Open tasks use a prefix scan and record lookups at the same revision. The cursor contains the last key and revision. A write between pages invalidates the snapshot and returns 409; restart the listing. This provides explicit consistency without pretending cursors are retained historical snapshots.
+## Pagination and deployment
 
-## Development checks
+Lists return `{ items, cursor }` in UTF-8 byte order. Pass the opaque cursor back with the same prefix. Any database write between pages invalidates the cursor; a 409 means restart the listing. Cursors do not retain historical snapshots.
 
-The example's setup command saves its protected-provisioning intent before contacting the database and writes a one-hour application token to a private file. Its localhost server accepts JSON requests and keeps credentials out of responses. The example README provides complete startup and curl commands.
+Setup creates a protected database and writes a one-hour scoped credential privately. The application keeps that credential on its server. This localhost demonstration has no user login; a deployed application supplies authentication and per-user authorization. A database token grants access to its entire database.
 
-Public client declarations and examples are checked with TypeScript. Four HTTP integration cases cover lost responses and duplicate intents, concurrent creation and atomic index removal, stale pagination, and settings conflicts. See [clients](clients.md) for the lower-level API and Pi adapter, and [the architecture reassessment](architecture-reassessment.md) for the open performance gate. This example demonstrates semantics; it is not evidence that current cloud latency meets a production web application's needs.
+The tests exercise actual HTTP storage, including concurrent task completion and duplicate requests. SDK tests separately inject lost responses, definite conflicts and receipt eviction. They establish behavior within their checked cases; the [architecture reassessment](architecture-reassessment.md) still gates cloud latency and production suitability.

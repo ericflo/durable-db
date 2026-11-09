@@ -15,3 +15,5 @@ node_modules/
 /.artifacts/
 
 __pycache__/
+
+/clients/javascript/dist/

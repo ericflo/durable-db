@@ -53,6 +53,24 @@ Current source builds additionally support [idempotent protected creation and du
 
 Fresh cloud namespaces can also enable [cumulative immutable-upload admission](docs/design-upload-admission.md). Its byte and attempt ceilings survive restarts and scaling, and administrators can raise them without resetting spent credit. This shared ceiling is one part of resource protection; format 5 also reclaims unreachable pages without upload credit. Per-tenant spend isolation and sustained-load qualification remain production gates.
 
+## Application code
+
+The TypeScript SDK keeps JSON encoding, revisions and transaction retries inside the client:
+
+```ts
+import { Database } from '@durable-db/client';
+
+const db = new Database({ url, database: 'my-app', token });
+await db.set('settings', { theme: 'dark' });
+
+await db.transaction(async (tx) => {
+  const count = (await tx.get<number>('views')) ?? 0;
+  tx.set('views', count + 1);
+});
+```
+
+The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Current source builds are required.
+
 ## Scale without moving the database
 
 ```text

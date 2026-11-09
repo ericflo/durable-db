@@ -6,8 +6,8 @@
   "license": "Apache-2.0",
   "exports": {
     ".": {
-      "types": "./client.d.mts",
-      "import": "./client.mjs"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./pi-reference": {
       "types": "./pi-reference.d.mts",
@@ -20,9 +20,11 @@
   },
   "scripts": {
     "test": "vitest run --testTimeout=30000 --hookTimeout=30000",
-    "format": "prettier --config .prettierrc.json --write \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\"",
-    "format:check": "prettier --config .prettierrc.json --check \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\"",
-    "typecheck": "tsc --project ../../examples/web-app/tsconfig.json"
+    "format": "prettier --config .prettierrc.json --write \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\" \"src/*.ts\"",
+    "format:check": "prettier --config .prettierrc.json --check \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\" \"src/*.ts\"",
+    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project ../../examples/web-app/tsconfig.json",
+    "build": "tsc --project tsconfig.json",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@earendil-works/pi-durable": "1.5.0"
@@ -35,5 +37,5 @@
     "typescript": "7.0.2",
     "vitest": "4.1.12"
   },
-  "types": "./client.d.mts"
+  "types": "./dist/index.d.ts"
 }

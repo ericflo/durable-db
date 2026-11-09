@@ -1,22 +1,33 @@
 # Clients and pi-durable
 
-`clients/javascript/client.mjs` is a small fetch-based client. It keeps revision and request-ID semantics explicit and refuses redirects: a redirected response cannot acknowledge the original mutation. Connect directly to the intended HTTPS origin; an HTTP-to-HTTPS redirect is not a substitute. The initial API works with any HTTP client.
+The TypeScript JSON API provides `get`, `set`, `delete`, ordered `list` and atomic `transaction` calls:
 
+```ts
+import { Database } from '@durable-db/client';
 
-The client exports TypeScript declarations for its wire contract and Pi adapters. The [general web application example](web-app.md) covers settings, pagination and atomic record/index changes with persistent application intent IDs. Its readable TypeScript storage module, local API and integration tests live in `examples/web-app/`.
+const db = new Database({ url, database: 'my-app', token: scopedApplicationToken });
+await db.set('settings', { theme: 'dark' });
+const settings = await db.get<{ theme: string }>('settings');
 
-```js
-import { DurableDb, encode } from './client.mjs';
-const db = new DurableDb({ url, database: 'demo', token });
-const snapshot = await db.read({ keys: ['counter'] });
-const operation = {
-  expected_revision: snapshot.revision,
-  request_id: crypto.randomUUID(),
-  writes: [{ key: 'message', value: encode('Hello') }],
-};
-await db.commit(operation);
-// On an unknown transport outcome, retry operation unchanged.
+await db.transaction(async (tx) => {
+  const count = (await tx.get<number>('views')) ?? 0;
+  tx.set('views', count + 1);
+});
 ```
+
+The [web application example](web-app.md) uses this API for a task board, preferences and an atomic completion counter. The package is private; the source example links `@durable-db/client` locally and builds it with `npm ci`. Node.js 24 is the tested runtime. Type parameters describe application schemas and do not validate stored data at runtime.
+
+## JSON API behavior
+
+Missing keys return `undefined`. Values are plain finite JSON, bounded to 64 KiB and 64 nesting levels. Transactions allow 128 distinct read keys, 128 write keys and a 1 MiB encoded request; reads see earlier staged writes. `list` returns `{ items: [{ key, value }], cursor }`, with 1–1,000 records per page. Cursors bind prefix and revision; a write between pages returns 409 and requires restarting the listing.
+
+The callback can rerun after a definite conflict, up to five attempts. Await every transaction read and keep external side effects outside the callback. Lost commit acknowledgements retry the identical request up to five times. If publication remains unresolved, `UncertainCommitError` exposes the original wire request for reconciliation; do not blindly repeat a non-idempotent operation. `RetryLimitError` reports exhausted retries without uncertain publication. Individual HTTP attempts time out after 35 seconds; these bounds do not impose a deadline on arbitrary callback code.
+
+The SDK stores no hidden application receipts. Across separate application requests, use stable business identities or application idempotency records where needed. Credentials belong on the application server, never in a browser bundle.
+
+## Wire API and provisioning
+
+`DurableDb` is the lower-level binary wire client used by the Pi adapters and provisioning tools. It exposes `read`, `commit`, `encode`, explicit revisions and request IDs. Each call makes one HTTP attempt. Retry uncertain commits unchanged. Redirects are refused; connect directly to the final HTTPS origin.
 
 For provisioning with a current source build, persist a creation intent and call `await db.createProtected({request_id, limits})` using administrator credentials. Retry that same object after an unknown outcome. It returns `{info, replayed}` with the original creation info. `db.create(limits)` remains the legacy format-1 operation for compatibility. `db.changeAccess({request_id, expected_policy_revision, change})` exposes the administrative [policy API](api.md#durable-token-revocation) with explicit retry identity. Use `await db.issueToken({write: true, ttl_seconds: 3600})` for a database-scoped application credential. Protected databases return its `token_id` alongside the bearer token for later revocation. Tenant applications receive this scoped token instead of the provisioning credential.
 

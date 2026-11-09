@@ -5,5 +5,12 @@
   "scripts": {
     "start": "node server.ts",
     "test": "node --test storage.test.ts"
+  },
+  "dependencies": {
+    "@durable-db/client": "file:../../clients/javascript",
+    "@hono/node-server": "2.1.6",
+    "@hono/zod-validator": "0.9.1",
+    "hono": "4.13.17",
+    "zod": "4.6.7"
   }
 }

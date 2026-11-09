@@ -1,40 +1,75 @@
-# JavaScript and TypeScript client
+# JavaScript and TypeScript
 
-An ESM HTTP client for durable-db, with TypeScript declarations for requests, results, database policies and both Pi adapters. The package remains private while the database is experimental. It runs in environments with `fetch`, Web Crypto and the standard encoding APIs; Node.js 24 is the tested server runtime.
+Typed JSON storage for server-side applications. The package is private while durable-db is experimental; the [runnable task board](../../examples/web-app/README.md) links it locally. Node.js 24 is the tested runtime.
 
 ```ts
-import { DurableDb, encode } from './client.mjs';
-import type { CommitRequest } from './client.mjs';
+import { Database } from '@durable-db/client';
 
-const database = new DurableDb({
-  url: 'http://127.0.0.1:7654',
-  database: 'my-application',
-  token: applicationToken,
-});
+const db = new Database({ url, database: 'my-app', token });
 
-const snapshot = await database.read({ keys: ['settings/theme'] });
-const intent: CommitRequest = {
-  expected_revision: snapshot.revision,
-  request_id: crypto.randomUUID(),
-  writes: [{ key: 'settings/theme', value: encode('dark') }],
-};
-await database.commit(intent);
+await db.set('settings', { theme: 'dark' });
+const settings = await db.get<{ theme: string }>('settings');
+await db.delete('draft');
+
+const page = await db.list<Task>({ prefix: 'tasks/', limit: 20 });
+const next = page.cursor
+  ? await db.list<Task>({ prefix: 'tasks/', cursor: page.cursor })
+  : undefined;
 ```
 
-Retain `intent` before sending it. After uncertainty, retry that exact object. A definite conflict requires a fresh read and an application decision. The client makes one HTTP attempt per call; it never silently reruns application logic. Responses use base64 values and UTF-8 keys. See the [HTTP contract](../../docs/api.md) for bounds, error handling and the finite recent-receipt window.
+`get<T>` returns `T | undefined`; stored `null` remains `null`. Values must be plain, finite JSON. Types describe your application's schema; they do not perform runtime schema validation. Credentials belong on the application server, never in a browser bundle.
 
-Use a database-scoped token in server-side application code. `createProtected`, `issueToken` and `changeAccess` require an administrator credential and belong in provisioning code. Redirects are rejected; connect to the final HTTPS origin directly.
+## Transactions
 
-The [web application example](../../examples/web-app/README.md) covers settings, pagination, atomic record/index updates and persistent application idempotency. It includes a local API and tests with lost acknowledgements and concurrent edits. The [Pi guide](../../docs/clients.md) explains Session ownership, takeover and Harness recovery.
+```ts
+await db.transaction(async (tx) => {
+  const count = (await tx.get<number>('page-views')) ?? 0;
+  tx.set('page-views', count + 1);
+  tx.set('last-view', { at: new Date().toISOString() });
+});
+```
 
-## Layout
+All reads use one database revision. Writes become visible together after the callback completes. Reads see earlier staged writes. The transaction returns the callback's result after confirmation, and a thrown callback publishes nothing.
 
-- `client.mjs` / `client.d.mts`: HTTP operations and the public typed wire contract.
-- `pi-indexed.mjs`: bounded indexed Pi adapter and ownership lifecycle.
-- `indexed/kv.mjs`: revision-pinned reads, detached writes and chunked records.
-- `indexed/records.mjs`: records and secondary indexes.
-- `indexed/documents.mjs`: document histories and content.
-- `pi-reference.mjs`: bounded reference adapter used for compatibility comparisons.
-- `*.test.mjs`: HTTP, conformance, fault and actual Harness tests.
+A definite conflict can rerun the callback, up to five attempts. Keep external side effects outside it and await every transaction read. Commit retries after a lost response reuse the identical request, without rerunning application logic. If the SDK cannot establish the outcome, `UncertainCommitError` carries that original request for reconciliation. Do not blindly rerun a non-idempotent operation after this error. `RetryLimitError` means the retry budget was exhausted without an uncertain publication. The SDK stores no extra application receipts.
 
-`npm run format:check` checks consistent formatting. `npm run typecheck` checks public declarations and executable TypeScript examples. `scripts/test-client.sh` from the repository root runs the complete local HTTP suite. Both checks are part of Woodpecker's build gate.
+For application-level replay across separate HTTP requests, use a stable business identity. The task board creates by task ID and completes only unfinished tasks, making those actions safe to repeat. More complex operations may need their own durable idempotency record.
+
+## Bounds and pagination
+
+| Operation | Limit |
+| --- | --- |
+| Key | 1–1,024 UTF-8 bytes, no NUL or unpaired surrogate |
+| JSON value | 64 KiB encoded JSON; at most 64 nesting levels |
+| Transaction | 128 distinct read keys, 128 write keys, 1 MiB encoded commit request |
+| List | 1–1,000 records per page; default 20 |
+| Retries | Five callback attempts; up to five identical commit attempts per callback; 35-second timeout per HTTP attempt |
+
+Server admission limits and database quotas also apply. These are work bounds, not a wall-clock deadline for an arbitrary callback. A read can retry transient transport/service failures up to five times.
+
+`list` returns `{ items: [{ key, value }], cursor }` in UTF-8 byte order. Cursors are opaque and bound to the prefix and revision. If any write changes the database between pages, the next page returns `DbError` with status 409. Restart the listing; cursors are not retained historical snapshots. Prefix scans and explicit indexes are the query model.
+
+## Provisioning and binary values
+
+`DurableDb` remains the lower-level wire client for provisioning, binary storage, adapters and explicit recovery:
+
+```ts
+import { DurableDb, encode } from '@durable-db/client';
+
+const wire = new DurableDb({ url, database: 'my-app', token });
+const snapshot = await wire.read({ keys: ['message'] });
+const request = {
+  expected_revision: snapshot.revision,
+  request_id: crypto.randomUUID(),
+  writes: [{ key: 'message', value: encode('Hello') }],
+};
+await wire.commit(request);
+```
+
+Retain the same request across uncertain retries. This layer makes one HTTP attempt per call and exposes base64 values. `createProtected`, `issueToken` and `changeAccess` need administrator credentials. Redirects are refused; connect to the final HTTPS origin. See the [HTTP contract](../../docs/api.md) and [Pi integration guide](../../docs/clients.md).
+
+## Development
+
+`src/` contains the JSON API, transaction scope, encoding and retry handling. `client.mjs` and `client.d.mts` define the wire API. `pi-indexed.mjs` and `indexed/` implement Pi storage; `pi-reference.mjs` is its reference adapter.
+
+`npm ci` builds the SDK. `npm run format:check` and `npm run typecheck` check the public API and executable examples. From the repository root, `scripts/test-client.sh` runs HTTP, lost-response, concurrent-update, Pi and application tests. Woodpecker requires these checks.

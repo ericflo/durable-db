@@ -11,3 +11,5 @@ data
 *.log
 spec/states
 spec/*_TTrace_*
+
+clients/javascript/dist
