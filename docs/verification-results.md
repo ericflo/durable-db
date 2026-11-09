@@ -359,3 +359,10 @@ The accompanying model explores **4,134 states**, 18,455 generated, depth 26, an
 Real B2 and versioned MinIO each pass sixteen frames containing 512 records, three injected lost upload responses resolved without another PUT, reconnect, persisted-prefix replay and exclusion of a delayed seventeenth frame. The batch path makes no authority reads, conditional replacements or read barriers. Selection uses the existing publication layer as a fixture. Both dedicated buckets, all physical versions and the temporary B2 workload key were removed. MinIO is not AWS qualification; this is component correctness evidence, not transaction throughput, automatic ownership or a production operating envelope. [The complete record](evidence/journal-2026-11-09.json) contains source hashes, test results and bounds.
 
 All 110 Rust tests pass locally, including the 10,005-database regression; opt-in cloud tests run separately as described above. Formatting and all-target clippy pass. The documentation build validates 580 local links.
+
+
+## Root renewal and repeated takeover candidate — 2026-11-09
+
+Two `RootControl` instances pass **952,597** and **3,417,821** states. They separately exercise three successive epochs and repeated root/child grants during a takeover. Five intentionally faulty variants fail the required overlap or grant-containment invariant. Two reachability controls establish successive activation and actual deadline extensions; the initial request-count-only coverage assertion was strengthened before acceptance.
+
+The root must renew through the exact current-epoch conditional register, anchor each grant at request start, drain from fence observation and conditionally activate before delegating. Lost replies cannot create permission. This model assumes an elapsed-time upper-bound contract and does not implement or prove its clock conversion. Election, placement, log history, resource bounds and runtime composition remain open. [The evidence record](evidence/root-control-candidate-2026-11-09.json) retains exact configurations and log hashes. No production status or runtime assumption changes follow from this component result.

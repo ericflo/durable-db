@@ -111,6 +111,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh Journal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-rootcontrol
+COPY spec/candidates/RootControl.tla spec/candidates/RootControl.checks spec/candidates/RootControl*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh RootControl && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-transactionclient
 COPY spec/TransactionClient.tla spec/TransactionClient.checks spec/TransactionClient.cfg spec/UnsafeTransactionRetry.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -168,6 +174,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=model-candidate-rootcontrol /checks/ /checks/
 COPY --from=model-candidate-delegatedgrant /checks/ /checks/
 COPY --from=model-candidate-ownedwal /checks/ /checks/
 COPY --from=model-journal /checks/ /checks/

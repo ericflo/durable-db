@@ -71,3 +71,12 @@ The checked instance contains one fixed root grant of length two, two independen
 The model checks that a valid child grant remains within the root permission and that none is valid after successor activation. `DelegatedGrant.checks` has a separate cached CI stage. Reproduce using `-config DelegatedGrant.cfg DelegatedGrant.tla` and each `DelegatedGrantUnsafe*.cfg` as above. Hashes and limits are in `docs/evidence/delegated-grant-candidate-2026-11-09.json`.
 
 This is the grant-containment component, **not** full hierarchical ownership. It assumes a valid root grant, atomic issuing and fence transitions, bounded-rate continuously advancing clocks, and unchanged assignment during a grant. It does not model root acquisition/renewal, repeated child renewals, reassignment, restarts, durable log composition, message/resource bounds, liveness or actual throughput. The deployment clock contract remains unresolved. No runtime clock dependency is adopted.
+
+
+## RootControl
+
+This component checks repeated renewal and takeover under an abstract elapsed-time upper bound. It includes exact conditional renewals, request-start expiry, fence-observation drain, conditional activation, lost replies and delegated grants. The three-epoch/no-child instance checks 952,597 states; the two-epoch/repeated-root-and-child instance checks 3,417,821. Five faulty variants detect overlapping roots or a child outliving its parent. Two coverage controls require actual successive activation and deadline extension.
+
+Run `scripts/check-candidate.sh RootControl`. The same descriptor is required in its own Woodpecker stage. The last two descriptor entries are forbidden-state coverage checks, not unsafe protocol variants. See `docs/verification.md` and `docs/evidence/root-control-candidate-2026-11-09.json` for exact bounds, assumptions and hashes.
+
+The abstract time coordinate is a specification device. The deployment clock conversion, arbitrary candidate elections, placement changes and journal composition are not established. Pauses and loss are represented by delaying or omitting an incarnation's actions; replacement uses a new epoch. The clock and WAL candidates retain distinct obligations and remain necessary research sources. This model does not change the runtime clock rule or implement a controller.

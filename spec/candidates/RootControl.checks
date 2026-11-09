@@ -1,0 +1,10 @@
+# Last two controls establish reachable coverage, not unsafe protocol variants.
+safe RootControl.cfg root-control 2g -
+safe RootControlRenewal.cfg root-control-renewal 2g -
+unsafe RootControlUnsafeLateRoot.cfg root-control-lateroot 2g RootExclusive
+unsafe RootControlUnsafeStaleRenewal.cfg root-control-stalerenewal 2g RootExclusive
+unsafe RootControlUnsafeSkipDrain.cfg root-control-skipdrain 2g RootExclusive
+unsafe RootControlUnsafeLongChild.cfg root-control-longchild 2g ChildWithinRoot
+unsafe RootControlUnsafeLateChild.cfg root-control-latechild 2g ChildWithinRoot
+unsafe RootControlCoverage.cfg root-control-coverage 2g NotAllActivated
+unsafe RootControlRenewalCoverage.cfg root-control-renewal-coverage 2g NotRenewedChild
