@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import time
@@ -30,8 +31,18 @@ def main():
     parser.add_argument('--admin-token-file', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--control-port', type=int, default=17840)
+    parser.add_argument('--steady-seconds', type=int, default=0,
+                        help='Optional bounded six-replica pilot, at most one hour, before disruption')
+    parser.add_argument('--observe-memory', action='store_true',
+                        help='Read only this namespace from kubelet statistics through the API proxy')
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
+    if not 0 <= args.steady_seconds <= 3600:
+        parser.error('The bounded pilot duration must be between zero and 3600 seconds')
+    if args.observe_memory and not args.steady_seconds:
+        parser.error('Memory observation requires a nonzero steady pilot duration')
+    if not re.search(r'@sha256:[0-9a-f]{64}$',args.image):
+        parser.error('Pin the database image by its immutable SHA-256 digest')
     run = uuid.uuid4().hex[:12]
     namespace = 'durable-db-qualification-' + run
     control = secrets.token_hex(32)
@@ -44,8 +55,10 @@ def main():
                   workload_sha256=hashlib.sha256(Path('scripts/cluster-workload.mjs').read_bytes()).hexdigest(),
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
                                      memory_cache_mib=8, disk_cache=False, maintenance_seconds=60,
-                                     upload_budget=dict(bytes=1073741824, attempts=100000)),
-                  phases=[], budget_observations=[], failures=[], limitations=[
+                                     upload_budget=dict(bytes=1073741824, attempts=100000),
+                                     steady_seconds=args.steady_seconds, memory_observation=args.observe_memory,
+                                     maximum_write_intents=100000),
+                  phases=[], budget_observations=[], resource_samples=[], failures=[], limitations=[
                       'Manual replica changes; no CPU-driven HPA claim.',
                       'Application-pod loss and namespace-scoped egress restriction; no host shutdown, node drain, rack failure or control-plane failure.',
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
@@ -116,6 +129,33 @@ def main():
             if now>=start+additional:return now
             time.sleep(3)
         raise RuntimeError('Acknowledged-write progress deadline exceeded')
+
+    def sample_resources():
+        sample = dict(time_utc=utc(), pods=[])
+        ready = pods()
+        for node in sorted({p['spec']['nodeName'] for p in ready if 'nodeName' in p['spec']}):
+            # Kubelet summaries contain aggregate resource counters, not pod
+            # credentials or application data. Keep only this task's namespace.
+            summary = json.loads(kube('get','--raw',f'/api/v1/nodes/{node}/proxy/stats/summary'))
+            for pod in summary.get('pods',[]):
+                ref = pod['podRef']
+                if ref['namespace'] != namespace or not any(ref['uid'] == p['metadata']['uid'] for p in ready):
+                    continue
+                for container in pod.get('containers',[]):
+                    if container['name'] != 'database':continue
+                    memory, cpu = container.get('memory',{}), container.get('cpu',{})
+                    sample['pods'].append(dict(pod=ref['name'],uid=ref['uid'],node=node,
+                        memory_observed_at=memory.get('time'),cpu_observed_at=cpu.get('time'),
+                        rss_bytes=memory.get('rssBytes'),working_set_bytes=memory.get('workingSetBytes'),
+                        usage_bytes=memory.get('usageBytes'),cpu_usage_nanoseconds=cpu.get('usageCoreNanoSeconds'),
+                        restart_count=next((c['restartCount'] for p in ready if p['metadata']['uid']==ref['uid']
+                            for c in p['status'].get('containerStatuses',[]) if c['name']=='database'),None)))
+        expected={p['metadata']['uid'] for p in ready if not p['metadata'].get('deletionTimestamp')}
+        if {p['uid'] for p in sample['pods']} != expected or not expected or any(p['rss_bytes'] is None or p['working_set_bytes'] is None for p in sample['pods']):
+            report['incomplete_resource_sample']=sample;save()
+            raise RuntimeError('Kubelet did not supply required task memory counters')
+        report['resource_samples'].append(sample);save()
+        return sample
 
     policy = dict(apiVersion='networking.k8s.io/v1',kind='NetworkPolicy',metadata=dict(name='storage-client'),
                   spec=dict(podSelector=dict(matchLabels={'durable-db-role':'storage-client'}),policyTypes=['Ingress','Egress'],
@@ -206,6 +246,24 @@ def main():
             kube('scale','deployment','durable-db',f'--replicas={count}')
             placement=route(wait_replicas(count));budget(f'scale-{count}')
             phase(f'scale-{count}',placement=placement,writes_acknowledged=progress())
+        if args.steady_seconds:
+            start=time.monotonic();last_progress=start;previous=snapshot()['writes_acknowledged']
+            steady_uids={p['metadata']['uid'] for p in pods() if not p['metadata'].get('deletionTimestamp')}
+            phase('steady-start',seconds=args.steady_seconds,writes_acknowledged=previous)
+            while time.monotonic()-start < args.steady_seconds:
+                state=snapshot();now=time.monotonic()
+                if state['writes_acknowledged']>previous:
+                    previous=state['writes_acknowledged'];last_progress=now
+                if now-last_progress>180:raise RuntimeError('Steady workload stopped making progress')
+                if args.observe_memory:
+                    sample=sample_resources()
+                    if {p['uid'] for p in sample['pods']}!=steady_uids or any(p['restart_count']!=0 for p in sample['pods']):
+                        raise RuntimeError('An unplanned API restart or replacement interrupted the memory pilot')
+                if int(now-start)//60 > int(report.get('steady_observed_seconds',0))//60:
+                    budget('steady-'+str(int(now-start)))
+                report['steady_observed_seconds']=now-start;save()
+                time.sleep(min(15,max(0,args.steady_seconds-(time.monotonic()-start))))
+            phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=snapshot()['writes_acknowledged'])
         victim=pods()[0]
         kube('delete','pod',victim['metadata']['name'],'--grace-period=0','--force','--wait=false')
         phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=route(wait_replicas(6)),writes_acknowledged=progress())
@@ -228,7 +286,7 @@ def main():
         kube('scale','deployment','durable-db','--replicas=3')
         phase('cold-three',placement=route(wait_replicas(3)),writes_acknowledged=progress())
         call('/pause',{});call('/verify',{});budget('cold-three')
-        state=snapshot();history=state.pop('history')
+        state=call('/status?history=1',timeout=60);history=state.pop('history')
         raw=''.join(json.dumps(record,separators=(',',':'))+'\n' for record in history).encode()
         args.output.with_suffix('.history.jsonl').write_bytes(raw)
         report.update(state);report['history_sha256']=hashlib.sha256(raw).hexdigest();report['complete']=True
@@ -243,7 +301,7 @@ def main():
             except Exception:pass
         save()
         if forward and forward.poll() is None:
-            try:report['partial_workload']=call('/status',timeout=10)
+            try:report['partial_workload']=call('/status?history=1',timeout=30)
             except Exception:pass
         raise
     finally:

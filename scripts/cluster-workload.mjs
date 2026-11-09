@@ -11,7 +11,8 @@ const prefix=process.env.DATABASE_PREFIX;
 const status={schema:1,state:'initializing',writes_acknowledged:0,reads_verified:0,http_attempt_statuses:{},failures:[],history:[],expected:[0,0,0,0]};
 const names=Array.from({length:4},(_,i)=>`${prefix}-writer-${i}`);
 const tokens=[];
-let running=false, workers=[], commandBusy=false;
+let running=false, workers=[], commandBusy=false, issued=0;
+const maxIntents=100000;
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const hash=value=>createHash('sha256').update(value).digest('hex');
 async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
@@ -35,6 +36,8 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
 async function writer(index) {
   try {
     while(running) {
+      if(issued>=maxIntents)throw new Error('Qualification write-intent bound reached');
+      issued++;
       const revision=status.expected[index], request_id=randomUUID();
       const value=Buffer.from(`${index}/${revision}`), key=String(revision).padStart(8,'0');
       const start=performance.now()/1000;
@@ -81,7 +84,10 @@ function authorized(request) {
 createServer(async(request,response)=>{
   response.setHeader('content-type','application/json');
   if(!authorized(request)){response.writeHead(401).end('{}');return;}
-  if(request.method==='GET'&&request.url==='/status'){response.end(JSON.stringify(status));return;}
+  if(request.method==='GET'&&request.url==='/status'){
+    response.end(JSON.stringify({...status,history:undefined,history_length:status.history.length,write_intents:issued}));return;
+  }
+  if(request.method==='GET'&&request.url==='/status?history=1'){response.end(JSON.stringify(status));return;}
   if(commandBusy){response.writeHead(409).end('{}');return;}
   commandBusy=true;
   try {
