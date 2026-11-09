@@ -32,6 +32,8 @@ Backup retention and recovery objectives are not yet selected. A proposed starti
 
 ## Implementation order
 
+**Current priority: [reassess the serving and durability architecture](architecture-reassessment.md).** The existing read barrier and shared publication path have not met the performance brief. Establish a safe ownership/read protocol and a measured batched durability path before expanding release or sustained-load qualification of a replacement.
+
 1. Close immediate admission and integrity gaps; enforce fresh dependency audits; measure the existing B2 protocol under contention. Keep latency distributions and failures in the same report.
 2. Decide the publication throughput design from those measurements. Start any batching/partitioning change in TLA+ and retain one shared B2/S3 implementation. Do not remove the conditional read barrier to improve a benchmark.
 3. Model and implement durable resource admission and authorization lifecycle. A physical reservation must account for uploads arriving after a worker pauses or dies. Refunding an expired reservation before proving that its uploads cannot arrive is unsafe. Logical bytes, current physical bytes, and cumulative provider spend need separate accounting.

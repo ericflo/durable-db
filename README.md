@@ -16,6 +16,8 @@ durable-db is an ordered key-value database written in Rust. Keep authoritative 
 | Automatic maintenance | Cooperative fenced garbage collection and incremental page compaction |
 | A checkable design | TLA+ specification, intentional broken-model counterexample, failure-injection tests |
 
+The current shared object-store read/publication path has not met the performance target. [Architecture reassessment](docs/architecture-reassessment.md) is the immediate priority; the passing safety and recovery checks do not close that gate.
+
 ## Start locally
 
 [v0.1.0](https://github.com/ericflo/durable-db/releases/tag/v0.1.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
