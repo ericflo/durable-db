@@ -227,7 +227,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh PartitionJournal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-latecontrol
+COPY spec/candidates/RootControl.tla spec/candidates/PartitionControl.tla spec/candidates/PartitionJournal.tla spec/candidates/LateControlCoverage.tla spec/candidates/LateControlCoverage.checks spec/candidates/LateControl*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh LateControlCoverage && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-candidate-latecontrol /checks/ /checks/
 COPY --from=proof-partition-journal /checks/ /checks/
 COPY --from=proof-partition-control /checks/ /checks/
 COPY --from=model-candidate-partitionjournal /checks/ /checks/

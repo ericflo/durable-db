@@ -79,6 +79,7 @@ for (const file of ['style.css', 'demo.js', 'icon.svg'])
   await copyFile(new URL(file, import.meta.url), new URL(file, out));
 await mkdir(new URL('evidence/', out), { recursive: true });
 for (const file of [
+  'late-control-candidate-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',

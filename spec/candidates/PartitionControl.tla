@@ -42,8 +42,11 @@ LoseOwnerReply(o) == /\ grants[o].pending = "reply"
 \* Freeze the old generation before any replacement can get a grant. The
 \* same-root drain covers old requests, including replies still in flight.
 \* Grants for other partitions keep being issued without provider mutations.
+\* A provider may apply an already-issued control update after permission ends.
+\* Such an update still requires the active coordinator identity to match; it
+\* never restores permission. Request/version/reply refinement is separate.
 StartMove(p, d) ==
-    /\ RootValid(p) /\ authority.owner = p
+    /\ roots[p].phase = "active" /\ authority.owner = p
     /\ placement[d].phase = "open" /\ placement[d].generation < Generations
     /\ placement' = [placement EXCEPT ![d] =
          [generation |-> @.generation + 1, phase |-> "frozen", root |-> p, drain |-> now]]
@@ -52,7 +55,7 @@ StartMove(p, d) ==
 \* A later root has already drained all grants from the previous root. It
 \* need not interpret a predecessor's local clock origin to finish a move.
 FinishMove(p, d) ==
-    /\ RootValid(p) /\ authority.owner = p /\ placement[d].phase = "frozen"
+    /\ roots[p].phase = "active" /\ authority.owner = p /\ placement[d].phase = "frozen"
     /\ (UnsafeMoveDrain \/ p > placement[d].root \/ now >= placement[d].drain + Lease)
     /\ placement' = [placement EXCEPT ![d].phase = "open"]
     /\ recoveredMove' = (recoveredMove \/ (p > placement[d].root))

@@ -83,8 +83,12 @@ ForgetScan(j) == /\ scans[j] # IdleScan
 \* The active coordinator conditionally selects an immutable prefix in the
 \* shared authority. This abstracts request/reply uncertainty and exact reads
 \* of previously selected prefixes; it does not add a CAS per data batch.
+\* A completed scan can be selected after either permission expires: older
+\* generations have permanently ended, and selection remains immutable. The
+\* provider must still fence a superseded coordinator. This is an atomic
+\* application transition, not yet a request/version/reply refinement.
 Select(j, p) ==
-    /\ JournalValid(j) /\ RootValid(p) /\ authority.owner = p /\ scans[j].finished
+    /\ roots[p].phase = "active" /\ authority.owner = p /\ scans[j].finished
     /\ LET old == Older(j, scans[j].generation) IN
          /\ (cuts[old] = -1 \/ UnsafeJournalReseal)
          /\ cuts' = [cuts EXCEPT ![old] = scans[j].position]

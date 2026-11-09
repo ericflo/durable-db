@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-11-09T18:24:03.728266+00:00",
+  "base_commit": "d5068e1fe0c0c85764e5cfb849b2b2f5470bfd8f",
+  "status": "Four late-control event witnesses with all original safety invariants; atomic application model, no runtime adoption",
+  "standard_checker_passed": true,
+  "checks": [
+    {
+      "kind": "coverage",
+      "config": "LateControlFreeze.cfg",
+      "expected_invariant": "NotLateFreeze",
+      "states": 14421,
+      "generated": 61083,
+      "depth": 22,
+      "optimistic_fingerprint_collision_estimate": null
+    },
+    {
+      "kind": "coverage",
+      "config": "LateControlMove.cfg",
+      "expected_invariant": "NotLateMove",
+      "states": 15503,
+      "generated": 68829,
+      "depth": 24,
+      "optimistic_fingerprint_collision_estimate": null
+    },
+    {
+      "kind": "coverage",
+      "config": "LateControlSelection.cfg",
+      "expected_invariant": "NotLateSelection",
+      "states": 20504,
+      "generated": 103966,
+      "depth": 34,
+      "optimistic_fingerprint_collision_estimate": null
+    },
+    {
+      "kind": "coverage",
+      "config": "LateControlOwnerSelection.cfg",
+      "expected_invariant": "NotLateOwnerSelection",
+      "states": 141611,
+      "generated": 719003,
+      "depth": 36,
+      "optimistic_fingerprint_collision_estimate": null
+    }
+  ],
+  "bounds": {
+    "LateControlFreeze.cfg": {
+      "Epochs": 1,
+      "Lease": 1,
+      "MaxTime": 3,
+      "MaxRevision": 8,
+      "MaxRenewals": 2,
+      "MaxChildRequests": 0,
+      "Partitions": "{a}",
+      "Generations": 2,
+      "MaxOwnerRequests": 1,
+      "LogLength": 1
+    },
+    "LateControlMove.cfg": {
+      "Epochs": 1,
+      "Lease": 1,
+      "MaxTime": 3,
+      "MaxRevision": 8,
+      "MaxRenewals": 2,
+      "MaxChildRequests": 0,
+      "Partitions": "{a}",
+      "Generations": 2,
+      "MaxOwnerRequests": 1,
+      "LogLength": 1
+    },
+    "LateControlSelection.cfg": {
+      "Epochs": 1,
+      "Lease": 1,
+      "MaxTime": 3,
+      "MaxRevision": 8,
+      "MaxRenewals": 2,
+      "MaxChildRequests": 0,
+      "Partitions": "{a}",
+      "Generations": 2,
+      "MaxOwnerRequests": 1,
+      "LogLength": 1
+    },
+    "LateControlOwnerSelection.cfg": {
+      "Epochs": 1,
+      "Lease": 2,
+      "MaxTime": 5,
+      "MaxRevision": 8,
+      "MaxRenewals": 2,
+      "MaxChildRequests": 0,
+      "Partitions": "{a}",
+      "Generations": 2,
+      "MaxOwnerRequests": 1,
+      "LogLength": 1
+    }
+  },
+  "source_sha256": {
+    "Dockerfile": "693d5ac8046f571647ff2d348cd1521fa08365374470da1d869bb6115da61c92",
+    "scripts/check-candidate.sh": "10b9f4854ee7ac97edbcc5ce1fabb873ef066e0680d14df087a8a53dc7a38e6d",
+    "scripts/check-model.sh": "16e680c21c7ffc4e44175ca50e51e2e75a1bd4799cdaf6d075e9d1f186391640",
+    "spec/candidates/LateControlCoverage.checks": "cb0ce0db1d44b29dcefe6ea7852fbe6f6b2a44f090390a0a839b022899e168f9",
+    "spec/candidates/LateControlCoverage.tla": "cbf738691fab1609ef87dae307c2e5fcc410424c6c82864f9b1c892ca6ff2cc4",
+    "spec/candidates/LateControlFreeze.cfg": "b984fd4590a55ff062417dbd05eee3a023fc8295d3fd72705783b92f09d4e645",
+    "spec/candidates/LateControlMove.cfg": "6b6212ee1483035259d6fa5c0196794acc3059c5d6c446c3a38bea8ab576ef06",
+    "spec/candidates/LateControlOwnerSelection.cfg": "3047bf19e7b177bedc43fdfee4bae33268ae4e72e5225017d27008ca08cdc238",
+    "spec/candidates/LateControlSelection.cfg": "09023d5c0983167a4b772d700cb10fa62119aa0b63b4300f26890d77b23e0a6b",
+    "spec/candidates/PartitionControl.tla": "3483f1a8bbc348322b4030e95302651a4f27d9e9a1e5e2a1e3f2e4dda7a42b7c",
+    "spec/candidates/PartitionJournal.tla": "cd48d6063190d0d9adbf7a6c378aaea0146c4c362595303f15c6af453d2ad3f0",
+    "spec/candidates/RootControl.tla": "012ffa88990278c79ed4bd479a805e798410e3ca2b8ed6f487b9dd7729809592"
+  },
+  "local_log_sha256": {
+    ".tools/candidates/LateControlCoverage/model-late-control-freeze.log": "39a6857ba038fa0f6e654043b2026fccbdb6eee7b62f84ae468ff4631c767ea7",
+    ".tools/candidates/LateControlCoverage/model-late-control-move.log": "d1a5e60bf30abe140d08335b92c67291ecde34c1ab55ad1d0c572dfc01f267a5",
+    ".tools/candidates/LateControlCoverage/model-late-control-selection.log": "f81144c86ef3f635ddf1e10b3ab89dae433ce43083bebe39f871fba47e79528b",
+    ".tools/candidates/LateControlCoverage/model-late-control-owner-selection.log": "34cdd5418b3a0502d3c9b996472aec6f6c00d158232b817578155005a5cf4704"
+  },
+  "checker": {
+    "release": "1.7.4",
+    "reported_version": "TLC2 2.19 of 08 August 2024",
+    "jar_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+    "workers": 2
+  },
+  "coverage": [
+    "Freeze after root permission expires",
+    "Move completion after root permission expires",
+    "Completed prefix selection after root permission expires",
+    "Completed prefix selection after owner permission expires while its coordinator remains valid"
+  ],
+  "assumptions": [
+    "Actual PartitionJournal, PartitionControl and RootControl transitions with their abstract timing and atomic placement/selection contracts",
+    "Every witnessed event has acknowledged old-generation data",
+    "Current active coordinator identity must still match; grant and acknowledgement permission are never restored by late application"
+  ],
+  "limitations": [
+    "Reachability checks do not establish liveness",
+    "No request/version/reply or local assignment-view refinement",
+    "No platform timing, Rust correctness, transaction semantics, admission or collection proof"
+  ],
+  "unbounded_safety_proofs": {
+    "permission_obligations": 486,
+    "journal_obligations": 785,
+    "negative_controls": 9,
+    "proof_bodies_changed": false,
+    "local_standard_command": "scripts/check-proof.sh PartitionJournal",
+    "full_woodpecker_qualification": "Pending for this source change"
+  }
+}

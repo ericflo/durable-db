@@ -63,7 +63,7 @@ Run `scripts/check-proof.sh GrantBounds`. The candidate has a separate cached pr
 
 This component combines the root protocol with independent partition generations and owner grants. Durable freeze/activation shares the root's conditional register; ordinary owner grants do not update it. Same-root movement drains old grants, and a later coordinator can complete an interrupted move after its own global drain without reading the former coordinator's clock.
 
-Run `scripts/check-candidate.sh PartitionControl`. Four positive instances cover two independent partitions, two successive moves, owner renewal before movement, and coordinator loss during movement. Their state counts are 488,465, 134,007, 212,562 and 844,280. Three faulty variants expose superseded-assignment grants, early activation and expiry anchored to delivery. Four coverage checks require independent permission, a third generation, actual owner deadline extension before movement, and completion of an interrupted move by a later root.
+Run `scripts/check-candidate.sh PartitionControl`. Four positive instances cover two independent partitions, two successive moves, owner renewal before movement, and coordinator loss during movement. Their state counts are 2,383,804, 545,839, 391,634 and 1,256,474. Three faulty variants expose superseded-assignment grants, early activation and expiry anchored to delivery. Four coverage checks require independent permission, a third generation, actual owner deadline extension before movement, and completion of an interrupted move by a later root.
 
 These finite checks exercise permission composition with an atomic placement/issuance boundary and the abstract root timing contract. They do not prove the clock contract, uncertainty/refinement of placement updates, data recovery, early release, routing, admission, collection, liveness or the Rust implementation. The exact bounds and remaining obligations are in `docs/verification.md`; no runtime clock rule changes.
 
@@ -76,6 +76,12 @@ Run `scripts/check-candidate.sh PartitionJournal` for delegated journal composit
 Five positive instances cover one movement, interrupted movement, two independent partitions, repeated movement and coordinator replacement without writer replacement. Seven unsafe controls and five history-reachability controls are mandatory. See [the verification scope](../../docs/verification.md#candidate-delegated-journal-recovery) for the exact bounds, assumptions and results. These are finite regressions alongside the unbounded proof below; neither adopts a runtime controller.
 
 Run `scripts/check-proof.sh PartitionJournal` for `DelegatedHistorySafety`: 785 obligations for arbitrary finite roots, partitions and writer generations, and unbounded histories/executions. The proof imports the maintained partition/root proofs and checks their dependencies first. Six journal mutations must fail. Positive model configurations also check the inductive strengthening; an equivalence theorem preserves every original invariant while avoiding duplicate checks. The timing contract, atomic placement/selection and fresh object observations remain assumptions. Wire uncertainty, platform/Rust refinement, transactions, resource admission, reclamation and liveness remain outside this result.
+
+## LateControlCoverage
+
+This wrapper records actual late control applications in the delegated journal model, with previously acknowledged history. Its four mandatory reachability checks cover freeze and move completion after coordinator expiry, prefix selection after coordinator expiry, and selection after writer expiry while the coordinator remains valid. All original safety invariants remain enabled; a trace must violate only its named forbidden-event condition.
+
+Run `scripts/check-candidate.sh LateControlCoverage`. The wrapper does not change the underlying transitions. Those transitions now admit late control application while still requiring the active coordinator identity to match; service and grant issuance retain their permission guards. This broadens the abstract proof scope but does not implement request/version/reply refinement. Woodpecker requires all four traces.
 
 ## Retired experiments
 

@@ -379,3 +379,7 @@ The replacement protocol now has an unbounded abstract proof of delegated owners
 Four finite permission instances and five history instances remain mandatory regressions, with unsafe variants and reachability controls. The proofs also require three permission mutations and six journal mutations to fail. [The verification scope](verification.md#candidate-delegated-journal-recovery) records the bounds and assumptions; [the history evidence](evidence/partition-journal-candidate-2026-11-09.json) pins the inputs and results.
 
 This establishes abstract history safety under a timing contract, atomic placement/prefix selection and fresh immutable object observations. It does not establish an implementation of those contracts, a replacement transaction engine, performance, resource isolation or liveness. Production status remains open.
+
+## Delayed control application — 2026-11-09
+
+The delegated permission and journal proofs now admit control updates that apply after their caller's permission expires. Their 486 and 785 obligations still pass, with all nine required proof mutations. Four reachability controls require actual late freezes, move completions and prefix selections with acknowledged history, while keeping the original safety invariants enabled. This expands the atomic model toward provider behavior; it does not complete the request/reply refinement or adopt a clock-based serving implementation. [Scope and evidence](verification.md#candidate-delayed-control-application).
