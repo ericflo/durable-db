@@ -26,6 +26,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Export, inspect, or restore a consistent logical database archive.
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
     /// Start a local development database or a stateless B2/S3-backed server.
     Serve {
         #[arg(long, default_value = "127.0.0.1:7654", env = "DURABLE_DB_LISTEN")]
@@ -106,6 +111,37 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Export one revision without overwriting an existing file. Source writes may cause a conflict.
+    Export {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        token_file: PathBuf,
+        #[arg(long)]
+        database: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Check every record, count, and checksum without contacting a server.
+    Inspect {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Restore into a new protected destination, or resume the identical archive and destination.
+    Restore {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        token_file: PathBuf,
+        #[arg(long)]
+        database: String,
+        #[arg(long)]
+        input: PathBuf,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -115,6 +151,29 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     match Cli::parse().command {
+        Command::Backup { command } => {
+            use durable_db::backup;
+            let result = match command {
+                BackupCommand::Export {
+                    url,
+                    token_file,
+                    database,
+                    output,
+                } => serde_json::to_value(
+                    backup::export(&url, &token_file, &database, &output).await?,
+                )?,
+                BackupCommand::Inspect { input } => serde_json::to_value(backup::inspect(&input)?)?,
+                BackupCommand::Restore {
+                    url,
+                    token_file,
+                    database,
+                    input,
+                } => serde_json::to_value(
+                    backup::restore(&url, &token_file, &database, &input).await?,
+                )?,
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Command::Keygen { output } => {
             keygen(&output)?;
             println!("Created {}", output.display());

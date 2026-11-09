@@ -104,7 +104,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh GlobalCollection && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-logicalbackup
+COPY spec/LogicalBackup.tla spec/LogicalBackup.checks spec/LogicalBackup.cfg spec/UnsafeBackupScan.cfg spec/UnsafeBackupTruncated.cfg spec/UnsafeBackupForeign.cfg spec/UnsafeBackupReplay.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh LogicalBackup && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-logicalbackup /checks/ /checks/
 COPY --from=model-globalcollection /checks/ /checks/
 COPY --from=model-cluster /checks/ /checks/
 COPY --from=model-bucket /checks/ /checks/

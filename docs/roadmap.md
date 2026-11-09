@@ -19,7 +19,7 @@ One shared publication implementation on B2 and S3, with a persistent B+tree dat
 ## Before general availability
 
 - Versioned storage migrations and mixed-version rolling upgrades, with rollback rules.
-- Backups, point-in-time recovery/retention, restore drills, and corruption repair tooling.
+- Consistent logical export and resumable protected restore are implemented; scheduled backups, point-in-time recovery/retention, recurring restore drills, and corruption repair remain.
 - Multilevel data-page indexes and larger individual databases without unbounded manifests or request memory.
 - B2 cloud qualification, contention measurements, and fault testing of its native bucket-revision publication protocol.
 - Independent protocol/security review, fuzzing, fault-injection campaigns, release signing/attestation, and cross-platform install verification.

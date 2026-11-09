@@ -41,6 +41,8 @@ def main():
     parser.add_argument('--read-workers', type=int, default=32)
     parser.add_argument('--phase-timeout', type=int, default=600)
     parser.add_argument('--maintenance-seconds', type=int, default=15)
+    parser.add_argument('--upload-budget-bytes', type=int)
+    parser.add_argument('--upload-budget-attempts', type=int)
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
     if not args.kind_cluster.startswith('durable-db-qualification') or not args.namespace.startswith('durable-db-qualification'):
@@ -49,6 +51,12 @@ def main():
         parser.error('Read workers must be 1..128 and phase timeout 60..1800 seconds')
     if args.maintenance_seconds not in range(1, 3601):
         parser.error('Maintenance interval must be 1..3600 seconds')
+    limits = None
+    if args.upload_budget_bytes is not None or args.upload_budget_attempts is not None:
+        if any(value is None or not 0 <= value <= 2**53 - 1
+               for value in (args.upload_budget_bytes, args.upload_budget_attempts)):
+            parser.error('Both upload ceilings must be provided as integers in 0..2^53-1')
+        limits = dict(bytes=args.upload_budget_bytes, attempts=args.upload_budget_attempts)
     if args.provider_ip:
         address = ipaddress.ip_address(args.provider_ip)
         if address.version != 4 or not address.is_private or address.is_loopback:
@@ -64,6 +72,7 @@ def main():
                                      maintenance_seconds=args.maintenance_seconds, memory_cache_mib=64, disk_cache_mib=128,
                                      inject_oom=args.inject_oom,
                                      partition_https=args.partition_https,
+                                     upload_budget=limits,
                                      hpa_down_stabilization_seconds=30, hpa_down_period_seconds=15),
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   phases=[], observations=[], http_attempt_statuses={}, writes_acknowledged=0,
@@ -103,6 +112,8 @@ def main():
     def rpc(database, suffix='', body=None, method=None, admin=False, timeout=240, stop=None):
         encoded = None if body is None else json.dumps(body).encode()
         path = '/v1/tokens' if suffix == '/tokens' else '/v1/databases/' + database + suffix
+        if suffix == '/upload-budget':
+            path = '/v1/storage/upload-budget'
         deadline = time.monotonic() + timeout
         attempt = 0
         while True:
@@ -136,6 +147,20 @@ def main():
                 stop.wait(delay)
             else:
                 time.sleep(delay)
+
+    def observe_budget(stage):
+        if limits is None:
+            return
+        status = rpc('', '/upload-budget', admin=True)
+        if status['limits'] != limits or status['configuration_revision'] != 0:
+            raise RuntimeError('Authoritative upload limits changed or were not initialized as requested')
+        previous = report.get('upload_budget_observations', [])
+        if any(status['allocated'][dimension] > limits[dimension] or
+               (previous and status['allocated'][dimension] < previous[-1]['status']['allocated'][dimension])
+               for dimension in limits):
+            raise RuntimeError('Durable upload allocation exceeded its ceiling or decreased after replica replacement')
+        report.setdefault('upload_budget_observations', []).append(dict(stage=stage, status=status))
+        save()
 
     def pods():
         return json.loads(kube('get', 'pods', '-l', 'app=durable-db', '-o', 'json'))['items']
@@ -274,6 +299,9 @@ def main():
             container['resources']['requests']['cpu'] = args.cpu_request
             container['resources']['limits']['cpu'] = '1'
             container['args'].append(f'--maintenance-seconds={args.maintenance_seconds}')
+            if limits is not None:
+                container['args'].extend([f'--upload-budget-bytes={limits["bytes"]}',
+                                          f'--upload-budget-attempts={limits["attempts"]}'])
         if resource['kind'] == 'HorizontalPodAutoscaler':
             resource['spec']['maxReplicas'] = 1
             resource['spec']['behavior']['scaleDown'] = dict(stabilizationWindowSeconds=30, policies=[dict(type='Pods', value=8, periodSeconds=15)])
@@ -287,6 +315,7 @@ def main():
         try:
             kube('apply', '-f', '-', body=dict(apiVersion='v1', kind='List', items=resources))
             phase('initial-one', observed=wait_replicas(1))
+            observe_budget('initial-one')
             run_id = uuid.uuid4().hex[:12]
             report['synthetic_run_id'] = run_id
             save()
@@ -308,6 +337,7 @@ def main():
             phase('cpu-scale-three', observed=wait_replicas(3, cpu=True))
             kube('patch', 'hpa', 'durable-db', '--type=merge', '-p', json.dumps(dict(spec=dict(maxReplicas=8))))
             phase('cpu-scale-eight', observed=wait_replicas(8, cpu=True))
+            observe_budget('cpu-scale-eight')
 
             chosen = next(p for p in pods() if not p['metadata'].get('deletionTimestamp') and p['status'].get('phase') == 'Running')
             drained_node = chosen['spec']['nodeName']
@@ -395,6 +425,7 @@ def main():
             assert_workers()
             # minReplicas remains one; only removal of CPU load should downscale.
             phase('cpu-scale-one', observed=wait_replicas(1, cpu=True))
+            observe_budget('cpu-scale-one')
             verify_all(writer_dbs)
             kube('delete', 'hpa', 'durable-db')
             kube('scale', 'deployment', 'durable-db', '--replicas=0')
@@ -407,6 +438,7 @@ def main():
             kube('scale', 'deployment', 'durable-db', '--replicas=1')
             kube('apply', '-f', '-', body=hpa_resource)
             phase('cold-one', observed=wait_replicas(1))
+            observe_budget('cold-one')
             verify_all(writer_dbs)
             if report['verified_keys'] != report['writes_acknowledged']:
                 raise RuntimeError('Acknowledged-write total differs from cold recovered keys')

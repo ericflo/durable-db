@@ -28,3 +28,5 @@ Each site may provision multiple databases. The bucket directory must support a 
 - Production readiness requires strict physical/spend controls, deployment qualification of the implemented overlapping signing-key rollout, tenant lifecycle/export, upgrade strategy, and measured performance under the target workload.
 
 No running NeuralColumn service, bucket, deployment, or production credentials are modified by this repository's initial development work.
+
+Logical recovery tooling now exports one revision and restores into a fresh protected database. Keep the destination private until full verification succeeds, then issue a new incarnation-scoped credential and change site routing. Automated retention/PITR and recovery scheduling remain necessary before treating this as the platform backup service.
