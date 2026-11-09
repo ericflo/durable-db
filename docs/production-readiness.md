@@ -1,6 +1,6 @@
 # Production readiness
 
-**Release decision: not ready for production.** v0.1.0 is an experimental release. The passing models, cloud tests, and 10,005-database directory test establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
+**Release decision: not ready for production.** v0.1.0 is an experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
 
 This document tracks the gates for the first production release. A gate closes only with reproducible evidence tied to a commit and configuration. A design, a passing happy-path test, or a successful deployment is not sufficient. The [verification record](verification-results.md) separates completed experiments from planned qualification.
 
@@ -8,7 +8,7 @@ This document tracks the gates for the first production release. A gate closes o
 
 The initial contract is atomic, revision-checked transactions and ordered scans within one database. Acknowledged writes must survive the loss of every API process and cache. Uncertain writes require identical retries; the recent receipt window is bounded. Cross-database transactions are outside this contract.
 
-Current per-database limits are 256 MiB, 1,000,000 keys, and 2,048 pages, with smaller request and rewrite budgets. Large database counts and high active throughput are different requirements. The directory has been tested at 10,005 databases; the first production capacity campaign should extend that to 100,000 and include concurrent creation, pagination, and collection. This is a test target, not a capacity guarantee.
+Current per-database limits are 256 MiB, 1,000,000 keys, and 2,048 pages, with smaller request and rewrite budgets. Large database counts and high active throughput are different requirements. The directory has been tested at 100,005 entries with sequential insertion, periodic collection, pagination, and an uncached reopen of every head. Concurrent HTTP provisioning and collection at that population, and a declared active workload, remain capacity gates. This synthetic-provider result is not a cloud capacity guarantee.
 
 Total databases, active databases, peak read/write arrival rates, value sizes, contention, and p99 latency targets must be recorded before choosing a production topology. Measure B2 first, then AWS S3, using the same implementation and workload. Include physical object versions, provider calls, and bandwidth when estimating cost. A laptop-to-cloud measurement is not a regional Kubernetes SLO.
 

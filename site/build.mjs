@@ -29,7 +29,7 @@ const home=await readFile(new URL('home.html',import.meta.url),'utf8');
 await writeFile(new URL('index.html',out),layout('Storage that stays. Compute that scales.',home,true));
 for(const file of ['style.css','demo.js','icon.svg']) await copyFile(new URL(file,import.meta.url),new URL(file,out));
 await mkdir(new URL('evidence/',out),{recursive:true});
-for(const file of ['physical-b2-2026-11-09.json','physical-b2-2026-11-09.history.jsonl','publication-proof-2026-11-09.json','kubernetes-budget-b2-2026-11-09.json','kubernetes-budget-b2-2026-11-09.history.jsonl','logical-backup-2026-11-09.json','kubernetes-budget-minio-2026-11-09.json','kubernetes-budget-minio-2026-11-09.history.jsonl','global-collection-2026-11-09.json','upload-budget-2026-11-09.json','kubernetes-b2-2026-11-09.json','kubernetes-b2-2026-11-09.history.jsonl','kubernetes-b2-calibration-incomplete-2026-11-09.json','kubernetes-oom-minio-2026-11-09.json','kubernetes-oom-minio-2026-11-09.history.jsonl','kubernetes-oom-calibration-incomplete-2026-11-09.json','kubernetes-hpa-minio-2026-11-09.json','kubernetes-hpa-minio-2026-11-09.history.jsonl','kubernetes-hpa-first-incomplete-2026-11-09.json','signing-policy-minio-2026-11-09.json','pi-indexed-b2-2026-11-09.json','b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json','b2-recovery-2026-11-08.json','b2-rebase-2026-11-08.json','b2-grouped-2026-11-08.json','b2-profile-isolation-2026-11-08.json','b2-profile-metrics-2026-11-08.json','mixed-combining-minio-2026-11-08.json','b2-combining-2026-11-08.json','b2-combining-metrics-2026-11-08.json','mixed-combining-b2-2026-11-08.json','mixed-combining-b2-failed-2026-11-08.json','mixed-combining-b2-admin-limit-2026-11-08.json','mixed-combining-b2-partial-recovery-2026-11-08.json','policy-upgrade-minio-2026-11-08.json','policy-upgrade-b2-2026-11-08.json','protected-creation-minio-2026-11-08.json','protected-creation-b2-2026-11-08.json']) {
+for(const file of ['directory-capacity-2026-11-09.json','physical-b2-2026-11-09.json','physical-b2-2026-11-09.history.jsonl','publication-proof-2026-11-09.json','kubernetes-budget-b2-2026-11-09.json','kubernetes-budget-b2-2026-11-09.history.jsonl','logical-backup-2026-11-09.json','kubernetes-budget-minio-2026-11-09.json','kubernetes-budget-minio-2026-11-09.history.jsonl','global-collection-2026-11-09.json','upload-budget-2026-11-09.json','kubernetes-b2-2026-11-09.json','kubernetes-b2-2026-11-09.history.jsonl','kubernetes-b2-calibration-incomplete-2026-11-09.json','kubernetes-oom-minio-2026-11-09.json','kubernetes-oom-minio-2026-11-09.history.jsonl','kubernetes-oom-calibration-incomplete-2026-11-09.json','kubernetes-hpa-minio-2026-11-09.json','kubernetes-hpa-minio-2026-11-09.history.jsonl','kubernetes-hpa-first-incomplete-2026-11-09.json','signing-policy-minio-2026-11-09.json','pi-indexed-b2-2026-11-09.json','b2-contention-2026-11-08.json','b2-isolation-2026-11-08.json','b2-recovery-2026-11-08.json','b2-rebase-2026-11-08.json','b2-grouped-2026-11-08.json','b2-profile-isolation-2026-11-08.json','b2-profile-metrics-2026-11-08.json','mixed-combining-minio-2026-11-08.json','b2-combining-2026-11-08.json','b2-combining-metrics-2026-11-08.json','mixed-combining-b2-2026-11-08.json','mixed-combining-b2-failed-2026-11-08.json','mixed-combining-b2-admin-limit-2026-11-08.json','mixed-combining-b2-partial-recovery-2026-11-08.json','policy-upgrade-minio-2026-11-08.json','policy-upgrade-b2-2026-11-08.json','protected-creation-minio-2026-11-08.json','protected-creation-b2-2026-11-08.json']) {
  await copyFile(new URL(`../docs/evidence/${file}`,import.meta.url),new URL(`evidence/${file}`,out));
 }
 await copyFile(new URL('../scripts/install.sh',import.meta.url),new URL('install.sh',out));
@@ -39,4 +39,22 @@ for(const file of ['alerts.yml','alerts.test.yml']) {
 }
 await writeFile(new URL('.nojekyll',out),'');
 // Explicit whitelist: integration plans and private source never enter the public site.
+// Validate the rendered publication, including evidence downloads and heading links.
+const publishedPages=['index',...docs,...designDocs];
+const rendered=new Map(await Promise.all(publishedPages.map(async name=>[`${name}.html`,await readFile(new URL(`${name}.html`,out),'utf8')])));
+let checkedLinks=0;
+for(const [name,html] of rendered){
+ for(const match of html.matchAll(/(?:href|src)="([^"]+)"/g)){
+  const href=match[1].replaceAll('&amp;','&');
+  if(/^(?:https?:|mailto:|data:|\/\/)/.test(href)) continue;
+  const target=new URL(href,new URL(name,out));
+  if(!target.href.startsWith(out.href)) throw new Error(`Link escapes the public site: ${name}: ${href}`);
+  const fragment=decodeURIComponent(target.hash.slice(1));target.hash='';target.search='';
+  const body=await readFile(target,'utf8').catch(()=>{throw new Error(`Missing public link: ${name}: ${href}`);});
+  if(fragment && target.pathname.endsWith('.html') && ![...body.matchAll(/id="([^"]+)"/g)].some(item=>item[1]===fragment))
+   throw new Error(`Missing public heading: ${name}: ${href}`);
+  checkedLinks++;
+ }
+}
 console.log(`Built ${docs.length+designDocs.length+1} public pages into .site/`);
+console.log(`Validated ${checkedLinks} local page, asset, evidence, and heading links.`);

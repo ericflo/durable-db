@@ -482,15 +482,42 @@ async fn ten_thousand_databases_split_page_recover_and_collect() {
             attempts: 100_000,
         }),
     ] {
-        qualify_large_directory(limits).await;
+        qualify_large_directory(limits, 10_000, false).await;
     }
 }
-async fn qualify_large_directory(limits: Option<durable_db::upload_budget::UploadLimits>) {
+#[tokio::test]
+#[ignore = "extended capacity qualification; run explicitly in release mode"]
+async fn hundred_thousand_databases_with_incremental_collection() {
+    qualify_large_directory(
+        Some(durable_db::upload_budget::UploadLimits {
+            bytes: 16 << 30,
+            attempts: 2_000_000,
+        }),
+        100_000,
+        true,
+    )
+    .await;
+}
+async fn sweep_directory(store: &Published, metadata: &Metadata) {
+    for pass in 0..10_000 {
+        store.collect_manifests().await.unwrap();
+        if metadata.read().await.unwrap().info["durable-db-index-gc"].is_empty() {
+            return;
+        }
+        assert!(pass < 9_999, "directory collector did not complete a sweep");
+    }
+}
+async fn qualify_large_directory(
+    limits: Option<durable_db::upload_budget::UploadLimits>,
+    count: usize,
+    incremental_collection: bool,
+) {
+    let started = std::time::Instant::now();
     let (store, metadata) = setup_with_budget(limits).await;
     // Permute insertion order to exercise both sides of splits and first-key changes.
     let mut expected = Vec::new();
-    for n in 0..10_000 {
-        let name = format!("site-{:05}", (n * 7919) % 10_000);
+    for n in 0..count {
+        let name = format!("site-{:05}", (n * 7919) % count);
         let key = format!("heads/{name}.json");
         assert!(
             store
@@ -499,6 +526,12 @@ async fn qualify_large_directory(limits: Option<durable_db::upload_budget::Uploa
                 .unwrap()
         );
         expected.push(key);
+        // Keep orphan accumulation bounded in the in-memory provider fixture.
+        // This is a sequential capacity campaign; concurrent collection has
+        // independent race tests and is not implied by this sweep.
+        if incremental_collection && (n + 1) % 1000 == 0 {
+            sweep_directory(&store, &metadata).await;
+        }
     }
     // Suffix ordering differs from database-name ordering for these names.
     for name in ["a", "a-", "a0", "a_", &"z".repeat(64)] {
@@ -520,7 +553,10 @@ async fn qualify_large_directory(limits: Option<durable_db::upload_budget::Uploa
         &root
     };
     assert_eq!(root["count"], expected.len());
-    assert!(root["height"].as_u64().unwrap() >= 3);
+    let height = root["height"].as_u64().unwrap() as usize;
+    // With fanout 64, a three-level tree can still hold 100,005 entries.
+    // Require a split root, without assuming a particular insertion occupancy.
+    assert!(height >= 3);
     assert!(serde_json::to_vec(&state.info).unwrap().len() < 1500);
     metadata.gets.store(0, Ordering::SeqCst);
     store
@@ -528,10 +564,7 @@ async fn qualify_large_directory(limits: Option<durable_db::upload_budget::Uploa
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        metadata.gets.load(Ordering::SeqCst),
-        root["height"].as_u64().unwrap() as usize + 1
-    );
+    assert_eq!(metadata.gets.load(Ordering::SeqCst), height + 1);
     metadata.gets.store(0, Ordering::SeqCst);
     assert_eq!(
         store
@@ -542,7 +575,7 @@ async fn qualify_large_directory(limits: Option<durable_db::upload_budget::Uploa
         64
     );
     assert!(
-        metadata.gets.load(Ordering::SeqCst) <= 9,
+        metadata.gets.load(Ordering::SeqCst) <= 2 * height + 3,
         "a listing must not hydrate the directory"
     );
     let mut actual = Vec::new();
@@ -574,16 +607,25 @@ async fn qualify_large_directory(limits: Option<durable_db::upload_budget::Uploa
             .unwrap()
     );
     // Cursors bound each pass. Stop only after the entire index keyspace wraps.
-    for pass in 0..1000 {
-        store.collect_manifests().await.unwrap();
-        let state = metadata.read().await.unwrap();
-        if state.info["durable-db-index-gc"].is_empty() {
+    sweep_directory(&store, &metadata).await;
+    let mut index_count = 0;
+    let mut after = None;
+    loop {
+        let page = metadata
+            .files
+            .list("indexes/", after.as_deref(), 1000)
+            .await
+            .unwrap();
+        if page.is_empty() {
             break;
         }
-        assert!(pass < 999, "directory collector did not complete a sweep");
+        index_count += page.len();
+        after = page.last().cloned();
     }
-    let indexes = metadata.files.list("indexes/", None, 1000).await.unwrap();
-    assert!(indexes.len() < 400, "only the live B+tree should remain");
+    assert!(
+        index_count < count / 25,
+        "only the live B+tree should remain"
+    );
     let reopened = Published::open(metadata.files.clone(), metadata.clone(), "test")
         .await
         .unwrap();
@@ -602,6 +644,11 @@ async fn qualify_large_directory(limits: Option<durable_db::upload_budget::Uploa
             .await
             .unwrap()
             .is_none()
+    );
+    eprintln!(
+        "directory qualification: databases={} height={height} index_pages={index_count} elapsed_seconds={:.3}",
+        expected.len(),
+        started.elapsed().as_secs_f64()
     );
 }
 #[tokio::test]

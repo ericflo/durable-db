@@ -22,6 +22,9 @@ impl Remote {
         let loopback = endpoint.host_str().is_some_and(|host| {
             host == "localhost"
                 || host
+                    // URL host strings retain brackets around IPv6 literals.
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(|ip| ip.is_loopback())
         });
@@ -118,5 +121,36 @@ impl Remote {
     }
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
         self.call(Method::GET, path, None::<&()>).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Remote;
+
+    #[test]
+    fn credentials_require_https_or_an_exact_loopback_origin() {
+        let directory = tempfile::tempdir().unwrap();
+        let token = directory.path().join("token");
+        std::fs::write(&token, "synthetic-capability").unwrap();
+        for origin in [
+            "http://127.0.0.1:7654",
+            "http://[::1]:7654",
+            "http://localhost:7654",
+            "https://database.example.com",
+        ] {
+            assert!(Remote::new(origin, &token).is_ok(), "{origin}");
+        }
+        for origin in [
+            "http://192.0.2.1",
+            "http://[2001:db8::1]",
+            "http://localhost.example.com",
+            "https://user:password@database.example.com",
+            "https://database.example.com/prefix",
+            "https://database.example.com?credential=example",
+            "https://database.example.com#fragment",
+        ] {
+            assert!(Remote::new(origin, &token).is_err(), "{origin}");
+        }
     }
 }
