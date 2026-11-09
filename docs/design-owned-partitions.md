@@ -84,6 +84,8 @@ A late upload beyond the sealed prefix is unacknowledged garbage. Including it o
 
 The model assumes fresh per-key reads: a negative result must not conceal an upload completed before that read began. Transport errors and unresolved responses must never count as end-of-log. The provider experiments exercise successful reconnect/read/list behavior and journal replay; they cannot prove the provider's consistency contract or the absence of stale negative reads in every failure mode.
 
+`RootJournal` now composes the root renewal/takeover actions with journal recovery for repeated epochs. The two-owner/two-batch instance checks 12,474 states; the three-owner/one-batch instance checks 2,230,369. Six broken variants fail, and a separate trace reaches a third serving owner retaining both predecessors' acknowledged prefixes. Catalog selection advances the same authority revision as renewal. These are bounded checks under the abstract timing and conditional-selection contracts; delegated partition movement, clock conversion and the runtime controller remain outside them. See [the composition scope](verification.md#candidate-repeated-root-and-journal-recovery).
+
 The provider contract is a separate obligation from an experiment: [AWS documents strong object read-after-write consistency](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html#ConsistencyModel), while [Backblaze describes confirmed file writes as immediately visible](https://www.backblaze.com/blog/design-thinking-b2-apis-the-hidden-costs-of-s3-compatibility/). Neither statement should be generalized to fresh bucket-metadata observations. The candidate's exact negative-read and error-classification assumptions must stay explicit.
 
 ## Serving authority remains the central decision
@@ -118,7 +120,7 @@ This demonstrates useful provider concurrency and supports investigating batched
 
 ## Next implementation gate
 
-Extend the initial serving/log model to the renewal hierarchy and repeated ownership changes, state an implementable timing contract, then implement the smallest executable path with bounded memory and caches. Use the same HTTP transaction semantics and repeat the same workload on B2 and S3-compatible storage. Measure provider latency and end-to-end overhead separately.
+Extend the repeated root/journal composition to delegated partition ownership, establish an implementable timing contract, then implement the smallest executable path with bounded memory and caches. The unbounded component proofs still need a composition theorem. Use the same HTTP transaction semantics and repeat the same workload on B2 and S3-compatible storage. Measure provider latency and end-to-end overhead separately.
 
 The first vertical run must combine warm reads without object-store control calls, independent databases, group commit, owner loss with the old process still alive, scale-down to one, total compute loss and recovery of every acknowledgement. Do not qualify throughput using a mock ownership boundary and describe it as a safe replacement. Only after this gate should the design expand to multilevel indexes, retained snapshots, compaction, physical admission, lifecycle APIs and the full production failure matrix.
 

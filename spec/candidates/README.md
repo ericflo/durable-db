@@ -84,6 +84,14 @@ Run `scripts/check-proof.sh RootControl` for the unbounded abstract permission p
 The abstract time coordinate is a specification device. The deployment clock conversion, arbitrary candidate elections, placement changes and journal composition are not established. Pauses and loss are represented by delaying or omitting an incarnation's actions; replacement uses a new epoch. The clock and WAL candidates retain distinct obligations and remain necessary research sources. This model does not change the runtime clock rule or implement a controller.
 
 
+## RootJournal
+
+This candidate composes `RootControl` with journal recovery across repeated epochs. It checks contiguous durability, acknowledgements under valid permission, fresh recovery reads, immutable selections and complete inherited history before serving. Selection also advances the shared authority revision, so it can conflict with renewal. The root owns the journal directly; delegated partition movement is outside this component.
+
+Run `scripts/check-candidate.sh RootJournal`. The wrapper copies its `RootControl` dependency, checks two positive instances, requires six unsafe variants to fail and requires a repeated-history coverage trace. The two-epoch/two-batch instance explores 12,474 states; the three-epoch/one-batch instance explores 2,230,369. Coverage shows the third owner retaining both predecessors' acknowledged prefixes. Exact bounds, assumptions and remaining obligations are in `docs/verification.md` and `docs/evidence/root-journal-candidate-2026-11-09.json`.
+
+The abstract timing contract and atomic durable selection remain assumptions. This is bounded composition, not an unbounded theorem or a clock/platform/Rust proof. It does not replace `OwnedWal`, which checks independently advancing clocks for one handoff, or the isolated grant/clock proofs.
+
 ## GrantBounds
 
 `GrantBoundsProof.tla` is an unbounded arithmetic proof of grant/drain margins, not another finite serving model. It permits a factor-two rate range and an additive elapsed-measurement error `E`. A drain needs `2L + 3E`; a child's request-anchored duration is at most `floor(max(0, R - 3E) / 2)`. All 19 obligations pass. Removing either margin fails its proof.
