@@ -41,6 +41,12 @@ The first benchmark should exercise warm reads without object-store authority up
 
 Use small deterministic model instances and targeted tests during development. Run relevant models and negative controls after protocol changes; retain the complete cached Woodpecker gates for main. Run the expensive cloud matrix and long soaks after the candidate clears its performance gate. The existing one-hour memory pilot is baseline instrumentation evidence, not a reason to retain the old architecture.
 
+## Serving-authority experiment
+
+A research-only `ServingLease` model explores local reads with explicitly bounded-rate clocks, delayed grants, pauses, takeover and process loss. Its small instance passes 4,884,220 states. Removing takeover drain, allowing a paused clock to stop, or starting expiry at delayed response delivery each produces a stale-read counterexample. [Candidate evidence](evidence/serving-authority-candidate-2026-11-09.json) records exact bounds, assumptions and source hashes.
+
+This is **not an adopted protocol**. It deliberately explores a timing assumption that the current runtime rules prohibit. Supporting that assumption on the deployment platforms would need a separate architecture decision and justification. The model's commit operation still atomically checks authoritative ownership; it does not establish a WAL-only write path or independent partition throughput. The experiment identifies both a possible way to remove the per-read object-store barrier and a concrete condition under which that way fails. Runtime reads remain unchanged.
+
 ## Public API and examples
 
 The client should expose understandable types and operation boundaries, with readable modules and API documentation. Examples under `examples/` should exercise ordinary server-side web application needs: settings, paginated records, and atomic changes across related records. They must demonstrate scoped credentials, conflicts and uncertain outcomes without hiding the database's guarantees. Pi integration remains an important acceptance workload, alongside general application storage.
