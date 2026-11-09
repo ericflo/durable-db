@@ -74,6 +74,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh AuthorizationLifecycle && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-databasecreation
+COPY spec/DatabaseCreation.tla spec/DatabaseCreation.checks spec/DatabaseCreation.cfg spec/UnsafeCreationReceipt.cfg spec/UnsafeCreationConfig.cfg spec/UnsafeCreationName.cfg spec/UnsafeCreationResult.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh DatabaseCreation && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
 COPY --from=model-cluster /checks/ /checks/
 COPY --from=model-bucket /checks/ /checks/
@@ -84,6 +90,7 @@ COPY --from=model-publicationrebase /checks/ /checks/
 COPY --from=model-observationbatch /checks/ /checks/
 COPY --from=model-publicationcombining /checks/ /checks/
 COPY --from=model-authorizationlifecycle /checks/ /checks/
+COPY --from=model-databasecreation /checks/ /checks/
 
 FROM tools AS build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./

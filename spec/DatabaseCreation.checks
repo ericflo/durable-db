@@ -1,0 +1,5 @@
+safe DatabaseCreation.cfg creation 1g -
+unsafe UnsafeCreationReceipt.cfg creation-receipt 1g ReceiptRetained
+unsafe UnsafeCreationConfig.cfg creation-config 1g ExactIdentity
+unsafe UnsafeCreationName.cfg creation-name 1g ExactIdentity
+unsafe UnsafeCreationResult.cfg creation-result 1g OriginalResult
