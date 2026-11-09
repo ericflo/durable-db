@@ -1,0 +1,3 @@
+safe PublicationSafety.cfg publication-safety 2g -
+unsafe UnsafeProofOrigin.cfg proof-origin 1g LiveExists
+unsafe UnsafeProofFence.cfg proof-fence 1g LiveExists

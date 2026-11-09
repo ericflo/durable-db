@@ -4,7 +4,7 @@
 
 durable-db is an ordered key-value database written in Rust. Keep authoritative data in object storage, run interchangeable API servers, and use bounded memory and optional local disk to make immutable reads cheaper. On a laptop, a local directory replaces the object store.
 
-**Status: experimental, v0.1.0.** The initial protocol is modeled in TLA+ and checked with TLC. The Rust implementation has adversarial and integration tests. These are evidence with explicit bounds—not a proof of the entire implementation. Read [verification](docs/verification.md) before putting important data here.
+**Status: experimental, v0.1.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
 
 | What you get | How it works |
 | --- | --- |

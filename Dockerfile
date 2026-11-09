@@ -110,7 +110,29 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh LogicalBackup && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-publicationsafety
+COPY spec/PublicationSafety.tla spec/PublicationSafety.checks spec/PublicationSafety.cfg spec/UnsafeProofOrigin.cfg spec/UnsafeProofFence.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PublicationSafety && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+# The pinned TLAPS binary requires glibc >= 2.38. It is a verification tool only;
+# the database keeps the existing Rust toolchain and static musl runtime.
+FROM docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS proof-tools
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 zlib1g && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY scripts/install-tlaps.sh scripts/install-tlaps.sh
+RUN scripts/install-tlaps.sh /opt/proof-tools
+ENV TLAPM=/opt/proof-tools/tlapm/bin/tlapm
+FROM proof-tools AS proof
+COPY scripts/check-proof.sh scripts/check-proof.sh
+COPY spec/PublicationSafety.tla spec/PublicationSafetyProof.tla spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-proof.sh && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=proof /checks/ /checks/
+COPY --from=model-publicationsafety /checks/ /checks/
 COPY --from=model-logicalbackup /checks/ /checks/
 COPY --from=model-globalcollection /checks/ /checks/
 COPY --from=model-cluster /checks/ /checks/
@@ -148,6 +170,8 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     && mkdir -p /out && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \
     && /out/durable-db --version && kache stats
 FROM build AS assembled
+COPY --from=proof-tools /opt/proof-tools/toolchain.tar.gz /out/verification-tools/tlapm-c8ddc44-linux-x86_64.tar.gz
+COPY --from=proof-tools /opt/proof-tools/tlapm/doc/tlapm/LICENSE /out/verification-tools/LICENSE.tlapm
 COPY --from=model /checks /out/checks
 COPY --from=alert-check /rules /out/checks/prometheus
 COPY site site

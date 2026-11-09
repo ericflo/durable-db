@@ -1,6 +1,6 @@
 # Verification
 
-The design starts in `spec/Cluster.tla`. Do not equate model checking with a proof that the Rust binary is correct. The model abstracts implementation details; TLC explores finite configured instances. Safety for unbounded clusters, liveness under stated fairness assumptions, and a checked refinement from implementation to model are separate obligations.
+The design starts in `spec/Cluster.tla`. Do not equate model checking with a proof that the Rust binary is correct. The model abstracts implementation details; TLC explores finite configured instances. An [unbounded TLAPS proof](proof-publication.md) now establishes abstract data-page reachability during publication and collection. Complete protocol composition, liveness under stated fairness assumptions, and a checked refinement from implementation to model remain separate obligations.
 
 ## What the model represents
 
@@ -41,10 +41,10 @@ The production hardening tests add malformed manifests, foreign object reference
 
 ## Remaining proof and qualification obligations
 
-- A mechanized inductive proof for arbitrary node/object counts; TLC's finite bounds are not that proof.
+- Extend the unbounded abstract page-reachability proof to the complete protocol and its implementation. TLC's finite checks remain separate evidence.
 - Liveness under eventual provider availability, fair admission, and bounded competing maintenance. Availability is impossible during arbitrary permanent partitions or when all nodes remain down.
 - Implementation/model refinement, filesystem and network cancellation, malformed/corrupt object behavior, allocator/resource bounds, cryptographic assumptions, and schema upgrades.
-- Independent-node Kubernetes fault campaigns, long-duration soak, and AWS qualification. CPU-triggered HPA, drain, SIGKILL, injected kernel OOM, provider partition, and all-pod loss pass on a three-node kind cluster with real B2 and MinIO. The nodes share one physical host; neither campaign establishes independent failure domains or AWS behavior.
+- Whole-host/control-plane faults, independent rack failure domains, long-duration soak, and AWS qualification. CPU-triggered HPA, drain, SIGKILL, injected kernel OOM, provider partition, and all-pod loss pass on a three-node kind cluster with real B2 and MinIO. A separate three-physical-host B2 campaign passes manual scaling, pod replacement, egress restriction, and cold recovery. Those hosts share one rack; host shutdown and rack loss have not been injected.
 - Independent security review and strict cluster-wide physical-storage/spend admission.
 
 The repository must keep these limitations visible until the corresponding evidence exists. “Proven in all situations” is not an accurate description of this initial release.
@@ -151,3 +151,7 @@ Format-5 `Published::get` carries the original collection fence in the engine's 
 `backup::export` checks every scan revision and final source identity before completing a checksum footer and publishing its private file. `backup::archive::Verified` privately spools and validates all records before any restore request. `backup::restore` recovers a creation identity derived from archive digest and target name, verifies previously committed chunks at one target revision, and continues deterministic expected-revision writes before verifying the entire result. Tests include actual HTTP interruptions, committed service errors, receipt eviction, archive replacement after validation, quota/encoding bounds, source mutation, existing destinations, and CLI export/inspect/restore.
 
 The model assumes atomic ordinary database operations, collision-free identity/integrity checks, and an isolated destination. It abstracts the HTTP, cryptographic, and filesystem layers and does not establish retained snapshots, PITR, scheduling, or a composed unbounded recovery proof. The [operator procedure](recovery.md) describes the partial-destination and concurrent-source-write boundaries.
+
+## Unbounded page reachability
+
+`PublicationSafetyProof.tla` proves the abstract page-reachability invariant for arbitrary jobs, collectors, page identities, and execution length: 35 strict TLAPS obligations pass. A temporary missing-fence mutation fails the proof. The same core model passes a 2,346,968-state TLC regression, and both missing-origin and missing-collector fences produce live-object-loss traces. The [proof scope and reproducible procedure](proof-publication.md) enumerate provider/freshness assumptions, trusted tools, and the outstanding composition/refinement obligations.

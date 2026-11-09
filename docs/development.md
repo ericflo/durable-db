@@ -22,3 +22,5 @@ cargo test --locked --release --test publication ten_thousand_databases_split_pa
 ```
 
 One local qualification passed in 40.51 seconds in release mode versus 292 seconds in a full debug-suite run. These are test runtimes on the development laptop, not database latency/throughput benchmarks.
+
+The unbounded abstract page-safety proof runs with `scripts/check-proof.sh`; its pinned Linux checker and assumptions are documented in [the proof procedure](proof-publication.md). `docker build --target proof .` runs the same gate in its isolated Ubuntu verification stage without compiling the database. The normal artifact build requires both this proof and every TLC model.
