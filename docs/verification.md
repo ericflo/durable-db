@@ -224,6 +224,25 @@ Six required broken variants fail: acknowledgement without permission, consumpti
 
 The theorem assumes an **abstract elapsed-time bound**, fresh immutable object observations, and atomic durable conditional selection with exact selection reads. It does not establish a wire implementation of that selection or infer fresh metadata from an ordinary bucket read. Pause/loss is delaying or omitting actions; replacement uses a fresh epoch. Delegated partition owners, reassignment, arbitrary elections, clock conversion/platform guarantees, transactions, receipts, admission, collection, implementation refinement and liveness remain open. In particular, objects are never reclaimed in this model. No runtime clock dependency or replacement controller is adopted.
 
+## Candidate delegated partition movement
+
+`PartitionControl.tla` interleaves the actual root protocol with partition generations, owner grant requests, delayed/lost replies, durable freeze decisions and activation. A move freezes renewal of the previous generation while grants for other partitions continue. The same coordinator drains the previous permission before activating the replacement. If the coordinator dies during a move, a later root can finish it after its own global drain; it never interprets its predecessor's local clock origin. Freeze and activation advance the same conditional-register revision as root renewal. Grant issuance and delivery do not mutate that register.
+
+Four positive instances check root permission, owner containment and exclusion of different generations for the same partition:
+
+| Instance | Bounds | Distinct states |
+| --- | --- | ---: |
+| Independent movement | One root, two partitions, two generations, three time advances, two root renewals, eight revisions | 488,465 |
+| Repeated movement | One root, one partition, three generations, four time advances, three root renewals, nine revisions | 134,007 |
+| Renewal before movement | One root, one partition, two generations, four time advances, three root renewals, nine revisions | 212,562 |
+| Interrupted movement | Two roots, one partition, two generations, three time advances, one renewal per root, eight revisions | 844,280 |
+
+The renewal instance permits two owner requests per root/partition/generation; the others permit one. All disable the root component's separate child requests. They generate 3,093,949, 697,614, 1,014,980 and 5,556,328 states, at depths 32, 33, 34 and 32. Optimistic fingerprint collision estimates are 6.9e-8, 4.1e-9, 9.2e-9 and 2.2e-7. A configured generation denotes a never-reused owner incarnation; initial placement is fixed. These are separate finite instances, not a proof of their Cartesian product or arbitrary cluster sizes.
+
+Three unsafe controls must fail: issuing grants for frozen/superseded assignments, skipping a partition drain, and starting owner expiry at reply delivery. Four reachability controls require a moved partition and an untouched partition to hold permission under the original coordinator, two successive moves reaching a third generation, an owner deadline actually extending before its replacement gets permission, and a later coordinator actually executing completion of an interrupted move. The last two use explicit history flags; merely observing an old completed move under a newer root is insufficient. Run `scripts/check-candidate.sh PartitionControl`; Woodpecker requires every check in a separate cached stage. [Evidence](evidence/partition-control-candidate-2026-11-09.json) records exact inputs and traces.
+
+This establishes bounded permission composition under the root timing abstraction. It assumes atomic durable placement updates and an issuer whose assignment view is synchronized with freeze decisions. The wire protocol must freeze issuance before an uncertain update and recover exact placement after root replacement; that refinement is not implemented here. Platform clocks, journal selection/data history, graceful early release, placement policy, routing, transactions, resource admission, collection and liveness remain open. The root/journal theorem does not automatically prove this delegated composition. No runtime clock dependency or replacement serving engine is adopted.
+
 ## Candidate clock error margins
 
 `spec/candidates/GrantBoundsProof.tla` proves four arithmetic lemmas with **19 strict TLAPS obligations**: an upper bound on root permission, exclusion after a successor drain, the rounded child-duration bound, and containment of a delivered child's permission within its parent. There is no finite bound on the nonnegative integer durations or error allowance in these lemmas. This is an arithmetic proof under a clock contract, not an unbounded proof of the ownership protocol.

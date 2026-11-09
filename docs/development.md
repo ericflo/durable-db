@@ -40,3 +40,6 @@ The repeated root/journal composition runs with `scripts/check-candidate.sh Root
 
 
 The common provider register is checked with `scripts/check-model.sh ProviderRegister` and `cargo test --locked --lib providers::`. The opt-in `cargo test --locked --test provider_register -- --ignored --exact unchanged_metadata_still_requires_an_exact_comparison` uses the same disposable-bucket/provider/context variables as the journal fixture and writes `DURABLE_DB_REGISTER_REPORT`. It performs at most thirteen conditional attempts, including the bounded reconnect barrier; provisioning and cleanup are additional operations. It does not initialize a publication format. Each provider connection adds a fresh identity to replacement metadata automatically, using the existing reserved probe field. Raw read barriers may precede explicit publication initialization; unknown protocol metadata still prevents initialization. Remove every physical version, the dedicated bucket and its temporary credentials after qualification.
+
+
+Partition movement runs with `scripts/check-candidate.sh PartitionControl` in its own `model-candidate-partitioncontrol` stage. The gate includes four positive instances, three unsafe variants and four reachability controls.

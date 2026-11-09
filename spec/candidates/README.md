@@ -99,3 +99,12 @@ The abstract timing contract and atomic durable selection remain assumptions. Th
 `GrantBoundsProof.tla` is an unbounded arithmetic proof of grant/drain margins, not another finite serving model. It permits a factor-two rate range and an additive elapsed-measurement error `E`. A drain needs `2L + 3E`; a child's request-anchored duration is at most `floor(max(0, R - 3E) / 2)`. All 19 obligations pass. Removing either margin fails its proof.
 
 Run `scripts/check-proof.sh GrantBounds`. The candidate has a separate cached proof stage. It does not prove a platform timing contract, implement a clock, or establish composition with the root/log models. See the maintained verification document for the exact assumptions and remaining obligations.
+
+
+## PartitionControl
+
+This component combines the root protocol with independent partition generations and owner grants. Durable freeze/activation shares the root's conditional register; ordinary owner grants do not update it. Same-root movement drains old grants, and a later coordinator can complete an interrupted move after its own global drain without reading the former coordinator's clock.
+
+Run `scripts/check-candidate.sh PartitionControl`. Four positive instances cover two independent partitions, two successive moves, owner renewal before movement, and coordinator loss during movement. Their state counts are 488,465, 134,007, 212,562 and 844,280. Three faulty variants expose superseded-assignment grants, early activation and expiry anchored to delivery. Four coverage checks require independent permission, a third generation, actual owner deadline extension before movement, and completion of an interrupted move by a later root.
+
+This is bounded permission composition, with an atomic placement/issuance boundary and the abstract root timing contract. It does not prove the clock contract, uncertainty/refinement of placement updates, data recovery, early release, routing, admission, collection, liveness or the Rust implementation. The exact bounds and remaining obligations are in `docs/verification.md`; no runtime clock rule changes.

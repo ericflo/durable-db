@@ -203,7 +203,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh RootJournal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-partitioncontrol
+COPY spec/candidates/RootControl.tla spec/candidates/PartitionControl.tla spec/candidates/PartitionControl.checks spec/candidates/PartitionControl*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PartitionControl && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-candidate-partitioncontrol /checks/ /checks/
 COPY --from=model-provider-register /checks/ /checks/
 COPY --from=proof-root-journal /checks/ /checks/
 COPY --from=model-candidate-rootjournal /checks/ /checks/
