@@ -2,6 +2,16 @@
 
 These models explore possible replacements for the current serving protocol. They are not the implemented protocol, are not included in the eighteen implementation-oriented CI models, and do not authorize changing runtime assumptions.
 
+Run a focused candidate and all its mandatory negative controls from the repository root:
+
+```sh
+scripts/check-candidate.sh WalHandoff
+scripts/check-candidate.sh OwnedWal
+scripts/check-candidate.sh DelegatedGrant
+```
+
+The wrapper uses the existing checksum-pinned checker in a temporary directory and saves logs under `.tools/candidates/`. It does not rebuild Rust or rerun unrelated models. Java must be available on `PATH`, or set `JAVA` to its executable. `ServingLease` predates these descriptors; its direct command is below.
+
 ## ServingLease
 
 Question: can a former owner return a stale successful read after another owner commits, if ordinary reads use a local view rather than an object-store conditional barrier?
@@ -62,3 +72,13 @@ The positive run checks **570,280 distinct states**, 2,709,529 generated, depth 
 `OwnedWal.checks` records exact expectations and is run in a separate cached Woodpecker stage. Locally, use the same TLC command above with `-config OwnedWal.cfg OwnedWal.tla`, then each `OwnedWalUnsafe*.cfg`. Source/configuration and checker-log hashes are in `docs/evidence/owned-wal-candidate-2026-11-09.json`.
 
 This closes a gap between the two earlier models for this bounded instance. It does **not** establish arbitrary epochs, partition placement, delegated renewal, liveness, request receipts, KV/transaction semantics, index recovery, compaction, retention, collection, or admission. Bounded-rate clocks, fresh negative object reads, immutable identities, and atomic durable control records remain assumptions. The runtime clock rule is unchanged; no replacement runtime is adopted by this result.
+
+## DelegatedGrant
+
+This separate candidate tests a way to avoid a conditional provider call for every partition's renewal. A coordinator holds an already acquired root grant and delegates shorter permission to owners. Each owner's interval is anchored at its own request start. If the coordinator has `R` clock units remaining and the slowest clock advances at half the fastest rate, the delegated duration is at most `floor(R / 2)`. It must not simply copy the remaining duration or start a new interval on response delivery. The old coordinator can continue issuing these bounded grants during the successor's drain; none may survive activation.
+
+The checked instance contains one fixed root grant of length two, two independently clocked children, one request/reply per child, two real-time transitions, arbitrary pauses and permanent crashes, and a successor that fences and drains before activation. The positive run explores **1,258,368 states**, 6,754,337 generated, depth 15, in seven seconds. Five required controls fail for giving the full unscaled remaining duration, delayed-response expiry, a stopped paused coordinator clock, a stopped paused child clock, and skipped drain. The optimistic fingerprint collision estimate is 3.7e-7. Standard checking plus controls takes 17.551 seconds locally.
+
+The model checks that a valid child grant remains within the root permission and that none is valid after successor activation. `DelegatedGrant.checks` has a separate cached CI stage. Reproduce using `-config DelegatedGrant.cfg DelegatedGrant.tla` and each `DelegatedGrantUnsafe*.cfg` as above. Hashes and limits are in `docs/evidence/delegated-grant-candidate-2026-11-09.json`.
+
+This is the grant-containment component, **not** full hierarchical ownership. It assumes a valid root grant, atomic issuing and fence transitions, bounded-rate continuously advancing clocks, and unchanged assignment during a grant. It does not model root acquisition/renewal, repeated child renewals, reassignment, restarts, durable log composition, message/resource bounds, liveness or actual throughput. The deployment clock contract remains unresolved. No runtime clock dependency is adopted.

@@ -1,0 +1,6 @@
+safe DelegatedGrant.cfg candidate-delegated-grant 2g -
+unsafe DelegatedGrantUnsafeFullRemaining.cfg candidate-delegated-grant-fullremaining 2g LeafWithinRootPermission
+unsafe DelegatedGrantUnsafeLateReply.cfg candidate-delegated-grant-latereply 2g LeafWithinRootPermission
+unsafe DelegatedGrantUnsafePausedRoot.cfg candidate-delegated-grant-pausedroot 2g NoOldPermissionAfterActivation
+unsafe DelegatedGrantUnsafePausedChild.cfg candidate-delegated-grant-pausedchild 2g LeafWithinRootPermission
+unsafe DelegatedGrantUnsafeSkipDrain.cfg candidate-delegated-grant-skipdrain 2g NoOldPermissionAfterActivation

@@ -25,7 +25,17 @@ A slow conditional control register is useful for creating a new ownership epoch
 
 A partition contains many databases and has one current writer incarnation. Its owner maintains the committed view and groups accepted transactions into a bounded log batch. Other processes route requests to that owner. The number of databases is not the number of buckets, partitions or permanently assigned processes. Placement and partition-count limits must be measured and documented; this does not reintroduce a fixed small database cap.
 
-One conditional register is still a potential control bottleneck. A candidate coordinator can batch placement and serving-authority renewal, while owners publish log batches independently. The coordination role must run in the database binary and recover from object storage. The renewal hierarchy, delegation and failover protocol are **not yet modeled or selected**. A single conditional update per partition per write would leave the important bottleneck intact.
+One conditional register is still a potential control bottleneck. A candidate coordinator can batch placement and serving-authority renewal, while owners publish log batches independently. The coordination role must run in the database binary and recover from object storage. The delegation bound below now has an isolated model; the complete renewal, placement and failover protocol is **not yet selected or composed**. A single conditional update per partition per write would leave the important bottleneck intact.
+
+### Renewal without a provider call per partition
+
+The coordinator can renew one durable root permission, then grant shorter permission to active owners over the cluster network. An owner may serve many partitions and each partition may contain many databases. Renewal demand should therefore follow active owners, not the total database population. The one-node case combines these roles in one process.
+
+For a coordinator with `R` local clock units remaining, and clock rates bounded between `r_min` and `r_max`, a child interval may be no longer than `floor(R * r_min / r_max)`, anchored at the child's **request start**. At issuance, the parent cannot expire sooner than `R / r_max` real time units. A child interval of that size ends within `R / r_max` real units of its earlier request start. It therefore cannot outlive the parent interval. Implementing this argument requires explicit clock-resolution and measurement-error margins as well as the rate bound; those margins are not yet selected.
+
+The `DelegatedGrant` candidate checks this containment with two owners, rates of one or two units per step, one fixed root grant, delayed replies, pauses/crashes and a fenced successor. Its **1,258,368-state** instance passes five required negative controls. Giving a child all the parent's remaining time, ignoring the rate ratio, already fails. See [the bounded evidence](evidence/delegated-grant-candidate-2026-11-09.json).
+
+This would make provider renewal calls constant per root-renewal interval; owner grant messages still scale with the number of active owners. Placement changes, durable seals and admission would add control work. Grant messages need bounded batching and backpressure. Assignments must remain fixed for each granted interval; movement must exclude the previous owner before a replacement serves. The model does not yet cover those operations, repeated renewal, or composition with log handoff, and establishes no throughput ceiling. Neither a renewal interval nor a production partition count is selected.
 
 ## Immutable batches and acknowledgement
 
@@ -63,6 +73,8 @@ The newer `OwnedWal` candidate combines that serving boundary with log upload, a
 This is initial bounded composition, not a complete cluster model. The successor remains the final owner after activation. Repeated epochs, many partitions, delegation, transaction/request semantics and liveness are still outside it. In particular, it does not yet establish a scalable renewal hierarchy or justify the deployment platform's clock behavior.
 
 The repository's current no-clock correctness rule was an implementation constraint, not a requirement in the original product brief. It remains in force for runtime code. Adopting elapsed-time authority would require a documented architecture decision, justified platform/timing assumptions, a composed model and fault tests. No clock-based runtime change is made by these experiments. No external coordinator is selected as a substitute.
+
+Clock selection alone is not that timing contract. Linux documents that `CLOCK_MONOTONIC` stops during suspend and `CLOCK_BOOTTIME` includes suspend, making the latter a candidate for this requirement. The kernel's virtualization documentation separately describes timekeeping and migration difficulties. These sources do not establish our required rate/error bounds across every virtual machine or migration. A deployment contract and failure tests must address those cases before runtime adoption. [Linux timekeeping](https://docs.kernel.org/core-api/timekeeping.html), [KVM timekeeping](https://www.kernel.org/doc/html/latest/virt/kvm/x86/timekeeping.html).
 
 ## What the provider measurements establish
 

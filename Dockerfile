@@ -93,6 +93,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 # Research model: checked independently without adopting its runtime assumptions.
+FROM model-tools AS model-candidate-delegatedgrant
+COPY spec/candidates/DelegatedGrant.tla spec/candidates/DelegatedGrant.checks spec/candidates/DelegatedGrant*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh DelegatedGrant && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-candidate-ownedwal
 COPY spec/candidates/OwnedWal.tla spec/candidates/OwnedWal.checks spec/candidates/OwnedWal*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -156,6 +162,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-proof.sh && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=model-candidate-delegatedgrant /checks/ /checks/
 COPY --from=model-candidate-ownedwal /checks/ /checks/
 COPY --from=model-candidate-walhandoff /checks/ /checks/
 COPY --from=model-transactionclient /checks/ /checks/
