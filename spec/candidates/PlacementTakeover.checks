@@ -1,0 +1,6 @@
+safe PlacementTakeover.cfg placement-takeover 4g -
+unsafe PlacementTakeoverUnsafeCompare.cfg placement-takeover-compare 4g GenerationOrder
+unsafe PlacementTakeoverUnsafeTimeout.cfg placement-takeover-timeout 4g ViewSafe
+unsafe PlacementTakeoverUnsafeReply.cfg placement-takeover-reply 4g ViewSafe
+unsafe PlacementTakeoverUnsafeDrain.cfg placement-takeover-drain 4g Exclusive
+unsafe PlacementTakeoverRecovery.cfg placement-takeover-recovery 4g NotRecovered

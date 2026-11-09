@@ -239,7 +239,21 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh LateControlCoverage && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-placementrequests
+COPY spec/candidates/PlacementRequests.tla spec/candidates/PlacementRequests.checks spec/candidates/PlacementRequests*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PlacementRequests && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-candidate-placementtakeover
+COPY spec/candidates/RootControl.tla spec/candidates/PlacementTakeover.tla spec/candidates/PlacementTakeover.checks spec/candidates/PlacementTakeover*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh PlacementTakeover && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-candidate-placementtakeover /checks/ /checks/
+COPY --from=model-candidate-placementrequests /checks/ /checks/
 COPY --from=model-transactionvalidation /checks/ /checks/
 COPY --from=model-candidate-latecontrol /checks/ /checks/
 COPY --from=proof-partition-journal /checks/ /checks/

@@ -4,8 +4,8 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 candidate=${1:-}
 case "$candidate" in
-  OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage) ;;
-  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage' >&2; exit 2 ;;
+  OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage|PlacementRequests|PlacementTakeover) ;;
+  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage|PlacementRequests|PlacementTakeover' >&2; exit 2 ;;
 esac
 
 "$repo/scripts/check-model.sh" prepare
@@ -16,7 +16,7 @@ trap 'exit 143' TERM
 mkdir -p "$scratch/scripts" "$scratch/spec" "$scratch/.tools"
 cp "$repo/scripts/check-model.sh" "$scratch/scripts/"
 cp "$repo/spec/candidates/$candidate.tla" "$repo/spec/candidates/$candidate.checks" "$scratch/spec/"
-if [ "$candidate" = RootJournal ] || [ "$candidate" = PartitionControl ] || [ "$candidate" = PartitionJournal ] || [ "$candidate" = LateControlCoverage ]; then
+if [ "$candidate" = RootJournal ] || [ "$candidate" = PartitionControl ] || [ "$candidate" = PartitionJournal ] || [ "$candidate" = LateControlCoverage ] || [ "$candidate" = PlacementTakeover ]; then
   cp "$repo/spec/candidates/RootControl.tla" "$scratch/spec/"
 fi
 if [ "$candidate" = PartitionJournal ] || [ "$candidate" = LateControlCoverage ]; then

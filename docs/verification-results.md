@@ -389,3 +389,15 @@ The delegated permission and journal proofs now admit control updates that apply
 The internal replacement-engine validator accepts disjoint-key writers from one snapshot while rejecting conflicting accepted predecessors, including writes awaiting durability. It checks scan phantoms, preserves strict whole-database revision conditions, expires snapshots when conflict history is reclaimed, and bounds metadata and range-validation work. Twelve Rust tests include 1,024 generated histories checked against a serial reference. Its preceding finite model checks 4,248,703 states, five unsafe controls and two concurrency/reclamation witnesses. [Evidence and limits](evidence/transaction-validation-2026-11-09.json).
 
 The component is not connected to the HTTP engine and establishes no database throughput or production-readiness claim. Durable value views, ownership, journal admission, receipts, authenticated snapshots and client/API support still need composition.
+
+## Placement request uncertainty — 2026-11-09
+
+A finite request/reply component checks 359,761 states with four fault controls and four event-coverage traces. One continuing coordinator handles stale observations, late provider application and late replies without restoring old-generation permission. The model stops local issuance before a change and requires an exact validated view before resuming. The coverage includes a timed-out freeze that succeeds and later permits the replacement generation to serve.
+
+This is one part of the control wire protocol. Root replacement, clocks, journal selection and the serving implementation remain open. [Scope and evidence](verification.md#candidate-placement-requests-and-uncertain-replies).
+
+## Placement requests during coordinator replacement — 2026-11-09
+
+The bounded `PlacementTakeover` composition checks 3,379,987 states with the actual root fence, renewal, drain and activation actions. Four faulty variants fail. Its required recovery trace contains an applied freeze with an uncertain reply, root replacement, exact placement revalidation and generation-two permission after generation-one permission ends.
+
+It starts at a reachable active root and permits one successor. It does not prove arbitrary takeover, platform timing, journal selection, a runtime controller or production readiness. [Scope and evidence](verification.md#candidate-placement-requests-across-root-replacement).

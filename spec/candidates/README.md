@@ -86,3 +86,15 @@ Run `scripts/check-candidate.sh LateControlCoverage`. The wrapper does not chang
 ## Retired experiments
 
 The initial `ServingLease` model used atomic authority-checked commits. Its pause, drain and delayed-grant controls now run in the maintained `OwnedWal` composition with immutable uploads. Its [historical evidence](../../docs/evidence/serving-authority-candidate-2026-11-09.json) identifies the source commit; the obsolete source and direct-run configurations are removed. The former `WalHandoff` model was similarly replaced by `Journal`; its [evidence](../../docs/evidence/wal-handoff-candidate-2026-11-09.json) remains available.
+
+## Placement request uncertainty
+
+Run `scripts/check-candidate.sh PlacementRequests` for the one-coordinator request/reply component. Its 359,761-state instance allows stale metadata observations, timed-out writes that apply later and stale replies after movement. It requires four faulty variants and four actual-event reachability traces. Invocation IDs are never reused; an uncertain result cannot restore issuance; a confirmed frozen view starts a conservative drain. The provider register must compare exactly even for an otherwise unchanged payload.
+
+This does not replace the root, permission or journal models: it does not yet compose root replacement, independent clocks, restart or prefix selection. See [the scope and bounds](../../docs/verification.md#candidate-placement-requests-and-uncertain-replies).
+
+## Placement requests during coordinator replacement
+
+Run `scripts/check-candidate.sh PlacementTakeover`. This composes the actual `RootControl` actions with placement request start, provider application, timeout, stale observations and delayed replies. Root and placement operations compare the same revision. The positive instance checks 3,379,987 states; four faulty variants and a recovery witness are required. The witness issues replacement-generation permission after a timed-out predecessor freeze actually applied.
+
+The seed is an already-active first root, followed by one successor; it does not model arbitrary repeated replacement or establish an unbounded refinement. The original root timing/epoch contracts remain assumptions. There is no journal or runtime adoption. [Bounds and limitations](../../docs/verification.md#candidate-placement-requests-across-root-replacement).

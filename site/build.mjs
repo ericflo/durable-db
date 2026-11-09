@@ -81,6 +81,8 @@ await mkdir(new URL('evidence/', out), { recursive: true });
 for (const file of [
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
+  'placement-requests-candidate-2026-11-09.json',
+  'placement-takeover-candidate-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',
