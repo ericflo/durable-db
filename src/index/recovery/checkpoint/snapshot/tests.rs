@@ -262,6 +262,52 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
 }
 
 #[tokio::test]
+async fn checkpoint_rewrite_refuses_cross_leaf_disorder_without_panicking() {
+    use crate::{
+        index::recovery::{Limits, Projection, checkpoint::build_projection},
+        storage::immutable::{Blob, REFERENCE_BYTES},
+    };
+    let files = Files::new();
+    let mut reference = fixture(files.clone()).await;
+    let root = reference.tree.unwrap().1;
+    let mut bytes = root
+        .read_range(files.as_ref(), 0..root.size())
+        .await
+        .unwrap()
+        .to_vec();
+    // Replace the second leaf with a validly encoded and checksummed node
+    // whose first bound is before the preceding leaf's final bound. Local
+    // node ordering and the parent/child final bounds still agree.
+    let second =
+        10 + 2 + u16::from_be_bytes(bytes[10..12].try_into().unwrap()) as usize + REFERENCE_BYTES;
+    let offset =
+        second + 2 + u16::from_be_bytes(bytes[second..second + 2].try_into().unwrap()) as usize;
+    let child = Blob::decode(&bytes[offset..offset + REFERENCE_BYTES]).unwrap();
+    let mut leaf = child
+        .read_range(files.as_ref(), 0..child.size())
+        .await
+        .unwrap()
+        .to_vec();
+    let key = &mut leaf[12..];
+    assert_eq!(&key[..4], b"app\0");
+    assert_eq!(key[19], 8);
+    key[19] = 7;
+    let child = Blob::upload(files.clone(), leaf.into()).await.unwrap();
+    let mut encoded = Vec::new();
+    child.encode(&mut encoded);
+    bytes[offset..offset + REFERENCE_BYTES].copy_from_slice(&encoded);
+    reference.tree = Some((1, Blob::upload(files.clone(), bytes.into()).await.unwrap()));
+    let mut projection = Projection::new(Limits::default()).unwrap();
+    projection.rebase(Snapshot::new(files.clone(), cache(0), reference));
+    projection.warm(db(7), 0, 0).await.unwrap();
+    let error = build_projection(&projection, files, reference.cut)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "unordered checkpoint manifest bounds");
+}
+
+#[tokio::test]
 async fn seeks_include_exact_table_and_manifest_bounds_and_isolate_generations() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;

@@ -149,9 +149,9 @@
   ],
   "change": {
     "summary": "Use authenticated manifest intervals to reuse unchanged checkpoint tables without reading their indexes; carry the base row total forward and adjust replaced tables only.",
-    "runtime_lines_added": 45,
+    "runtime_lines_added": 49,
     "runtime_lines_deleted": 35,
-    "net_runtime_lines_added": 10,
+    "net_runtime_lines_added": 14,
     "storage_format_changed": false,
     "full_manifest_traversal_retained": true,
     "tenant_maintenance_accounting_complete": false
@@ -178,7 +178,8 @@
     "clippy": "passed with warnings denied",
     "negative_rust_controls": [
       "Previous implementation fails: 187 reads instead of 4.",
-      "Exclusive upper-bound comparison fails ordered checkpoint construction."
+      "Exclusive upper-bound comparison fails ordered checkpoint construction.",
+      "Removing the global manifest interval guard reproduces a BTreeMap range panic for a checksummed cross-leaf ordering violation."
     ],
     "model": {
       "name": "CheckpointOverlay",
@@ -189,12 +190,20 @@
       "negative_controls": 8,
       "additional_safe_states": 0,
       "scope": "Finite data/receipt composition and interval reuse, not Rust refinement, physical timing or full protocol composition."
-    }
+    },
+    "focused_rewrite_suite_seconds": 0.68,
+    "followup_scope": "Cloud qualification uses 9e0892c; a later four-line fail-closed check rejects disordered manifest intervals before a resident range lookup. Focused positive/negative malformed-input regressions qualify that follow-up."
   },
   "limitations": [
     "Tenant maintenance, request and egress accounting remain incomplete; only journal admission has per-name ceilings.",
     "The full manifest still needs traversal; no large-image progress or cleanup SLO is established.",
     "Retained references assume a complete authenticated base. Referenced objects are checked on access or by explicit full-image verification; checkpoint rewriting is not an audit.",
     "Native CLI cutover requires physical ownership timing qualification; durable reader/backup retention and production/AWS qualification remain open."
-  ]
+  ],
+  "superseded_ci": {
+    "pipeline": 124,
+    "source_commit": "3c3b13d114a84e635cc659ad82d7f0b1a2aa3365",
+    "status": "canceled by maintainer",
+    "reason": "Restart qualification with the malformed-manifest fail-closed guard; not a test failure."
+  }
 }

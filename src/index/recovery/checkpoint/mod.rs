@@ -269,6 +269,10 @@ async fn build_projection(
         while let Some(routed) = tables.next().await? {
             builder.tree.reuse_from(&tables);
             let lower = boundary.replace(routed.last.clone());
+            ensure!(
+                lower.as_ref().is_none_or(|last| last < &routed.last),
+                "unordered checkpoint manifest bounds"
+            );
             count = count
                 .checked_add(1)
                 .context("checkpoint table count overflow")?;
