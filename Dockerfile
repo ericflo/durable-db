@@ -453,13 +453,15 @@ COPY docs docs
 COPY deploy/prometheus deploy/prometheus
 COPY scripts/install.sh scripts/install.sh
 COPY scripts/publish-docs.sh scripts/test-publish-docs.mjs scripts/github_known_hosts scripts/
+COPY scripts/check-release.mjs scripts/check-release.mjs
 COPY LICENSE README.md ./
 RUN node --test scripts/test-publish-docs.mjs \
     && npm --prefix site ci --no-audit --no-fund && npm --prefix site run build \
     && cp -a .site /out/site && cp LICENSE /out/site/LICENSE \
     && cp LICENSE README.md /out/ && cd /out \
     && tar czf durable-db-linux-amd64.tar.gz durable-db LICENSE \
-    && sha256sum durable-db-linux-amd64.tar.gz > SHA256SUMS
+    && sha256sum durable-db-linux-amd64.tar.gz > SHA256SUMS \
+    && node /src/scripts/check-release.mjs /out/durable-db-linux-amd64.tar.gz > /out/checks/release.json
 FROM scratch AS artifacts
 COPY --from=assembled /out/ /
 FROM scratch AS runtime
