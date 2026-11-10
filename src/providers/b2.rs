@@ -520,6 +520,103 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn root_controller_handles_cancelled_claims_and_lost_renewal_replies_over_http() {
+        for apply_before_successor in [false, true] {
+            root_controller_handoff(apply_before_successor).await;
+        }
+    }
+
+    async fn root_controller_handoff(apply_before_successor: bool) {
+        use crate::ownership::root::{Error as RootError, Outcome, Profile};
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct Clock(Arc<AtomicUsize>);
+        impl crate::ownership::timing::Clock for Clock {
+            fn read(&self) -> Option<Duration> {
+                Some(Duration::from_secs(self.0.load(Ordering::SeqCst) as u64))
+            }
+        }
+        let (native, state, server) = fixture().await;
+        let files =
+            Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
+        let connection = super::super::Connection::new(files, native, "test");
+        let clock = Clock(Arc::new(AtomicUsize::new(0)));
+        let profile = Profile::new(Duration::from_secs(10), Duration::from_secs(1)).unwrap();
+        let mut old = connection.root(clock.clone(), profile).unwrap();
+        let observed = old.observe().await.unwrap();
+        let request = old.claim(observed).unwrap();
+        state.pause_update.store(true, Ordering::SeqCst);
+        let work = tokio::spawn(request.execute());
+
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            state.update_started.notified().await;
+            old.abandon();
+            work.abort();
+            assert!(work.await.err().unwrap().is_cancelled());
+            if apply_before_successor {
+                state.release_update.notify_one();
+                state.update_finished.notified().await;
+            }
+
+            clock.0.store(5, Ordering::SeqCst);
+            let mut successor = connection.root(clock.clone(), profile).unwrap();
+            let observed = successor.observe().await.unwrap();
+            let request = successor.claim(observed).unwrap();
+            assert!(matches!(
+                successor.finish(request.execute().await).unwrap(),
+                Outcome::Confirmed
+            ));
+            if !apply_before_successor {
+                state.release_update.notify_one();
+                state.update_finished.notified().await;
+            }
+            assert!(old.permission().unwrap().is_none());
+            let observed = old.observe().await.unwrap();
+            assert!(matches!(old.validate(observed), Err(RootError::NotOwner)));
+
+            clock.0.store(27, Ordering::SeqCst);
+            let observed = successor.observe().await.unwrap();
+            let request = successor.validate(observed).unwrap();
+            state.lose_update_ack.store(true, Ordering::SeqCst);
+            assert!(matches!(
+                successor.finish(request.execute().await).unwrap(),
+                Outcome::Uncertain(_)
+            ));
+            assert!(matches!(successor.activate(), Err(RootError::NotReady)));
+            assert!(successor.permission().unwrap().is_none());
+
+            clock.0.store(28, Ordering::SeqCst);
+            let observed = successor.observe().await.unwrap();
+            let request = successor.validate(observed).unwrap();
+            assert!(matches!(
+                successor.finish(request.execute().await).unwrap(),
+                Outcome::Confirmed
+            ));
+            let request = successor.activate().unwrap();
+            assert!(matches!(
+                successor.finish(request.execute().await).unwrap(),
+                Outcome::Confirmed
+            ));
+            assert_eq!(
+                successor.permission().unwrap().unwrap().epoch,
+                if apply_before_successor { 2 } else { 1 }
+            );
+            assert_eq!(state.update_calls.load(Ordering::SeqCst), 5);
+            assert_eq!(state.bucket.lock().unwrap().info["head"], "current");
+            // The compatibility engine must refuse this experimental namespace.
+            assert!(connection.into_published(None).await.is_err());
+            assert_eq!(
+                state.bucket.lock().unwrap().info["durable-db-format"],
+                "owned-candidate-1"
+            );
+        })
+        .await;
+        server.abort();
+        result.unwrap();
+    }
+
     async fn cancelled_control_request(apply_before_revalidation: bool) {
         use crate::providers::control::Outcome;
         let (native, state, server) = fixture().await;

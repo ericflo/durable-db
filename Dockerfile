@@ -269,7 +269,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh RootRequests && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-rootacquisition
+COPY spec/candidates/RootAcquisition.tla spec/candidates/RootAcquisition.checks spec/candidates/RootAcquisition*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh RootAcquisition && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-candidate-rootacquisition /checks/ /checks/
 COPY --from=proof-root-requests /checks/ /checks/
 COPY --from=model-candidate-rootrequests /checks/ /checks/
 COPY --from=model-candidate-placementtakeover /checks/ /checks/

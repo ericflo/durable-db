@@ -138,6 +138,16 @@ The [Rust interval component](verification.md#ownership-interval-component) impl
 
 The timing profile must be part of the durable, versioned cluster contract. Every participant must reject a mismatched profile. A rolling configuration change cannot shorten the drain while grants issued under a longer lifetime or larger error allowance may still exist; changing the profile needs an explicit transition that excludes those grants.
 
+## Root controller and bootstrap
+
+`src/ownership/root.rs` connects the common provider session to the checked interval component. A fresh UUID binds once to an observed predecessor and its checked successor epoch. Competing candidates may capture the same predecessor; exact publication selects one. An uncertain claim is recovered by validating that same incarnation and epoch, never by retargeting its identity. The acquisition model starts with an empty register and includes claims that apply after caller timeout.
+
+The first matching confirmation starts a full drain. Renewals preserve an existing active interval while in flight, but only the current successful invocation extends it from its captured start. Activation does not extend the interval. Lost activation replies can be recovered by exact validation using the earlier completed drain. Expired, foreign or abandoned replies cannot manufacture permission. Observation futures own their state so provider waits need not hold the controller lock.
+
+The experimental `owned-candidate-1` format binds the namespace, incarnation, epoch, phase and full timing profile. Unknown fields/formats, legacy publication metadata, mismatched profiles, exhaustion and invalid confirmations fail closed. Provider-specific transports run the same controller; the B2 ten-field metadata bound includes room for the shared mutation identity. Existing non-reserved metadata is preserved.
+
+This implementation has no system clock adapter, automatic election/renewal driver, placement scheduler or journal catalog. The controller's permission check must follow recovery, durable-prefix verification and preparation of a consistent data view. The acquisition model, interval proof and earlier root proofs are component evidence; no theorem yet proves their complete Rust composition. The [verification record](verification.md#candidate-root-controller) includes controlled-clock tests and loopback B2/S3 HTTP faults, not a new cloud benchmark or platform qualification.
+
 ## What the provider measurements establish
 
 The bounded experiment uses the existing Rust provider bindings, two warmup objects, 32 measured operations per phase, 1 KiB and 64 KiB values, and concurrency 1, 4 and 16. Both B2 and a versioned MinIO fixture verify all 194 objects after reconnecting and match their ordered listing. Measured data operations add zero authority reads, conditional authority replacements or read barriers. Both dedicated buckets are removed afterward.
@@ -154,7 +164,7 @@ This demonstrates useful provider concurrency and supports investigating batched
 
 ## Next implementation gate
 
-Establish an implementable timing contract and refine atomic placement/prefix selection into provider requests with uncertain replies, then implement the smallest executable path with bounded memory and caches. Delegated permissions and journal history now have unbounded abstract composition proofs. Clock conversion, transactions and resource accounting still need composition. Use the same HTTP transaction semantics and repeat the same workload on B2 and S3-compatible storage. Measure provider latency and end-to-end overhead separately.
+Establish an implementable timing contract, add journal catalog recovery and placement/prefix publication to the root controller with uncertain replies, then complete the smallest executable serving path with bounded memory and caches. Delegated permissions and journal history now have unbounded abstract composition proofs. Clock conversion, transactions and resource accounting still need composition. Use the same HTTP transaction semantics and repeat the same workload on B2 and S3-compatible storage. Measure provider latency and end-to-end overhead separately.
 
 The first vertical run must combine warm reads without object-store control calls, independent databases, group commit, owner loss with the old process still alive, scale-down to one, total compute loss and recovery of every acknowledgement. Do not qualify throughput using a mock ownership boundary and describe it as a safe replacement. Only after this gate should the design expand to multilevel indexes, retained snapshots, compaction, physical admission, lifecycle APIs and the full production failure matrix.
 

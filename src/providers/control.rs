@@ -70,13 +70,16 @@ impl Session {
     }
 
     /// A raw observation may be stale. It never changes `confirmed()`.
-    pub async fn observe(&self) -> anyhow::Result<Observation> {
-        let bucket = self.authority.read().await?;
-        metadata_bound(&bucket.info, MAX_METADATA_BYTES)?;
-        Ok(Observation {
-            session: self.id,
-            bucket,
-        })
+    pub fn observe(&self) -> impl Future<Output = anyhow::Result<Observation>> + Send + use<> {
+        // Own the transport and identity so a controller need not keep its
+        // state locked while waiting for the provider. Replies remain scoped.
+        let authority = self.authority.clone();
+        let session = self.id;
+        async move {
+            let bucket = authority.read().await?;
+            metadata_bound(&bucket.info, MAX_METADATA_BYTES)?;
+            Ok(Observation { session, bucket })
+        }
     }
 
     /// The last current-invocation success, cleared before every new request.

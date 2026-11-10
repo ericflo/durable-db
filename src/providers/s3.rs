@@ -264,6 +264,7 @@ mod tests {
     use std::sync::Mutex;
 
     struct Wire {
+        absent: bool,
         puts: usize,
         object_puts: usize,
         object: Bytes,
@@ -300,6 +301,12 @@ mod tests {
 
     async fn read(State(state): State<Arc<Mutex<Wire>>>) -> Response {
         let state = state.lock().unwrap();
+        if state.absent {
+            return Response::builder()
+                .status(404)
+                .body(Body::from("<Error><Code>NoSuchKey</Code></Error>"))
+                .unwrap();
+        }
         Response::builder()
             .header("etag", &state.etag)
             .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
@@ -314,18 +321,25 @@ mod tests {
     ) -> Response {
         let mut state = state.lock().unwrap();
         state.puts += 1;
-        if headers.get("if-match").and_then(|h| h.to_str().ok()) != Some(state.etag.as_str()) {
+        let matches = if state.absent {
+            headers.get("if-none-match").and_then(|h| h.to_str().ok()) == Some("*")
+        } else {
+            headers.get("if-match").and_then(|h| h.to_str().ok()) == Some(state.etag.as_str())
+        };
+        if !matches {
             return Response::builder()
                 .status(412)
                 .body(Body::from("<Error><Code>PreconditionFailed</Code></Error>"))
                 .unwrap();
         }
         state.bucket = serde_json::from_slice(&bytes).unwrap();
-        state.etag = "\"new\"".into();
+        state.absent = false;
+        state.etag = format!("\"revision-{}\"", state.bucket.revision);
         // The authoritative update has happened. Simulate a gateway/server
         // losing its successful acknowledgement and returning a transient error.
         Response::builder()
             .status(state.acknowledgement)
+            .header("etag", &state.etag)
             .header("location", "/test/prefix/authority.json")
             .body(Body::from("<Error><Code>InternalError</Code></Error>"))
             .unwrap()
@@ -337,19 +351,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_same_root_controller_recovers_creation_and_fences_late_s3_updates() {
+        use crate::ownership::root::{Outcome, Profile};
+        use std::{
+            sync::atomic::{AtomicU64, Ordering},
+            time::Duration,
+        };
+        #[derive(Clone)]
+        struct Clock(Arc<AtomicU64>);
+        impl crate::ownership::timing::Clock for Clock {
+            fn read(&self) -> Option<Duration> {
+                Some(Duration::from_secs(self.0.load(Ordering::SeqCst)))
+            }
+        }
+        let (connection, state, task) = fixture(503, true).await;
+        let clock = Clock(Arc::new(AtomicU64::new(0)));
+        let profile = Profile::new(Duration::from_secs(10), Duration::from_secs(1)).unwrap();
+        let mut old = connection.root(clock.clone(), profile).unwrap();
+        let observed = old.observe().await.unwrap();
+        let request = old.claim(observed).unwrap();
+        assert!(matches!(
+            old.finish(request.execute().await).unwrap(),
+            Outcome::Uncertain(_)
+        ));
+        assert_eq!(state.lock().unwrap().puts, 1);
+        assert!(old.permission().unwrap().is_none());
+        state.lock().unwrap().acknowledgement = 200;
+        clock.0.store(3, Ordering::SeqCst);
+        let observed = old.observe().await.unwrap();
+        let request = old.validate(observed).unwrap();
+        assert!(matches!(
+            old.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        clock.0.store(26, Ordering::SeqCst);
+        let observed = old.observe().await.unwrap();
+        let request = old.validate(observed).unwrap();
+        assert!(matches!(
+            old.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        let request = old.activate().unwrap();
+        assert!(matches!(
+            old.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        assert_eq!(old.permission().unwrap().unwrap().epoch, 1);
+
+        clock.0.store(27, Ordering::SeqCst);
+        let observed = old.observe().await.unwrap();
+        let delayed = old.validate(observed).unwrap();
+        old.abandon();
+        let mut successor = connection.root(clock.clone(), profile).unwrap();
+        let observed = successor.observe().await.unwrap();
+        let request = successor.claim(observed).unwrap();
+        assert!(matches!(
+            successor.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        assert!(matches!(
+            old.finish(delayed.execute().await).unwrap(),
+            Outcome::Ignored
+        ));
+        assert_eq!(state.lock().unwrap().bucket.revision, 5);
+        clock.0.store(50, Ordering::SeqCst);
+        let observed = successor.observe().await.unwrap();
+        let request = successor.validate(observed).unwrap();
+        assert!(matches!(
+            successor.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        let request = successor.activate().unwrap();
+        assert!(matches!(
+            successor.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        assert_eq!(successor.permission().unwrap().unwrap().epoch, 2);
+        assert!(old.permission().unwrap().is_none());
+        assert_eq!(state.lock().unwrap().puts, 8);
+        task.abort();
+        task.await.unwrap_err();
+    }
+
+    #[tokio::test]
     async fn conditional_update_does_not_follow_a_redirect_into_a_false_comparison() {
         for status in [301, 302, 303, 307, 308] {
             check_uncertainty(status).await;
         }
     }
 
-    async fn check_uncertainty(acknowledgement: u16) {
+    async fn fixture(
+        acknowledgement: u16,
+        absent: bool,
+    ) -> (
+        super::super::Connection,
+        Arc<Mutex<Wire>>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let initial = Bucket {
             revision: 0,
             version: None,
             info: BTreeMap::new(),
         };
         let state = Arc::new(Mutex::new(Wire {
+            absent,
             puts: 0,
             object_puts: 0,
             object: Bytes::new(),
@@ -382,6 +487,11 @@ mod tests {
         )
         .unwrap();
         let connection = super::super::Connection::new(binding.files.clone(), binding, "prefix");
+        (connection, state, task)
+    }
+
+    async fn check_uncertainty(acknowledgement: u16) {
+        let (connection, state, task) = fixture(acknowledgement, false).await;
         assert_eq!(
             state.lock().unwrap().puts,
             0,

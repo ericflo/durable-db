@@ -33,6 +33,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
 | Ownership intervals | `cargo test --locked --lib ownership::timing` and `scripts/check-proof.sh GrantBounds` |
+| Candidate root controller | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootAcquisition` |
 | Candidate root request lifecycle | `scripts/check-candidate.sh RootRequests` and `scripts/check-proof.sh RootRequests` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
@@ -51,7 +52,7 @@ scripts/check-candidate.sh PartitionJournal
 scripts/check-proof.sh PartitionJournal
 ```
 
-The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal`, `LateControlCoverage`, `PlacementRequests`, `PlacementTakeover` and `RootRequests`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `RootRequests`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
+The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal`, `LateControlCoverage`, `PlacementRequests`, `PlacementTakeover`, `RootRequests` and `RootAcquisition`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `RootRequests`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
 
 ## Formal check inputs
 
@@ -90,6 +91,8 @@ cargo test --locked --test journal_cloud -- --ignored --exact journal_reconnect_
 The register fixture permits at most thirteen conditional attempts, including a bounded reconnect barrier. The journal fixture permits seventeen PUT attempts of at most 33 KiB each. Provisioning, reads, verification and cleanup are additional operations. After success or failure, remove every physical version, the bucket and its temporary credentials. MinIO exercises the S3 binding; it does not qualify AWS. The older publication fixture has its own environment contract in `tests/s3.rs`.
 
 For component work, `Native::connect_storage` and `S3::connect_storage` return the same `providers::Connection`. Its `objects()` and `authority()` expose transports without initializing publication metadata. `into_published` explicitly opens the current engine. Each conditional register replacement receives a fresh mutation identity, including replacements with otherwise identical metadata. Raw connections do not grant serving permission or provide tenant admission. HTTP regressions check that immutable writes leave authority metadata untouched and that redirects or lost replies do not cause a second PUT.
+
+The experimental `Connection::root(clock, profile)` controller binds the same provider connection to a fresh candidate identity and a durable timing profile. It has no operating-system clock adapter, serving API or automatic driver. Its `owned-candidate-1` format requires a fresh namespace and is rejected by the existing publication engine. Use only disposable fixtures while journal/placement recovery and the platform contract remain unqualified. The observation and mutation futures own their request state; await them outside the controller lock, then match the completion before consulting permission. Returned identities and durations are not transferable authority. See [controller scope](verification.md#candidate-root-controller).
 
 ## CI and publication
 

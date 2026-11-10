@@ -2,6 +2,12 @@
 
 These models explore possible replacements for the current serving protocol. They are not the implemented serving protocol and do not authorize changing runtime assumptions. The maintained journal component model and its unbounded abstract proof now live in `spec/Journal.tla` and `spec/JournalProof.tla`, replacing the former `WalHandoff` experiment. Run `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` for that component.
 
+## RootAcquisition
+
+This component starts with an empty register and unordered competing candidate identities. Each identity binds once to an observed predecessor; claims capture an exact comparison and cannot retarget after timeout or conflict. Successful generations are contiguous, each has one winning identity, and a winning identity cannot reappear in another generation. Lost claims can apply after timeout and be recovered through exact validation. Raw observations may be any historical version.
+
+Run `scripts/check-candidate.sh RootAcquisition`. The two- and three-candidate positive instances each allow four invocations, with 89,685 and 697,663 distinct states. Removing comparisons or allowing retargeting must fail. Two reachability controls exercise competing captured predecessors and recovery after a timed-out claim actually applies. There is no symmetry reduction or guided constraint. This is a finite acquisition model, not a serving-permission, liveness or Rust-refinement proof. The root controller also relies on the separate `RootRequests`, `RootControl` and `GrantBounds` contracts; their composition with the implementation remains an obligation.
+
 Run a focused candidate and all its mandatory negative controls from the repository root:
 
 ```sh

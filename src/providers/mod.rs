@@ -23,7 +23,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn new(files: Arc<dyn Storage>, authority: Arc<dyn Authority>, prefix: &str) -> Self {
+    pub(crate) fn new(
+        files: Arc<dyn Storage>,
+        authority: Arc<dyn Authority>,
+        prefix: &str,
+    ) -> Self {
         Self {
             files,
             authority: Arc::new(register::Register(authority)),
@@ -51,6 +55,17 @@ impl Connection {
     /// handling. This establishes no ownership or permission to serve data.
     pub fn control(&self) -> control::Session {
         control::Session::new(self.authority())
+    }
+
+    /// Create a candidate root controller under an explicitly supplied clock
+    /// contract. This can initialize a fresh experimental ownership format;
+    /// it rejects the existing engine's format and does not serve database data.
+    pub fn root<C: crate::ownership::timing::Clock>(
+        &self,
+        clock: C,
+        profile: crate::ownership::root::Profile,
+    ) -> Result<crate::ownership::root::Root<C>, crate::ownership::root::Error> {
+        crate::ownership::root::Root::new(self.control(), &self.prefix, clock, profile)
     }
 
     /// Explicitly initialize or open the current publication engine.

@@ -1,0 +1,6 @@
+safe RootAcquisition.cfg root-acquisition 512m -
+safe RootAcquisitionThree.cfg root-acquisition-three 512m -
+unsafe RootAcquisitionUnsafeCompare.cfg root-acquisition-compare 512m UniqueWinner
+unsafe RootAcquisitionUnsafeRetarget.cfg root-acquisition-retarget 512m ClaimBinding
+unsafe RootAcquisitionCompeting.cfg root-acquisition-competing 512m NotCompetingWinners
+unsafe RootAcquisitionRecovered.cfg root-acquisition-recovered 512m NotRecoveredClaim

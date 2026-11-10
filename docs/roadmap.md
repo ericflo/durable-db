@@ -8,7 +8,7 @@ The [production readiness plan](production-readiness.md) owns the release checkl
 
 Compose the [owned-partition design](design-owned-partitions.md) into an executable path: local reads under valid ownership, independent immutable log batches, bounded transaction validation, and recovery of every acknowledged write. Preserve one B2/S3 algorithm and the object-store durability boundary.
 
-The journal, conflict validator and invocation-bound control sessions are implemented components. Their models and abstract permission/history proofs have explicit assumptions; timing, election, wire and implementation composition remains open. They do not yet replace the HTTP engine.
+The journal, conflict validator and root controller are implemented components. The controller combines one-time candidate claims, invocation-bound replies and checked intervals; B2 and S3 HTTP fault fixtures exercise the same implementation. Platform timing, journal/placement recovery, routing and whole-protocol verification remain open. These components do not yet replace the HTTP engine.
 
 The first end-to-end qualification must include stale owners that remain alive, movement, scale-down to one and complete compute loss. Measure warm reads, batched durable writes, many active databases and disjoint-key transactions within one database. Publish latency, failures, retries, fairness, provider calls and cost on B2, then AWS S3.
 
