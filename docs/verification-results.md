@@ -1,6 +1,8 @@
 # Verification results
 
-## Shared-table index admission (2026-11-10)
+## v0.10.0 shared-table index admission (2026-11-10)
+
+[v0.10.0](https://github.com/ericflo/durable-db/releases/tag/v0.10.0) packages `eb2915a`, verified by [Woodpecker #139](https://ci.eflorenzano.com/repos/18/pipeline/139/1). The exact downloaded static Linux x86_64 binary passes standalone transactions, ordered reads, backup/restore and SIGKILL/reopen without a toolchain. The public default installer verifies the checksum and installs that same binary. The musl 10,005-database test passes in 198.61 seconds; 99 enabled tests pass against the local CLI in 10.65 seconds and against the separate native library fixture in 64.33 seconds.
 
 Native write admission now charges both data and index objects for every base table a change can replace. Pricing uses existing authenticated manifest descriptors and adds no provider calls. The 183-table fixture checks three rewritten pairs with four manifest reads and no table reads; the TCP regression rejects one byte short before allocation/PUT and admits the exact boundary. Restoring data-only pricing wrongly admits the write and fails that regression.
 
@@ -8,7 +10,9 @@ The change adds 13 net runtime Rust lines. All 288 local Rust tests pass; the fo
 
 Budgeted format `owned-candidate-16` excludes older accounting policies. Unbudgeted storage stays at `owned-candidate-15`: a published v0.9.0 binary creates a checkpoint and suffix, the new binary reopens that same directory and writes, then v0.9.0 reopens again. Values, revisions and exact retry receipts survive both forced-stop transitions without export. The data-only shortcut and forced format changes for unbudgeted storage are removed.
 
-[Complete evidence](evidence/index-copy-admission-2026-11-10.json) records the corrected fixture expectation and compatibility drill. This accounts for existing table/index copies; growth in new encoding, manifests, retries and recovery remain outside full tenant attribution. Cluster timing/placement, durable retention and production qualification remain open.
+Real B2 and versioned MinIO pass the native HTTP fixture, preserving values, receipts and nonrefundable budgets across two cold reopens and automatic cleanup. The first B2 run returned a 503 after one immutable-upload error; a fresh run passed with no retry-policy change. Its underlying cause remains unexplained. All disposable resources from both runs were removed.
+
+[Complete evidence](evidence/index-copy-admission-2026-11-10.json) records that failure, the corrected fixture expectation and the compatibility drill. This accounts for existing table/index copies; growth in new encoding, manifests, retries and recovery remain outside full tenant attribution. Cluster timing/placement, durable retention and production qualification remain open.
 
 ## v0.9.0 native local CLI (2026-11-10)
 
