@@ -54,6 +54,30 @@ impl LogId {
         )
     }
 
+    /// Collection accepts only exact writer keys; malformed names fail closed.
+    pub(crate) fn parse_key(key: &str) -> anyhow::Result<(Self, u64)> {
+        ensure!(key.len() == 90, "invalid journal object key length");
+        let (partition, rest) = key
+            .strip_prefix("journal/")
+            .context("invalid journal object key")?
+            .split_once('-')
+            .context("invalid journal object key")?;
+        let (epoch, position) = rest.split_once('-').context("invalid journal object key")?;
+        let log = Self {
+            partition: *Uuid::parse_str(partition)?.as_bytes(),
+            epoch: *Uuid::parse_str(epoch)?.as_bytes(),
+        };
+        let position = u64::from_str_radix(position, 16)?;
+        ensure!(
+            !log.partition().is_nil()
+                && !log.epoch().is_nil()
+                && position > 0
+                && key == log.key(position),
+            "noncanonical journal object key"
+        );
+        Ok((log, position))
+    }
+
     fn encode(self, output: &mut Vec<u8>) {
         output.extend_from_slice(&self.partition);
         output.extend_from_slice(&self.epoch);

@@ -5,6 +5,7 @@
 //! This is not a serving engine: journal selection/recovery and data-view checks
 //! must still precede every permission check. There is no system clock adapter.
 mod catalog;
+mod collection;
 mod metadata;
 mod registration;
 mod replay;
@@ -15,7 +16,7 @@ use crate::{
     journal::{QueueLimits, Writer},
     storage::Storage,
 };
-pub(crate) use catalog::protected as protected_catalog;
+pub(crate) use collection::Collection;
 use metadata::Phase;
 pub(crate) use metadata::Record;
 pub(crate) use metadata::{VERSION, budget as metadata_budget};
@@ -122,9 +123,9 @@ pub struct Root<C> {
 }
 
 impl<C: Clock> Root<C> {
-    pub(crate) fn budget_collection(&self) -> Option<crate::upload_budget::Collection> {
+    pub(crate) fn collection(&self) -> Option<Collection> {
         self.budgeted.then(|| {
-            crate::upload_budget::Collection::new(
+            Collection::new(
                 self.session.authority(),
                 self.files.clone(),
                 self.prefix.clone(),

@@ -6,7 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-pub(crate) const VERSION: &str = "owned-candidate-9";
+pub(crate) const VERSION: &str = "owned-candidate-10";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
@@ -66,7 +66,7 @@ pub(super) fn decode(
                     LEGACY_PROBE,
                     crate::upload_budget::FIELD,
                     crate::upload_budget::DATABASE_FIELD,
-                    crate::upload_budget::COLLECTION_FIELD,
+                    super::collection::FIELD,
                 ]
                 .contains(&k.as_str())
         })
@@ -161,7 +161,7 @@ pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
     for (field, bytes) in [
         (ROOT, 1024),
         (
-            crate::upload_budget::COLLECTION_FIELD,
+            super::collection::FIELD,
             if info.contains_key(crate::upload_budget::FIELD) {
                 1024
             } else {

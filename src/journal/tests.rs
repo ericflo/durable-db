@@ -512,6 +512,24 @@ fn frame_and_prefix_decoding_reject_bad_lengths_identities_and_trailing_bytes() 
     rehash(&mut bad_empty);
     assert!(Prefix::decode(&bad_empty).is_err());
     assert!(Prefix::decode(&prefix.encode()[..111]).is_err());
+    let log = LogId::root(uuid::Uuid::from_u128(0xabcdef));
+    for position in [1, u64::MAX] {
+        assert_eq!(
+            LogId::parse_key(&log.key(position)).unwrap(),
+            (log, position)
+        );
+    }
+    let key = log.key(1);
+    for bad in [
+        log.key(0),
+        key[..89].into(),
+        format!("{key}0"),
+        key.to_uppercase(),
+        key.replace("journal/", "unknown/"),
+        LogId::root(uuid::Uuid::nil()).key(1),
+    ] {
+        assert!(LogId::parse_key(&bad).is_err());
+    }
 }
 
 proptest::proptest! {

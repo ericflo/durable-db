@@ -178,7 +178,7 @@ async fn check_native_budget(connection: Connection) {
         ledger.charge(100).await.unwrap();
         assert!(ledger.charge(1).await.is_err());
     }
-    assert!(root.budget_collection().unwrap().collect().await.unwrap() > 0);
+    assert!(root.collection().unwrap().collect().await.unwrap() > 0);
     for name in ["a", "b"] {
         assert_eq!(
             root.database_budget(name)

@@ -101,7 +101,7 @@ impl<C: Clock + Send + 'static> Native<C> {
         }
         owner.check()?;
         let cache = owner.cache();
-        let collection = owner.budget_collection()?;
+        let collection = owner.collection()?;
         let owner = Arc::new(RwLock::new(owner));
         let (queue, receive) = mpsc::channel(capacity);
         let running = Arc::new(AtomicBool::new(true));
@@ -275,7 +275,7 @@ async fn run<C: Clock + Send>(
     mut queue: mpsc::Receiver<Command>,
     _running: Running,
     _renewal: Option<Renewal>,
-    collection: Option<crate::upload_budget::Collection>,
+    collection: Option<crate::ownership::root::Collection>,
 ) {
     let mut uploads = JoinSet::new();
     // At most one bounded sweep per serving worker, outside every owner lock.
@@ -301,7 +301,7 @@ async fn run<C: Clock + Send>(
                 collections.spawn(async move { tokio::time::timeout(Duration::from_secs(30), collection.collect()).await });
             }
             result = collections.join_next(), if !collections.is_empty() => {
-                if !matches!(result, Some(Ok(Ok(Ok(_))))) { tracing::warn!("native budget metadata collection deferred"); }
+                if !matches!(result, Some(Ok(Ok(Ok(_))))) { tracing::warn!("native storage collection deferred"); }
             }
             command = queue.recv() => {
                 let Some(command) = command else { return };

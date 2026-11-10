@@ -343,77 +343,6 @@ async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generatio
 }
 
 #[tokio::test]
-async fn checkpoint_inside_a_selected_journal_recovers_suffix_without_covered_frames() {
-    let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
-    let mut writer = old.take_journal(QueueLimits::default()).unwrap();
-    append(&mut writer, 1, Some(b"one")).await;
-    append(&mut writer, 2, None).await;
-    append(&mut writer, 3, Some(b"")).await;
-    let mut root = selected(&provider, &clock).await;
-    let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
-        .await
-        .unwrap()
-        .advance(2)
-        .await
-        .unwrap();
-    assert!(!recovery.is_complete());
-    let request = root
-        .publish_checkpoint(recovery.checkpoint().await.unwrap())
-        .unwrap();
-    provider.lose_reply.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        root.finish(request.execute().await).unwrap(),
-        Outcome::Uncertain(_)
-    ));
-    validate(&mut root).await;
-    // Deliberately remove covered frames to establish they are not downloaded.
-    // Production collection is still disabled and requires a retention protocol.
-    let keys = provider.files.list("journal/", None, 10).await.unwrap();
-    assert_eq!(keys.len(), 3);
-    for key in &keys[..2] {
-        provider.files.delete(key).await.unwrap();
-    }
-    assert!(
-        crate::transactions::recovery::restore(
-            root.replay().unwrap(),
-            crate::transactions::recovery::tests::Memory::default()
-        )
-        .await
-        .is_err()
-    );
-    let mut current = root.take_journal(QueueLimits::default()).unwrap();
-    append(&mut current, 4, Some(b"next-owner")).await;
-    let mut successor = selected(&provider, &clock).await;
-    let restored = Recovering::begin(successor.replay().unwrap(), Limits::default())
-        .await
-        .unwrap();
-    let projection = finish(restored).await;
-    let view = projection.view(db()).await.unwrap().unwrap();
-    assert_eq!(view.snapshot_floor(), 2);
-    assert!(view.get(b"x", 1).await.is_err());
-    assert!(view.get(b"x", 2).await.unwrap().unwrap().value.is_none());
-    assert_eq!(
-        view.get(b"x", 3).await.unwrap().unwrap().value,
-        Some(Bytes::new())
-    );
-    assert_eq!(
-        view.get(b"x", 4).await.unwrap().unwrap().value.as_deref(),
-        Some(b"next-owner".as_slice())
-    );
-    for revision in 1..=4 {
-        assert_eq!(
-            view.resolve(&format!("r-{revision}"), [revision as u8; 32], revision - 1)
-                .await
-                .unwrap(),
-            Resolution::Committed(revision)
-        );
-    }
-    assert_eq!(projection.usage().versions, 2); // only the selected suffix is resident
-}
-
-#[tokio::test]
 async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_orders() {
     for checkpoint_first in [true, false] {
         let provider = Provider::new();
@@ -730,4 +659,167 @@ async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered
             .as_deref(),
         Some(b"after".as_slice())
     );
+}
+
+#[tokio::test]
+async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suffix() {
+    use crate::{index::recovery::checkpoint::Staged, upload_budget::UploadLimits};
+    async fn next(connection: &Connection, clock: &ManualClock) -> Root<ManualClock> {
+        for _ in 0..2 {
+            let (mut root, outcome) = super::budget::attempt(connection, clock).await;
+            if matches!(outcome, Outcome::Confirmed) {
+                clock.set(clock.now.load(Ordering::SeqCst) + 23);
+                validate(&mut root).await;
+                activate(&mut root).await;
+                return root;
+            }
+            assert!(matches!(outcome, Outcome::Conflict));
+        }
+        panic!("bootstrap did not confirm");
+    }
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 256,
+        })
+        .await
+        .unwrap();
+    let mut old = next(&connection, &clock).await;
+    let mut writer = old.take_journal(QueueLimits::default()).unwrap();
+    append(&mut writer, 1, Some(b"one")).await;
+    append(&mut writer, 2, None).await;
+    append(&mut writer, 3, Some(b"")).await;
+    let original = provider.files.list("journal/", None, 10).await.unwrap();
+    let mut root = next(&connection, &clock).await;
+    let journal = scan(&mut root).await;
+    seal(&mut root, journal).await;
+    let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
+        .await
+        .unwrap()
+        .advance(2)
+        .await
+        .unwrap();
+    let staged = recovery.checkpoint().await.unwrap();
+    let (origin, reference) = (staged.origin, staged.reference);
+    // The collector has no local grant and no unallocated byte credit. It must
+    // make progress without immutable PUTs or restoring abandoned allowance.
+    let exhausted = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits::default())
+        .await
+        .unwrap();
+    assert!(
+        exhausted
+            .objects()
+            .put("tables/no-credit", Bytes::from_static(b"x"))
+            .await
+            .is_err()
+    );
+    let collector = exhausted
+        .root(clock.clone(), profile())
+        .unwrap()
+        .collection()
+        .unwrap();
+    let allowance = exhausted.objects().upload_budget().await.unwrap().unwrap();
+    let request = root.publish_checkpoint(staged).unwrap();
+    provider.pause.store(true, Ordering::SeqCst);
+    let task = tokio::spawn(request.execute());
+    provider.entered.notified().await;
+    collector.collect().await.unwrap();
+    assert_eq!(
+        provider.files.list("journal/", None, 10).await.unwrap(),
+        original
+    );
+    provider.release.notify_one();
+    assert!(matches!(
+        root.finish(task.await.unwrap()).unwrap(),
+        Outcome::Conflict
+    ));
+    validate(&mut root).await;
+    let request = root
+        .publish_checkpoint(Staged { origin, reference })
+        .unwrap();
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        root.finish(request.execute().await).unwrap(),
+        Outcome::Uncertain(_)
+    ));
+    validate(&mut root).await;
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(collector.collect().await.is_err());
+    assert_eq!(
+        provider.files.list("journal/", None, 10).await.unwrap(),
+        original
+    );
+    // Corrupt/missing checkpoint headers cannot authorize any journal deletion.
+    let key = format!("tables/{}", &reference.encode()[..32]);
+    let header = provider.files.get(&key, 1024).await.unwrap().unwrap().bytes;
+    provider
+        .files
+        .put(&key, Bytes::from_static(b"corrupt"))
+        .await
+        .unwrap();
+    assert!(collector.collect().await.is_err());
+    provider.files.delete(&key).await.unwrap();
+    assert!(collector.collect().await.is_err());
+    assert_eq!(
+        provider.files.list("journal/", None, 10).await.unwrap(),
+        original
+    );
+    provider.files.put(&key, header).await.unwrap();
+    assert_eq!(collector.collect().await.unwrap(), 2);
+    assert_eq!(
+        provider.files.list("journal/", None, 10).await.unwrap(),
+        original[2..]
+    );
+    assert_eq!(
+        exhausted.objects().upload_budget().await.unwrap().unwrap(),
+        allowance
+    );
+    validate(&mut root).await;
+    assert!(
+        crate::transactions::recovery::restore(
+            root.replay().unwrap(),
+            crate::transactions::recovery::tests::Memory::default()
+        )
+        .await
+        .is_err()
+    );
+    // The next owner's frame is independent of the checkpoint-covered journal.
+    validate(&mut root).await;
+    let mut current = root.take_journal(QueueLimits::default()).unwrap();
+    append(&mut current, 4, Some(b"next-owner")).await;
+    let mut successor = next(&connection, &clock).await;
+    let journal = scan(&mut successor).await;
+    seal(&mut successor, journal).await;
+    let projection = finish(
+        Recovering::begin(successor.replay().unwrap(), Limits::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let view = projection.view(db()).await.unwrap().unwrap();
+    assert_eq!(view.snapshot_floor(), 2);
+    assert!(view.get(b"x", 1).await.is_err());
+    assert!(view.get(b"x", 2).await.unwrap().unwrap().value.is_none());
+    assert_eq!(
+        view.get(b"x", 3).await.unwrap().unwrap().value,
+        Some(Bytes::new())
+    );
+
+    assert_eq!(
+        view.get(b"x", 4).await.unwrap().unwrap().value.as_deref(),
+        Some(b"next-owner".as_slice())
+    );
+    for revision in 1..=4 {
+        assert_eq!(
+            view.resolve(&format!("r-{revision}"), [revision as u8; 32], revision - 1)
+                .await
+                .unwrap(),
+            Resolution::Committed(revision)
+        );
+    }
 }

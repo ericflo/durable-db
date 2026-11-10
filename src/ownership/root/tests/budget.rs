@@ -12,7 +12,10 @@ fn limits(attempts: u64) -> UploadLimits {
     }
 }
 
-async fn attempt(connection: &Connection, clock: &ManualClock) -> (Root<ManualClock>, Outcome) {
+pub(super) async fn attempt(
+    connection: &Connection,
+    clock: &ManualClock,
+) -> (Root<ManualClock>, Outcome) {
     let mut root = connection.root(clock.clone(), profile()).unwrap();
     let observed = root.observe().await.unwrap();
     let request = root.claim(observed).unwrap();
@@ -391,7 +394,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
     // Every sweep is bounded; a replacement resumes the durable cursors. More
     // than one page of LIVE manifests must not hide obsolete objects forever.
     for _ in 0..8 {
-        root.budget_collection().unwrap().collect().await.unwrap();
+        root.collection().unwrap().collect().await.unwrap();
     }
     assert_eq!(
         provider
@@ -573,7 +576,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
                 provider.pause.store(true, Ordering::SeqCst);
                 let task = tokio::spawn(request.execute());
                 provider.entered.notified().await;
-                assert!(root.budget_collection().unwrap().collect().await.unwrap() > 0);
+                assert!(root.collection().unwrap().collect().await.unwrap() > 0);
                 provider.release.notify_one();
                 assert!(matches!(
                     root.finish(task.await.unwrap()).unwrap(),
@@ -588,7 +591,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
         }
         // The first sweep after takeover has a catalog and no tenant ledger.
         // Later sweeps must protect both trees even when their key names match.
-        root.budget_collection().unwrap().collect().await.unwrap();
+        root.collection().unwrap().collect().await.unwrap();
         let mut replay = root.replay().unwrap();
         for expected in 1..epoch {
             let batch = replay.read_next().await.unwrap().unwrap();
@@ -603,7 +606,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
             ledger.initialize_database().await.unwrap();
             ledger.charge(1).await.unwrap();
             let spent = ledger.status().await.unwrap();
-            root.budget_collection().unwrap().collect().await.unwrap();
+            root.collection().unwrap().collect().await.unwrap();
             assert_eq!(ledger.status().await.unwrap(), spent);
             let mut replay = root.replay().unwrap();
             assert!(replay.read_next().await.unwrap().is_some());
@@ -616,7 +619,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
     let collector = connection
         .root(clock, profile())
         .unwrap()
-        .budget_collection()
+        .collection()
         .unwrap();
     // A missing/corrupt catalog is an error, not an empty protected tree.
     let header = format!("catalogs/{}", provider.record().catalog.unwrap().simple());
@@ -648,7 +651,7 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
     let root = connection.root(ManualClock::default(), profile()).unwrap();
     let ledger = root.database_budget("app").unwrap().unwrap();
     ledger.initialize_database().await.unwrap();
-    let collector = root.budget_collection().unwrap();
+    let collector = root.collection().unwrap();
     // Metadata is uploaded, but its captured directory comparison is delayed.
     provider.pause.store(true, Ordering::SeqCst);
     let task = {
