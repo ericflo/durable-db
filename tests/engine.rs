@@ -16,6 +16,17 @@ use std::{
 };
 use tokio::sync::Notify;
 
+async fn page_count(storage: &dyn Storage, database: &str) -> usize {
+    let head = storage
+        .get(&format!("heads/{database}.json"), 512 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    serde_json::from_slice::<serde_json::Value>(&head.bytes).unwrap()["pages"]
+        .as_array()
+        .unwrap()
+        .len()
+}
 fn cache() -> Arc<Cache> {
     Arc::new(Cache::new(1024 * 1024, None).unwrap())
 }
@@ -135,7 +146,8 @@ async fn quotas_refuse_before_upload_and_keys_cannot_escape_namespace() {
 
 #[tokio::test]
 async fn ordered_scans_across_split_pages_have_stable_exclusive_cursors() {
-    let engine = Engine::new(remote(), cache());
+    let storage = remote();
+    let engine = Engine::new(storage.clone(), cache());
     engine.create("test", Limits::default()).await.unwrap();
     let mut req = request(0, "many", "unused", None);
     req.writes = (0..100)
@@ -145,7 +157,7 @@ async fn ordered_scans_across_split_pages_have_stable_exclusive_cursors() {
         })
         .collect();
     engine.commit("test", &req).await.unwrap();
-    assert!(engine.info("test").await.unwrap().pages > 1);
+    assert!(page_count(storage.as_ref(), "test").await > 1);
     for reverse in [false, true] {
         let mut after = None;
         let mut keys = Vec::new();
@@ -449,7 +461,8 @@ proptest::proptest! {
 
 #[tokio::test]
 async fn compaction_preserves_logical_revision_and_snapshot_contents() {
-    let engine = Engine::new(remote(), cache());
+    let storage = remote();
+    let engine = Engine::new(storage.clone(), cache());
     engine.create("test", Limits::default()).await.unwrap();
     let writes = (0..80)
         .map(|n| Write {
@@ -489,7 +502,7 @@ async fn compaction_preserves_logical_revision_and_snapshot_contents() {
         .await
         .unwrap();
     let before = engine.info("test").await.unwrap();
-    assert!(before.pages > 1);
+    assert!(page_count(storage.as_ref(), "test").await > 1);
     let req = ReadRequest {
         scans: vec![Scan {
             limit: 100,
@@ -509,7 +522,7 @@ async fn compaction_preserves_logical_revision_and_snapshot_contents() {
     let after = engine.info("test").await.unwrap();
     assert_eq!(before.revision, after.revision);
     assert_eq!(before.bytes, after.bytes);
-    assert_eq!(after.pages, 1);
+    assert_eq!(page_count(storage.as_ref(), "test").await, 1);
     assert_eq!(
         snapshot,
         serde_json::to_value(engine.read("test", &req).await.unwrap()).unwrap()

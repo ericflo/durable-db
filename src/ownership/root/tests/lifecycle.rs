@@ -95,6 +95,9 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         serde_json::to_value(&first.info).unwrap()
     );
     assert_eq!(owner.usage().versions, 0);
+    let empty = owner.info_authorized("app", &admin).await.unwrap();
+    assert_eq!((empty.revision, empty.keys, empty.bytes), (0, 0, 0));
+    assert!(serde_json::to_value(&empty).unwrap().get("pages").is_none());
     let auth = Auth::new(&"31".repeat(32)).unwrap();
     let (writer, _) = credential(&owner, "app", &auth, true).await;
     let (reader, _) = credential(&owner, "app", &auth, false).await;
@@ -164,6 +167,12 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
             .values,
         vec![Some("eA==".into())]
     );
+    let info = owner.info_authorized("app", &reader).await.unwrap();
+    assert_eq!((info.revision, info.keys, info.bytes), (1, 1, 2));
+    assert!(matches!(
+        owner.info_authorized("other", &reader).await,
+        Err(Error::Unauthorized)
+    ));
     let legacy = auth
         .access(&auth.issue("app".into(), true, 3600).unwrap(), "app", true)
         .unwrap();
@@ -210,6 +219,11 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
     assert_eq!(
         serde_json::to_value(result.info).unwrap(),
         serde_json::to_value(first.info).unwrap()
+    );
+    let restored = owner.info_authorized("app", &reader).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&info).unwrap()
     );
     assert_eq!(
         owner

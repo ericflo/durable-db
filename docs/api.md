@@ -12,7 +12,7 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 | --- | --- |
 | `PUT /v1/databases/{db}` | Admin: idempotent protected creation with a permanent request identity |
 | `POST /v1/databases/{db}` | Admin: legacy format-1 creation with `max_bytes` and `max_keys` quotas |
-| `GET /v1/databases/{db}` | Revision, logical usage, pages, and limits |
+| `GET /v1/databases/{db}` | Revision, live key/byte usage, access policy, and limits |
 | `POST /v1/databases/{db}/read` | Atomic read of keys and/or ordered scans |
 | `POST /v1/databases/{db}/commit` | Revision-checked atomic writes and optional value checks |
 | `POST /v1/databases/{db}/gc` | Admin: one bounded maintenance sweep |
@@ -23,6 +23,8 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 | `GET /metrics` | Administrator or metrics-only credential: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
 | `GET /health/live` | Process is serving HTTP |
 | `GET /health/ready` | Startup completed and server is not draining |
+
+Database info reports logical usage. The experimental `pages` field has been removed: native tables are shared across databases, so a per-database physical page count is not a useful API contract.
 
 Readiness does not continuously probe the object provider; provider outages return 503 from data requests. Liveness never depends on storage availability, avoiding restart storms.
 

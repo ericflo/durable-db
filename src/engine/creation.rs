@@ -36,10 +36,7 @@ impl CreationReceipt {
         );
         validate_limits(&self.initial.limits).context("invalid initial limits")?;
         ensure!(
-            self.initial.revision == 0
-                && self.initial.bytes == 0
-                && self.initial.keys == 0
-                && self.initial.pages == 0,
+            self.initial.revision == 0 && self.initial.bytes == 0 && self.initial.keys == 0,
             "invalid initial database info"
         );
         let original = self
@@ -131,7 +128,6 @@ impl CreationReceipt {
                 revision: 0,
                 bytes: 0,
                 keys: 0,
-                pages: 0,
                 limits: request.limits.clone(),
                 policy: Some(policy.info()),
             },

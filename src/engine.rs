@@ -81,7 +81,6 @@ pub struct Info {
     pub revision: u64,
     pub bytes: u64,
     pub keys: u64,
-    pub pages: usize,
     pub limits: Limits,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyInfo>,
@@ -183,7 +182,6 @@ impl Manifest {
             revision: self.revision,
             bytes: self.bytes,
             keys: self.keys,
-            pages: self.pages.len(),
             limits: self.limits.clone(),
             policy: self.policy.as_ref().map(access::Policy::info),
         }

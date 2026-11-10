@@ -251,6 +251,31 @@ impl<C: Clock> Owner<C> {
             .commit_result(change.ticket)?
             .map(|_| change.result.clone()))
     }
+    pub async fn info_authorized(&self, db: &str, caller: &Access) -> Result<engine::Info> {
+        caller.check_scope(db, false)?;
+        let entry = self.catalog_entry(db).await?.ok_or(Error::NotFound)?;
+        entry.authorize(db, caller, false)?;
+        let view = self
+            .projection
+            .view(Database {
+                name: db,
+                generation: entry.generation()?,
+            })
+            .await?;
+        let usage = view
+            .as_ref()
+            .map_or(Default::default(), recovery::View::statistics);
+        let info = engine::Info {
+            revision: view.as_ref().map_or(0, recovery::View::revision),
+            keys: usage.keys,
+            bytes: usage.bytes,
+            limits: entry.creation.limits().clone(),
+            policy: Some(entry.policy.info()),
+        };
+        entry.authorize(db, caller, false)?;
+        self.check()?;
+        Ok(info)
+    }
     pub async fn policy_info(&self, db: &str, caller: &Access) -> Result<PolicyInfo> {
         caller.check_scope(db, false)?;
         let entry = self.catalog_entry(db).await?.ok_or(Error::NotFound)?;

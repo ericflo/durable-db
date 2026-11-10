@@ -563,7 +563,18 @@ async fn collector_preserves_pages_retained_from_an_earlier_manifest() {
     )
     .await
     .unwrap();
-    assert_eq!(db.info("sample").await.unwrap().pages, 2);
+    let head = storage
+        .get("heads/sample.json", 512 * 1024)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&head.bytes).unwrap()["pages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     db.commit(
         "sample",
         &CommitRequest {
