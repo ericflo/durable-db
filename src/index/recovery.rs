@@ -94,6 +94,15 @@ struct Resident {
     floor: u64,
     base: Option<checkpoint::DatabaseSnapshot>,
 }
+impl Resident {
+    fn changed(&self) -> bool {
+        // Only a commit changes revision. Missing state cannot be evicted.
+        let base = self.base.as_ref().map_or(0, |base| base.revision());
+        self.state
+            .as_ref()
+            .is_none_or(|state| state.revision() != base)
+    }
+}
 pub struct Projection {
     base: Option<checkpoint::Snapshot>,
     databases: BTreeMap<(String, Uuid), Resident>,
@@ -121,6 +130,16 @@ impl Projection {
         self.base = Some(base);
         self.databases.clear();
         self.usage = Usage::default();
+    }
+    pub(crate) fn discard_warmed(&mut self) -> bool {
+        let Some(base) = self.base.clone() else {
+            return false;
+        };
+        if self.usage.versions != 0 || self.databases.values().any(Resident::changed) {
+            return false;
+        }
+        self.rebase(base);
+        true
     }
     pub fn usage(&self) -> Usage {
         self.usage

@@ -327,7 +327,7 @@ async fn build_projection(
             let replaces_metadata = projection
                 .databases
                 .range(first.clone()..=last)
-                .any(|(key, resident)| changed(resident) && (key != &first || kind < 2));
+                .any(|(key, resident)| resident.changed() && (key != &first || kind < 2));
             if !replaces_metadata && changes.peek().is_none_or(|row| row.key > routed.last) {
                 builder.flush().await?;
                 builder.rows = builder
@@ -347,7 +347,7 @@ async fn build_projection(
                     && projection
                         .databases
                         .get(&(db.name.to_owned(), db.generation))
-                        .is_some_and(changed)
+                        .is_some_and(Resident::changed)
                 {
                     continue;
                 }
@@ -408,17 +408,11 @@ fn checkpoint_row(
         value,
     }
 }
-fn changed(resident: &Resident) -> bool {
-    // Warming receipts for a retry/refusal does not change the durable image.
-    resident.state.as_ref().is_some_and(|state| {
-        state.revision() > resident.base.as_ref().map_or(0, DatabaseSnapshot::revision)
-    })
-}
 fn changed_rows(projection: &Projection) -> impl Iterator<Item = Entry> + '_ {
     projection
         .databases
         .iter()
-        .filter(|(_, resident)| changed(resident))
+        .filter(|(_, resident)| resident.changed())
         .flat_map(|((name, generation), resident)| {
             let state = resident.state.as_ref().expect("checkpoint state validated");
             let mut prefix = name.as_bytes().to_vec();

@@ -1,6 +1,6 @@
 -------------------------- MODULE CheckpointOverlay -------------------------
 EXTENDS Integers, Sequences, FiniteSets, TLC
-CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse, UnsafeManifestReuse
+CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse, UnsafeManifestReuse, UnsafeEvict
 Databases == 1..2
 Keys == 1..2
 Pairs == Databases \X Keys
@@ -56,7 +56,13 @@ Manifest == IF UnsafeManifestReuse \/ Merged = Base THEN Base ELSE Merged
 Rewrite == /\ phase = "ready" /\ rewritten = {}
            /\ rewritten' = {IF UnsafeRewrite THEN recent ELSE Manifest}
            /\ UNCHANGED <<history, cut, applied, recent, touched, receipts, phase>>
-Next == Advance \/ Finish \/ Fail \/ Rewrite
+\* No journal progress beyond the checkpoint: resident receipt metadata is
+\* disposable. Eviction with a selected suffix would discard committed data.
+Evict == /\ phase = "ready" /\ (applied = 0 \/ UnsafeEvict)
+         /\ recent' = [p \in Pairs |-> -1]
+         /\ touched' = {} /\ receipts' = [d \in Databases |-> {}]
+         /\ UNCHANGED <<history, cut, applied, phase, rewritten>>
+Next == Advance \/ Finish \/ Fail \/ Rewrite \/ Evict
 Spec == Init /\ [][Next]_vars
 Safe == /\ (phase = "ready" =>
               /\ cut + applied = 3

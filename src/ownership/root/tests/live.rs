@@ -1122,25 +1122,35 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
         .await
         .unwrap()
         .len();
-    let retry = owner.prepare_request(database("a"), &write).await.unwrap();
-    assert!(retry.upload.is_none());
-    assert!(
-        owner
-            .commit_result(retry.tickets[0])
-            .unwrap()
-            .unwrap()
-            .replayed
-    );
-    assert!(owner.maintain().await.unwrap());
-    assert_eq!(
-        provider
-            .files
-            .list("tables/", None, 100)
+    let controls = provider.calls.load(Ordering::SeqCst);
+    for stale in [false, true, false] {
+        let mut request = write.clone();
+        if stale {
+            request.request_id = "stale".into();
+        }
+        let retry = owner
+            .prepare_request(database("a"), &request)
             .await
-            .unwrap()
-            .len()
-            - before,
-        1,
-        "a warmed retry uploads only the cut header, retaining values, receipts and manifest"
-    );
+            .unwrap();
+        assert!(retry.upload.is_none());
+        let result = owner.commit_result(retry.tickets[0]);
+        if stale {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap().unwrap().replayed);
+        }
+        assert!(owner.maintain().await.unwrap());
+        assert_eq!(owner.usage().databases, 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
+        assert_eq!(
+            provider
+                .files
+                .list("tables/", None, 100)
+                .await
+                .unwrap()
+                .len(),
+            before,
+            "a warmed retry/refusal needs no checkpoint upload"
+        );
+    }
 }

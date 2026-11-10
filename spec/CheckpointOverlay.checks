@@ -5,3 +5,4 @@ unsafe CheckpointOverlayUnsafeEarly.cfg checkpoint-overlay-unsafeearly 512m Safe
 unsafe CheckpointOverlayUnsafeRewrite.cfg checkpoint-overlay-unsaferewrite 512m Safe
 unsafe CheckpointOverlayUnsafeReuse.cfg checkpoint-overlay-unsafereuse 512m Safe
 unsafe CheckpointOverlayUnsafeManifest.cfg checkpoint-overlay-unsafemanifest 512m Safe
+unsafe CheckpointOverlayUnsafeEvict.cfg checkpoint-overlay-unsafeevict 512m Safe

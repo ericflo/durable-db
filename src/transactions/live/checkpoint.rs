@@ -65,6 +65,18 @@ impl<C: Clock> Owner<C> {
         if !self.checkpoint_due() || self.writer.pending_batches() != 0 {
             return Ok(false);
         }
+        // Retries/refusals can fill the receipt cache without advancing history.
+        // Drop only that disposable state: no new checkpoint or authority CAS.
+        if self.maintenance.publishing.is_none()
+            && self.maintenance.recovered == 0
+            && self.writer.durable_prefix().position() == self.maintenance.covered
+            && self.projection.discard_warmed()
+        {
+            self.active.clear();
+            self.validation = validation::Usage::default();
+            self.maintenance.requested = false;
+            return Ok(true);
+        }
         if self.maintenance.publishing.is_none() {
             let origin = {
                 let _request = self.control.request.lock().await;
