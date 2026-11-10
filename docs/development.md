@@ -41,6 +41,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
+| Physical process pause (Linux) | `cargo test --locked --lib physical_owner_pause` (about eight seconds, including the frozen-clock control) |
 | Ownership intervals | `cargo test --locked --lib ownership::timing` and `scripts/check-proof.sh GrantBounds` |
 | Candidate root controller | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootAcquisition` |
 | Durable root registrations | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootRegistration` |

@@ -259,6 +259,8 @@ impl Authority for S3 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    mod timing;
     use super::*;
     use axum::{body::Body, extract::State, http::HeaderMap, response::Response, routing::get};
     use std::sync::Mutex;
@@ -961,6 +963,13 @@ mod tests {
         Arc<Mutex<Wire>>,
         tokio::task::JoinHandle<()>,
     ) {
+        let (endpoint, state, task) = serve_fixture(acknowledgement, absent).await;
+        (fixture_connection(&endpoint), state, task)
+    }
+    async fn serve_fixture(
+        acknowledgement: u16,
+        absent: bool,
+    ) -> (String, Arc<Mutex<Wire>>, tokio::task::JoinHandle<()>) {
         let initial = Bucket {
             revision: 0,
             version: None,
@@ -994,6 +1003,9 @@ mod tests {
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        (endpoint, state, task)
+    }
+    fn fixture_connection(endpoint: &str) -> super::super::Connection {
         let binding = S3::bind(
             AmazonS3Builder::new()
                 .with_bucket_name("test")
@@ -1006,8 +1018,7 @@ mod tests {
             "us-east-1".into(),
         )
         .unwrap();
-        let connection = super::super::Connection::new(binding.files.clone(), binding, "prefix");
-        (connection, state, task)
+        super::super::Connection::new(binding.files.clone(), binding, "prefix")
     }
 
     async fn check_uncertainty(acknowledgement: u16) {

@@ -136,6 +136,8 @@ Finite clock precision also needs a margin. The candidate arithmetic now assumes
 
 The [Rust interval component](verification.md#ownership-interval-component) implements checked arithmetic, request-anchored expiry and conservative drains with separate process-clock identities. Failed or backwards readings permanently retire a timeline. It supplies no system clock and grants no authority by itself; platform qualification and controller composition remain necessary.
 
+A Linux process-pause qualification now stops a real native owner, completes takeover and a successor write, then verifies that the resumed process refuses stale service. A frozen-clock negative control demonstrates why that platform contract matters. The clock adapter is confined to the test; this does not qualify VM suspend/restore or enable clock-based HTTP serving. [Scope and command](verification.md#ownership-interval-component).
+
 The timing profile must be part of the durable, versioned cluster contract. Every participant must reject a mismatched profile. A rolling configuration change cannot shorten the drain while grants issued under a longer lifetime or larger error allowance may still exist; changing the profile needs an explicit transition that excludes those grants.
 
 ## Root controller and bootstrap
