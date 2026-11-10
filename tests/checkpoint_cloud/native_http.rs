@@ -114,7 +114,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let connection = connect(&provider, &bucket, &namespace)
         .await
         .with_upload_budget(UploadLimits {
-            bytes: 16 * 1024 * 1024,
+            // Three fresh connections each consume a nonrefundable 8 MiB grant.
+            bytes: 32 * 1024 * 1024,
             attempts: 256,
         })
         .await
@@ -286,6 +287,9 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .await
         .unwrap();
     let server = Server::start(&connection).await;
+    let namespace_budget = connection.objects().upload_budget().await.unwrap().unwrap();
+    assert_eq!(namespace_budget.limits.bytes, 32 * 1024 * 1024);
+    assert_eq!(namespace_budget.allocated.bytes, 24 * 1024 * 1024);
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     for (path, revision, value) in readers {
         let response = server.ok("POST", path, &read).await;
@@ -299,7 +303,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     );
     server.stop().await;
     let evidence = json!({"provider":provider,"namespace":namespace,
-        "tenant_budget":balance,"exhausted_tenant_did_not_stall_neighbor":true,
+        "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
