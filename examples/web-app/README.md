@@ -29,7 +29,7 @@ Completing a task twice increments the counter once. Concurrent completions of d
 
 ## Run it
 
-Requires Node.js 24 and a current source build of durable-db; see the [build instructions](../../docs/development.md). The original v0.1.0 release predates protected database provisioning.
+Requires Node.js 24 and durable-db v0.2.0 or later; see the [installation instructions](../../README.md#start-locally).
 
 From the repository root:
 
