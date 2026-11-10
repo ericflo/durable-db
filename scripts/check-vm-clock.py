@@ -127,12 +127,12 @@ def exercise(work, source):
         if not guest_info.endswith(' ' + source):
             raise RuntimeError('guest did not select the requested clocksource')
 
-        def sample():
-            stream.write(b'sample\n')
+        def sample(request='sample'):
+            stream.write((request + '\n').encode())
             return list(map(int, read_until(stream, 'SAMPLE ').split()[1:]))
 
         rows = []
-        for mode in ['baseline', 'qmp-stop', 'cgroup-freeze', 'snapshot-restore']:
+        for mode in ['baseline', 'qmp-stop', 'cgroup-freeze', 'clocksource-fallback', 'snapshot-restore']:
             before = sample()
             started = time.monotonic_ns()
             if mode == 'qmp-stop':
@@ -143,7 +143,7 @@ def exercise(work, source):
                 error = command('human-monitor-command', {'command-line': 'savevm lease'})
                 if error:
                     raise RuntimeError(error)
-            time.sleep(3)
+            time.sleep(.05 if mode == 'clocksource-fallback' else 3)
             if mode == 'qmp-stop':
                 command('cont')
             elif mode == 'cgroup-freeze':
@@ -152,7 +152,7 @@ def exercise(work, source):
                 error = command('human-monitor-command', {'command-line': 'loadvm lease'})
                 if error:
                     raise RuntimeError(error)
-            after = sample()
+            after = sample('source kvm-clock' if mode == 'clocksource-fallback' else 'sample')
             elapsed = time.monotonic_ns() - started
             delta = [b - a for a, b in zip(before, after)]
             normalized = delta[0] * 3 // 2
@@ -162,7 +162,11 @@ def exercise(work, source):
                          'marker_before': before[3], 'marker_after': after[3],
                          'guard_accepts_timestamp': bool(after[4]),
                          'normalized_boottime_ns': normalized, 'within_candidate_bounds': within,
-                         'guarded_scenario_passed': not after[4] or within})
+                         'guarded_scenario_passed': (not after[4] if mode == 'clocksource-fallback' else not after[4] or within)})
+            if mode == 'clocksource-fallback':
+                # A new raw probe sample is not a new owner: a Timeline that saw
+                # the refusal stays retired, as the focused Rust test checks.
+                sample('source ' + source)
         return {'guest': guest_info, 'qemu': version, 'samples': rows}
 
 
