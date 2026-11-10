@@ -1,6 +1,8 @@
 //! Native value-index components. These do not grant serving authority or
 //! implement a transaction engine, compactor or collector.
+pub mod memory;
 pub mod merge;
+pub mod recovery;
 pub mod table;
 
 // Includes room for a database/generation prefix around a 1 KiB application key.

@@ -3,6 +3,11 @@ use super::{
     *,
 };
 use crate::{
+    cache::Cache,
+    index::{
+        recovery::{Limits as IndexLimits, Projection},
+        table,
+    },
     storage::Storage,
     transactions::{
         record::{Database, Mutation},
@@ -112,19 +117,32 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
     drop(writer);
     let replay = root.replay().unwrap();
     clock.set(clock.now.load(Ordering::SeqCst) + 10);
-    let view = recovery::restore(replay, Memory::default()).await.unwrap();
-    assert_eq!(view.calls, 4);
-    assert_eq!(view.values.len(), 2);
+    let view = recovery::restore(replay, Projection::new(IndexLimits::default()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(view.usage().databases, 2);
+    assert_eq!(view.usage().versions, 5);
+    assert_eq!(view.usage().receipts, 4);
+    let a = view.view(database("a")).unwrap().unwrap();
+    let b = view.view(database("b")).unwrap().unwrap();
+    assert!(a.get(b"x", 2).unwrap().unwrap().value.is_none());
     assert_eq!(
-        view.values[&("a".into(), database("a").generation, "y".into())],
-        b"after"
+        a.get(b"x", 1).unwrap().unwrap().value.as_deref(),
+        Some(b"before".as_slice())
     );
     assert_eq!(
-        view.values[&("b".into(), database("b").generation, "x".into())],
-        b""
+        a.get(b"y", 2).unwrap().unwrap().value.as_deref(),
+        Some(b"after".as_slice())
     );
+    assert_eq!(
+        b.get(b"x", 2).unwrap().unwrap().value.as_deref(),
+        Some(b"".as_slice())
+    );
+    assert!(a.get(b"x", 3).is_err());
+    assert!(a.scan(b"", None, 3).is_err());
     for name in ["a", "b"] {
-        let state = &view.states[&(name.into(), database(name).generation)];
+        let database = view.view(database(name)).unwrap().unwrap();
+        let state = database.state();
         assert_eq!(state.revision(), 2);
         assert_eq!(
             state.resolve("same-id", [1; 32], 0).unwrap(),
@@ -139,7 +157,43 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
             Resolution::Missing
         );
     }
-    assert!(!view.dropped.load(Ordering::SeqCst));
+    // Flush the actual selected-journal projection through the native table
+    // codec and read it after dropping the recovered memory view. This is a
+    // value flush, not checkpoint publication or permission to retire history.
+    let reference = table::build(provider.files.clone(), a.rows())
+        .await
+        .unwrap();
+    drop(view);
+    let reopened = table::Table::open(
+        provider.files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        reference,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened
+            .get(b"x", 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .as_deref(),
+        Some(b"before".as_slice())
+    );
+    assert!(
+        reopened
+            .get(b"x", 2)
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .is_none()
+    );
+    let mut scan = reopened.scan(b"", None, 2).unwrap();
+    assert_eq!(scan.next().await.unwrap().unwrap().key.as_ref(), b"x");
+    assert_eq!(scan.next().await.unwrap().unwrap().key.as_ref(), b"y");
+    assert!(scan.next().await.unwrap().is_none());
     assert!(root.permission().unwrap().is_none());
 }
 
@@ -319,4 +373,201 @@ async fn cancellation_drops_the_private_target_after_partial_application() {
     task.abort();
     assert!(task.await.is_err());
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn native_recovery_bounds_are_aggregate_and_do_not_alias_database_generations() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut old = active(&provider, &clock).await;
+    let original = database("a");
+    let recreated = Database {
+        name: "a",
+        generation: Uuid::from_u128(11),
+    };
+    write(
+        &mut old,
+        &[vec![
+            record(
+                original,
+                1,
+                "first",
+                &[Mutation {
+                    key: "x",
+                    value: Some(b"old!"),
+                }],
+            ),
+            record(
+                recreated,
+                1,
+                "first",
+                &[Mutation {
+                    key: "x",
+                    value: Some(b"new!"),
+                }],
+            ),
+        ]],
+    )
+    .await;
+    let mut root = successor(&provider, &clock).await;
+    let journal = scan(&mut root).await;
+    seal(&mut root, journal).await;
+    let defaults = IndexLimits::default();
+    for limits in [
+        IndexLimits {
+            databases: 1,
+            ..defaults
+        },
+        IndexLimits {
+            versions: 1,
+            ..defaults
+        },
+        IndexLimits {
+            value_bytes: 9,
+            ..defaults
+        },
+        IndexLimits {
+            receipts: 1,
+            ..defaults
+        },
+        IndexLimits {
+            receipt_bytes: 89,
+            ..defaults
+        },
+    ] {
+        assert!(
+            recovery::restore(root.replay().unwrap(), Projection::new(limits).unwrap())
+                .await
+                .is_err()
+        );
+    }
+    let recovered = recovery::restore(root.replay().unwrap(), Projection::new(defaults).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(recovered.usage().databases, 2);
+    assert_eq!(recovered.usage().versions, 2);
+    assert_eq!(recovered.usage().value_bytes, 10);
+    assert_eq!(recovered.usage().receipts, 2);
+    assert_eq!(recovered.usage().receipt_bytes, 90);
+    for (db, expected) in [(original, b"old!"), (recreated, b"new!")] {
+        let view = recovered.view(db).unwrap().unwrap();
+        assert_eq!(
+            view.get(b"x", 1).unwrap().unwrap().value.as_deref(),
+            Some(expected.as_slice())
+        );
+        assert_eq!(
+            view.state().resolve("first", [1; 32], 0).unwrap(),
+            Resolution::Committed(1)
+        );
+    }
+    assert!(recovered.view(database("missing")).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn native_recovery_receipt_eviction_releases_only_receipt_capacity() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut old = active(&provider, &clock).await;
+    let frames: Vec<_> = (1..=3)
+        .map(|revision| {
+            vec![
+                crate::transactions::record::Commit::encode(
+                    database("a"),
+                    revision,
+                    revision - 1,
+                    revision - 1,
+                    &format!("r-{revision}"),
+                    [revision as u8; 32],
+                    &[Mutation {
+                        key: "x",
+                        value: Some(b"v"),
+                    }],
+                )
+                .unwrap(),
+            ]
+        })
+        .collect();
+    write(&mut old, &frames).await;
+    let mut root = successor(&provider, &clock).await;
+    let journal = scan(&mut root).await;
+    seal(&mut root, journal).await;
+    let limits = IndexLimits {
+        receipts: 1,
+        receipt_bytes: 43,
+        ..IndexLimits::default()
+    };
+    let recovered = recovery::restore(root.replay().unwrap(), Projection::new(limits).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(recovered.usage().versions, 3);
+    assert_eq!(recovered.usage().value_bytes, 6);
+    assert_eq!(recovered.usage().receipts, 1);
+    assert_eq!(recovered.usage().receipt_bytes, 43);
+    let view = recovered.view(database("a")).unwrap().unwrap();
+    assert_eq!(
+        view.state().resolve("r-1", [1; 32], 0).unwrap(),
+        Resolution::Expired
+    );
+    assert_eq!(
+        view.state().resolve("r-3", [3; 32], 0).unwrap(),
+        Resolution::Committed(3)
+    );
+    assert_eq!(view.get(b"x", 1).unwrap().unwrap().revision, 1);
+}
+
+#[tokio::test]
+async fn native_selected_recovery_handles_ten_thousand_database_generations() {
+    const DATABASES: usize = 10_005;
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut old = active(&provider, &clock).await;
+    let records: Vec<_> = (0..DATABASES)
+        .map(|n| {
+            record(
+                Database {
+                    name: &format!("app-{n:05}"),
+                    generation: Uuid::from_u128(n as u128 + 1),
+                },
+                1,
+                "first",
+                &[Mutation {
+                    key: "x",
+                    value: Some(b"v"),
+                }],
+            )
+        })
+        .collect();
+    let frames: Vec<_> = records
+        .chunks(crate::journal::MAX_RECORDS)
+        .map(<[_]>::to_vec)
+        .collect();
+    write(&mut old, &frames).await;
+    let mut root = successor(&provider, &clock).await;
+    let journal = scan(&mut root).await;
+    seal(&mut root, journal).await;
+    let recovered = recovery::restore(
+        root.replay().unwrap(),
+        Projection::new(IndexLimits::default()).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.usage().databases, DATABASES);
+    assert_eq!(recovered.usage().versions, DATABASES);
+    assert_eq!(recovered.usage().receipts, DATABASES);
+    for n in 0..DATABASES {
+        let view = recovered
+            .view(Database {
+                name: &format!("app-{n:05}"),
+                generation: Uuid::from_u128(n as u128 + 1),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            view.state().resolve("first", [1; 32], 0).unwrap(),
+            Resolution::Committed(1)
+        );
+        let row = view.get(b"x", 1).unwrap().unwrap();
+        assert_eq!(row.value.as_deref(), Some(b"v".as_slice()));
+        assert!(view.get(b"x", 0).unwrap().is_none());
+    }
 }

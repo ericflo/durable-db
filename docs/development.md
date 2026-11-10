@@ -29,6 +29,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | --- | --- |
 | HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
+| Native memory and recovery | `cargo test --locked --lib index::memory`, `cargo test --locked --lib ownership::root::tests::transactions`, `scripts/check-model.sh MemoryIndex` and `scripts/check-model.sh TransactionRecovery` |
 | Native table merging | `cargo test --locked --lib index::merge` and `scripts/check-model.sh TableMerge` |
 | Native sorted tables | `cargo test --locked --lib index::table` and `scripts/check-model.sh SortedTable` |
 | Rust journal | `cargo test --locked --lib journal` |
@@ -108,7 +109,7 @@ cargo test --locked --test provider_ranges -- --ignored --exact bounded_ranges_o
 
 It writes one 16 MiB object and verifies five bounded slices, missing/size errors and rejection above the 8 MiB cap. It does not retry an uncertain upload. Delete all versions and revoke the temporary key after either outcome. The [retired index evaluation](design-owned-partitions.md#historical-third-party-index-integration) records historical selected-journal and grouped-write evidence.
 
-For native tables, set `DURABLE_DB_TABLE_REPORT` and use the same disposable provider environment:
+For native tables and their overlapping snapshot merge, set `DURABLE_DB_TABLE_REPORT` and use the same disposable provider environment:
 
 ```sh
 cargo test --locked --test native_tables -- --ignored --exact native_tables_use_bounded_blocks_and_recover_revisioned_ordered_rows

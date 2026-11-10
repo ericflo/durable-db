@@ -1,7 +1,10 @@
 //! Opt-in native table qualification, independent of serving or ownership.
 use durable_db::{
     cache::Cache,
-    index::table::{self, Reference, Row, Table},
+    index::{
+        merge,
+        table::{self, Reference, Row, Table},
+    },
     metrics::REGISTRY,
     providers::{b2::Native, s3::S3},
 };
@@ -127,7 +130,7 @@ async fn native_tables_use_bounded_blocks_and_recover_revisioned_ordered_rows() 
     assert!(cache.memory_bytes().await <= 256 * 1024);
     drop((cursor, table, cache));
     let reopened = Table::open(
-        files,
+        files.clone(),
         Arc::new(Cache::new(0, None).unwrap()),
         Reference::decode(&reference).unwrap(),
     )
@@ -142,13 +145,74 @@ async fn native_tables_use_bounded_blocks_and_recover_revisioned_ordered_rows() 
         assert_eq!(row.revision, revision);
         assert_eq!(row.value.is_none(), revision == 2);
     }
+    // Reconstruct both table handles without caches, then merge overlapping
+    // histories. A newer deletion must hide the old value in another object.
+    let delta_keys: Vec<_> = (0..=1024).map(|n| format!("db/0001/item/{n:04}")).collect();
+    let delta = table::build(
+        files.clone(),
+        delta_keys.iter().enumerate().map(|(n, key)| Row {
+            key: key.as_bytes(),
+            revision: 4,
+            value: if n < 1024 && n % 7 == 0 {
+                None
+            } else {
+                Some(b"".as_slice())
+            },
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("native delta upload failed; outcome may be unknown"));
+    let delta = Table::open(
+        files,
+        Arc::new(Cache::new(0, None).unwrap()),
+        Reference::decode(&delta.encode()).unwrap(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("native delta open failed"));
+    let tables = [delta, reopened];
+    let mut merged = merge::Cursor::new(&tables, b"", None, 4).unwrap();
+    let mut merged_rows = 0;
+    let mut merged_deletions = 0;
+    while let Some(row) = merged
+        .next()
+        .await
+        .unwrap_or_else(|_| panic!("native merged scan failed"))
+    {
+        assert_eq!(row.key.as_ref(), delta_keys[merged_rows].as_bytes());
+        assert_eq!(row.revision, 4);
+        if merged_rows < 1024 && merged_rows % 7 == 0 {
+            assert!(row.value.is_none());
+            merged_deletions += 1;
+        } else {
+            assert!(row.value.as_ref().unwrap().is_empty());
+        }
+        merged_rows += 1;
+    }
+    assert_eq!(merged_rows, 1025);
+    assert_eq!(merged_deletions, 147);
+    for revision in 1..=4 {
+        let row = merge::get(&tables, keys[0].as_bytes(), revision)
+            .await
+            .unwrap_or_else(|_| panic!("native merged point read failed"))
+            .unwrap();
+        assert_eq!(row.revision, revision);
+        assert_eq!(row.value.is_none(), revision == 2 || revision == 4);
+    }
+    assert!(
+        merge::get(&tables, delta_keys[1024].as_bytes(), 3)
+            .await
+            .unwrap_or_else(|_| panic!("native merged absence read failed"))
+            .is_none()
+    );
     assert_eq!(before, controls());
     std::fs::write(report,serde_json::to_vec_pretty(&serde_json::json!({
-        "schema":1,"provider":provider,"namespace":namespace,"scope":"Native immutable table; debug build; no serving authority, transactions, compaction or AWS qualification",
+        "schema":1,"provider":provider,"namespace":namespace,"scope":"Native immutable tables and snapshot merge; debug build; no serving authority, transactions, compaction or AWS qualification",
         "keys":1024,"stored_versions":3072,"snapshot_revision":2,"scan_rows":rows,"tombstones":tombstones,
         "maximum_block_bytes":131072,"memory_cache_bytes":262144,"reference_bytes":reference.len(),
         "upload_ms":upload_ms,"cold_point_ms":cold_point_ms,"cold_point_range_reads":1,
         "warm_point_reads":2000,"warm_point_total_ms":warm_ms,"warm_point_additional_object_calls":0,
-        "cache_free_reopen":true,"shared_register_calls":0
+        "cache_free_reopen":true,"shared_register_calls":0,
+        "merged_tables":2,"merged_snapshot_revision":4,"merged_rows":merged_rows,"merged_tombstones":merged_deletions,
+        "merged_historical_point_snapshots":4,"merged_new_key_absent_at_older_snapshot":true
     })).unwrap()).unwrap();
 }

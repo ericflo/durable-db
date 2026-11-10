@@ -25,6 +25,7 @@ pub struct State {
     generation: Uuid,
     revision: u64,
     receipt_floor: u64,
+    receipt_bytes: usize,
     receipts: VecDeque<(u64, Arc<str>)>,
     by_request: BTreeMap<Arc<str>, Receipt>,
 }
@@ -49,6 +50,7 @@ impl State {
             generation: database.generation,
             revision: 0,
             receipt_floor: 0,
+            receipt_bytes: 0,
             receipts: VecDeque::new(),
             by_request: BTreeMap::new(),
         })
@@ -56,6 +58,19 @@ impl State {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub(crate) fn database(&self) -> Database<'_> {
+        Database {
+            name: &self.name,
+            generation: self.generation,
+        }
+    }
+
+    /// Retained receipt count and request/fingerprint/revision payload bytes.
+    /// Collection nodes and allocator overhead need separate process admission.
+    pub(crate) fn receipt_usage(&self) -> (usize, usize) {
+        (self.by_request.len(), self.receipt_bytes)
     }
 
     /// Resolve retained receipts before checking snapshot age or conflicts.
@@ -121,9 +136,11 @@ impl State {
         {
             let (_, request) = self.receipts.pop_front().expect("checked receipt");
             self.by_request.remove(&request);
+            self.receipt_bytes -= request.len() + 40;
         }
         self.receipt_floor = commit.receipt_floor();
         let request: Arc<str> = commit.request_id().into();
+        self.receipt_bytes += request.len() + 40;
         self.receipts
             .push_back((commit.revision(), request.clone()));
         self.by_request.insert(
@@ -144,7 +161,8 @@ impl State {
 /// empty state). `apply` installs every evaluated mutation and the supplied
 /// revision/receipts. On error the runner discards the entire private target.
 /// These are implementation obligations, not properties established for an
-/// arbitrary trait implementor. No production index is selected here yet.
+/// arbitrary trait implementor. The native index supplies a bounded target in
+/// `index::recovery`; it is not yet the HTTP serving engine.
 #[async_trait]
 pub trait Target: Send + Sized {
     async fn take_state(&mut self, database: Database<'_>) -> anyhow::Result<State>;

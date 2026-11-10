@@ -80,7 +80,7 @@ async fn table(files: Arc<Files>, rows: &[TestRow<'_>]) -> Table {
         .await
         .unwrap()
 }
-async fn collect(mut cursor: Cursor) -> Vec<(Bytes, u64, Option<Bytes>)> {
+async fn collect(mut cursor: Cursor<'_>) -> Vec<(Bytes, u64, Option<Bytes>)> {
     let mut out = Vec::new();
     while let Some(row) = cursor.next().await.unwrap() {
         out.push((row.key, row.revision, row.value));

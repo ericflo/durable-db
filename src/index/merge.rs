@@ -1,7 +1,10 @@
 //! Snapshot reads over overlapping immutable tables. The caller supplies the
 //! complete, retained source set; these readers do not establish ownership.
 //! Deletions remain rows until the complete read view can suppress them.
-use super::table::{self, Entry, Table};
+use super::{
+    memory,
+    table::{self, Entry, Table},
+};
 use anyhow::ensure;
 use futures::{StreamExt, TryStreamExt, stream};
 use std::{
@@ -17,11 +20,34 @@ const POINT_CONCURRENCY: usize = 8;
 /// Consult every source before returning absence, a value or a deletion. Reads
 /// are bounded in flight; an unavailable source always fails the whole lookup.
 pub async fn get(tables: &[Table], key: &[u8], revision: u64) -> anyhow::Result<Option<Entry>> {
+    lookup(tables, None, key, revision).await
+}
+
+/// The memory view and table references must belong to the same database
+/// generation and retained snapshot. Source identity is a manifest obligation.
+pub async fn get_with_memory(
+    tables: &[Table],
+    memory: &memory::Memory,
+    key: &[u8],
+    revision: u64,
+) -> anyhow::Result<Option<Entry>> {
+    lookup(tables, Some(memory), key, revision).await
+}
+
+async fn lookup(
+    tables: &[Table],
+    memory: Option<&memory::Memory>,
+    key: &[u8],
+    revision: u64,
+) -> anyhow::Result<Option<Entry>> {
     super::validate_key(key)?;
-    ensure!(tables.len() <= MAX_SOURCES, "index read fan-in exceeded");
+    ensure!(
+        tables.len() <= MAX_SOURCES - usize::from(memory.is_some()),
+        "index read fan-in exceeded"
+    );
     let mut reads = stream::iter(tables.iter().map(|table| table.get(key, revision)))
         .buffer_unordered(POINT_CONCURRENCY);
-    let mut winner: Option<Entry> = None;
+    let mut winner = memory.map(|m| m.get(key, revision)).transpose()?.flatten();
     let mut conflict = false;
     while let Some(row) = reads.try_next().await? {
         let Some(row) = row else { continue };
@@ -70,28 +96,68 @@ impl Eq for Head {}
 /// One decoded block and one frontier row per source. Every source uses the
 /// same range and snapshot. I/O failures and cancellation can be retried on the
 /// same cursor; contradictory visible rows retire it permanently.
-pub struct Cursor {
-    sources: Vec<table::Cursor>,
+pub struct Cursor<'a> {
+    sources: Vec<Source<'a>>,
     pending: VecDeque<usize>,
     heads: BinaryHeap<Head>,
     failed: bool,
 }
-impl Cursor {
+enum Source<'a> {
+    Table(table::Cursor),
+    Memory(memory::Cursor<'a>),
+}
+impl Source<'_> {
+    async fn next(&mut self) -> anyhow::Result<Option<Entry>> {
+        match self {
+            Self::Table(cursor) => cursor.next().await,
+            Self::Memory(cursor) => Ok(cursor.next()),
+        }
+    }
+}
+impl<'a> Cursor<'a> {
     pub fn new(
         tables: &[Table],
         start: &[u8],
         end: Option<&[u8]>,
         revision: u64,
     ) -> anyhow::Result<Self> {
+        Self::create(tables, None, start, end, revision)
+    }
+
+    pub fn with_memory(
+        tables: &[Table],
+        memory: &'a memory::Memory,
+        start: &[u8],
+        end: Option<&[u8]>,
+        revision: u64,
+    ) -> anyhow::Result<Self> {
+        Self::create(tables, Some(memory), start, end, revision)
+    }
+
+    fn create(
+        tables: &[Table],
+        memory: Option<&'a memory::Memory>,
+        start: &[u8],
+        end: Option<&[u8]>,
+        revision: u64,
+    ) -> anyhow::Result<Self> {
         super::validate_range(start, end)?;
-        ensure!(tables.len() <= MAX_SOURCES, "index read fan-in exceeded");
+        ensure!(
+            tables.len() <= MAX_SOURCES - usize::from(memory.is_some()),
+            "index read fan-in exceeded"
+        );
+        let count = tables.len() + usize::from(memory.is_some());
+        let mut sources = tables
+            .iter()
+            .map(|t| t.scan(start, end, revision).map(Source::Table))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if let Some(memory) = memory {
+            sources.push(Source::Memory(memory.scan(start, end, revision)?));
+        }
         Ok(Self {
-            sources: tables
-                .iter()
-                .map(|t| t.scan(start, end, revision))
-                .collect::<anyhow::Result<_>>()?,
-            pending: (0..tables.len()).collect(),
-            heads: BinaryHeap::with_capacity(tables.len()),
+            sources,
+            pending: (0..count).collect(),
+            heads: BinaryHeap::with_capacity(count),
             failed: false,
         })
     }

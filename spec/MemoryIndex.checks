@@ -1,0 +1,3 @@
+safe MemoryIndex.cfg memory-index 512m -
+unsafe MemoryIndexUnsafePartial.cfg memory-index-unsafepartial 512m Atomic
+unsafe MemoryIndexUnsafeLatest.cfg memory-index-unsafelatest 512m Atomic
