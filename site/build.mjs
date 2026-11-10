@@ -82,6 +82,7 @@ await mkdir(new URL('evidence/', out), { recursive: true });
 for (const file of [
   'release-0.2.0-2026-11-10.json',
   'release-0.3.0-2026-11-10.json',
+  'inline-checkpoints-2026-11-10.json',
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
   'placement-requests-candidate-2026-11-09.json',

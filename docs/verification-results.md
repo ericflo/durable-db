@@ -1,5 +1,11 @@
 # Verification results
 
+## Inline checkpoint descriptors (2026-11-10)
+
+The native checkpoint descriptor now lives in authority metadata, removing its header object and upload/read/cache paths. Snapshot creation performs zero object reads; an unchanged rewrite makes zero uploads. Runtime Rust shrank by 42 lines. Native format `owned-candidate-11` requires a fresh namespace when coming from an older candidate.
+
+The [qualification record](evidence/inline-checkpoints-2026-11-10.json) includes 276 local Rust tests, the unchanged bounded checkpoint model and nine negative controls, and passing real B2/versioned MinIO HTTP tests. Automatic maintenance retains the recovery catalog and the uncovered journal suffix, then reclaims the suffix after a new checkpoint; two complete cold reopens preserve values, exact retry receipts and budgets. Both buckets, physical versions, the temporary key and container were removed. This does not qualify physical timing, AWS or an SLO. Obsolete table/manifest reclamation and full tenant maintenance accounting remain open.
+
 ## v0.2.0 experimental release (2026-11-10)
 
 [v0.2.0](https://github.com/ericflo/durable-db/releases/tag/v0.2.0) packages commit `6ae12e4`, verified by [Woodpecker #109](https://ci.eflorenzano.com/repos/18/pipeline/109/1). The build gate passed dependency audits, Rust tests including the directory-capacity regression, client/Pi contracts, maintained models/proofs and Pages delivery. The static Linux x86_64 archive contains the exact tested binary and Apache-2.0 license. A standalone run with no toolchain on `PATH` passed protected creation/retry, point and ordered reads, export/inspect/restore, and recovery after a forced process stop. The public installer then downloaded the GitHub asset, verified its checksum and installed the same binary. [Release evidence](evidence/release-0.2.0-2026-11-10.json) records hashes, checks and scope. Temporary servers, data, tokens and installation files were removed.
