@@ -11,7 +11,7 @@ use crate::{
     },
     journal::{self, Resolution},
     ownership::timing::Clock,
-    transactions::live::{AuthorizedTicket, CatalogChange, CatalogResult, Owner},
+    transactions::live::{AuthorizedTicket, CatalogChange, CatalogResult, Owner, Renewal},
 };
 use async_trait::async_trait;
 use std::{
@@ -28,8 +28,9 @@ use tokio::{
 };
 
 /// Native HTTP backend for an already recovered owner. The caller must supply
-/// and independently renew a qualified ownership contract. This adapter does
-/// not select a physical clock, elect an owner, or enable the CLI cloud runtime.
+/// a qualified ownership contract. Use `renewing` to own its renewal task, or
+/// `new` with externally driven renewal. Neither selects a physical clock,
+/// elects an owner, or enables the CLI cloud runtime.
 /// Dropping it retires the worker; accepted writes can have unknown outcomes.
 pub struct Native<C> {
     owner: Arc<RwLock<Owner<C>>>,
@@ -79,6 +80,20 @@ impl<C: Clock + Send + 'static> Native<C> {
     /// Requests also obey the public wire bounds; journal/cache limits remain
     /// independent. Capacity is 1..128; saturation refuses before admission.
     pub fn new(owner: Owner<C>, capacity: usize) -> Result<Self> {
+        Self::start(owner, capacity, None)
+    }
+    /// Own bounded renewal scheduling alongside serving. The injected clock and
+    /// profile must already be qualified. Worker failure/drop also stops renewal.
+    pub fn renewing(
+        owner: Owner<C>,
+        capacity: usize,
+        period: Duration,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let renewal = owner.control().keep_alive(period, timeout)?;
+        Self::start(owner, capacity, Some(renewal))
+    }
+    fn start(owner: Owner<C>, capacity: usize, renewal: Option<Renewal>) -> Result<Self> {
         if !(1..=128).contains(&capacity) {
             return Err(Error::Invalid(
                 "native request capacity must be 1..128".into(),
@@ -89,7 +104,12 @@ impl<C: Clock + Send + 'static> Native<C> {
         let owner = Arc::new(RwLock::new(owner));
         let (queue, receive) = mpsc::channel(capacity);
         let running = Arc::new(AtomicBool::new(true));
-        let worker = tokio::spawn(run(owner.clone(), receive, Running(running.clone())));
+        let worker = tokio::spawn(run(
+            owner.clone(),
+            receive,
+            Running(running.clone()),
+            renewal,
+        ));
         Ok(Self {
             owner,
             cache,
@@ -219,6 +239,7 @@ async fn run<C: Clock + Send>(
     owner: Arc<RwLock<Owner<C>>>,
     mut queue: mpsc::Receiver<Command>,
     _running: Running,
+    _renewal: Option<Renewal>,
 ) {
     let mut uploads = JoinSet::new();
     let mut pending: Vec<Pending> = Vec::new();

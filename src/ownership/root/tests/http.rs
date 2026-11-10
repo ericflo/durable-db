@@ -597,3 +597,34 @@ async fn native_http_javascript_contract() {
     );
     println!("{}", String::from_utf8_lossy(&output.stdout));
 }
+
+#[tokio::test(start_paused = true)]
+async fn native_http_stops_renewal_when_the_serving_worker_retires() {
+    use crate::api::Backend;
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let owner = super::live::open(active(&provider, &clock).await, live::Limits::default()).await;
+    let before = provider.calls.load(Ordering::SeqCst);
+    let backend = Native::renewing(
+        owner,
+        2,
+        Duration::from_millis(10),
+        Duration::from_millis(5),
+    )
+    .unwrap();
+    tokio::task::yield_now().await;
+    assert!(provider.calls.load(Ordering::SeqCst) > before);
+    assert!(backend.ready().await);
+    clock.failed.store(true, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    assert!(!backend.ready().await);
+    let reads = provider.reads.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        provider.reads.load(Ordering::SeqCst),
+        reads,
+        "a retired serving worker must not keep its renewal task running"
+    );
+}

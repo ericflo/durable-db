@@ -4,6 +4,8 @@
 //! The HTTP adapter uses catalog-authorized methods. Low-level generation APIs
 //! require caller authorization. Physical timing/placement remains external.
 mod catalog;
+mod control;
+pub use control::{Control, Renewal};
 mod checkpoint;
 pub use catalog::{AuthorizedBatch, AuthorizedTicket, CatalogChange, CatalogResult};
 mod commit;
@@ -27,11 +29,7 @@ use crate::{
 };
 use anyhow::{Context, ensure};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeMap,
-    ops::Bound,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, ops::Bound, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Clone, Copy)]
@@ -111,53 +109,6 @@ pub struct Prepared {
     pub upload: Option<journal::PreparedUpload>,
 }
 
-pub struct Control<C> {
-    root: Arc<Mutex<Root<C>>>,
-    request: Arc<tokio::sync::Mutex<()>>,
-}
-impl<C> Clone for Control<C> {
-    fn clone(&self) -> Self {
-        Self {
-            root: self.root.clone(),
-            request: self.request.clone(),
-        }
-    }
-}
-impl<C: Clock> Control<C> {
-    fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Root<C>>> {
-        self.root
-            .lock()
-            .map_err(|_| anyhow::anyhow!("owner control retired"))
-    }
-    /// Cancelled/unknown requests are abandoned before a fresh exact validation.
-    /// The old interval is never extended by the act of abandoning a request.
-    pub async fn renew(&self) -> anyhow::Result<root::Outcome> {
-        let _request = self.request.lock().await;
-        self.renew_locked().await
-    }
-    // The request gate spans I/O, but permission checks take only the short
-    // root mutex. Abandon can therefore affect only a cancelled prior request,
-    // never another live caller's checkpoint or renewal.
-    async fn renew_locked(&self) -> anyhow::Result<root::Outcome> {
-        let observation = self.lock()?.observe();
-        let observed = observation.await?;
-        let prepared = {
-            let mut root = self.lock()?;
-            root.abandon();
-            root.validate(observed)?
-        };
-        let completed = prepared.execute().await;
-        Ok(self.lock()?.finish(completed)?)
-    }
-    fn check(&self, identity: root::Identity) -> anyhow::Result<()> {
-        ensure!(
-            self.lock()?.permission()? == Some(identity),
-            "owner has no serving permission"
-        );
-        Ok(())
-    }
-}
-
 /// Recovery is private. Keep `control()` running while storage I/O is pending.
 /// Prior journal selection must be complete before constructing this opening.
 pub struct Opening<C> {
@@ -177,10 +128,7 @@ impl<C: Clock> Opening<C> {
         );
         let replay = root.replay()?;
         Ok(Self {
-            control: Control {
-                root: Arc::new(Mutex::new(root)),
-                request: Arc::new(tokio::sync::Mutex::new(())),
-            },
+            control: Control::new(root),
             replay,
             limits,
             cache,

@@ -43,6 +43,7 @@ struct Provider {
     history: Mutex<Vec<Bucket>>,
     stale: Mutex<Option<usize>>,
     calls: AtomicU64,
+    reads: AtomicU64,
     lose_reply: AtomicBool,
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
@@ -62,6 +63,7 @@ impl Provider {
             }]),
             stale: Mutex::new(None),
             calls: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
@@ -90,6 +92,7 @@ impl Provider {
 #[async_trait]
 impl Authority for Provider {
     async fn read(&self) -> anyhow::Result<Bucket> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         let history = self.history.lock().unwrap();
         Ok(history[self.stale.lock().unwrap().unwrap_or(history.len() - 1)].clone())
     }

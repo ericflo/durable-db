@@ -651,3 +651,68 @@ async fn native_cancelled_renewal_keeps_reads_live_and_does_not_strand_the_contr
     assert!(matches!(control.renew().await.unwrap(), Outcome::Confirmed));
     assert!(owner.catalog_result(&creation).unwrap().is_some());
 }
+
+#[tokio::test(start_paused = true)]
+async fn native_renewal_scheduler_bounds_timeouts_skips_missed_ticks_and_stops_on_drop() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+    let control = owner.control();
+    assert!(
+        control
+            .keep_alive(Duration::ZERO, Duration::from_secs(1))
+            .is_err()
+    );
+    provider.pause.store(true, Ordering::SeqCst);
+    let renewal = control
+        .keep_alive(Duration::from_millis(10), Duration::from_millis(5))
+        .unwrap();
+    provider.entered.notified().await;
+    let calls = provider.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_millis(6)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        calls + 1,
+        "timeout must release the control gate"
+    );
+    assert!(
+        owner
+            .read_request(
+                crate::transactions::record::Database {
+                    name: "app",
+                    generation: Uuid::from_u128(9)
+                },
+                &ReadRequest::default()
+            )
+            .await
+            .is_ok()
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        calls + 2,
+        "missed ticks cannot cause a renewal burst"
+    );
+    drop(renewal);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 2);
+    clock.set(100);
+    assert!(
+        owner
+            .read_request(
+                crate::transactions::record::Database {
+                    name: "app",
+                    generation: Uuid::from_u128(9)
+                },
+                &ReadRequest::default()
+            )
+            .await
+            .is_err()
+    );
+}
