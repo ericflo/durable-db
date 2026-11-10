@@ -633,6 +633,14 @@ mod tests {
             let mut replay = successor.replay().unwrap();
             assert!(replay.read_next().await.unwrap().is_none());
             assert!(replay.completed());
+            let view = crate::transactions::recovery::restore(
+                successor.replay().unwrap(),
+                crate::transactions::recovery::tests::Memory::default(),
+            )
+            .await
+            .unwrap();
+            assert!(view.states.is_empty());
+            assert!(view.values.is_empty());
             // The compatibility engine must refuse this experimental namespace.
             assert!(connection.into_published(None).await.is_err());
             assert_eq!(

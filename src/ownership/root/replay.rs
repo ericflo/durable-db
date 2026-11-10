@@ -50,6 +50,10 @@ impl Replay {
         self.completed
     }
 
+    pub(crate) fn at_start(&self) -> bool {
+        !self.loaded
+    }
+
     /// At most one borrowed frame and 64 queued catalog keys. The borrow forces
     /// the caller to release each frame before requesting one from another log.
     pub async fn read_next(&mut self) -> anyhow::Result<Option<ReplayBatch<'_>>> {

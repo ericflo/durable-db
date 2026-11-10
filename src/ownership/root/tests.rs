@@ -2,6 +2,7 @@ use super::*;
 mod catalog;
 mod registration;
 mod replay;
+mod transactions;
 use crate::{
     providers::Connection,
     publication::{Authority, Bucket},

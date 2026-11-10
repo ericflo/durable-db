@@ -135,6 +135,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh TransactionValidation && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-transactionrecovery
+COPY spec/TransactionRecovery.tla spec/TransactionRecovery.checks spec/TransactionRecovery*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh TransactionRecovery && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-ownershipclaim
 COPY spec/OwnershipClaim.tla spec/OwnershipClaim.checks spec/OwnershipClaim.cfg spec/UnsafeClaimRetarget.cfg spec/UnsafeClaimComparison.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -303,6 +309,7 @@ COPY --from=model-candidate-rootrequests /checks/ /checks/
 COPY --from=model-candidate-placementtakeover /checks/ /checks/
 COPY --from=model-candidate-placementrequests /checks/ /checks/
 COPY --from=model-transactionvalidation /checks/ /checks/
+COPY --from=model-transactionrecovery /checks/ /checks/
 COPY --from=model-candidate-latecontrol /checks/ /checks/
 COPY --from=proof-partition-journal /checks/ /checks/
 COPY --from=proof-partition-control /checks/ /checks/
@@ -378,8 +385,10 @@ COPY site site
 COPY docs docs
 COPY deploy/prometheus deploy/prometheus
 COPY scripts/install.sh scripts/install.sh
+COPY scripts/publish-docs.sh scripts/test-publish-docs.mjs scripts/github_known_hosts scripts/
 COPY LICENSE README.md ./
-RUN npm --prefix site ci --no-audit --no-fund && npm --prefix site run build \
+RUN node --test scripts/test-publish-docs.mjs \
+    && npm --prefix site ci --no-audit --no-fund && npm --prefix site run build \
     && cp -a .site /out/site && cp LICENSE /out/site/LICENSE \
     && cp LICENSE README.md /out/ && cd /out \
     && tar czf durable-db-linux-amd64.tar.gz durable-db LICENSE \

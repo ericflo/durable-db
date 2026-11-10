@@ -399,6 +399,13 @@ mod tests {
     #[tokio::test]
     async fn the_same_root_controller_recovers_creation_and_fences_late_s3_updates() {
         use crate::ownership::root::{Outcome, Profile};
+        use crate::transactions::{
+            record::{Database, Mutation},
+            recovery::{
+                self, Resolution,
+                tests::{Memory, record},
+            },
+        };
         use std::{
             sync::atomic::{AtomicU64, Ordering},
             time::Duration,
@@ -446,10 +453,33 @@ mod tests {
         let mut writer = old
             .take_journal(crate::journal::QueueLimits::default())
             .unwrap();
-        let upload = writer.prepare(&[Bytes::from_static(b"first")]).unwrap();
+        let database = Database {
+            name: "web-app",
+            generation: uuid::Uuid::from_u128(42),
+        };
+        let first = record(
+            database,
+            1,
+            "request",
+            &[Mutation {
+                key: "note",
+                value: Some(b"first"),
+            }],
+        );
+        let upload = writer.prepare(std::slice::from_ref(&first)).unwrap();
         writer.complete(upload.send().await).unwrap();
         assert!(writer.pop_durable().unwrap().is_some());
-        let late = writer.prepare(&[Bytes::from_static(b"late")]).unwrap();
+        let late = writer
+            .prepare(&[record(
+                database,
+                2,
+                "late",
+                &[Mutation {
+                    key: "note",
+                    value: Some(b"late"),
+                }],
+            )])
+            .unwrap();
 
         clock.0.store(27, Ordering::SeqCst);
         let observed = old.observe().await.unwrap();
@@ -532,12 +562,28 @@ mod tests {
         let mut replay = successor.replay().unwrap();
         let batch = replay.read_next().await.unwrap().unwrap();
         assert_eq!(batch.identity().epoch, 1);
-        assert_eq!(
-            batch.records().collect::<Vec<_>>(),
-            vec![b"first".as_slice()]
-        );
+        assert_eq!(batch.records().collect::<Vec<_>>(), vec![first.as_ref()]);
         assert!(replay.read_next().await.unwrap().is_none());
         assert!(replay.completed());
+
+        let view = recovery::restore(successor.replay().unwrap(), Memory::default())
+            .await
+            .unwrap();
+        let metadata = &view.states[&(database.name.into(), database.generation)];
+        assert_eq!(metadata.revision(), 1);
+        assert_eq!(
+            metadata.resolve("request", [1; 32], 0).unwrap(),
+            Resolution::Committed(1)
+        );
+        assert_eq!(
+            metadata.resolve("late", [2; 32], 1).unwrap(),
+            Resolution::Missing
+        );
+        assert_eq!(
+            view.values[&(database.name.into(), database.generation, "note".into())],
+            b"first"
+        );
+        assert_eq!(state.lock().unwrap().puts, 10);
 
         task.abort();
         task.await.unwrap_err();

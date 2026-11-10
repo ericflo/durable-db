@@ -1,0 +1,7 @@
+safe TransactionRecovery.cfg transaction-recovery 512m -
+safe TransactionRecoveryRetention.cfg transaction-recovery-retention 512m -
+unsafe TransactionRecoveryUnsafeReceipt.cfg transaction-recovery-receipt 512m AtomicPrefix
+unsafe TransactionRecoveryUnsafeRevision.cfg transaction-recovery-revision 512m AtomicPrefix
+unsafe TransactionRecoveryUnsafeExpose.cfg transaction-recovery-expose 512m CompleteView
+unsafe TransactionRecoveryComplete.cfg transaction-recovery-complete 512m NotCompleteNonempty
+unsafe TransactionRecoveryUnsafeFloor.cfg transaction-recovery-floor 512m AtomicPrefix

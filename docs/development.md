@@ -37,6 +37,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Durable root registrations | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootRegistration` |
 | Durable prefix catalog | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootCatalog` |
 | Ordered catalog replay | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib journal` and `scripts/check-candidate.sh CatalogReplay` |
+| Transaction records and recovery | `cargo test --locked --lib transactions::`, `cargo test --locked --lib ownership::root::tests::transactions`, `cargo test --locked --lib providers::` and `scripts/check-model.sh TransactionRecovery` |
 | Candidate root request lifecycle | `scripts/check-candidate.sh RootRequests` and `scripts/check-proof.sh RootRequests` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
@@ -99,7 +100,7 @@ The experimental `Connection::root(clock, profile)` controller binds the same pr
 
 ## CI and publication
 
-[Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds publish the public documentation with a repository-scoped SSH deploy key. A newer push cancels the previous running pipeline in this setup; finish local iteration before pushing and let the required run complete so verification and publication can finish.
+[Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds push the public documentation with a repository-scoped SSH deploy key, then wait up to ten minutes for the public `deployment.json` marker to match `CI_COMMIT_SHA`. A successful push alone does not qualify publication: GitHub can fail the later Pages deployment while leaving the previous site live. On failure, inspect the public site's deployment status and retry the same checked artifact; do not claim the site is current until its marker and evidence match. A newer source push cancels the previous running pipeline in this setup; finish local iteration before pushing and let the required run complete so verification and publication can finish.
 
 The [Docker build](https://github.com/ericflo/durable-db/blob/main/Dockerfile) requires Rust formatting, lints and tests; the full client/Pi suite; every maintained model and its controls; and the publication, journal and candidate proofs. It builds the static Linux executable, runtime image and documentation artifacts. The 10,005-database regression retains every assertion and runs in release mode; the rest of the Rust suite runs in debug mode.
 
