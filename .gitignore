@@ -1,4 +1,5 @@
 /target/
+/experiments/slatedb-contract/target/
 /.tools/
 /data/
 /.cache/

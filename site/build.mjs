@@ -93,6 +93,7 @@ for (const file of [
   'root-catalog-2026-11-09.json',
   'catalog-replay-2026-11-09.json',
   'transaction-recovery-2026-11-09.json',
+  'slatedb-contract-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',
