@@ -155,5 +155,24 @@
     ".tools/native-table-s3.log": "3ea1645fec0258984545f124e0f4998b462b8915cc2fb2a6b55623d530d20917",
     ".tools/native-table-b2-cleanup.log": "04e13ce614e1c9e3f534b1ceedb3342134861d5feeaef99dc500e4cb84dc6d66",
     ".tools/native-table-s3-cleanup.json": "4364a0ab0d2920522f487c55bfd4b7808fd3d38ec3064bbebbd516bf484c1ce5"
+  },
+  "implementation_commit": "d7f63ffa87da2fd72c86dc0c3e84f8f13ab6efbb",
+  "ci_registry_recovery": {
+    "quay_index": "sha256:9764044e09eb2c9e1abdb12d0f0188d4efb7384b0262d3c080f0fc59045c89ba",
+    "docker_hub_index": "sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f",
+    "identical_linux_amd64_manifest": "sha256:b3e1df0b7003c8222c9f79e679b2ec9c8f993803d36839d7f139eef5cc64119b",
+    "official_mirror_documentation": "https://prometheus.io/docs/prometheus/latest/installation/",
+    "failed_ci_attempts": [
+      {
+        "pipeline": 72,
+        "failure": "Quay HTTP 502 during runtime image resolution; artifact checks passed"
+      },
+      {
+        "pipeline": 73,
+        "failure": "Quay HTTP 504 during initial image resolution"
+      }
+    ],
+    "alert_tests_passed": true,
+    "local_alert_log_sha256": "3b9b586eef2d38a9c2c36bed06cf2ce9ea21584c2f46b56172957a390a03e0a8"
   }
 }

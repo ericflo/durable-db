@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4 AS node
-FROM quay.io/prometheus/prometheus:v3.16.0-distroless@sha256:9764044e09eb2c9e1abdb12d0f0188d4efb7384b0262d3c080f0fc59045c89ba AS alert-check
+FROM docker.io/prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f AS alert-check
 WORKDIR /rules
 COPY deploy/prometheus .
 RUN ["/bin/promtool", "test", "rules", "alerts.test.yml"]
