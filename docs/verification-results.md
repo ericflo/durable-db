@@ -1,5 +1,15 @@
 # Verification results
 
+## v0.6.0 tenant checkpoint-row admission (2026-11-10)
+
+Commit `9b198aa` changes native write admission from journal-only charging to the atomic sum of journal bytes and the checkpoint rows a transaction introduces: values/tombstones, its new receipt and database metadata. It reuses the existing ledger, adds no provider call to a cached grant, and adds 20 net runtime Rust lines. Duplicate row-sizing arithmetic and the obsolete journal-only rule were removed. Native format `owned-candidate-13` requires a fresh namespace so older controllers cannot undercharge; the CLI engine and storage format are unchanged.
+
+All 282 local Rust tests and 99 enabled native client tests pass. The focused four-test budget group takes 0.51 seconds; the encoder check takes 0.11 seconds. Restoring the old journal-only charge makes both the mixed-batch and real TCP refusal tests fail. The reused admission model checks 5,776 states in under one second, with three negative controls; the existing credit model passes 11,006 states and five controls. These are bounded checks, not an implementation proof.
+
+Real B2 and versioned MinIO both refuse a 428-byte write at a 427-byte allowance without an immutable PUT or credit allocation, then accept it at the exact boundary. Two cold reopens and automatic journal/table/metadata collection preserve values, receipts and the 856-byte cumulative allocation for two writes. Funded neighbors continue and exact retries cost no new admission. All disposable buckets, physical versions, the B2 test key and MinIO container were removed. [Complete evidence](evidence/tenant-checkpoint-admission-2026-11-10.json).
+
+This is direct row-contribution accounting, charged once per admitted attempt. It does not cover retained-row/receipt rewrites, shared block/index/manifest costs, metadata, retries/recovery or request/egress costs. Complete tenant maintenance accounting, physical timing/native CLI cutover, durable retention and large-image cleanup qualification remain open.
+
 ## v0.5.1 checkpoint index reads (2026-11-10)
 
 [v0.5.1](https://github.com/ericflo/durable-db/releases/tag/v0.5.1) packages commit `7eae7de`, verified by [Woodpecker #125](https://ci.eflorenzano.com/repos/18/pipeline/125/1). The exact downloaded static Linux x86_64 archive passed standalone transaction, ordered-read, backup/restore and SIGKILL/reopen checks without a toolchain on `PATH`. The public default installer verified the GitHub asset checksum and installed the same binary. Native client contracts passed 99 enabled tests in CI (66 seconds).
