@@ -4,7 +4,7 @@
 
 durable-db is an ordered key-value database written in Rust. Keep authoritative data in object storage, run interchangeable API servers, and use bounded memory and optional local disk to make immutable reads cheaper. On a laptop, a local directory replaces the object store.
 
-**Status: experimental, v0.1.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
+**Status: experimental, v0.2.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
 
 | What you get | How it works |
 | --- | --- |
@@ -22,7 +22,7 @@ The replacement index now recovers an immutable checkpoint plus a bounded recent
 
 ## Start locally
 
-[v0.1.0](https://github.com/ericflo/durable-db/releases/tag/v0.1.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
+[v0.2.0](https://github.com/ericflo/durable-db/releases/tag/v0.2.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -36,9 +36,9 @@ The default address is `127.0.0.1:7654`. First startup generates `data/admin.key
 
 ```sh
 export DDB_TOKEN=$(durable-db token --key-file ./data/admin.key --admin)
-curl http://127.0.0.1:7654/v1/databases/demo \
+curl -X PUT http://127.0.0.1:7654/v1/databases/demo \
   -H "Authorization: Bearer $DDB_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"max_bytes":67108864,"max_keys":100000}'
+  -d '{"request_id":"create-demo","limits":{"max_bytes":67108864,"max_keys":100000}}'
 
 curl http://127.0.0.1:7654/v1/databases/demo/commit \
   -H "Authorization: Bearer $DDB_TOKEN" -H 'Content-Type: application/json' \
@@ -51,7 +51,7 @@ curl http://127.0.0.1:7654/v1/databases/demo/read \
 
 Values are base64-encoded arbitrary bytes: `d29ybGQ=` is `world`. Keys are UTF-8 strings. A read returns a revision; supply it when committing changes. A `409` requires a fresh read and recomputation. Retry an uncertain write with the **identical** request ID, revision, and body.
 
-Current source builds add [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database), [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md), and [consistent export and resumable restore](docs/recovery.md). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. These features postdate the v0.1.0 installer example and require upgraded servers.
+This release includes [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database), [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md), and [consistent export and resumable restore](docs/recovery.md). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. Upgrade all serving processes before enabling protected databases or new keyring policies.
 
 Fresh cloud namespaces can also enable [cumulative immutable-upload admission](docs/design-upload-admission.md). Its byte and attempt ceilings survive restarts and scaling, and administrators can raise them without resetting spent credit. This shared ceiling is one part of resource protection; format 5 also reclaims unreachable pages without upload credit. Per-tenant spend isolation and sustained-load qualification remain production gates.
 
@@ -71,7 +71,7 @@ await db.transaction(async (tx) => {
 });
 ```
 
-The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Current source builds are required.
+The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Use the matching v0.2.0 client checkout.
 
 ## Scale without moving the database
 
