@@ -103,7 +103,7 @@ fn write(revision: u64) -> Value {
 
 // Mark both metadata prefixes after setup: slow provider calls may let the
 // ordinary 60-second worker run before the fixture finishes writing its data.
-async fn collected(files: &Arc<dyn durable_db::storage::Storage>, journals: usize) -> f64 {
+async fn collected(files: &Arc<dyn durable_db::storage::Storage>, expected: [usize; 3]) -> f64 {
     let markers = ["manifests", "indexes"]
         .map(|prefix| format!("{prefix}/zz-collection-check.{}", Uuid::new_v4()));
     for marker in &markers {
@@ -116,7 +116,7 @@ async fn collected(files: &Arc<dyn durable_db::storage::Storage>, journals: usiz
             for (i, prefix) in ["manifests/", "indexes/", "journal/"].iter().enumerate() {
                 remaining[i] = files.list(prefix, None, 128).await.unwrap().len();
             }
-            if remaining == [2, 1, journals]
+            if remaining == expected
                 && files.get(&markers[0], 1).await.unwrap().is_none()
                 && files.get(&markers[1], 1).await.unwrap().is_none()
             {
@@ -212,7 +212,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "two checkpoints each have data, index and manifest, with no header object"
     );
     let setup_seconds = started.elapsed().as_secs_f64();
-    let cleanup_ms = collected(&files, 1).await;
+    let cleanup_ms = collected(&files, [2, 1, 1]).await;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     server.stop().await;
     drop((connection, files));
@@ -283,7 +283,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     // Wait for both metadata loops and all covered journals after takeover.
     // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
-    collected(&files, 0).await;
+    collected(&files, [3, 2, 0]).await;
     server.stop().await;
     drop((connection, files));
     let connection = connect(&provider, &bucket, &namespace)
