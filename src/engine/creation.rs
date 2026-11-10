@@ -14,19 +14,19 @@ pub struct CreateResult {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct CreationReceipt {
+pub(crate) struct CreationReceipt {
     id: String,
     digest: String,
     initial: Info,
 }
-fn digest(request: &CreateRequest) -> anyhow::Result<String> {
+pub(crate) fn digest(request: &CreateRequest) -> anyhow::Result<String> {
     let mut digest = Sha256::new();
     digest.update(b"durable-db.creation.v1\0");
     digest.update(serde_json::to_vec(request).context("encode creation intent")?);
     Ok(hex::encode(digest.finalize()))
 }
 impl CreationReceipt {
-    pub(super) fn validate(&self, manifest: &Manifest) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self, policy: &access::Policy) -> anyhow::Result<()> {
         ensure!(
             !self.id.is_empty() && self.id.len() <= 128 && valid_digest(&self.digest),
             "invalid creation identity"
@@ -44,14 +44,9 @@ impl CreationReceipt {
             .policy
             .as_ref()
             .context("missing creation policy")?;
-        let current = manifest
-            .policy
-            .as_ref()
-            .context("missing current creation policy")?
-            .info();
+        let current = policy.info();
         ensure!(
-            manifest.format == 2
-                && original.incarnation == current.incarnation
+            original.incarnation == current.incarnation
                 && original.generation == 0
                 && original.revision == 1
                 && original.revoked_tokens == 0,
@@ -77,25 +72,18 @@ impl Engine {
         request: &CreateRequest,
     ) -> Result<CreateResult> {
         validate_db(db)?;
-        validate_limits(&request.limits)?;
-        if request.request_id.is_empty() || request.request_id.len() > 128 {
-            return Err(Error::Invalid(
-                "creation request_id must contain 1..128 bytes".into(),
-            ));
-        }
-        let intent = digest(request)?;
+        request.validate()?;
         match self.manifest(db).await {
-            Ok((existing, _)) => return recover(&existing, request, &intent),
+            Ok((existing, _)) => return recover(&existing, request),
             Err(Error::NotFound) => {}
             Err(error) => return Err(error),
         }
         let mut manifest = Manifest::empty(request.limits.clone(), Some(access::Policy::created()));
         let initial = manifest.info();
-        manifest.creation = Some(CreationReceipt {
-            id: request.request_id.clone(),
-            digest: intent.clone(),
-            initial: initial.clone(),
-        });
+        manifest.creation = Some(CreationReceipt::created(
+            request,
+            manifest.policy.as_ref().unwrap(),
+        )?);
         manifest.validate(db)?;
         if !self
             .storage
@@ -104,7 +92,7 @@ impl Engine {
         {
             // A concurrent identical creation may have won. A fresh exact
             // receipt is the only witness that permits returning success.
-            return recover(&self.manifest(db).await?.0, request, &intent);
+            return recover(&self.manifest(db).await?.0, request);
         }
         Ok(CreateResult {
             info: initial,
@@ -112,20 +100,52 @@ impl Engine {
         })
     }
 }
-fn recover(manifest: &Manifest, request: &CreateRequest, intent: &str) -> Result<CreateResult> {
-    let Some(receipt) = &manifest.creation else {
-        return Err(Error::Conflict);
-    };
-    if receipt.id != request.request_id {
-        return Err(Error::Conflict);
+fn recover(manifest: &Manifest, request: &CreateRequest) -> Result<CreateResult> {
+    manifest
+        .creation
+        .as_ref()
+        .ok_or(Error::Conflict)?
+        .recover(request)
+}
+impl CreateRequest {
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_limits(&self.limits)?;
+        if self.request_id.is_empty() || self.request_id.len() > 128 {
+            return Err(Error::Invalid(
+                "creation request_id must contain 1..128 bytes".into(),
+            ));
+        }
+        Ok(())
     }
-    if receipt.digest != intent {
-        return Err(Error::Invalid(
-            "request_id was used for a different creation request".into(),
-        ));
+}
+impl CreationReceipt {
+    pub(crate) fn created(request: &CreateRequest, policy: &access::Policy) -> Result<Self> {
+        request.validate()?;
+        Ok(Self {
+            id: request.request_id.clone(),
+            digest: digest(request)?,
+            initial: Info {
+                revision: 0,
+                bytes: 0,
+                keys: 0,
+                pages: 0,
+                limits: request.limits.clone(),
+                policy: Some(policy.info()),
+            },
+        })
     }
-    Ok(CreateResult {
-        info: receipt.initial.clone(),
-        replayed: true,
-    })
+    pub(crate) fn recover(&self, request: &CreateRequest) -> Result<CreateResult> {
+        if self.id != request.request_id {
+            return Err(Error::Conflict);
+        }
+        if self.digest != digest(request)? {
+            return Err(Error::Invalid(
+                "request_id was used for a different creation request".into(),
+            ));
+        }
+        Ok(CreateResult {
+            info: self.initial.clone(),
+            replayed: true,
+        })
+    }
 }

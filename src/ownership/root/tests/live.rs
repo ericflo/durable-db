@@ -16,7 +16,7 @@ fn database(name: &str) -> Database<'_> {
         generation: Uuid::from_u128(10),
     }
 }
-async fn open(root: Root<ManualClock>, limits: live::Limits) -> Owner<ManualClock> {
+pub(super) async fn open(root: Root<ManualClock>, limits: live::Limits) -> Owner<ManualClock> {
     Opening::new(
         root,
         limits,

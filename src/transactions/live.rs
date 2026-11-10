@@ -3,7 +3,9 @@
 //! Uploads and control renewal own their I/O and do not hold that borrow.
 //! Database generations must already be authorized by the caller. This is not
 //! a public HTTP router or a qualified physical clock/placement implementation.
+mod catalog;
 mod checkpoint;
+pub use catalog::{AuthorizedBatch, AuthorizedTicket, CatalogChange, CatalogResult};
 mod commit;
 mod read;
 use super::{
@@ -200,6 +202,7 @@ impl<C: Clock> Opening<C> {
             limits: self.limits,
             active: BTreeMap::new(),
             pending: BTreeMap::new(),
+            catalog_pending: BTreeMap::new(),
             reserved: recovery::Usage::default(),
             validation: validation::Usage::default(),
             failed: false,
@@ -224,6 +227,7 @@ pub struct Owner<C> {
     limits: Limits,
     active: BTreeMap<(Arc<str>, Uuid), Active>,
     pending: BTreeMap<RequestKey, Pending>,
+    catalog_pending: BTreeMap<Arc<str>, catalog::PendingChange>,
     reserved: recovery::Usage,
     validation: validation::Usage,
     failed: bool,
@@ -547,6 +551,9 @@ impl<C: Clock> Owner<C> {
                 self.reserved.receipt_bytes -= commit.request_id().len() + 40;
             }
         }
+        let durable = self.writer.durable_prefix().position();
+        self.catalog_pending
+            .retain(|_, change| change.ticket.position > durable);
         self.failed = false;
         Ok(())
     }

@@ -28,6 +28,14 @@ pub enum Access {
     Administrator,
     Database(Claims),
 }
+impl Access {
+    pub(crate) fn check_scope(&self, database: &str, write: bool) -> Result<()> {
+        match self {
+            Self::Administrator => Ok(()),
+            Self::Database(claims) => claims.check_scope(database, write),
+        }
+    }
+}
 impl Claims {
     pub(crate) fn check_scope(&self, database: &str, write: bool) -> Result<()> {
         if self.expires <= now() || self.database != database || (write && !self.write) {

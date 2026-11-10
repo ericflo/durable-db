@@ -825,6 +825,95 @@ mod tests {
                 .unwrap()
                 .replayed
         );
+        // Lifecycle metadata uses the same immutable HTTP journal path.
+        use crate::{
+            Error,
+            auth::{Access, Auth},
+            engine::{CreateRequest, PolicyAction, PolicyRequest, ReadRequest},
+        };
+        let admin = Access::Administrator;
+        let request = CreateRequest {
+            request_id: "create-tenant".into(),
+            limits: Default::default(),
+        };
+        let mut creation = owner
+            .prepare_creation("tenant", &request, &admin)
+            .await
+            .unwrap();
+        let upload = creation.upload.take().unwrap();
+        let position = upload.position();
+        state.lock().unwrap().acknowledgement = 503;
+        owner.complete(upload.send().await).await.unwrap();
+        assert!(owner.catalog_result(&creation).unwrap().is_none());
+        assert!(matches!(
+            owner.policy_info("tenant", &admin).await,
+            Err(Error::NotFound)
+        ));
+        let duplicate = owner
+            .prepare_creation("tenant", &request, &admin)
+            .await
+            .unwrap();
+        assert!(duplicate.upload.is_none());
+        state.lock().unwrap().acknowledgement = 200;
+        owner.resolve_upload(position).await.unwrap();
+        assert!(owner.catalog_result(&duplicate).unwrap().is_some());
+        let policy = owner.policy_info("tenant", &admin).await.unwrap();
+        let auth = Auth::new(&"41".repeat(32)).unwrap();
+        let (token, id) = auth
+            .issue_for_policy(
+                "tenant".into(),
+                true,
+                3600,
+                policy.incarnation,
+                policy.generation,
+            )
+            .unwrap();
+        let caller = auth.access(&token, "tenant", true).unwrap();
+        let protected = owner
+            .prepare_authorized(&[("tenant", &wire_request, &caller)])
+            .await
+            .unwrap();
+        owner
+            .complete(protected.upload.unwrap().send().await)
+            .await
+            .unwrap();
+        let mut revoke = owner
+            .prepare_policy(
+                "tenant",
+                &PolicyRequest {
+                    request_id: "revoke".into(),
+                    expected_policy_revision: 1,
+                    change: PolicyAction::Revoke { token_id: id },
+                },
+                &admin,
+            )
+            .await
+            .unwrap();
+        let upload = revoke.upload.take().unwrap();
+        let position = upload.position();
+        state.lock().unwrap().acknowledgement = 503;
+        owner.complete(upload.send().await).await.unwrap();
+        assert!(matches!(
+            owner
+                .prepare_authorized(&[("tenant", &wire_request, &caller)])
+                .await,
+            Err(Error::Busy)
+        ));
+        state.lock().unwrap().acknowledgement = 200;
+        owner.resolve_upload(position).await.unwrap();
+        assert!(owner.catalog_result(&revoke).unwrap().is_some());
+        assert!(matches!(
+            owner
+                .read_authorized("tenant", &ReadRequest::default(), &caller)
+                .await,
+            Err(Error::Unauthorized)
+        ));
+        assert!(matches!(
+            owner
+                .authorized_result(&protected.tickets[0], &caller)
+                .await,
+            Err(Error::Unauthorized)
+        ));
         task.abort();
         task.await.unwrap_err();
     }

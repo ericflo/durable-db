@@ -14,8 +14,8 @@ use std::{
     sync::Arc,
 };
 use uuid::Uuid;
-mod access;
-mod creation;
+pub(crate) mod access;
+pub(crate) mod creation;
 pub use access::{PolicyAction, PolicyInfo, PolicyRequest, PolicyResult};
 pub use creation::{CreateRequest, CreateResult};
 
@@ -113,7 +113,7 @@ impl Manifest {
             policy.validate()?;
         }
         if let Some(creation) = &self.creation {
-            creation.validate(self)?;
+            creation.validate(self.policy.as_ref().context("missing creation policy")?)?;
         }
         Uuid::parse_str(&self.fence).context("invalid manifest fence")?;
         ensure!(

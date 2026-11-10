@@ -5,3 +5,5 @@ unsafe LiveTransactionsUnsafeReject.cfg live-transactions-reject 512m DurableRes
 unsafe LiveTransactionsUnsafePermission.cfg live-transactions-permission 512m Permission
 unsafe LiveTransactionsUnsafeRetry.cfg live-transactions-retry 512m AtMostOnce
 unsafe LiveTransactionsUnsafeCondition.cfg live-transactions-condition 512m Conditions
+unsafe LiveTransactionsUnsafeStalePolicy.cfg live-stale-policy 512m AuthorizedAdmissions
+unsafe LiveTransactionsUnsafePolicyReply.cfg live-policy-reply 512m AuthorizedResponses
