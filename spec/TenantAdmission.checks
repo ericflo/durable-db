@@ -1,4 +1,4 @@
 safe TenantAdmission.cfg tenant-admission 512m -
 unsafe TenantAdmissionUnsafeLateCheck.cfg tenant-admission-late 512m ScopeCoverage
 unsafe TenantAdmissionUnsafeCrossScope.cfg tenant-admission-scope 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeMaintenance.cfg tenant-admission-maintenance 512m ScopeCoverage
+unsafe TenantAdmissionUnsafeRetained.cfg tenant-admission-retained 512m ScopeCoverage

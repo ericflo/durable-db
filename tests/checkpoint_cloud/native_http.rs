@@ -235,6 +235,24 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "limits":{"bytes":856,"attempts":2}}),
         )
         .await;
+    let puts = calls("object_put");
+    assert_eq!(
+        server.call("POST", commit, &write(1)).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(calls("object_put"), puts);
+    assert_eq!(
+        server.ok("GET", budget, &json!({})).await["allocated"]["bytes"],
+        428
+    );
+    server
+        .ok(
+            "POST",
+            budget,
+            &json!({"request_id":"retained","expected_configuration_revision":3,
+        "limits":{"bytes":928,"attempts":2}}),
+        )
+        .await;
     assert_eq!(server.ok("POST", commit, &write(1)).await["revision"], 2);
     let balance = server.ok("GET", budget, &json!({})).await;
     assert_eq!(balance["allocated"]["attempts"], 2);
@@ -358,7 +376,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
-        "exact_admission_bytes_per_write":428,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
+        "admission_bytes_per_write":[428,500],"retained_receipt_rewrite_bytes":72,
+        "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],

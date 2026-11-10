@@ -233,7 +233,7 @@ impl State {
 /// revision/receipts. On error the runner discards the entire private target.
 /// These are implementation obligations, not properties established for an
 /// arbitrary trait implementor. The native index supplies a bounded target in
-/// `index::recovery`; it is not yet the HTTP serving engine.
+/// `index::recovery`.
 #[async_trait]
 pub trait Target: Send + Sized {
     async fn take_state(&mut self, database: Database<'_>) -> anyhow::Result<State>;

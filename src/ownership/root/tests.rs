@@ -454,6 +454,7 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
         "owned-candidate-10",
         "owned-candidate-11",
         "owned-candidate-12",
+        "owned-candidate-13",
         "future",
     ] {
         provider.history.lock().unwrap()[0].info =

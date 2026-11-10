@@ -6,7 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-pub(crate) const VERSION: &str = "owned-candidate-13";
+pub(crate) const VERSION: &str = "owned-candidate-14";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 

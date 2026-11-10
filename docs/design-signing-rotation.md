@@ -1,6 +1,6 @@
 # Signing keys and rolling rotation
 
-v0.6.0 supports bounded overlapping verification keys and an expiring administrator capability; the original v0.1.0 binary predates them. It does not make a pod's key file a cluster consensus authority. Durable per-database token revocation remains in the database manifest.
+v0.7.0 supports bounded overlapping verification keys and an expiring administrator capability; the original v0.1.0 binary predates them. It does not make a pod's key file a cluster consensus authority. Durable per-database token revocation remains in the database manifest.
 
 The key file accepts the existing 32-byte hex secret or a strict JSON version-1 keyring containing one active hex key, at most three previous/next verification keys, and an explicit `allow_legacy_admin` boolean. Keys must be unique. All files are read once at process startup. Every key can verify tenant, monitoring, and new administrator capabilities; only the active key issues them. Existing tenant token encodings remain readable. The verifier tries at most four HMAC keys, without accepting caller-selected algorithms or unbounded key IDs.
 

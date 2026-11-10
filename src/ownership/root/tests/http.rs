@@ -895,10 +895,37 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
     );
-    // Ledger/status comparisons invalidate checkpoint observations. Maintenance
-    // revalidates and retries once without imposing a routine 503 on admission.
+    // The new rows fit, but rewriting the checkpoint's retained receipt needs
+    // another 70 bytes. Refusal allocates no credit and sends no immutable PUT.
+    let puts = faults.puts.load(Ordering::SeqCst);
+    assert_eq!(
+        tcp_call(&client, "POST", &a, writer, next.clone()).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
+    let (_, refused) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
+    assert_eq!(refused["allocated"]["bytes"], 420);
+    let refill = json!({"request_id":"retained","expected_configuration_revision":3,"limits":{"bytes":908,"attempts":2}});
+    assert_eq!(
+        tcp_call(&client, "POST", &budget, &token, refill).await.0,
+        StatusCode::OK
+    );
     assert_eq!(
         tcp_call(&client, "POST", &a, writer, next).await.0,
+        StatusCode::OK
+    );
+    // A second write before the next checkpoint pays its new rows, without
+    // charging the already dirty receipt window again (420 bytes exactly).
+    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":1328,"attempts":3}});
+    assert_eq!(
+        tcp_call(&client, "POST", &budget, &token, refill).await.0,
+        StatusCode::OK
+    );
+    let mut dirty = commit();
+    dirty["request_id"] = json!("dirty");
+    dirty["expected_revision"] = json!(2);
+    assert_eq!(
+        tcp_call(&client, "POST", &a, writer, dirty).await.0,
         StatusCode::OK
     );
     server.abort();

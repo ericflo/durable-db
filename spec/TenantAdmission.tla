@@ -1,12 +1,13 @@
 --------------------------- MODULE TenantAdmission ---------------------------
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS Tenants, Nodes, Grants, Operations, Capacity, InitialCapacity, MaxAttempts,
-          UnsafeLateCheck, UnsafeCrossScope, UnsafeMaintenanceOmission
+          UnsafeLateCheck, UnsafeCrossScope, UnsafeRetainedOmission
 ASSUME Cardinality(Tenants) = 2
-\* Byte-dimension abstraction: each admission needs both contributions. The
-\* runtime subtracts their sum atomically and spends ONE transaction attempt.
-\* Retained-row rewrites, index/manifest overhead and retries are not modeled.
-Components == {"journal", "checkpoint"}
+\* Byte-dimension abstraction of a first change to a checkpointed database:
+\* direct work (journal + new rows) and retained-receipt rewriting need credit.
+\* Runtime charges their sum and ONE attempt; subsequent dirty writes need
+\* no additional base-receipt charge. Other rewrites/overhead are not modeled.
+Components == {"direct", "retained"}
 Required(o) == {<<o,c>>: c \in Components}
 A == CHOOSE t \in Tenants: TRUE
 B == CHOOSE t \in Tenants: t # A
@@ -30,7 +31,7 @@ Init == /\ Credita!Init /\ Creditb!Init /\ assigned = {}
 Charged(t) == IF t = A THEN chargeda ELSE chargedb
 Assign(t,o) == /\ <<t,o>> \notin assigned
                /\ Required(o) \subseteq Charged(t) \/ UnsafeLateCheck
-                  \/ (UnsafeMaintenanceOmission /\ <<o,"journal">> \in Charged(t))
+                  \/ (UnsafeRetainedOmission /\ (Required(o) \ {<<o,"retained">>}) \subseteq Charged(t))
                   \/ (UnsafeCrossScope /\ \E u \in Tenants \ {t}: Required(o) \subseteq Charged(u))
                /\ assigned' = assigned \cup {<<t,o>>}
                /\ UNCHANGED <<<<initializeda, runninga, allocateda, ceilinga, issueda, ownera, amounta, currenta, remaininga, chargeda, delivereda, refundeda>>, <<initializedb, runningb, allocatedb, ceilingb, issuedb, ownerb, amountb, currentb, remainingb, chargedb, deliveredb, refundedb>>>>

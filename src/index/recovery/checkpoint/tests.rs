@@ -135,18 +135,111 @@ async fn contribution_matches_encoded_rows_including_tombstones_and_block_splits
             Arc::new(Cache::new(0, None).unwrap()),
             reference,
         );
-        let mut tables = snapshot.seek(Bytes::new()).unwrap();
-        let mut row_bytes = 0;
-        while let Some(table) = tables.next().await.unwrap() {
-            let [data, index] = table.reference.blobs();
-            let bytes = index
-                .read_range(files.as_ref(), 0..index.size())
-                .await
-                .unwrap();
-            let blocks = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
-            row_bytes += data.size() as usize - 12 * blocks as usize;
-        }
+        let row_bytes = data_row_bytes(files.as_ref(), &snapshot).await;
         assert_eq!(row_bytes, contribution_bytes(db, &request, &mutations));
+        snapshot.verify(Limits::default()).await.unwrap();
+    }
+}
+async fn data_row_bytes(files: &dyn Storage, snapshot: &Snapshot) -> usize {
+    let mut tables = snapshot.seek(Bytes::new()).unwrap();
+    let mut bytes = 0;
+    while let Some(table) = tables.next().await.unwrap() {
+        let [data, index] = table.reference.blobs();
+        let header = index.read_range(files, 0..index.size()).await.unwrap();
+        let blocks = u32::from_be_bytes(header[8..12].try_into().unwrap());
+        bytes += data.size() as usize - 12 * blocks as usize;
+    }
+    bytes
+}
+#[tokio::test]
+async fn retained_receipt_admission_matches_rewritten_rows_and_resets_only_at_checkpoint() {
+    use crate::transactions::{record::Commit, recovery::Target};
+    let files = Files::new(0);
+    let db = Database {
+        name: "app",
+        generation: Uuid::from_u128(7),
+    };
+    let mut projection = Projection::new(Limits::default()).unwrap();
+    for (revision, id) in [(1, "r".repeat(128)), (2, "short".into())] {
+        let bytes = Commit::encode(db, revision, revision - 1, 0, &id, [1; 32], &[]).unwrap();
+        let commit = Commit::decode(&bytes).unwrap();
+        let state = projection
+            .take_state(db)
+            .await
+            .unwrap()
+            .advance(&commit)
+            .unwrap();
+        projection.apply(&commit, state).await.unwrap();
+        assert_eq!(
+            projection
+                .view(db)
+                .await
+                .unwrap()
+                .unwrap()
+                .checkpoint_receipt_rewrite_bytes()
+                .unwrap(),
+            0
+        );
+    }
+    let mut reference = build_projection(&projection, files.clone(), cut())
+        .await
+        .unwrap();
+    for (revision, floor, id) in [(3, 0, "third"), (4, 2, "fourth")] {
+        // Cold metadata comes from the checkpoint; receipt pricing adds no read.
+        projection = Projection::new(Limits::default()).unwrap();
+        projection.rebase(Snapshot::new(
+            files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            reference,
+        ));
+        projection.warm(db, 0, 0).await.unwrap();
+        let reads = files.range_reads.load(Ordering::SeqCst);
+        let retained = projection
+            .view(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .checkpoint_receipt_rewrite_bytes()
+            .unwrap();
+        assert_eq!(files.range_reads.load(Ordering::SeqCst), reads);
+        assert!(retained > 0);
+        let admitted = contribution_bytes(db, id, &[]) + retained;
+        let bytes = Commit::encode(db, revision, revision - 1, floor, id, [2; 32], &[]).unwrap();
+        let commit = Commit::decode(&bytes).unwrap();
+        let state = projection
+            .take_state(db)
+            .await
+            .unwrap()
+            .advance(&commit)
+            .unwrap();
+        projection.apply(&commit, state).await.unwrap();
+        assert_eq!(
+            projection
+                .view(db)
+                .await
+                .unwrap()
+                .unwrap()
+                .checkpoint_receipt_rewrite_bytes()
+                .unwrap(),
+            0
+        );
+        reference = build_projection(&projection, files.clone(), cut())
+            .await
+            .unwrap();
+        let snapshot = Snapshot::new(
+            files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            reference,
+        );
+        let actual = data_row_bytes(files.as_ref(), &snapshot).await;
+        if floor == 0 {
+            assert_eq!(actual, admitted);
+        } else {
+            assert!(
+                actual < admitted,
+                "expired base receipts remain conservatively charged"
+            );
+        }
         snapshot.verify(Limits::default()).await.unwrap();
     }
 }

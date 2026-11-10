@@ -351,14 +351,16 @@ impl<C: Clock> Owner<C> {
         let mut resolved = Vec::with_capacity(requests.len());
         for (request, fingerprint) in requests.iter().zip(&fingerprints) {
             self.warm(request.snapshot.database()).await?;
-            resolved.push(
-                self.projection
-                    .view(request.snapshot.database())
-                    .await?
-                    .unwrap()
-                    .resolve(request.id, *fingerprint, request.snapshot.revision())
+            let view = self
+                .projection
+                .view(request.snapshot.database())
+                .await?
+                .unwrap();
+            resolved.push((
+                view.resolve(request.id, *fingerprint, request.snapshot.revision())
                     .await?,
-            );
+                view.checkpoint_receipt_rewrite_bytes()?,
+            ));
         }
         // Charge the stable name before reserving shared journal order. A
         // refusal must not create a hole that prevents other tenants committing.
@@ -366,7 +368,7 @@ impl<C: Clock> Owner<C> {
         // failures may strand credit but can never create new rights.
         let mut admissions = BTreeMap::new();
         let mut admitted = Vec::with_capacity(requests.len());
-        for ((request, fingerprint), resolution) in
+        for ((request, fingerprint), (resolution, retained)) in
             requests.iter().zip(&fingerprints).zip(&resolved)
         {
             let key = (
@@ -386,7 +388,8 @@ impl<C: Clock> Owner<C> {
                         database,
                         request.id,
                         request.mutations,
-                    );
+                    )
+                    + retained;
                 let allowed = self.charge_database(database, bytes).await?;
                 admissions.insert((key, *fingerprint), allowed);
                 allowed
@@ -400,7 +403,7 @@ impl<C: Clock> Owner<C> {
         self.failed = true; // any unexpected error after admission retires the view
         let mut records = Vec::new();
         let mut tickets = Vec::with_capacity(requests.len());
-        for (((request, fingerprint), resolved), admitted) in requests
+        for (((request, fingerprint), (resolved, _)), admitted) in requests
             .iter()
             .zip(fingerprints.iter().copied())
             .zip(resolved)
