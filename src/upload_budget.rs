@@ -287,6 +287,14 @@ pub(crate) struct Files {
 }
 #[async_trait]
 impl Storage for Files {
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        object_size: u64,
+    ) -> anyhow::Result<Bytes> {
+        self.inner.get_range(key, range, object_size).await
+    }
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
         self.inner.get(key, max).await
     }

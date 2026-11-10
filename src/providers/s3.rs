@@ -267,6 +267,7 @@ mod tests {
 
     struct Wire {
         immutable: BTreeMap<String, Bytes>,
+        authority_reads: usize,
         registration_puts: usize,
         absent: bool,
         puts: usize,
@@ -366,7 +367,8 @@ mod tests {
     }
 
     async fn read(State(state): State<Arc<Mutex<Wire>>>) -> Response {
-        let state = state.lock().unwrap();
+        let mut state = state.lock().unwrap();
+        state.authority_reads += 1;
         if state.absent {
             return Response::builder()
                 .status(404)
@@ -419,6 +421,53 @@ mod tests {
     #[tokio::test]
     async fn conditional_update_does_not_retry_a_committed_error_into_a_false_comparison() {
         check_uncertainty(503).await;
+    }
+
+    #[tokio::test]
+    async fn exhausted_upload_credit_preserves_bounded_ranges_without_control_calls() {
+        use crate::upload_budget::{Allocator, Files, UploadLimits};
+        let (connection, state, task) = fixture(200, true).await;
+        let files = Files {
+            inner: connection.objects(),
+            allocator: Arc::new(Allocator::new(connection.authority())),
+        };
+        let payload = Bytes::from((0..16_384).map(|n| (n % 251) as u8).collect::<Vec<_>>());
+        connection
+            .into_published(Some(UploadLimits {
+                bytes: payload.len() as u64,
+                attempts: 1,
+            }))
+            .await
+            .unwrap();
+        files.put("tables/one", payload.clone()).await.unwrap();
+        assert!(files.put("tables/two", Bytes::new()).await.is_err());
+        let before = {
+            let state = state.lock().unwrap();
+            assert_eq!(state.immutable.len(), 1, "exhaustion must precede PUT");
+            (state.authority_reads, state.puts)
+        };
+        assert_eq!(
+            files
+                .get_range("tables/one", 128..192, 16_384)
+                .await
+                .unwrap(),
+            payload.slice(128..192)
+        );
+        assert!(
+            files
+                .get_range("tables/one", 128..192, 16_385)
+                .await
+                .is_err()
+        );
+        assert!(
+            files
+                .get_range("tables/one", 0..16_385, 16_384)
+                .await
+                .is_err()
+        );
+        let state = state.lock().unwrap();
+        assert_eq!((state.authority_reads, state.puts), before);
+        task.abort();
     }
 
     #[tokio::test]
@@ -977,6 +1026,7 @@ mod tests {
         };
         let state = Arc::new(Mutex::new(Wire {
             immutable: BTreeMap::new(),
+            authority_reads: 0,
             registration_puts: 0,
             absent,
             puts: 0,
