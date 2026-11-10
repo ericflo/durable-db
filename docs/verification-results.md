@@ -1,10 +1,12 @@
 # Verification results
 
-## Inline checkpoint descriptors (2026-11-10)
+## v0.4.0 inline checkpoint descriptors (2026-11-10)
+
+[v0.4.0](https://github.com/ericflo/durable-db/releases/tag/v0.4.0) packages commit `7535bab`, checked by [Woodpecker #118](https://ci.eflorenzano.com/repos/18/pipeline/118/1). The downloaded static Linux x86_64 archive passed standalone checks with no toolchain on `PATH`, including backup/restore and recovery after SIGKILL. The public installer downloaded the GitHub asset, verified its checksum and installed the same binary.
 
 The native checkpoint descriptor now lives in authority metadata, removing its header object and upload/read/cache paths. Snapshot creation performs zero object reads; an unchanged rewrite makes zero uploads. Runtime Rust shrank by 42 lines. Native format `owned-candidate-11` requires a fresh namespace when coming from an older candidate.
 
-The [qualification record](evidence/inline-checkpoints-2026-11-10.json) includes 276 local Rust tests, the unchanged bounded checkpoint model and nine negative controls, and passing real B2/versioned MinIO HTTP tests. Automatic maintenance retains the recovery catalog and the uncovered journal suffix, then reclaims the suffix after a new checkpoint; two complete cold reopens preserve values, exact retry receipts and budgets. Both buckets, physical versions, the temporary key and container were removed. This does not qualify physical timing, AWS or an SLO. Obsolete table/manifest reclamation and full tenant maintenance accounting remain open.
+The [qualification record](evidence/inline-checkpoints-2026-11-10.json) includes 276 local Rust tests, the unchanged bounded checkpoint model and nine negative controls, and passing real B2/versioned MinIO HTTP tests. Automatic maintenance retains the recovery catalog and the uncovered journal suffix, then reclaims the suffix after a new checkpoint; two complete cold reopens preserve values, exact retry receipts and budgets. Both buckets, physical versions, the temporary key and container were removed. The native JavaScript contract passed 99 enabled tests in CI (67 seconds). An earlier CI run exceeded its 90-second deadline; three local runs passed, and the harness now streams diagnostics. The earlier timeout remains unexplained and is recorded in the evidence. This does not qualify physical timing, AWS or an SLO. The CLI still uses the shared publication engine. Obsolete table/manifest reclamation and full tenant maintenance accounting remain open.
 
 ## v0.2.0 experimental release (2026-11-10)
 
