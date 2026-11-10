@@ -247,16 +247,33 @@ impl Table {
     /// One bounded block at a time. Emits tombstones so a table merge cannot
     /// resurrect an older value. Snapshot retention and authority are external.
     pub fn scan(&self, start: &[u8], end: Option<&[u8]>, revision: u64) -> anyhow::Result<Cursor> {
+        self.scan_ordered(start, end, revision, false)
+    }
+    pub(crate) fn scan_ordered(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        revision: u64,
+        reverse: bool,
+    ) -> anyhow::Result<Cursor> {
         super::validate_range(start, end)?;
         Ok(Cursor {
             table: self.clone(),
-            next_block: self.seek(start, revision),
+            next_block: if reverse {
+                self.0
+                    .blocks
+                    .partition_point(|b| end.is_none_or(|end| b.first.key.as_ref() < end))
+            } else {
+                self.seek(start, revision)
+            },
             rows: Vec::new().into_iter(),
             start: Bytes::copy_from_slice(start),
             end: end.map(Bytes::copy_from_slice),
             revision,
             previous: None,
             done: revision == 0,
+            reverse,
+            pending: None,
         })
     }
 }
@@ -270,14 +287,50 @@ pub struct Cursor {
     revision: u64,
     previous: Option<Bytes>,
     done: bool,
+    reverse: bool,
+    pending: Option<Entry>,
 }
 impl Cursor {
     pub async fn next(&mut self) -> anyhow::Result<Option<Entry>> {
         loop {
             if self.done {
-                return Ok(None);
+                return Ok(self.pending.take());
             }
-            if let Some(row) = self.rows.next() {
+            if self.reverse {
+                // Reverse physical order encounters a key's oldest revision
+                // first. Keep its winner until the entire key group is known,
+                // including versions in the preceding block.
+                let next_key = self.rows.as_slice().last().map(|r| &r.key).or_else(|| {
+                    self.next_block
+                        .checked_sub(1)
+                        .map(|i| &self.table.0.blocks[i].last.key)
+                });
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| next_key.is_none_or(|key| key < &p.key))
+                {
+                    return Ok(self.pending.take());
+                }
+            }
+            let row = if self.reverse {
+                self.rows.next_back()
+            } else {
+                self.rows.next()
+            };
+            if let Some(row) = row {
+                if self.reverse {
+                    if row.key < self.start {
+                        self.done = true;
+                        return Ok(self.pending.take());
+                    }
+                    if row.revision <= self.revision
+                        && self.end.as_ref().is_none_or(|end| row.key < *end)
+                    {
+                        self.pending = Some(row);
+                    }
+                    continue;
+                }
                 if self.end.as_ref().is_some_and(|end| row.key >= *end) {
                     self.done = true;
                     return Ok(None);
@@ -291,14 +344,23 @@ impl Cursor {
                 self.previous = Some(row.key.clone());
                 return Ok(Some(row));
             }
-            if self.next_block == self.table.0.blocks.len() {
+            if if self.reverse {
+                self.next_block == 0
+            } else {
+                self.next_block == self.table.0.blocks.len()
+            } {
                 self.done = true;
-                return Ok(None);
+                return Ok(self.pending.take());
             }
             // Advance only after a complete validated block. A failed read can
             // be retried and must never become a false end-of-table result.
-            self.rows = self.table.block(self.next_block).await?.into_iter();
-            self.next_block += 1;
+            let number = if self.reverse {
+                self.next_block - 1
+            } else {
+                self.next_block
+            };
+            self.rows = self.table.block(number).await?.into_iter();
+            self.next_block = if self.reverse { number } else { number + 1 };
         }
     }
 }

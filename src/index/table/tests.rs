@@ -162,6 +162,33 @@ async fn revisions_cross_blocks_and_tombstones_survive_range_scans_and_cold_reop
         assert_eq!(row.revision, revision.min(16));
         assert_eq!(row.value.is_none(), revision == 6);
     }
+    for revision in 0..=18 {
+        let forward = collected(table.scan(b"", None, revision).unwrap()).await;
+        let reverse = collected(table.scan_ordered(b"", None, revision, true).unwrap()).await;
+        assert_eq!(reverse, forward.into_iter().rev().collect::<Vec<_>>());
+    }
+    // A reverse key group can span blocks. Losing the newer block must not
+    // expose its older, already-read candidate as the snapshot winner.
+    let cold = Table::open(
+        files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        reference,
+    )
+    .await
+    .unwrap();
+    let mut reverse = cold.scan_ordered(b"", None, 6, true).unwrap();
+    let reads = files.reads.load(AtomicOrder::SeqCst);
+    assert_eq!(reverse.next().await.unwrap().unwrap().key, b"c"[..]);
+    assert_eq!(reverse.next().await.unwrap().unwrap().key, b"b"[..]);
+    assert_eq!(files.reads.load(AtomicOrder::SeqCst), reads + 1);
+    files.fail_read.store(true, AtomicOrder::SeqCst);
+    assert!(reverse.next().await.is_err());
+    let winner = reverse.next().await.unwrap().unwrap();
+    assert_eq!(
+        (winner.key.as_ref(), winner.revision, winner.value),
+        (b"a".as_slice(), 6, None)
+    );
+    assert!(reverse.next().await.unwrap().is_none());
     assert!(table.get(b"a", 0).await.unwrap().is_none());
     assert!(table.get(b"absent", 18).await.unwrap().is_none());
     let rows = collected(table.scan(b"a", Some(b"c"), 6).unwrap()).await;
@@ -359,6 +386,8 @@ proptest::proptest! {
                 let actual=collected(table.scan(&[2],Some(&[6]),snapshot).unwrap()).await;
                 let expected:Vec<_>=expected.range(2..6).map(|(k,(r,v))|(Bytes::copy_from_slice(&[*k]),*r,v.as_ref().map(|v|Bytes::copy_from_slice(v)))).collect();
                 assert!(actual==expected);
+                let reverse=collected(table.scan_ordered(&[2],Some(&[6]),snapshot,true).unwrap()).await;
+                assert_eq!(reverse,expected.into_iter().rev().collect::<Vec<_>>());
             }
         });
     }

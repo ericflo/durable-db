@@ -140,6 +140,8 @@ pub(super) struct Reader {
     stack: Vec<Pending>,
     tables: std::collections::VecDeque<RoutedTable>,
     failed: bool,
+    reverse: bool,
+    end: Option<Bytes>,
 }
 impl Reader {
     pub fn new(files: Arc<dyn Storage>, root: Option<(u8, Blob)>) -> anyhow::Result<Self> {
@@ -161,6 +163,8 @@ impl Reader {
                 .collect(),
             tables: std::collections::VecDeque::new(),
             failed: false,
+            reverse: false,
+            end: None,
         })
     }
     pub fn seek(
@@ -171,6 +175,18 @@ impl Reader {
     ) -> anyhow::Result<Self> {
         let mut reader = Self::new(files, root)?;
         reader.start = start;
+        reader.cache = Some(cache);
+        Ok(reader)
+    }
+    pub fn seek_reverse(
+        files: Arc<dyn Storage>,
+        root: Option<(u8, Blob)>,
+        end: Option<Bytes>,
+        cache: Arc<Cache>,
+    ) -> anyhow::Result<Self> {
+        let mut reader = Self::new(files, root)?;
+        reader.reverse = true;
+        reader.end = end;
         reader.cache = Some(cache);
         Ok(reader)
     }
@@ -221,15 +237,30 @@ impl Reader {
                     previous.as_ref().is_none_or(|p| p < &last),
                     "checkpoint manifest bounds are not strictly ordered"
                 );
+                // A child covers (previous upper bound, its upper bound].
+                // Reverse seeking uses its lower boundary, not its maximum:
+                // an end inside this child must still visit the child.
+                let eligible = if self.reverse {
+                    self.end
+                        .as_ref()
+                        .is_none_or(|end| previous.as_ref().is_none_or(|lower| lower < end))
+                } else {
+                    last >= self.start
+                };
                 previous = Some(last.clone());
                 if pending.height == 0 {
                     let reference = table::Reference::decode(take(&mut input, 152)?)?;
-                    if last >= self.start {
-                        self.tables.push_back(RoutedTable { last, reference });
+                    if eligible {
+                        let table = RoutedTable { last, reference };
+                        if self.reverse {
+                            self.tables.push_front(table);
+                        } else {
+                            self.tables.push_back(table);
+                        }
                     }
                 } else {
                     let blob = Blob::decode(take(&mut input, REFERENCE_BYTES)?)?;
-                    if last >= self.start {
+                    if eligible {
                         children.push(Pending {
                             height: pending.height - 1,
                             blob,
@@ -246,7 +277,11 @@ impl Reader {
                         .is_none_or(|last| Some(last) == previous.as_ref()),
                 "checkpoint manifest boundary or length mismatch"
             );
-            self.stack.extend(children.into_iter().rev());
+            if self.reverse {
+                self.stack.extend(children);
+            } else {
+                self.stack.extend(children.into_iter().rev());
+            }
             self.failed = false;
         }
     }

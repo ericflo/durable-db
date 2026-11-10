@@ -650,7 +650,7 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
     let mut owner = open(
         active(&provider, &clock).await,
         live::Limits {
-            checkpoint_frames: 1,
+            checkpoint_frames: 2,
             ..Default::default()
         },
     )
@@ -666,7 +666,8 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
         Arc::new(Cache::new(0, None).unwrap()),
     );
     old.create("a", Default::default()).await.unwrap();
-    let mutations = [
+    let long = format!("{}\u{7f}", "x".repeat(1023));
+    let mut mutations = vec![
         Mutation {
             key: "note/a",
             value: Some(b"one"),
@@ -692,63 +693,127 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
             value: Some(b"neighbor"),
         },
     ];
-    let snapshot = owner.snapshot(database("a")).await.unwrap();
-    let prepared = owner
-        .prepare(&[request(&snapshot, "write", &[], &mutations)])
-        .await
-        .unwrap();
-    owner
-        .complete(prepared.upload.unwrap().send().await)
-        .await
-        .unwrap();
-    old.commit(
-        "a",
-        &CommitRequest {
-            expected_revision: 0,
-            request_id: "write".into(),
-            checks: vec![],
-            writes: mutations
-                .iter()
-                .map(|m| Write {
-                    key: m.key.into(),
-                    value: m.value.map(|v| STANDARD.encode(v)),
-                })
-                .collect(),
-        },
-    )
-    .await
-    .unwrap();
-    let controls = provider.calls.load(Ordering::SeqCst);
-    let bodies = [
-        r#"{}"#,
-        r#"{"keys":["note/a","note/aa","note/ab","absent","note/a"]}"#,
-        r#"{"expected_revision":1,"keys":["other"],"scans":[{"prefix":"note/","limit":2},{"prefix":"note/","after":"note/aa","limit":2}]}"#,
-        r#"{"scans":[{"prefix":"note/","start":"note/aa","end":"note/é","limit":1000},{"prefix":"note/é","limit":1}]}"#,
-        r#"{"scans":[{"prefix":"note/","after":"zzz","limit":1},{"start":"z","end":"a","limit":1}]}"#,
-    ];
-    for body in bodies {
-        let request: ReadRequest = serde_json::from_str(body).unwrap();
-        let actual = owner.read_request(database("a"), &request).await.unwrap();
-        let expected = old.read("a", &request).await.unwrap();
-        assert_eq!(
-            serde_json::to_value(actual).unwrap(),
-            serde_json::to_value(expected).unwrap()
-        );
-    }
-    assert_eq!(
-        owner.usage(),
-        crate::index::recovery::Usage::default(),
-        "cold reads must not materialize receipt windows or validator state"
-    );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
-    for body in [
-        r#"{"expected_revision":0}"#,
-        r#"{"keys":[""]}"#,
-        r#"{"scans":[{"prefix":"\u0000","limit":1}]}"#,
-        r#"{"scans":[{"limit":1001}]}"#,
+    for key in [
+        &long,
+        "utf/\u{7f}",
+        "utf/\u{80}",
+        "utf/\u{d7ff}",
+        "utf/\u{e000}",
+        "utf/\u{10ffff}",
+        "\u{10ffff}",
     ] {
-        let request = serde_json::from_str(body).unwrap();
-        assert!(owner.read_request(database("a"), &request).await.is_err());
-        assert!(old.read("a", &request).await.is_err());
+        mutations.push(Mutation {
+            key,
+            value: Some(b"boundary"),
+        });
+    }
+    for stage in 0..3 {
+        mutations.sort_by_key(|m| m.key);
+        let snapshot = owner.snapshot(database("a")).await.unwrap();
+        let prepared = owner
+            .prepare(&[request(
+                &snapshot,
+                &format!("write-{stage}"),
+                &[],
+                &mutations,
+            )])
+            .await
+            .unwrap();
+        owner
+            .complete(prepared.upload.unwrap().send().await)
+            .await
+            .unwrap();
+        old.commit(
+            "a",
+            &CommitRequest {
+                expected_revision: stage,
+                request_id: format!("write-{stage}"),
+                checks: vec![],
+                writes: mutations
+                    .iter()
+                    .map(|m| Write {
+                        key: m.key.into(),
+                        value: m.value.map(|v| STANDARD.encode(v)),
+                    })
+                    .collect(),
+            },
+        )
+        .await
+        .unwrap();
+        let controls = provider.calls.load(Ordering::SeqCst);
+        let bodies = [
+            r#"{}"#,
+            r#"{"keys":["note/a","note/aa","note/ab","absent","note/a"]}"#,
+            r#"{"expected_revision":1,"keys":["other"],"scans":[{"prefix":"note/","limit":2},{"prefix":"note/","after":"note/aa","limit":2}]}"#,
+            r#"{"scans":[{"prefix":"note/","start":"note/aa","end":"note/é","limit":1000},{"prefix":"note/é","limit":1}]}"#,
+            r#"{"scans":[{"prefix":"note/","after":"zzz","limit":1},{"start":"z","end":"a","limit":1}]}"#,
+            r#"{"scans":[{"prefix":"note/","reverse":true,"limit":2},{"prefix":"note/","reverse":true,"after":"note/b","limit":2}]}"#,
+            r#"{"scans":[{"prefix":"note/","reverse":true,"start":"note/aa","end":"note/é","limit":1000},{"prefix":"note/é","reverse":true,"limit":1}]}"#,
+            r#"{"scans":[{"reverse":true,"limit":2},{"prefix":"note/","reverse":true,"after":"aaa","limit":2}]}"#,
+        ];
+        for body in bodies {
+            let mut request: ReadRequest = serde_json::from_str(body).unwrap();
+            if request.expected_revision.is_some() {
+                request.expected_revision = Some(stage + 1);
+            }
+            let actual = owner.read_request(database("a"), &request).await.unwrap();
+            let expected = old.read("a", &request).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        for prefix in [
+            &long,
+            "utf/\u{7f}",
+            "utf/\u{d7ff}",
+            "utf/\u{10ffff}",
+            "\u{10ffff}",
+        ] {
+            for reverse in [false, true] {
+                let request = serde_json::from_value(
+                    serde_json::json!({ "scans": [{"prefix":prefix,"reverse":reverse,"limit":2}] }),
+                )
+                .unwrap();
+                let actual = owner.read_request(database("a"), &request).await.unwrap();
+                let expected = old.read("a", &request).await.unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+        }
+        if stage == 1 {
+            assert_eq!(
+                owner.usage(),
+                crate::index::recovery::Usage::default(),
+                "cold reads must not materialize receipt windows or validator state"
+            );
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
+        for body in [
+            r#"{"expected_revision":0}"#,
+            r#"{"keys":[""]}"#,
+            r#"{"scans":[{"prefix":"\u0000","limit":1}]}"#,
+            r#"{"scans":[{"limit":1001}]}"#,
+        ] {
+            let request = serde_json::from_str(body).unwrap();
+            assert!(owner.read_request(database("a"), &request).await.is_err());
+            assert!(old.read("a", &request).await.is_err());
+        }
+        mutations = vec![
+            Mutation {
+                key: "note/b",
+                value: if stage == 0 { None } else { Some(b"restored") },
+            },
+            Mutation {
+                key: "note/aa",
+                value: None,
+            },
+            Mutation {
+                key: "note/c",
+                value: Some(b"new"),
+            },
+        ];
     }
 }

@@ -69,16 +69,18 @@ async fn lookup(
 struct Head {
     source: usize,
     row: Entry,
+    reverse: bool,
 }
 impl Ord for Head {
     fn cmp(&self, other: &Self) -> Ordering {
-        // BinaryHeap pops the greatest: smallest key, highest revision first.
-        other
-            .row
-            .key
-            .cmp(&self.row.key)
-            .then_with(|| self.row.revision.cmp(&other.row.revision))
-            .then_with(|| self.source.cmp(&other.source))
+        // BinaryHeap pops the next key in scan order, highest revision first.
+        (if self.reverse {
+            self.row.key.cmp(&other.row.key)
+        } else {
+            other.row.key.cmp(&self.row.key)
+        })
+        .then_with(|| self.row.revision.cmp(&other.row.revision))
+        .then_with(|| self.source.cmp(&other.source))
     }
 }
 impl PartialOrd for Head {
@@ -102,6 +104,7 @@ pub struct Cursor<'a> {
     pending: VecDeque<usize>,
     heads: BinaryHeap<Head>,
     failed: bool,
+    reverse: bool,
 }
 enum Source<'a> {
     Table(table::Cursor),
@@ -124,15 +127,19 @@ impl<'a> Cursor<'a> {
         start: &[u8],
         end: Option<&[u8]>,
         revision: u64,
+        reverse: bool,
     ) -> anyhow::Result<Self> {
-        let mut cursor = Self::create(&[], memory, start, end, revision)?;
+        let mut cursor = Self::create(&[], memory, start, end, revision, reverse)?;
         if let Some(base) = base {
             ensure!(revision >= base.revision(), "snapshot predates checkpoint");
             let source = cursor.sources.len();
-            cursor.sources.push(Source::Checkpoint(Box::new(base.scan(
-                std::str::from_utf8(start)?,
-                end.map(std::str::from_utf8).transpose()?,
-            )?)));
+            cursor
+                .sources
+                .push(Source::Checkpoint(Box::new(base.scan_ordered(
+                    std::str::from_utf8(start)?,
+                    end.map(std::str::from_utf8).transpose()?,
+                    reverse,
+                )?)));
             cursor.pending.push_back(source);
         }
         Ok(cursor)
@@ -143,7 +150,7 @@ impl<'a> Cursor<'a> {
         end: Option<&[u8]>,
         revision: u64,
     ) -> anyhow::Result<Self> {
-        Self::create(tables, None, start, end, revision)
+        Self::create(tables, None, start, end, revision, false)
     }
 
     pub fn with_memory(
@@ -153,7 +160,7 @@ impl<'a> Cursor<'a> {
         end: Option<&[u8]>,
         revision: u64,
     ) -> anyhow::Result<Self> {
-        Self::create(tables, Some(memory), start, end, revision)
+        Self::create(tables, Some(memory), start, end, revision, false)
     }
 
     fn create(
@@ -162,6 +169,7 @@ impl<'a> Cursor<'a> {
         start: &[u8],
         end: Option<&[u8]>,
         revision: u64,
+        reverse: bool,
     ) -> anyhow::Result<Self> {
         super::validate_range(start, end)?;
         ensure!(
@@ -171,16 +179,22 @@ impl<'a> Cursor<'a> {
         let count = tables.len() + usize::from(memory.is_some());
         let mut sources = tables
             .iter()
-            .map(|t| t.scan(start, end, revision).map(Source::Table))
+            .map(|t| {
+                t.scan_ordered(start, end, revision, reverse)
+                    .map(Source::Table)
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
         if let Some(memory) = memory {
-            sources.push(Source::Memory(memory.scan(start, end, revision)?));
+            sources.push(Source::Memory(
+                memory.scan_ordered(start, end, revision, reverse)?,
+            ));
         }
         Ok(Self {
             sources,
             pending: (0..count).collect(),
             heads: BinaryHeap::with_capacity(count),
             failed: false,
+            reverse,
         })
     }
 
@@ -193,7 +207,11 @@ impl<'a> Cursor<'a> {
             // Keep both the pending source and previously loaded heads on an
             // error or cancellation. No result is safe with an unknown frontier.
             if let Some(row) = self.sources[source].next().await? {
-                self.heads.push(Head { source, row });
+                self.heads.push(Head {
+                    source,
+                    row,
+                    reverse: self.reverse,
+                });
             }
             self.pending.pop_front();
         }

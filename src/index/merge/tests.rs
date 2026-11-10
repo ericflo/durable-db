@@ -164,7 +164,7 @@ async fn contradictory_visible_rows_fail_and_retire_scans_but_newer_versions_dom
 
 #[tokio::test]
 async fn failed_and_cancelled_sources_never_become_absence_or_skip_buffered_heads() {
-    for cancel in [false, true] {
+    for (cancel, reverse) in [(false, false), (false, true), (true, false), (true, true)] {
         let first = Files::new();
         let second = Files::new();
         let tables = [
@@ -172,7 +172,7 @@ async fn failed_and_cancelled_sources_never_become_absence_or_skip_buffered_head
             table(second.clone(), &[(b"a", 2, None), (b"b", 2, Some(b"next"))]).await,
         ];
         let baseline = first.reads.load(AO::SeqCst);
-        let mut cursor = Cursor::new(&tables, b"", None, 2).unwrap();
+        let mut cursor = Cursor::create(&tables, None, b"", None, 2, reverse).unwrap();
         if cancel {
             second.pause.store(true, AO::SeqCst);
             tokio::select! {
@@ -186,8 +186,9 @@ async fn failed_and_cancelled_sources_never_become_absence_or_skip_buffered_head
         assert_eq!(first.reads.load(AO::SeqCst), baseline + 1);
         let rows = collect(cursor).await;
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].0, b"a".as_slice());
-        assert!(rows[0].2.is_none());
+        let winner = if reverse { &rows[2] } else { &rows[0] };
+        assert_eq!(winner.0, b"a".as_slice());
+        assert!(winner.2.is_none());
         // The first source's held frontier survived the other source's failure.
         assert_eq!(first.reads.load(AO::SeqCst), baseline + 1);
         second.fail.store(true, AO::SeqCst);
@@ -268,6 +269,8 @@ proptest::proptest! {
             let rows = collect(Cursor::new(&tables, &[start], Some(&[end]), snapshot).unwrap()).await;
             let oracle: Vec<_> = expected.range(start..end).map(|(&k,(r,v))| (Bytes::copy_from_slice(&[k]),*r,v.clone())).collect();
             assert_eq!(rows, oracle);
+            let reverse = collect(Cursor::create(&tables, None, &[start], Some(&[end]), snapshot, true).unwrap()).await;
+            assert_eq!(reverse, oracle.into_iter().rev().collect::<Vec<_>>());
         });
     }
 }

@@ -40,17 +40,35 @@ impl Snapshot {
             .usage())
     }
     fn scan_raw(&self, start: Bytes, end: Option<Bytes>) -> anyhow::Result<RawCursor> {
+        self.scan_raw_ordered(start, end, false)
+    }
+    fn scan_raw_ordered(
+        &self,
+        start: Bytes,
+        end: Option<Bytes>,
+        reverse: bool,
+    ) -> anyhow::Result<RawCursor> {
         Ok(RawCursor {
             snapshot: self.clone(),
-            manifest: self.seek(start.clone())?,
-            full: start.is_empty() && end.is_none(),
+            manifest: if reverse {
+                tree::Reader::seek_reverse(
+                    self.0.files.clone(),
+                    self.0.header.tree,
+                    end.clone(),
+                    self.0.cache.clone(),
+                )?
+            } else {
+                self.seek(start.clone())?
+            },
+            full: !reverse && start.is_empty() && end.is_none(),
             start,
             end,
             current: None,
-            table_end: None,
+            table_boundary: None,
             previous: None,
             done: false,
             failed: false,
+            reverse,
             tables: 0,
             rows: 0,
             declared_rows: 0,
@@ -197,8 +215,16 @@ impl DatabaseSnapshot {
     /// Ordered half-open range, streaming one table index and data block at a
     /// time. Empty start means the first key; no end means this generation's end.
     pub fn scan(&self, start: &str, end: Option<&str>) -> anyhow::Result<Cursor> {
+        self.scan_ordered(start, end, false)
+    }
+    pub(crate) fn scan_ordered(
+        &self,
+        start: &str,
+        end: Option<&str>,
+        reverse: bool,
+    ) -> anyhow::Result<Cursor> {
         ensure!(
-            start.len() <= 1024 && end.is_none_or(|end| end.len() <= 1024 && start < end),
+            start.len() <= 1024 && end.is_none_or(|end| end.len() <= 1025 && start < end),
             "invalid checkpoint scan bounds"
         );
         let start = composite(&self.prefix, 2, start.as_bytes());
@@ -208,7 +234,7 @@ impl DatabaseSnapshot {
         );
         Ok(Cursor {
             database: self.clone(),
-            raw: self.snapshot.scan_raw(start, Some(end))?,
+            raw: self.snapshot.scan_raw_ordered(start, Some(end), reverse)?,
         })
     }
 
@@ -309,10 +335,11 @@ pub(crate) struct RawCursor {
     start: Bytes,
     end: Option<Bytes>,
     current: Option<table::Cursor>,
-    table_end: Option<Bytes>,
+    table_boundary: Option<Bytes>,
     previous: Option<Bytes>,
     done: bool,
     failed: bool,
+    reverse: bool,
 }
 impl RawCursor {
     pub async fn next(&mut self) -> anyhow::Result<Option<Entry>> {
@@ -327,7 +354,11 @@ impl RawCursor {
             if let Some(cursor) = &mut self.current {
                 if let Some(row) = cursor.next().await? {
                     ensure!(
-                        self.previous.as_ref().is_none_or(|p| p < &row.key),
+                        self.previous.as_ref().is_none_or(|p| if self.reverse {
+                            p > &row.key
+                        } else {
+                            p < &row.key
+                        }),
                         "unordered checkpoint scan"
                     );
                     self.previous = Some(row.key.clone());
@@ -346,11 +377,15 @@ impl RawCursor {
                     return Ok(Some(row));
                 }
                 self.current = None;
-                if self
-                    .end
-                    .as_ref()
-                    .is_some_and(|end| self.table_end.as_ref().is_some_and(|last| last >= end))
-                {
+                if if self.reverse {
+                    self.table_boundary
+                        .as_ref()
+                        .is_some_and(|first| first <= &self.start)
+                } else {
+                    self.end.as_ref().is_some_and(|end| {
+                        self.table_boundary.as_ref().is_some_and(|last| last >= end)
+                    })
+                } {
                     self.done = true;
                     break;
                 }
@@ -376,21 +411,36 @@ impl RawCursor {
                 );
             }
             ensure!(
-                self.table_end
+                self.table_boundary
                     .as_ref()
-                    .is_none_or(|last| last.as_ref() < table.first_key()),
+                    .is_none_or(|boundary| if self.reverse {
+                        boundary.as_ref() > table.last_key()
+                    } else {
+                        boundary.as_ref() < table.first_key()
+                    }),
                 "overlapping checkpoint tables"
             );
-            if self
-                .end
-                .as_ref()
-                .is_some_and(|end| table.first_key() >= end.as_ref())
-            {
+            if if self.reverse {
+                table.last_key() < self.start.as_ref()
+            } else {
+                self.end
+                    .as_ref()
+                    .is_some_and(|end| table.first_key() >= end.as_ref())
+            } {
                 self.done = true;
                 break;
             }
-            self.table_end = Some(Bytes::copy_from_slice(table.last_key()));
-            self.current = Some(table.scan(&self.start, self.end.as_deref(), u64::MAX)?);
+            self.table_boundary = Some(Bytes::copy_from_slice(if self.reverse {
+                table.first_key()
+            } else {
+                table.last_key()
+            }));
+            self.current = Some(table.scan_ordered(
+                &self.start,
+                self.end.as_deref(),
+                u64::MAX,
+                self.reverse,
+            )?);
         }
         if self.full {
             let header = &self.snapshot.0.header;

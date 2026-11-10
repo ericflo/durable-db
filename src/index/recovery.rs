@@ -266,8 +266,24 @@ impl<'a> View<'a> {
         end: Option<&[u8]>,
         revision: u64,
     ) -> anyhow::Result<merge::Cursor<'a>> {
+        self.scan_ordered(start, end, revision, false)
+    }
+    pub(crate) fn scan_ordered(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        revision: u64,
+        reverse: bool,
+    ) -> anyhow::Result<merge::Cursor<'a>> {
         self.check_revision(revision)?;
-        merge::Cursor::with_checkpoint(self.base.as_ref(), self.memory, start, end, revision)
+        merge::Cursor::with_checkpoint(
+            self.base.as_ref(),
+            self.memory,
+            start,
+            end,
+            revision,
+            reverse,
+        )
     }
 }
 #[async_trait]

@@ -190,6 +190,13 @@ async fn seeks_include_exact_table_and_manifest_bounds_and_isolate_generations()
             }
             assert!(cursor.next().await.unwrap().is_none());
             assert!(cursor.next().await.unwrap().is_none());
+            let mut cursor = database.scan_ordered(&a, Some(&b), true).unwrap();
+            for n in (start..end.min(180)).rev() {
+                let row = cursor.next().await.unwrap().unwrap();
+                assert_eq!(row.key, format!("k/{n:04}").as_bytes());
+                assert_eq!(row.value, value(generation, n));
+            }
+            assert!(cursor.next().await.unwrap().is_none());
         }
         let mut cursor = database.scan("", None).unwrap();
         let mut count = 0;
@@ -197,6 +204,14 @@ async fn seeks_include_exact_table_and_manifest_bounds_and_isolate_generations()
             count += 1;
         }
         assert_eq!(count, 180);
+        let mut cursor = database.scan_ordered("", None, true).unwrap();
+        for n in (0..180).rev() {
+            assert_eq!(
+                cursor.next().await.unwrap().unwrap().key,
+                format!("k/{n:04}").as_bytes()
+            );
+        }
+        assert!(cursor.next().await.unwrap().is_none());
     }
     for database in [
         db(6),
@@ -313,6 +328,20 @@ async fn cold_work_tracks_tree_height_and_warm_reads_need_no_provider_calls() {
     }
     assert_eq!(files.reads.load(Ordering::SeqCst), reads);
     assert!(shared.memory_bytes().await <= 256 * 1024);
+    let cold = open(files.clone(), reference, 0).await;
+    let before = files.reads.load(Ordering::SeqCst);
+    let mut cursor = cold.scan_ordered("", Some("k/0179"), true).unwrap();
+    for n in (177..179).rev() {
+        assert_eq!(
+            cursor.next().await.unwrap().unwrap().key,
+            format!("k/{n:04}").as_bytes()
+        );
+    }
+    let reads = files.reads.load(Ordering::SeqCst) - before;
+    assert!(
+        reads <= 6,
+        "reverse page must seek past unrelated tables: {reads}"
+    );
 }
 
 #[tokio::test]
@@ -320,28 +349,44 @@ async fn failed_and_canceled_scans_retire_instead_of_skipping_a_table() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;
     let database = open(files.clone(), reference, 0).await;
-    let mut cursor = database.scan("", None).unwrap();
-    files.fail.store(true, Ordering::SeqCst);
-    assert!(cursor.next().await.is_err());
-    assert!(cursor.next().await.is_err());
-    let mut cursor = database.scan("", None).unwrap();
-    let first = cursor.next().await.unwrap().unwrap();
-    assert_eq!(first.key, b"k/0000"[..]);
-    // Drain the first tiny table so the cancellation interrupts new I/O.
-    cursor.next().await.unwrap().unwrap();
-    cursor.next().await.unwrap().unwrap();
-    files.pause.store(true, Ordering::SeqCst);
-    {
-        let next = cursor.next();
-        tokio::pin!(next);
-        tokio::select! {
-            _ = &mut next => panic!("read must remain pending"),
-            permit = files.entered.acquire() => { permit.unwrap().forget(); }
+    for reverse in [false, true] {
+        let mut cursor = database.scan_ordered("", None, reverse).unwrap();
+        files.fail.store(true, Ordering::SeqCst);
+        assert!(cursor.next().await.is_err());
+        assert!(cursor.next().await.is_err());
+        let mut cursor = database.scan_ordered("", None, reverse).unwrap();
+        let first = cursor.next().await.unwrap().unwrap();
+        assert_eq!(
+            first.key,
+            if reverse {
+                Bytes::from_static(b"k/0179")
+            } else {
+                Bytes::from_static(b"k/0000")
+            }
+        );
+        // Drain the first tiny table so the cancellation interrupts new I/O.
+        cursor.next().await.unwrap().unwrap();
+        cursor.next().await.unwrap().unwrap();
+        files.pause.store(true, Ordering::SeqCst);
+        {
+            let next = cursor.next();
+            tokio::pin!(next);
+            tokio::select! {
+                _ = &mut next => panic!("read must remain pending"),
+                permit = files.entered.acquire() => { permit.unwrap().forget(); }
+            }
         }
+        assert!(cursor.next().await.is_err());
+        let mut fresh = database.scan_ordered("", None, reverse).unwrap();
+        assert_eq!(
+            fresh.next().await.unwrap().unwrap().key,
+            if reverse {
+                Bytes::from_static(b"k/0179")
+            } else {
+                Bytes::from_static(b"k/0000")
+            }
+        );
     }
-    assert!(cursor.next().await.is_err());
-    let mut fresh = database.scan("", None).unwrap();
-    assert_eq!(fresh.next().await.unwrap().unwrap().key, b"k/0000"[..]);
     files.fail.store(true, Ordering::SeqCst);
     assert!(database.get("missing").await.is_err());
     assert!(database.get("missing").await.unwrap().is_none());

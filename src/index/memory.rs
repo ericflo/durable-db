@@ -129,6 +129,15 @@ impl Memory {
         end: Option<&[u8]>,
         revision: u64,
     ) -> anyhow::Result<Cursor<'_>> {
+        self.scan_ordered(start, end, revision, false)
+    }
+    pub(crate) fn scan_ordered(
+        &self,
+        start: &[u8],
+        end: Option<&[u8]>,
+        revision: u64,
+        reverse: bool,
+    ) -> anyhow::Result<Cursor<'_>> {
         super::validate_range(start, end)?;
         Ok(Cursor {
             rows: self.rows.range((
@@ -139,6 +148,8 @@ impl Memory {
             )),
             revision,
             previous: None,
+            reverse,
+            pending: None,
         })
     }
     /// All retained versions in table order. Borrowing prevents mutation during
@@ -157,12 +168,34 @@ pub struct Cursor<'a> {
     rows: btree_map::Range<'a, Key, Option<Bytes>>,
     revision: u64,
     previous: Option<Bytes>,
+    reverse: bool,
+    pending: Option<Entry>,
 }
 impl Iterator for Cursor<'_> {
     type Item = Entry;
     fn next(&mut self) -> Option<Entry> {
         if self.revision == 0 {
             return None;
+        }
+        if self.reverse {
+            loop {
+                let next = self.rows.clone().next_back();
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| next.is_none_or(|((key, _), _)| key < &p.key))
+                {
+                    return self.pending.take();
+                }
+                let ((key, Reverse(revision)), value) = self.rows.next_back()?;
+                if *revision <= self.revision {
+                    self.pending = Some(Entry {
+                        key: key.clone(),
+                        revision: *revision,
+                        value: value.clone(),
+                    });
+                }
+            }
         }
         for ((key, Reverse(revision)), value) in self.rows.by_ref() {
             if *revision > self.revision || self.previous.as_ref() == Some(key) {

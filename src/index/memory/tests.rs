@@ -185,6 +185,8 @@ proptest::proptest! {
         }
         let actual: BTreeMap<_,_> = m.scan(b"",None,snapshot).unwrap().map(|r|(r.key,(r.revision,r.value))).collect();
         assert_eq!(actual,oracle);
+        let reverse: Vec<_> = m.scan_ordered(b"",None,snapshot,true).unwrap().map(|r|(r.key,(r.revision,r.value))).collect();
+        assert_eq!(reverse,oracle.iter().rev().map(|(k,v)|(k.clone(),v.clone())).collect::<Vec<_>>());
         for key in (0..10).map(|k|format!("k-{k}")) {
             assert_eq!(m.get(key.as_bytes(),snapshot).unwrap().map(|r|(r.revision,r.value)),oracle.get(key.as_bytes()).cloned());
         }

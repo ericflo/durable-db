@@ -15,9 +15,6 @@ impl<C: Clock> Owner<C> {
         request: &ReadRequest,
     ) -> Result<ReadResult> {
         request.validate()?;
-        if request.scans.iter().any(|s| s.reverse) {
-            return Err(Error::Invalid("reverse scans are unavailable".into()));
-        }
         self.check()?;
         let view = self.projection.view(database).await?;
         let revision = view.as_ref().map_or(0, recovery::View::revision);
@@ -42,24 +39,42 @@ impl<C: Clock> Owner<C> {
             result.values.push(value);
         }
         for scan in &request.scans {
+            let prefix_end = prefix_end(&scan.prefix);
             let start = [
                 Some(scan.prefix.as_str()),
                 scan.start.as_deref(),
-                scan.after.as_deref(),
+                if scan.reverse {
+                    None
+                } else {
+                    scan.after.as_deref()
+                },
             ]
             .into_iter()
             .flatten()
             .max()
             .unwrap();
+            let end = [
+                prefix_end.as_deref(),
+                scan.end.as_deref(),
+                if scan.reverse {
+                    scan.after.as_deref()
+                } else {
+                    None
+                },
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let mut items = Vec::new();
             let mut more = false;
             if let Some(view) = &view
-                && scan.end.as_deref().is_none_or(|end| start < end)
+                && end.is_none_or(|end| start < end)
             {
-                let mut cursor = view.scan(
+                let mut cursor = view.scan_ordered(
                     start.as_bytes(),
-                    scan.end.as_deref().map(str::as_bytes),
+                    end.map(str::as_bytes),
                     revision,
+                    scan.reverse,
                 )?;
                 while let Some(row) = cursor.next().await? {
                     steps += 1;
@@ -96,6 +111,26 @@ impl<C: Clock> Owner<C> {
         self.check()?;
         Ok(result)
     }
+}
+// UTF-8 preserves scalar ordering. Advancing the last nonmaximum scalar gives
+// a valid exclusive prefix bound; at a UTF-8 width boundary it can be one byte
+// longer than a maximum-length user key. It is a bound, never a stored key.
+fn prefix_end(prefix: &str) -> Option<String> {
+    let mut end = prefix.to_owned();
+    while let Some((offset, ch)) = end.char_indices().next_back() {
+        end.truncate(offset);
+        if ch == char::MAX {
+            continue;
+        }
+        let next = if ch as u32 == 0xd7ff {
+            0xe000
+        } else {
+            ch as u32 + 1
+        };
+        end.push(char::from_u32(next).expect("next Unicode scalar"));
+        return Some(end);
+    }
+    None
 }
 fn check_size(size: usize) -> Result<()> {
     if size > 1024 * 1024 {

@@ -2,3 +2,4 @@ safe TableMerge.cfg table-merge 512m -
 unsafe TableMergeUnsafeOld.cfg table-merge-unsafeold 512m Correct
 unsafe TableMergeUnsafeDropDelete.cfg table-merge-unsafedropdelete 512m Correct
 unsafe TableMergeUnsafeSkipError.cfg table-merge-unsafeskiperror 512m Correct
+unsafe TableMergeUnsafeOrder.cfg table-merge-order 512m Correct
