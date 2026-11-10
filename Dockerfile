@@ -172,9 +172,15 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-checkpoint
-COPY spec/Checkpoint.tla spec/Checkpoint.checks spec/Checkpoint*.cfg spec/
+COPY spec/Checkpoint.tla spec/Checkpoint.checks spec/Checkpoint.cfg spec/CheckpointUnsafe*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh Checkpoint && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
+FROM model-tools AS model-checkpointread
+COPY spec/CheckpointRead.tla spec/CheckpointRead.checks spec/CheckpointRead*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh CheckpointRead && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-ownershipclaim
@@ -352,6 +358,7 @@ COPY --from=model-sortedtable /checks/ /checks/
 COPY --from=model-tablemerge /checks/ /checks/
 COPY --from=model-memoryindex /checks/ /checks/
 COPY --from=model-checkpoint /checks/ /checks/
+COPY --from=model-checkpointread /checks/ /checks/
 COPY --from=model-candidate-latecontrol /checks/ /checks/
 COPY --from=proof-partition-journal /checks/ /checks/
 COPY --from=proof-partition-control /checks/ /checks/

@@ -397,6 +397,14 @@ impl<C: Clock> Root<C> {
         Ok(Replay::new(self.files.clone(), record))
     }
 
+    /// Capture the confirmed checkpoint identity for immutable readback. The
+    /// returned image does not include newer journal entries or grant a lease.
+    pub fn checkpoint_reference(
+        &mut self,
+    ) -> Result<Option<crate::index::recovery::checkpoint::Reference>, Error> {
+        Ok(self.recovery_record()?.checkpoint)
+    }
+
     /// Atomically publish a fully uploaded native checkpoint built from this
     /// exact recovery snapshot. Unknown results require exact revalidation; a
     /// late request cannot overwrite a successor's claim or newer checkpoint.

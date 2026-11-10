@@ -1,6 +1,7 @@
 //! Bulk-built, range-routed manifest. Nodes contain at most 64 references and
 //! their upper key bounds. Both construction and traversal use bounded stacks.
 use crate::{
+    cache::Cache,
     index::table,
     storage::{
         Storage,
@@ -134,6 +135,8 @@ struct Pending {
 }
 pub(super) struct Reader {
     files: Arc<dyn Storage>,
+    cache: Option<Arc<Cache>>,
+    start: Bytes,
     stack: Vec<Pending>,
     tables: std::collections::VecDeque<RoutedTable>,
     failed: bool,
@@ -146,6 +149,8 @@ impl Reader {
         );
         Ok(Self {
             files,
+            cache: None,
+            start: Bytes::new(),
             stack: root
                 .into_iter()
                 .map(|(height, blob)| Pending {
@@ -157,6 +162,17 @@ impl Reader {
             tables: std::collections::VecDeque::new(),
             failed: false,
         })
+    }
+    pub fn seek(
+        files: Arc<dyn Storage>,
+        root: Option<(u8, Blob)>,
+        start: Bytes,
+        cache: Arc<Cache>,
+    ) -> anyhow::Result<Self> {
+        let mut reader = Self::new(files, root)?;
+        reader.start = start;
+        reader.cache = Some(cache);
+        Ok(reader)
     }
     pub async fn next(&mut self) -> anyhow::Result<Option<RoutedTable>> {
         ensure!(!self.failed, "checkpoint manifest reader retired");
@@ -174,10 +190,14 @@ impl Reader {
                 pending.blob.size() <= MAX_NODE as u64,
                 "checkpoint manifest node exceeds bound"
             );
-            let bytes = pending
-                .blob
-                .read_range(self.files.as_ref(), 0..pending.blob.size())
-                .await?;
+            let bytes = if let Some(cache) = &self.cache {
+                pending.blob.read_cached(self.files.as_ref(), cache).await?
+            } else {
+                pending
+                    .blob
+                    .read_range(self.files.as_ref(), 0..pending.blob.size())
+                    .await?
+            };
             ensure!(
                 bytes.len() >= 10 && &bytes[..8] == b"DDBCPN01" && bytes[8] == pending.height,
                 "invalid checkpoint manifest node"
@@ -203,16 +223,19 @@ impl Reader {
                 );
                 previous = Some(last.clone());
                 if pending.height == 0 {
-                    self.tables.push_back(RoutedTable {
-                        last,
-                        reference: table::Reference::decode(take(&mut input, 152)?)?,
-                    });
+                    let reference = table::Reference::decode(take(&mut input, 152)?)?;
+                    if last >= self.start {
+                        self.tables.push_back(RoutedTable { last, reference });
+                    }
                 } else {
-                    children.push(Pending {
-                        height: pending.height - 1,
-                        blob: Blob::decode(take(&mut input, REFERENCE_BYTES)?)?,
-                        last: Some(last),
-                    });
+                    let blob = Blob::decode(take(&mut input, REFERENCE_BYTES)?)?;
+                    if last >= self.start {
+                        children.push(Pending {
+                            height: pending.height - 1,
+                            blob,
+                            last: Some(last),
+                        });
+                    }
                 }
             }
             ensure!(

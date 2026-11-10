@@ -19,6 +19,30 @@ pub struct Blob {
     digest: [u8; 32],
 }
 impl Blob {
+    /// Cache only complete, authenticated immutable objects. This never caches
+    /// a mutable root or turns a missing/corrupt provider object into absence.
+    pub(crate) async fn read_cached(
+        &self,
+        storage: &dyn Storage,
+        cache: &crate::cache::Cache,
+    ) -> anyhow::Result<Bytes> {
+        ensure!(
+            self.size <= super::MAX_RANGE_BYTES as u64,
+            "immutable cache read exceeds bound"
+        );
+        let digest = hex::encode(self.digest);
+        let key = format!("immutable/{digest}");
+        if let Some(bytes) = cache.get(&key, &digest).await {
+            ensure!(
+                bytes.len() as u64 == self.size,
+                "immutable cache length mismatch"
+            );
+            return Ok(bytes);
+        }
+        let bytes = self.read_range(storage, 0..self.size).await?;
+        cache.insert(&key, bytes.clone()).await;
+        Ok(bytes)
+    }
     pub async fn upload(storage: Arc<dyn Storage>, bytes: Bytes) -> anyhow::Result<Self> {
         ensure!(
             (1..=MAX_BLOB_BYTES).contains(&bytes.len()),

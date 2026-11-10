@@ -2,7 +2,8 @@
 //! before takeover; injected clocks do not qualify physical lease safety.
 use bytes::Bytes;
 use durable_db::{
-    index::recovery::{Limits, Recovering},
+    cache::Cache,
+    index::recovery::{Limits, Recovering, checkpoint::Snapshot},
     journal::{QueueLimits, Writer},
     metrics::REGISTRY,
     ownership::{
@@ -155,6 +156,85 @@ fn controls() -> [u64; 3] {
         calls("read_barrier"),
     ]
 }
+async fn lazy_reads(connection: &Connection, root: &mut Root<TestClock>) -> serde_json::Value {
+    let before = controls();
+    let gets = calls("object_get");
+    let cache = Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap());
+    let reference = root.checkpoint_reference().unwrap().unwrap();
+    let start = Instant::now();
+    let snapshot = Snapshot::open(connection.objects(), cache.clone(), reference)
+        .await
+        .unwrap_or_else(|_| panic!("lazy checkpoint open failed"));
+    let view = snapshot
+        .database(Database {
+            name: "app-0512",
+            generation: Uuid::from_u128(513),
+        })
+        .await
+        .unwrap_or_else(|_| panic!("lazy checkpoint metadata failed"))
+        .unwrap();
+    assert_eq!(view.revision(), 4);
+    assert_eq!(
+        view.get("x").await.unwrap().unwrap().value,
+        Some(Bytes::new())
+    );
+    assert_eq!(
+        view.resolve("r-1", [1; 32], 0).await.unwrap(),
+        Resolution::Committed(1)
+    );
+    let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let cold_gets = calls("object_get") - gets;
+    assert!(cold_gets <= 8, "one database must not load the checkpoint");
+    let gets = calls("object_get");
+    let start = Instant::now();
+    for _ in 0..1000 {
+        assert_eq!(
+            view.get("x").await.unwrap().unwrap().value,
+            Some(Bytes::new())
+        );
+        assert_eq!(
+            view.resolve("r-1", [1; 32], 0).await.unwrap(),
+            Resolution::Committed(1)
+        );
+        let mut scan = view.scan("", None).unwrap();
+        assert_eq!(scan.next().await.unwrap().unwrap().key, b"x"[..]);
+        assert!(scan.next().await.unwrap().is_none());
+    }
+    let warm_ms = start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(gets, calls("object_get"));
+    for n in 0..1024 {
+        let name = format!("app-{n:04}");
+        let view = snapshot
+            .database(Database {
+                name: &name,
+                generation: Uuid::from_u128(n + 1),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.revision(), 4);
+        assert_eq!(
+            view.get("x").await.unwrap().unwrap().value,
+            Some(Bytes::new())
+        );
+        assert_eq!(
+            view.resolve("r-4", [4; 32], 3).await.unwrap(),
+            Resolution::Committed(4)
+        );
+        assert_eq!(
+            view.resolve("r-6", [6; 32], 4).await.unwrap(),
+            Resolution::Missing
+        );
+    }
+    assert_eq!(before, controls());
+    let memory_bytes = cache.memory_bytes().await;
+    assert!(memory_bytes <= 4 * 1024 * 1024);
+    serde_json::json!({"cold_point_and_receipt_ms":cold_ms,"cold_object_gets":cold_gets,
+        "warm_iterations":1000,"warm_operations_per_iteration":3,"warm_ms":warm_ms,
+        "warm_object_gets":0,"control_calls":0,"verified_databases":1024,
+        "cache_capacity_bytes":4*1024*1024,"cache_accounted_bytes":memory_bytes,
+        "scope":"Immutable checkpoint at revision 4 only; excludes later selected/live journal and serving authority; debug integration sample"})
+}
 #[tokio::test]
 #[ignore = "requires an explicitly disposable B2 or S3 bucket and a report path"]
 async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
@@ -222,6 +302,7 @@ async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
     let clock = TestClock::default();
     let mut root = activate(&connection, &clock).await;
     select(&mut root).await;
+    let lazy = lazy_reads(&connection, &mut root).await;
     let before = controls();
     let gets = calls("object_get");
     let start = Instant::now();
@@ -285,7 +366,7 @@ async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
     assert_eq!(gets, calls("object_get"));
     assert_eq!(before, controls());
     std::fs::write(report,serde_json::to_vec_pretty(&serde_json::json!({
-        "schema":1,"provider":provider,"namespace":namespace,"scope":"Native checkpoint composition; injected clocks, stopped writers, debug build; no serving API, live stale-owner fencing, automatic GC or AWS qualification",
+        "schema":1,"provider":provider,"namespace":namespace,"scope":"Native checkpoint composition; injected clocks, stopped writers, debug build; no serving API, live stale-owner fencing, automatic GC or AWS qualification", "lazy_reads":lazy,
         "databases":1024,"original_selected_frames":24,"checkpoint_cut_frame":16,"covered_frames_removed":16,"suffix_frames_replayed":frames,"checkpoint_publication_abandoned_then_validated":true,"late_old_suffix_excluded":true,"fresh_connection_and_controller_reconstruction":true,
         "checkpoint_stage_ms":checkpoint_ms,"recovery_ms":recovery_ms,"recovery_object_gets":recovery_gets,"recovery_control_calls":0,"resident_versions_after_suffix":projection.usage().versions,"receipts_after_suffix":projection.usage().receipts,
         "verified_databases":1024,"verification_ms":reads_ms,"verification_object_calls":0

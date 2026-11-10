@@ -1,6 +1,7 @@
 //! Native checkpoints bind values, revisions and retry receipts to an exact
 //! selected-journal boundary. All objects are immutable; the root register is
 //! the sole publication point. Upload failure returns no publishable handle.
+mod snapshot;
 mod tree;
 use super::{Limits, Memory, Projection, Recovering, Resident, State, add, memory};
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
 use anyhow::{Context, ensure};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+pub use snapshot::{Cursor, DatabaseSnapshot, Snapshot};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -50,6 +52,13 @@ impl Reference {
 pub struct Staged {
     pub(crate) origin: Record,
     pub(crate) reference: Reference,
+}
+impl Staged {
+    /// Immutable readback of this staged image. This neither publishes it nor
+    /// authorizes serving it as current database state.
+    pub fn reference(&self) -> Reference {
+        self.reference
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,7 +113,10 @@ impl Header {
             .0
             .read_range(files.as_ref(), 0..reference.0.size())
             .await?;
-        let wire: Wire = serde_json::from_slice(&bytes)?;
+        Self::decode(&bytes)
+    }
+    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        let wire: Wire = serde_json::from_slice(bytes)?;
         let incarnation = Uuid::parse_str(&wire.incarnation)?;
         let prefix = Prefix::decode(&hex::decode(&wire.cut)?)?;
         ensure!(
@@ -373,15 +385,8 @@ fn load_row(
             projection.usage.databases < projection.limits.databases,
             "checkpoint database capacity exhausted"
         );
-        let bytes = row.value.as_ref().context("checkpoint metadata deleted")?;
-        ensure!(bytes.len() == 16, "invalid checkpoint metadata length");
-        let revision = u64::from_be_bytes(bytes[..8].try_into()?);
-        let floor = u64::from_be_bytes(bytes[8..].try_into()?);
-        ensure!(
-            row.revision == revision,
-            "checkpoint metadata revision mismatch"
-        );
-        let state = State::from_checkpoint(db, revision, floor)?;
+        let state = metadata(&row, db)?;
+        let revision = state.revision();
         projection.databases.insert(
             key.clone(),
             Resident {
@@ -452,6 +457,17 @@ fn load_row(
         _ => anyhow::bail!("invalid checkpoint row kind"),
     }
     Ok(())
+}
+fn metadata(row: &Entry, database: Database<'_>) -> anyhow::Result<State> {
+    let bytes = row.value.as_ref().context("checkpoint metadata deleted")?;
+    ensure!(bytes.len() == 16, "invalid checkpoint metadata length");
+    let revision = u64::from_be_bytes(bytes[..8].try_into()?);
+    let floor = u64::from_be_bytes(bytes[8..].try_into()?);
+    ensure!(
+        row.revision == revision,
+        "checkpoint metadata revision mismatch"
+    );
+    State::from_checkpoint(database, revision, floor)
 }
 #[cfg(test)]
 mod tests;

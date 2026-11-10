@@ -159,6 +159,15 @@ struct Inner {
 #[derive(Clone)]
 pub struct Table(Arc<Inner>);
 impl Table {
+    pub(crate) fn first_key(&self) -> &[u8] {
+        &self
+            .0
+            .blocks
+            .first()
+            .expect("nonempty table index")
+            .first
+            .key
+    }
     pub(crate) fn last_key(&self) -> &[u8] {
         &self.0.blocks.last().expect("nonempty table index").last.key
     }
@@ -180,7 +189,7 @@ impl Table {
         );
         let bytes = reference
             .index
-            .read_range(storage.as_ref(), 0..reference.index.size())
+            .read_cached(storage.as_ref(), cache.as_ref())
             .await?;
         let blocks = codec::decode_index(&bytes, reference.data.size())?;
         Ok(Self(Arc::new(Inner {
