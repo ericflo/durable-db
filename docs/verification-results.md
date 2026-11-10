@@ -1,5 +1,11 @@
 # Verification results
 
+## v0.2.0 experimental release (2026-11-10)
+
+[v0.2.0](https://github.com/ericflo/durable-db/releases/tag/v0.2.0) packages commit `6ae12e4`, verified by [Woodpecker #109](https://ci.eflorenzano.com/repos/18/pipeline/109/1). The build gate passed dependency audits, Rust tests including the directory-capacity regression, client/Pi contracts, maintained models/proofs and Pages delivery. The static Linux x86_64 archive contains the exact tested binary and Apache-2.0 license. A standalone run with no toolchain on `PATH` passed protected creation/retry, point and ordered reads, export/inspect/restore, and recovery after a forced process stop. The public installer then downloaded the GitHub asset, verified its checksum and installed the same binary. [Release evidence](evidence/release-0.2.0-2026-11-10.json) records hashes, checks and scope. Temporary servers, data, tokens and installation files were removed.
+
+The CLI still uses the shared publication engine; native serving remains a library integration. This release does not close physical timing, full tenant maintenance accounting or native journal/checkpoint reclamation gates.
+
 ## Native HTTP budgets and recovery (2026-11-10)
 
 Commit `aad7ef8` passes the extended native HTTP fixture on real B2 and versioned MinIO. Three owners and two complete cache/connection reopens preserve values, exact retry receipts, tenant balances and nonrefundable namespace allocations. The normal maintenance task runs both before and after the first takeover, when a recovery catalog exists. Both providers then recover that collected namespace again. The [complete evidence](evidence/native-catalog-collection-2026-11-10.json) includes configuration, timings, the initial fixture failures and cleanup. Every remaining physical version, both disposable buckets, the temporary B2 key and the MinIO container were removed.
