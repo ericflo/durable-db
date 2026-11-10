@@ -158,6 +158,110 @@ async fn open(files: Arc<Files>, reference: Reference, memory: usize) -> Databas
 }
 
 #[tokio::test]
+async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bound() {
+    use crate::{
+        index::recovery::{Limits, Projection, checkpoint::build_projection},
+        transactions::{
+            record::{Commit, Mutation},
+            recovery::{Resolution, Target},
+        },
+    };
+    let files = Files::new();
+    let reference = fixture(files.clone()).await;
+    let snapshot = Snapshot::new(files.clone(), cache(0), reference);
+    let mut manifest = snapshot.seek(Bytes::new()).unwrap();
+    let mut idle = std::collections::BTreeSet::new();
+    while let Some(table) = manifest.next().await.unwrap() {
+        if super::super::split_key(&table.last).unwrap().0 != db(7) {
+            idle.extend(table.reference.blobs().map(|b| b.key()));
+        }
+    }
+    let mut projection = Projection::new(Limits::default()).unwrap();
+    projection.rebase(snapshot);
+    files.reads.store(0, Ordering::SeqCst);
+    let unchanged = build_projection(&projection, files.clone(), reference.cut)
+        .await
+        .unwrap();
+    assert!(unchanged == reference);
+    assert_eq!(files.reads.load(Ordering::SeqCst), 4, "manifest nodes only");
+
+    // The last value of generation 7 is exactly a manifest upper bound. Its
+    // deletion must replace that table without opening either idle database.
+    let encoded = Commit::encode(
+        db(7),
+        4,
+        3,
+        3,
+        "r-4",
+        [4; 32],
+        &[Mutation {
+            key: "k/0179",
+            value: None,
+        }],
+    )
+    .unwrap();
+    let commit = Commit::decode(&encoded).unwrap();
+    let state = projection
+        .take_state(db(7))
+        .await
+        .unwrap()
+        .advance(&commit)
+        .unwrap();
+    projection.apply(&commit, state).await.unwrap();
+    files.reads.store(0, Ordering::SeqCst);
+    files.keys.lock().unwrap().clear();
+    let rewritten = build_projection(&projection, files.clone(), reference.cut)
+        .await
+        .unwrap();
+    assert_eq!(
+        files.reads.load(Ordering::SeqCst),
+        10,
+        "four manifest and three index/data pairs"
+    );
+    assert!(files.keys.lock().unwrap().iter().all(|k| !idle.contains(k)));
+    assert_eq!(
+        rewritten.rows,
+        reference.rows - 1,
+        "two expired receipts become one"
+    );
+    let rewritten = Snapshot::new(files.clone(), cache(0), rewritten);
+    rewritten.verify(Limits::default()).await.unwrap();
+    for generation in 7..=9 {
+        let view = rewritten.database(db(generation)).await.unwrap().unwrap();
+        for n in 0..180 {
+            let expected = if generation == 7 && n == 179 {
+                None
+            } else {
+                value(generation, n)
+            };
+            assert_eq!(
+                view.get(&format!("k/{n:04}")).await.unwrap().unwrap().value,
+                expected
+            );
+        }
+        assert_eq!(
+            view.resolve("r-3", [3; 32], 2).await.unwrap(),
+            if generation == 7 {
+                Resolution::Expired
+            } else {
+                Resolution::Committed(3)
+            }
+        );
+    }
+    assert_eq!(
+        rewritten
+            .database(db(7))
+            .await
+            .unwrap()
+            .unwrap()
+            .resolve("r-4", [4; 32], 3)
+            .await
+            .unwrap(),
+        Resolution::Committed(4)
+    );
+}
+
+#[tokio::test]
 async fn seeks_include_exact_table_and_manifest_bounds_and_isolate_generations() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;

@@ -16,7 +16,7 @@ use anyhow::{Context, ensure};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 pub use snapshot::{Cursor, DatabaseSnapshot, Snapshot};
-use std::sync::Arc;
+use std::{ops::Bound, sync::Arc};
 use uuid::Uuid;
 
 const MAX_DESCRIPTOR_BYTES: usize = 1024;
@@ -262,53 +262,63 @@ async fn build_projection(
     if let Some(base) = &projection.base {
         let mut tables = base.seek(Bytes::new())?;
         let mut count = 0u64;
-        let mut rows = 0u64;
+        // Retained references carry their share of this authenticated total.
+        // Only replaced tables need an index read and a row-count adjustment.
+        builder.rows = base.header().rows;
         let mut boundary: Option<Bytes> = None;
         while let Some(routed) = tables.next().await? {
             builder.tree.reuse_from(&tables);
+            let lower = boundary.replace(routed.last.clone());
+            count = count
+                .checked_add(1)
+                .context("checkpoint table count overflow")?;
+            ensure!(count <= base.header().tables, "extra checkpoint tables");
+            // A changed database replaces its entire receipt window, including
+            // expired rows absent from `changes`. The manifest's (lower, last]
+            // interval conservatively covers them without opening the table.
+            let first = lower
+                .as_deref()
+                .map(split_key)
+                .transpose()?
+                .map(|(db, kind, _)| ((db.name.to_owned(), db.generation), kind));
+            let (last, _, _) = split_key(&routed.last)?;
+            let last = (last.name.to_owned(), last.generation);
+            let replaces_metadata = projection
+                .databases
+                .range((
+                    first
+                        .as_ref()
+                        .map_or(Bound::Unbounded, |(key, _)| Bound::Included(key.clone())),
+                    Bound::Included(last),
+                ))
+                .any(|(key, resident)| {
+                    resident.changed()
+                        && first
+                            .as_ref()
+                            .is_none_or(|(first, kind)| key != first || *kind < 2)
+                });
+            if !replaces_metadata && changes.peek().is_none_or(|row| row.key > routed.last) {
+                builder.flush().await?;
+                builder.last = Some(routed.last.clone());
+                builder.tree.push(routed.reference, routed.last).await?;
+                continue;
+            }
             let table = base.table(&routed).await?;
             ensure!(
-                boundary
+                lower
                     .as_ref()
                     .is_none_or(|last| last.as_ref() < table.first_key()),
                 "overlapping checkpoint tables"
             );
-            boundary = Some(routed.last.clone());
-            count = count
-                .checked_add(1)
-                .context("checkpoint table count overflow")?;
-            rows = rows
-                .checked_add(table.row_count())
-                .context("checkpoint row count overflow")?;
-            ensure!(
-                count <= base.header().tables && rows <= base.header().rows,
-                "extra checkpoint tables or rows"
-            );
+            builder.rows = builder
+                .rows
+                .checked_sub(table.row_count())
+                .context("checkpoint row count underflow")?;
             while changes
                 .peek()
                 .is_some_and(|row| row.key.as_ref() < table.first_key())
             {
                 builder.push_row(changes.next().unwrap()).await?;
-            }
-            // A changed database replaces its entire receipt window, including
-            // expired rows absent from `changes`. Check that interval too.
-            let (first, kind, _) = split_key(table.first_key())?;
-            let (last, _, _) = split_key(table.last_key())?;
-            let first = (first.name.to_owned(), first.generation);
-            let last = (last.name.to_owned(), last.generation);
-            let replaces_metadata = projection
-                .databases
-                .range(first.clone()..=last)
-                .any(|(key, resident)| resident.changed() && (key != &first || kind < 2));
-            if !replaces_metadata && changes.peek().is_none_or(|row| row.key > routed.last) {
-                builder.flush().await?;
-                builder.rows = builder
-                    .rows
-                    .checked_add(table.row_count())
-                    .context("checkpoint row count overflow")?;
-                builder.last = Some(routed.last.clone());
-                builder.tree.push(routed.reference, routed.last).await?;
-                continue;
             }
             let mut source = table.scan(b"", None, u64::MAX)?;
             let mut seen = 0u64;
@@ -342,8 +352,8 @@ async fn build_projection(
             }
         }
         ensure!(
-            count == base.header().tables && rows == base.header().rows,
-            "checkpoint image counts mismatch"
+            count == base.header().tables,
+            "checkpoint table count mismatch"
         );
     }
     for row in changes {

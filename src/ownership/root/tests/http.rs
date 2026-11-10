@@ -936,6 +936,8 @@ async fn native_http_collects_checkpointed_journals() {
     let journals = provider.files.list("journal/", None, 128).await.unwrap();
     assert_eq!(header.cut.prefix.position(), 4);
     assert_eq!(journals.len(), 1);
+    let descriptor: Value = serde_json::from_str(&header.encode().unwrap()).unwrap();
+    assert_eq!(descriptor["height"], 0);
     assert_eq!(
         provider
             .files
@@ -943,7 +945,7 @@ async fn native_http_collects_checkpointed_journals() {
             .await
             .unwrap()
             .len(),
-        5 // two data/index pairs and one manifest
+        2 * descriptor["tables"].as_u64().unwrap() as usize + 1
     );
     assert_eq!(
         crate::journal::LogId::parse_key(&journals[0]).unwrap(),

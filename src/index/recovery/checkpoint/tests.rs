@@ -506,6 +506,7 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
     assert_eq!(projection.warm(db, 0, 0).await.unwrap(), (2, 0));
     assert_eq!(projection.usage().receipts, 2);
     let puts = files.puts.load(Ordering::SeqCst);
+    let reads = files.range_reads.load(Ordering::SeqCst);
     files.ranges.lock().unwrap().clear();
     let unchanged = build_projection(&projection, files.clone(), cut())
         .await
@@ -514,6 +515,11 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
         files.puts.load(Ordering::SeqCst) - puts,
         0,
         "unchanged tables and manifest need no uploads; the cut is inline"
+    );
+    assert_eq!(
+        files.range_reads.load(Ordering::SeqCst) - reads,
+        1,
+        "one manifest read, no retained table indexes or data"
     );
     for reference in &old {
         let key = format!(
@@ -718,10 +724,38 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
     );
     let current = references(&rewritten).await;
     let retained = current.intersection(&old).next().unwrap();
-    let index = format!(
-        "tables/{}",
-        Uuid::from_slice(&retained[64..80]).unwrap().simple()
-    );
+    let index = table::Reference::decode(retained).unwrap().blobs()[1].key();
     files.inner.delete(&index).await.unwrap();
-    assert!(build_projection(&projection, files, cut()).await.is_err());
+    // Retaining an authenticated reference is not a full-image audit. The
+    // missing index still fails explicit verification, never becoming absence.
+    let reference = build_projection(&projection, files.clone(), cut())
+        .await
+        .unwrap();
+    assert!(
+        Snapshot::new(
+            files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            reference
+        )
+        .verify(Limits::default())
+        .await
+        .is_err()
+    );
+    let base = projection.base.as_ref().unwrap();
+    let first = base
+        .seek(Bytes::new())
+        .unwrap()
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    files
+        .inner
+        .delete(&first.reference.blobs()[1].key())
+        .await
+        .unwrap();
+    assert!(
+        build_projection(&projection, files, cut()).await.is_err(),
+        "a replaced table must be read and validated"
+    );
 }

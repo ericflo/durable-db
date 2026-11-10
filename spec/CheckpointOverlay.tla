@@ -1,6 +1,6 @@
 -------------------------- MODULE CheckpointOverlay -------------------------
 EXTENDS Integers, Sequences, FiniteSets, TLC
-CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse, UnsafeManifestReuse, UnsafeEvict
+CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse, UnsafeManifestReuse, UnsafeEvict, UnsafeBoundary
 Databases == 1..2
 Keys == 1..2
 Pairs == Databases \X Keys
@@ -44,9 +44,15 @@ Finish == /\ phase = "recovering" /\ cut + applied = 3
 Fail == /\ phase = "recovering" /\ phase' = "failed"
         /\ UNCHANGED <<history, cut, applied, recent, touched, receipts, rewritten>>
 \* Ordered tables cover positions 1..3 and 4; the first crosses a database
-\* boundary. An unchanged table reuses its authenticated prior reference.
+\* boundary. Authenticated manifest upper bounds define (previous, upper]
+\* intervals: reuse needs no table-index read. Gaps may cause extra rewrites.
+\* Rust carries the authenticated base row total, subtracts opened/replaced
+\* table counts and adds emitted rows; a rewrite is not a full-image audit.
 Position(p) == 2*(p[1]-1)+p[2]
-SameTable(p,q) == (Position(p) <= 3) = (Position(q) <= 3)
+Lower(p) == IF Position(p) <= 3 THEN 0 ELSE 3
+Upper(p) == IF Position(p) <= 3 THEN 3 ELSE 4
+SameTable(p,q) == /\ Lower(p) < Position(q)
+                  /\ IF UnsafeBoundary THEN Position(q) < Upper(p) ELSE Position(q) <= Upper(p)
 Reuse(p) == UnsafeReuse \/ \A q \in Pairs: SameTable(p,q) => recent[q] = -1
 Merged == [p \in Pairs |-> IF Reuse(p) THEN Base[p] ELSE Visible[p]]
 \* An authenticated manifest reference can also be retained when its complete
