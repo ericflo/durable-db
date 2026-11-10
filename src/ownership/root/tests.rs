@@ -135,8 +135,8 @@ impl Authority for Provider {
         }
         Ok(Some(bucket))
     }
-    async fn delete_versions(&self, _: &str) -> anyhow::Result<()> {
-        unreachable!("root control never deletes data")
+    async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
+        self.files.delete(key).await
     }
 }
 

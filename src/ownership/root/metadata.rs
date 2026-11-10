@@ -66,6 +66,7 @@ pub(super) fn decode(
                     LEGACY_PROBE,
                     crate::upload_budget::FIELD,
                     crate::upload_budget::DATABASE_FIELD,
+                    crate::upload_budget::COLLECTION_FIELD,
                 ]
                 .contains(&k.as_str())
         })
@@ -159,6 +160,14 @@ pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
     let mut reserved = info.clone();
     for (field, bytes) in [
         (ROOT, 1024),
+        (
+            crate::upload_budget::COLLECTION_FIELD,
+            if info.contains_key(crate::upload_budget::FIELD) {
+                1024
+            } else {
+                0
+            },
+        ),
         (
             crate::upload_budget::DATABASE_FIELD,
             if info.contains_key(crate::upload_budget::FIELD) {

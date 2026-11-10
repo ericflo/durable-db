@@ -101,6 +101,7 @@ impl<C: Clock + Send + 'static> Native<C> {
         }
         owner.check()?;
         let cache = owner.cache();
+        let collection = owner.budget_collection()?;
         let owner = Arc::new(RwLock::new(owner));
         let (queue, receive) = mpsc::channel(capacity);
         let running = Arc::new(AtomicBool::new(true));
@@ -109,6 +110,7 @@ impl<C: Clock + Send + 'static> Native<C> {
             receive,
             Running(running.clone()),
             renewal,
+            collection,
         ));
         Ok(Self {
             owner,
@@ -273,8 +275,18 @@ async fn run<C: Clock + Send>(
     mut queue: mpsc::Receiver<Command>,
     _running: Running,
     _renewal: Option<Renewal>,
+    collection: Option<crate::upload_budget::Collection>,
 ) {
     let mut uploads = JoinSet::new();
+    // At most one bounded sweep per serving worker, outside every owner lock.
+    // Dropping the JoinSet on retirement cancels it; no unique collector lease
+    // or in-memory cursor is needed for safety or restart.
+    let mut collections = JoinSet::new();
+    let mut sweep = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        Duration::from_secs(60),
+    );
+    sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending: Vec<Pending> = Vec::new();
     let mut unknown = BTreeSet::new();
     let mut unsent = BTreeMap::new();
@@ -284,6 +296,13 @@ async fn run<C: Clock + Send>(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = sweep.tick(), if collection.is_some() && collections.is_empty() => {
+                let collection = collection.clone().unwrap();
+                collections.spawn(async move { tokio::time::timeout(Duration::from_secs(30), collection.collect()).await });
+            }
+            result = collections.join_next(), if !collections.is_empty() => {
+                if !matches!(result, Some(Ok(Ok(Ok(_))))) { tracing::warn!("native budget metadata collection deferred"); }
+            }
             command = queue.recv() => {
                 let Some(command) = command else { return };
                 if !command.response.send.is_closed() {

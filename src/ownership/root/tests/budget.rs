@@ -388,6 +388,30 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
         root.observe().await.is_ok(),
         "owner metadata accepts and preserves the budget directory"
     );
+    // Every sweep is bounded; a replacement resumes the durable cursors. More
+    // than one page of LIVE manifests must not hide obsolete objects forever.
+    for _ in 0..8 {
+        root.budget_collection().unwrap().collect().await.unwrap();
+    }
+    assert_eq!(
+        provider
+            .files
+            .list("manifests/", None, 1000)
+            .await
+            .unwrap()
+            .len(),
+        134
+    );
+    for name in ["a", "b", "c", "d"] {
+        assert!(
+            root.database_budget(name)
+                .unwrap()
+                .unwrap()
+                .charge(1)
+                .await
+                .is_err()
+        );
+    }
 }
 
 #[tokio::test]
@@ -509,6 +533,100 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
             .unwrap()
             .unwrap()
             .revision,
+        1
+    );
+}
+
+#[tokio::test]
+async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes() {
+    let provider = Provider::new();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 32,
+        })
+        .await
+        .unwrap();
+    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let ledger = root.database_budget("app").unwrap().unwrap();
+    ledger.initialize_database().await.unwrap();
+    let collector = root.budget_collection().unwrap();
+    // Metadata is uploaded, but its captured directory comparison is delayed.
+    provider.pause.store(true, Ordering::SeqCst);
+    let task = {
+        let ledger = ledger.clone();
+        tokio::spawn(async move { ledger.charge(100).await })
+    };
+    provider.entered.notified().await;
+    assert!(collector.collect().await.unwrap() > 0);
+    provider.release.notify_one();
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        ledger.status().await.unwrap().allocated.attempts,
+        32,
+        "a fenced publisher rebuilt its immutable paths before granting rights"
+    );
+    let orphan = format!("manifests/orphan.{}", Uuid::new_v4());
+    connection
+        .objects()
+        .put(&orphan, Bytes::new())
+        .await
+        .unwrap();
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(collector.collect().await.is_err());
+    assert!(
+        provider.files.get(&orphan, 1).await.unwrap().is_some(),
+        "uncertain fences grant no delete permission"
+    );
+    // Exhaust all remaining global attempts. The out-of-scope table identity
+    // survives collection; deleting metadata never restores either allowance.
+    while connection
+        .objects()
+        .put("tables/untouched", Bytes::new())
+        .await
+        .is_ok()
+    {}
+    let global = connection.objects().upload_budget().await.unwrap().unwrap();
+    let tenant = ledger.status().await.unwrap();
+    assert!(collector.collect().await.unwrap() > 0);
+    assert!(provider.files.get(&orphan, 1).await.unwrap().is_none());
+    assert!(
+        provider
+            .files
+            .get("tables/untouched", 1)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(ledger.status().await.unwrap(), tenant);
+    assert_eq!(
+        connection.objects().upload_budget().await.unwrap().unwrap(),
+        global
+    );
+    assert!(
+        connection
+            .objects()
+            .put("tables/refused", Bytes::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        provider
+            .files
+            .list("manifests/", None, 128)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        provider
+            .files
+            .list("indexes/", None, 128)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }

@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod collection;
 mod database;
+pub(crate) use collection::{Collection, FIELD as COLLECTION_FIELD};
 pub(crate) use database::FIELD as DATABASE_FIELD;
 
 pub(crate) const FIELD: &str = "durable-db-upload-budget";

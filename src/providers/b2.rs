@@ -354,6 +354,7 @@ impl Authority for Native {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::Storage;
     use axum::{Json, Router, extract::State, routing::post};
     use std::sync::{
         Mutex,
@@ -371,6 +372,7 @@ mod tests {
         update_finished: tokio::sync::Notify,
         bucket: Mutex<Bucket>,
         deleted: Mutex<Vec<String>>,
+        files: Mutex<Option<Arc<Remote>>>,
     }
     async fn listing(State(s): State<Arc<Mock>>) -> (StatusCode, Json<Value>) {
         s.listing_calls.fetch_add(1, Ordering::SeqCst);
@@ -450,7 +452,19 @@ mod tests {
             Json(json!({"revision":b.revision,"bucketInfo":b.info})),
         )
     }
-    async fn versions(Json(v): Json<Value>) -> Json<Value> {
+    async fn versions(State(s): State<Arc<Mock>>, Json(v): Json<Value>) -> Json<Value> {
+        let files = s.files.lock().unwrap().clone();
+        if let Some(files) = files {
+            let name = v["prefix"].as_str().unwrap();
+            assert_eq!(v["startFileName"], name);
+            let key = name.strip_prefix("test/").unwrap();
+            let entries = if files.get(key, 65536).await.unwrap().is_some() {
+                vec![json!({"fileName":name,"fileId":"v1"})]
+            } else {
+                vec![]
+            };
+            return Json(json!({"files": entries}));
+        }
         assert_eq!(v["prefix"], "test/blocks/one");
         Json(
             json!({"files":[{"fileName":"test/blocks/one","fileId":"v1"},{"fileName":"test/blocks/one","fileId":"v2"},{"fileName":"test/blocks/one-other","fileId":"keep"}]}),
@@ -461,6 +475,19 @@ mod tests {
             .lock()
             .unwrap()
             .push(v["fileId"].as_str().unwrap().to_owned());
+        let files = s.files.lock().unwrap().clone();
+        if let Some(files) = files {
+            files
+                .delete(
+                    v["fileName"]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("test/")
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
         Json(v)
     }
     async fn fixture() -> (Arc<Native>, Arc<Mock>, tokio::task::JoinHandle<()>) {
@@ -480,6 +507,7 @@ mod tests {
                 info: BTreeMap::from([("head".into(), "current".into())]),
             }),
             deleted: Mutex::new(vec![]),
+            files: Mutex::new(None),
         });
         let app = Router::new()
             .route("/b2api/v4/b2_list_buckets", post(listing))
@@ -515,9 +543,10 @@ mod tests {
 
     #[tokio::test]
     async fn native_budget_bootstrap_uses_b2_revision_checks() {
-        let (native, _, server) = fixture().await;
+        let (native, state, server) = fixture().await;
         let files =
             Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
+        *state.files.lock().unwrap() = Some(files.clone());
         super::super::check_native_budget(super::super::Connection::new(files, native, "test"))
             .await;
         server.abort();

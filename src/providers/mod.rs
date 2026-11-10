@@ -178,6 +178,38 @@ async fn check_native_budget(connection: Connection) {
         ledger.charge(100).await.unwrap();
         assert!(ledger.charge(1).await.is_err());
     }
+    assert!(root.budget_collection().unwrap().collect().await.unwrap() > 0);
+    for name in ["a", "b"] {
+        assert_eq!(
+            root.database_budget(name)
+                .unwrap()
+                .unwrap()
+                .status()
+                .await
+                .unwrap()
+                .allocated
+                .attempts,
+            1
+        );
+    }
+    assert_eq!(
+        connection
+            .objects()
+            .list("manifests/", None, 128)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        connection
+            .objects()
+            .list("indexes/", None, 128)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(root.observe().await.is_ok());
     assert!(connection.authority().read().await.unwrap().info.len() <= 10);
 }

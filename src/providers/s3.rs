@@ -279,6 +279,38 @@ mod tests {
         lose_next_control_reply: bool,
     }
 
+    async fn list_immutable(
+        State(state): State<Arc<Mutex<Wire>>>,
+        axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+    ) -> String {
+        let state = state.lock().unwrap();
+        let versions = query.contains_key("versions");
+        let prefix = query.get("prefix").unwrap();
+        let entries: String = state.immutable.iter().filter_map(|(key, bytes)| {
+            let key = format!("prefix/{key}");
+            if !key.starts_with(prefix) || query.get("start-after").is_some_and(|after| key <= *after) { return None }
+            let key = quick_xml::escape::escape(&key);
+            Some(if versions { format!("<Version><Key>{key}</Key><VersionId>v1</VersionId></Version>") }
+            else { format!("<Contents><Key>{key}</Key><LastModified>2026-11-08T00:00:00Z</LastModified><ETag>object</ETag><Size>{}</Size></Contents>", bytes.len()) })
+        }).take(128).collect();
+        let tag = if versions {
+            "ListVersionsResult"
+        } else {
+            "ListBucketResult"
+        };
+        format!("<{tag}><IsTruncated>false</IsTruncated>{entries}</{tag}>")
+    }
+    async fn delete_immutable(
+        State(state): State<Arc<Mutex<Wire>>>,
+        axum::extract::Path(id): axum::extract::Path<String>,
+        axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+    ) -> StatusCode {
+        assert_eq!(query.get("versionId").map(String::as_str), Some("v1"));
+        assert!(id.starts_with("manifests/") || id.starts_with("indexes/"));
+        state.lock().unwrap().immutable.remove(&id);
+        StatusCode::NO_CONTENT
+    }
+
     async fn read_object(State(state): State<Arc<Mutex<Wire>>>) -> Response {
         let state = state.lock().unwrap();
         Response::builder()
@@ -1048,10 +1080,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new()
+            .route("/test", get(list_immutable))
+            .route("/test/", get(list_immutable))
             .route("/test/prefix/authority.json", get(read).put(write))
             .route(
                 "/test/prefix/{*id}",
-                get(read_immutable).put(write_immutable),
+                get(read_immutable)
+                    .put(write_immutable)
+                    .delete(delete_immutable),
             )
             .route(
                 "/test/prefix/journal/frame",

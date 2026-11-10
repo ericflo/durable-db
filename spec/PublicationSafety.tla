@@ -1,4 +1,7 @@
 ----------------------- MODULE PublicationSafety -----------------------
+\* Native tenant-ledger metadata uses this protocol too: its publisher rebuilds
+\* fresh objects after ANY failed exact comparison, and collection lists before
+\* a nonce-changing comparison. Directory membership supplies protected objects.
 EXTENDS Naturals, FiniteSets
 CONSTANTS Jobs, Collectors, Pages
 VARIABLES live, objects, used, fence, job, candidate, protected, gc

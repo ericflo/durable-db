@@ -894,3 +894,81 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     server.abort();
 }
+
+#[tokio::test(start_paused = true)]
+async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
+    let (router, provider, _, _, token) = fixture(8, 64).await;
+    create(&router, &token, "app").await;
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/databases/app/commit",
+            &token,
+            commit()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(
+        provider
+            .files
+            .list("manifests/", None, 128)
+            .await
+            .unwrap()
+            .len()
+            > 1
+    );
+    let journals = provider.files.list("journal/", None, 128).await.unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while provider
+            .files
+            .list("manifests/", None, 128)
+            .await
+            .unwrap()
+            .len()
+            != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        provider
+            .files
+            .list("indexes/", None, 128)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        provider.files.list("journal/", None, 128).await.unwrap(),
+        journals
+    );
+    let (status, budget) = call(
+        &router,
+        "GET",
+        "/v1/databases/app/upload-budget",
+        &token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(budget["allocated"]["attempts"], 32);
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/databases/app/read",
+            &token,
+            json!({"keys":["x"]})
+        )
+        .await
+        .1["values"][0],
+        "eA=="
+    );
+}

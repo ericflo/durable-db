@@ -20,7 +20,7 @@ struct Envelope {
     database: String,
     record: Record,
 }
-fn root(before: &Bucket) -> anyhow::Result<Option<Root>> {
+pub(super) fn root(before: &Bucket) -> anyhow::Result<Option<Root>> {
     ensure!(
         before.info.get("durable-db-format").map(String::as_str)
             == Some(crate::ownership::root::VERSION),

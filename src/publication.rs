@@ -238,25 +238,9 @@ impl Published {
             self.authority.delete_versions(&key).await?;
             metrics::REGISTRY.event(Event::ProposalDeleteAck, 1);
         }
-        let mut deleted = 0;
-        for key in manifests {
-            metrics::REGISTRY.event(Event::ManifestCandidates, 1);
-            let db = witness(&key, "manifests/")?;
-            let pointer = self.directory.get(protected.as_ref(), db).await?;
-            if pointer.is_none_or(|p| p.key != key) {
-                self.authority.delete_versions(&key).await?;
-                metrics::REGISTRY.event(Event::ManifestDeleteAck, 1);
-                deleted += 1;
-            }
-        }
-        for key in indexes {
-            metrics::REGISTRY.event(Event::IndexCandidates, 1);
-            if !self.directory.reachable(protected.as_ref(), &key).await? {
-                self.authority.delete_versions(&key).await?;
-                metrics::REGISTRY.event(Event::IndexDeleteAck, 1);
-            }
-        }
-        Ok(deleted)
+        self.directory
+            .collect_unreachable(protected.as_ref(), &manifests, &indexes, &*self.authority)
+            .await
     }
 }
 fn slot(key: &str) -> anyhow::Result<String> {

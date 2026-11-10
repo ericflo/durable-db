@@ -121,6 +121,12 @@ pub struct Root<C> {
 }
 
 impl<C: Clock> Root<C> {
+    pub(crate) fn budget_collection(&self) -> Option<crate::upload_budget::Collection> {
+        self.budgeted.then(|| {
+            crate::upload_budget::Collection::new(self.session.authority(), self.files.clone())
+        })
+    }
+
     pub(crate) fn database_budget(
         &self,
         name: &str,

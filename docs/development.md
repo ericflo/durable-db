@@ -28,6 +28,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Change | Focused checks |
 | --- | --- |
 | Native physical upload admission | `cargo test --locked --lib native_budget`, `cargo test --locked --lib database_budget`, `cargo test --locked --test upload_budget`, `cargo test --locked --lib root::tests::http`, `scripts/check-model.sh UploadCredits` and `scripts/check-model.sh TenantAdmission` |
+| Native budget metadata cleanup | `cargo test --locked --lib database_budget`, `cargo test --locked --lib automatically_collects`, `scripts/check-model.sh PublicationSafety` and `scripts/check-proof.sh PublicationSafety` |
 | HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
 | Native lifecycle and logical quotas | `cargo test --locked --lib native_lifecycle` and `scripts/check-model.sh MemoryIndex` |
 | Live native transactions | `cargo test --locked --lib live_` and `scripts/check-model.sh LiveTransactions` |
