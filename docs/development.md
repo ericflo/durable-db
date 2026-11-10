@@ -59,6 +59,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
 | SDK or web-app example | `scripts/test-client.sh sdk.test.mjs` |
 | Native HTTP and client contract | `cargo test --locked --lib root::tests::http`; after `npm --prefix clients/javascript ci`, run `cargo test --locked --lib native_http_javascript_contract -- --ignored --nocapture` |
+| Native provider qualification | `cargo test --locked --test checkpoint_cloud -- --ignored --exact native_http::native_http_budgets_cleanup_and_cold_recovery --nocapture` |
 | Pi adapter or HTTP client transport | `scripts/test-client.sh` |
 | Public documentation | `npm --prefix site ci` and `node site/build.mjs` |
 
@@ -163,3 +164,5 @@ cargo test --locked --test checkpoint_cloud -- --ignored --exact native_checkpoi
 ```
 
 This initializes `owned-candidate-6`, writes 1,024 database generations, checkpoints the first 16 selected frames, removes those covered fixture frames, and reconstructs through a fresh provider connection and controller. It checks nine suffix frames, retained receipts, excluded late old-owner data and zero control calls during reconstruction. Before suffix recovery it also checks lazy checkpoint point reads, ordered scans and receipt resolution, including 1,000 warmed iterations with zero provider calls and all 1,024 databases at their checkpoint revision. It rewrites the combined image and reopens it with every resident limit set to one, checking all 1,024 database generations without resident rows or receipts. Its timing samples use a debug build; they are not serving SLOs. It uses injected clocks and stops writers before takeover; it does not qualify physical lease safety, the serving API, automatic collection or AWS. Delete all physical versions and the dedicated bucket and revoke temporary credentials after either outcome. Checkpoint construction itself performs no cleanup.
+
+The native provider qualification requires a **fresh dedicated disposable bucket** named `durable-db-test-*`, `DURABLE_DB_DISPOSABLE=1`, `DURABLE_DB_TEST_PROVIDER=b2` or `s3`, `DURABLE_DB_TEST_BUCKET`, the provider's credentials, and `DURABLE_DB_NATIVE_HTTP_REPORT` for JSON evidence. It exercises the real native HTTP path and waits for the normal 60-second cleanup interval. The caller must remove every physical version, the bucket, and any temporary workload key afterward. It uses a logical clock and stops the first server before takeover; it does not qualify physical ownership timing or enable the CLI cutover.

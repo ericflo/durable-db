@@ -45,6 +45,7 @@ struct Provider {
     stale: Mutex<Option<usize>>,
     calls: AtomicU64,
     reads: AtomicU64,
+    maintenance: AtomicU64,
     lose_reply: AtomicBool,
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
@@ -65,6 +66,7 @@ impl Provider {
             stale: Mutex::new(None),
             calls: AtomicU64::new(0),
             reads: AtomicU64::new(0),
+            maintenance: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
@@ -134,6 +136,10 @@ impl Authority for Provider {
                 .insert("durable-db-prefix".into(), "unexpected".into());
         }
         Ok(Some(bucket))
+    }
+    async fn maintenance(&self) -> anyhow::Result<()> {
+        self.maintenance.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
         self.files.delete(key).await

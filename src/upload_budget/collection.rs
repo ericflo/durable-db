@@ -42,6 +42,10 @@ impl Collection {
     pub(crate) async fn collect(&self) -> anyhow::Result<usize> {
         let before = self.authority.read().await?;
         database::root(&before)?;
+        // The S3 register also retains immutable historical versions. Reuse
+        // its list-before-barrier cleanup even before any tenant exists; B2
+        // has no corresponding object history. This never spends immutable PUT credit.
+        self.authority.maintenance().await?;
         let cursor = Cursor::read(&before)?;
         let manifests = self
             .files

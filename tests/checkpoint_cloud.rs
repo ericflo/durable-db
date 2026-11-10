@@ -1,5 +1,7 @@
 //! Opt-in checkpoint composition on disposable providers. Writers are stopped
 //! before takeover; injected clocks do not qualify physical lease safety.
+#[path = "checkpoint_cloud/native_http.rs"]
+mod native_http;
 use bytes::Bytes;
 use durable_db::{
     cache::Cache,
@@ -41,16 +43,26 @@ async fn connect(provider: &str, bucket: &str, namespace: &str) -> Connection {
 }
 async fn activate(connection: &Connection, clock: &TestClock) -> Root<TestClock> {
     let profile = Profile::new(Duration::from_nanos(10), Duration::from_nanos(1)).unwrap();
-    let mut root = connection.root(clock.clone(), profile).unwrap();
-    let observed = root
-        .observe()
-        .await
-        .unwrap_or_else(|_| panic!("root observation failed"));
-    let request = root.claim(observed).unwrap();
-    assert!(matches!(
-        root.finish(request.execute().await).unwrap(),
-        Outcome::Confirmed
-    ));
+    // Budgeted bootstrap can consume a grant while uploading registration,
+    // invalidating its captured comparison. A fresh candidate reuses the grant.
+    let mut root = None;
+    for _ in 0..2 {
+        let mut candidate = connection.root(clock.clone(), profile).unwrap();
+        let observed = candidate
+            .observe()
+            .await
+            .unwrap_or_else(|_| panic!("root observation failed"));
+        let request = candidate.claim(observed).unwrap();
+        match candidate.finish(request.execute().await).unwrap() {
+            Outcome::Confirmed => {
+                root = Some(candidate);
+                break;
+            }
+            Outcome::Conflict => continue,
+            _ => panic!("root claim was uncertain"),
+        }
+    }
+    let mut root = root.expect("root claim conflicted twice");
     clock.0.fetch_add(23, Ordering::SeqCst);
     validate(&mut root).await;
     let request = root.activate().unwrap();

@@ -898,6 +898,13 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 #[tokio::test(start_paused = true)]
 async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
     let (router, provider, _, _, token) = fixture(8, 64).await;
+    tokio::task::yield_now().await; // Start the worker before advancing virtual time.
+    // Control history accumulates even before tenant metadata exists.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(provider.maintenance.load(Ordering::SeqCst), 1);
     create(&router, &token, "app").await;
     assert_eq!(
         call(
@@ -922,20 +929,18 @@ async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
     );
     let journals = provider.files.list("journal/", None, 128).await.unwrap();
     tokio::time::advance(Duration::from_secs(61)).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while provider
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        provider
             .files
             .list("manifests/", None, 128)
             .await
             .unwrap()
-            .len()
-            != 1
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+            .len(),
+        1
+    );
     assert_eq!(
         provider
             .files
