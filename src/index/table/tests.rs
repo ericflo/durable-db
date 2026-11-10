@@ -73,6 +73,32 @@ fn cache() -> Arc<Cache> {
 }
 
 #[tokio::test]
+async fn admission_bound_matches_actual_singleton_data_and_index_objects() {
+    let files = Files::new();
+    let large = vec![42; 64 * 1024];
+    for length in [1, 19, MAX_KEY_BYTES] {
+        let key = vec![b'k'; length];
+        for value in [None, Some(&b""[..]), Some(&b"x"[..]), Some(&large[..])] {
+            let reference = build(
+                files.clone(),
+                [Row {
+                    key: &key,
+                    revision: 1,
+                    value,
+                }],
+            )
+            .await
+            .unwrap();
+            let encoded = reference.blobs().iter().map(|b| b.size()).sum::<u64>();
+            assert_eq!(
+                encoded,
+                row_upload_bound(key.len(), value.map_or(0, <[u8]>::len)) as u64
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn point_hits_still_validate_rows_after_the_winner() {
     let files = Files::new();
     let reference = build(

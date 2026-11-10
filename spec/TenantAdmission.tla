@@ -4,10 +4,11 @@ CONSTANTS Tenants, Nodes, Grants, Operations, Capacity, InitialCapacity, MaxAtte
           UnsafeLateCheck, UnsafeCrossScope, UnsafeCopyOmission
 ASSUME Cardinality(Tenants) = 2
 \* Byte-dimension abstraction of one transaction: direct work (journal +
-\* new rows) and base-table data/index copies need same-name credit before assignment.
+\* new rows with their block/index encoding allowance) and base-table data/index
+\* copies need same-name credit before assignment.
 \* The writer pays even for a neighbor's rows and index in a shared table. Runtime
 \* charges the sum and ONE attempt. Range selection/byte sizing are checked
-\* separately against actual rewrites; new overhead and retry costs are omitted.
+\* separately against actual objects; manifest/reblocking/retry costs are omitted.
 Components == {"direct", "copies"}
 Required(o) == {<<o,c>>: c \in Components}
 A == CHOOSE t \in Tenants: TRUE

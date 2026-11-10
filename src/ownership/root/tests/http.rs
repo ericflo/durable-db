@@ -807,7 +807,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::new();
     let budget = format!("{base}/v1/databases/a/upload-budget");
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":419,"attempts":2}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":821,"attempts":2}});
     for replayed in [false, true] {
         let (status, result) = tcp_call(&client, "POST", &budget, &token, fund.clone()).await;
         assert_eq!(status, StatusCode::OK);
@@ -845,8 +845,8 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let a = format!("{base}/v1/databases/a/commit");
     let initial_tables = checkpoint_table_objects(provider.files.as_ref()).await;
     assert_eq!(initial_tables.len(), 2, "one data/index pair");
-    let first_admission = 420 + initial_tables.values().sum::<u64>();
-    // This request needs 250 journal bytes and 170 checkpoint row bytes.
+    let first_admission = 822 + initial_tables.values().sum::<u64>();
+    // 250 journal + 170 row + 402 singleton block/index allowance bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
         tcp_call(&client, "POST", &a, writer, commit()).await.0,
@@ -916,7 +916,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         "one new data/index pair after checkpoint"
     );
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
-    let second_total = first_admission + 418 + copies;
+    let second_total = first_admission + 818 + copies;
     let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
@@ -943,7 +943,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     // A dirty write conservatively pays the same base-copy contribution again.
     // This needs no persistent paid-table set or cross-transaction refund.
-    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 420 + copies,"attempts":3}});
+    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 822 + copies,"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK

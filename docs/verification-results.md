@@ -1,5 +1,13 @@
 # Verification results
 
+## v0.11.0 checkpoint encoding admission (2026-11-10)
+
+Native write admission now prices each new metadata, receipt and mutation row as a singleton data/index pair, covering its block header, index header, boundary keys, extent and digest. This adds nine net runtime Rust lines and no provider calls or allocations. Existing base-table copy charges remain. The small TCP fixture charges 402 additional bytes; one byte below the complete allowance refuses before allocation or PUT, and an exact retry remains free.
+
+All 289 local Rust tests, formatting and strict clippy pass. Actual singleton encodings match their allowance; maximum-field, 128-mutation and multi-table checkpoint cases fit the sum. Removing the encoding allowance makes the HTTP regression wrongly admit a write (200 instead of 413). The unchanged 5,776-state admission model and all three negative controls pass. The row-only calculator and test that stripped block headers/ignored indexes were removed.
+
+Budgeted native format `owned-candidate-17` excludes older admission policies; it requires a fresh budgeted namespace. Unbudgeted/local format stays `owned-candidate-15`. [Milestone evidence](evidence/row-overhead-admission-2026-11-10.json) records the scope and verification. Retained-row reblocking, manifest and retry costs remain outside complete tenant attribution. Durable retention and calibrated clock/placement qualification remain open; [the clock infrastructure requirements](design-owned-partitions.md#handoff-fixes-an-exact-old-prefix) now identify the required devices, guarantees and fault-injection access.
+
 ## Clock error prerequisites (2026-11-10)
 
 The existing timing proof now has **21 strict TLAPS obligations** and three required negative controls. Its added lemma shows that per-reading maximum error `A` supplies the elapsed error `E = 2A`; no replacement lease algorithm or rate scaling is needed. Treating missing maximum-error flags as zero fails the separate capability regression. All 288 Rust tests, strict clippy, formatting and the existing physical process-pause test pass.

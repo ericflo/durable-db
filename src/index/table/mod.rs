@@ -59,6 +59,15 @@ pub(crate) fn encoded_row_len(key_bytes: usize, value_bytes: usize) -> usize {
     14 + key_bytes + value_bytes
 }
 
+/// Upper bound for a validated row's data/index encoding: place it alone in
+/// one table. A block and index header cost 12 bytes each, the two indexed
+/// boundaries cost 10 + key bytes each, and extent/count/digest cost 48.
+/// Summing these singleton costs covers any packing of these rows, but not
+/// reblocking other retained rows or manifest nodes.
+pub(crate) fn row_upload_bound(key_bytes: usize, value_bytes: usize) -> usize {
+    encoded_row_len(key_bytes, value_bytes) + 92 + 2 * key_bytes
+}
+
 struct Block {
     first: Boundary,
     last: Boundary,

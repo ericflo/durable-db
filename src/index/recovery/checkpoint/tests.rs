@@ -91,15 +91,14 @@ fn receipt(fingerprint: u8) -> Bytes {
     Bytes::from(vec![fingerprint; 32])
 }
 #[tokio::test]
-async fn contribution_matches_encoded_rows_including_tombstones_and_block_splits() {
+async fn contribution_covers_encoded_tables_including_tombstones_and_splits() {
     use crate::transactions::{record::Commit, recovery::Target};
     let name = "d".repeat(64);
-    let request = "r".repeat(128);
     let value = vec![42; 64 * 1024];
     let keys: Vec<_> = (0..128)
         .map(|n| format!("{n:03}{}", "k".repeat(1021)))
         .collect();
-    for count in [0, 1, 128] {
+    for (count, large) in [(0, false), (1, false), (128, false), (128, true)] {
         let files = Files::new(0);
         let db = Database {
             name: &name,
@@ -110,23 +109,35 @@ async fn contribution_matches_encoded_rows_including_tombstones_and_block_splits
             .enumerate()
             .map(|(n, key)| Mutation {
                 key,
-                value: match n % 16 {
+                value: match if large { 15 } else { n % 16 } {
                     0 => None,
                     15 => Some(&value),
                     _ => Some(b""),
                 },
             })
             .collect();
-        let encoded = Commit::encode(db, 1, 0, 0, &request, [1; 32], &mutations).unwrap();
-        let commit = Commit::decode(&encoded).unwrap();
         let mut projection = Projection::new(Limits::default()).unwrap();
-        let state = projection
-            .take_state(db)
-            .await
-            .unwrap()
-            .advance(&commit)
-            .unwrap();
-        projection.apply(&commit, state).await.unwrap();
+        let batches: Vec<&[Mutation<'_>]> = if mutations.is_empty() {
+            vec![&[]]
+        } else {
+            mutations.chunks(if large { 8 } else { 128 }).collect()
+        };
+        let mut charged = 0;
+        for (position, batch) in batches.into_iter().enumerate() {
+            let request = format!("{position:03}{}", "r".repeat(125));
+            let revision = position as u64 + 1;
+            let encoded =
+                Commit::encode(db, revision, revision - 1, 0, &request, [1; 32], batch).unwrap();
+            let commit = Commit::decode(&encoded).unwrap();
+            let state = projection
+                .take_state(db)
+                .await
+                .unwrap()
+                .advance(&commit)
+                .unwrap();
+            projection.apply(&commit, state).await.unwrap();
+            charged += contribution_bytes(db, &request, batch);
+        }
         let reference = build_projection(&projection, files.clone(), cut())
             .await
             .unwrap();
@@ -135,19 +146,24 @@ async fn contribution_matches_encoded_rows_including_tombstones_and_block_splits
             Arc::new(Cache::new(0, None).unwrap()),
             reference,
         );
-        let row_bytes = data_row_bytes(files.as_ref(), &snapshot).await;
-        assert_eq!(row_bytes, contribution_bytes(db, &request, &mutations));
+        let table_bytes = encoded_table_bytes(&snapshot).await;
+        assert!(table_bytes <= charged as u64);
+        if large {
+            assert!(reference.tables > 1, "fixture exercises table splits");
+        }
         snapshot.verify(Limits::default()).await.unwrap();
     }
 }
-async fn data_row_bytes(files: &dyn Storage, snapshot: &Snapshot) -> usize {
+async fn encoded_table_bytes(snapshot: &Snapshot) -> u64 {
     let mut tables = snapshot.seek(Bytes::new()).unwrap();
     let mut bytes = 0;
     while let Some(table) = tables.next().await.unwrap() {
-        let [data, index] = table.reference.blobs();
-        let header = index.read_range(files, 0..index.size()).await.unwrap();
-        let blocks = u32::from_be_bytes(header[8..12].try_into().unwrap());
-        bytes += data.size() as usize - 12 * blocks as usize;
+        bytes += table
+            .reference
+            .blobs()
+            .iter()
+            .map(|b| b.size())
+            .sum::<u64>();
     }
     bytes
 }
@@ -291,7 +307,7 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             reference,
         );
         assert!(
-            data_row_bytes(files.as_ref(), &snapshot).await as u64
+            encoded_table_bytes(&snapshot).await
                 <= contribution_bytes(db, "next", &mutations[..1]) as u64 + copies
         );
         assert_eq!(

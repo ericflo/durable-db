@@ -192,7 +192,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .unwrap_or_else(|_| panic!("native budget initialization failed"));
     let server = Server::start(&connection).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":427,"attempts":2}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":833,"attempts":2}});
     for replayed in [false, true] {
         assert_eq!(server.ok("POST", budget, &fund).await["replayed"], replayed);
     }
@@ -209,9 +209,9 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let initial_tables = checkpoint_table_objects(connection.objects().as_ref()).await;
     assert_eq!(initial_tables.len(), 2, "one data/index pair");
     let initial_copies = initial_tables.values().sum::<u64>();
-    let first_admission = 428 + initial_copies;
-    // 254 journal bytes + 174 checkpoint-row bytes. The old journal-only
-    // rule would admit this underfunded write; no PUT may precede refusal.
+    let first_admission = 834 + initial_copies;
+    // 254 journal + 174 row + 406 singleton block/index allowance bytes.
+    // Admission must precede every journal PUT.
     let puts = calls("object_put");
     assert_eq!(
         server.call("POST", commit, &write(0)).await.0,
@@ -251,13 +251,13 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .collect();
     assert_eq!(replaced.len(), 2, "one data/index pair");
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
-    let second_admission = 428 + copies;
+    let second_admission = 834 + copies;
     server
         .ok(
             "POST",
             budget,
             &json!({"request_id":"more","expected_configuration_revision":2,
-        "limits":{"bytes":first_admission + 428,"attempts":2}}),
+        "limits":{"bytes":first_admission + 834,"attempts":2}}),
         )
         .await;
     let puts = calls("object_put");

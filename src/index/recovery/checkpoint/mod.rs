@@ -23,9 +23,9 @@ const MAX_DESCRIPTOR_BYTES: usize = 1024;
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const CHUNK_ROWS: usize = 4096;
 
-/// Direct row contribution of a validated transaction: metadata, its new
-/// receipt, and mutations (including tombstones). Charged once at admission;
-/// this excludes retained-row rewrites, block headers, indexes and manifests.
+/// Direct contribution of a validated transaction: metadata, its new receipt,
+/// and mutations (including tombstones), each priced as a singleton data/index
+/// pair. Excludes retained-row reblocking, manifests and retry attempts.
 /// It is not a reservation authorizing any future physical upload.
 pub(crate) fn contribution_bytes(
     database: Database<'_>,
@@ -33,11 +33,11 @@ pub(crate) fn contribution_bytes(
     mutations: &[Mutation<'_>],
 ) -> usize {
     let prefix = database.name.len() + 18; // NUL, generation, row kind
-    table::encoded_row_len(prefix, 32)
-        + table::encoded_row_len(prefix + request_id.len(), 32)
+    table::row_upload_bound(prefix, 32)
+        + table::row_upload_bound(prefix + request_id.len(), 32)
         + mutations
             .iter()
-            .map(|m| table::encoded_row_len(prefix + m.key.len(), m.value.map_or(0, <[u8]>::len)))
+            .map(|m| table::row_upload_bound(prefix + m.key.len(), m.value.map_or(0, <[u8]>::len)))
             .sum::<usize>()
 }
 

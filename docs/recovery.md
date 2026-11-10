@@ -6,7 +6,7 @@ This is an operator-driven recovery tool. Scheduled retained snapshots, point-in
 
 ## Local format upgrades
 
-v0.10.0 reopens v0.9.0 local directories directly, preserving values, revisions and receipts. No export is required between these versions.
+v0.11.0 retains the local storage format used by v0.9.0 and v0.10.0. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions.
 
 v0.9.0 switched local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
 
@@ -14,7 +14,7 @@ v0.9.0 switched local serving to the native journal and index. It refuses an old
 2. Stop the old server. Start v0.9.0 with a **new** `--data` directory and restore each archive. Keep the old directory and exports until verification completes.
 3. Mint new scoped credentials and switch application routing only after every restore succeeds. Restore preserves keys, values and logical quotas; authorization incarnations, receipts and revision numbers are new.
 
-Rollback uses the previous binary and untouched old directory. Writes accepted by the new server are absent from that old directory; export and reconcile them before routing applications back. Never run an older binary against a native directory or replace its authority file. Missing authority in a nonempty native directory is refused.
+For a migration from pre-v0.9.0 storage, rollback uses the previous binary and untouched old directory. Writes accepted by the new server are absent from that old directory; export and reconcile them before routing applications back. Never run a pre-v0.9.0 binary against a native directory or replace its authority file. Missing authority in a nonempty native directory is refused.
 
 ## Export a consistent revision
 
