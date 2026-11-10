@@ -1,5 +1,15 @@
 # Verification results
 
+## Shared-table copy admission (2026-11-10)
+
+Commit `278e5f6` charges each distinct native write for its journal record, new checkpoint rows and the base data tables its changes can force maintenance to copy. This includes unchanged neighbors' rows and replaces the receipt-only surcharge. Manifest seeks price table descriptors without reading indexes or values; duplicate routes count once. New databases in gaps and exact upper-bound mutations are covered. Distinct writes can pay repeatedly before checkpointing. This is conservative admission, not precise billing or a reservation for future uploads. Native format `owned-candidate-15` requires a fresh namespace; the CLI engine is unchanged.
+
+All 283 local Rust tests and 99 enabled native client tests pass. A TCP test measures actual encoded objects, refuses one byte short before allocation/PUT and accepts the exact boundary; deliberately undercharging by one byte fails it. In the 183-table fixture, pricing reads four manifest nodes and covers exactly the three replaced base data objects, with no index/value reads. A shared-table test checks gap inserts, append-only generations, duplicate keys, dirty writes, expiry, cached pricing and missing-manifest refusal. The model remains 5,776 states with three negative controls. The change adds 54 net runtime Rust lines and removes the receipt-only calculator, special dirty-window rule and superseded test/control.
+
+Real B2 and versioned MinIO pass the HTTP fixture, charging 1,765 and 2,113 bytes for its two writes, including 1,337 and 1,685 bytes of shared base data. Refusal and exact retries issue no immutable PUT; neighbors continue. Two cold reopens and automatic cleanup preserve balances, receipts and values. B2 finishes in 138.34 seconds, MinIO in 121.49 seconds. The initial B2 run received HTTP 500 on a fixture orphan-marker upload; it was cleaned up and repeated in a fresh bucket without changing retry semantics. All three disposable buckets, physical versions, both B2 keys and the MinIO container were removed. [Complete evidence](evidence/shared-table-admission-2026-11-10.json).
+
+New block/index/manifest overhead, catalog/ledger metadata, maintenance retries/recovery, physical timing/native CLI cutover, durable retention and broader performance/AWS qualification remain open. These provider fixtures use a logical clock and stopped old servers, not production timing or sustained load.
+
 ## v0.7.0 retained-receipt admission (2026-11-10)
 
 [v0.7.0](https://github.com/ericflo/durable-db/releases/tag/v0.7.0) packages `c759469`, verified by [Woodpecker #130](https://ci.eflorenzano.com/repos/18/pipeline/130/1). Its downloaded static Linux x86_64 archive passes standalone transactions, ordered reads, backup/restore and SIGKILL/reopen without a toolchain. The public default installer verifies the GitHub asset checksum and installs the same binary.
