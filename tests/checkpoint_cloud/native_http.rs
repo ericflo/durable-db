@@ -101,6 +101,37 @@ fn write(revision: u64) -> Value {
         "writes":[{"key":"x","value":if revision == 0 {"b25l"} else {"dHdv"}}]})
 }
 
+// Mark both metadata prefixes after setup: slow provider calls may let the
+// ordinary 60-second worker run before the fixture finishes writing its data.
+async fn collected(files: &Arc<dyn durable_db::storage::Storage>, journals: usize) -> f64 {
+    let markers = ["manifests", "indexes"]
+        .map(|prefix| format!("{prefix}/zz-collection-check.{}", Uuid::new_v4()));
+    for marker in &markers {
+        files.put(marker, Bytes::new()).await.unwrap();
+    }
+    let start = Instant::now();
+    let mut remaining = [0; 3];
+    tokio::time::timeout(Duration::from_secs(150), async {
+        loop {
+            for (i, prefix) in ["manifests/", "indexes/", "journal/"].iter().enumerate() {
+                remaining[i] = files.list(prefix, None, 128).await.unwrap().len();
+            }
+            if remaining == [2, 1, journals]
+                && files.get(&markers[0], 1).await.unwrap().is_none()
+                && files.get(&markers[1], 1).await.unwrap().is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("automatic collection timed out: manifests/indexes/journals {remaining:?}")
+    });
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh disposable B2/S3 bucket and a native HTTP report path"]
 async fn native_http_budgets_cleanup_and_cold_recovery() {
@@ -169,35 +200,19 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .await
         .expect("list tenant metadata")
         .len();
-    assert!(
-        initial > 2,
-        "fixture must leave obsolete ledgers to collect"
-    );
+    assert!(initial >= 2, "both live tenant ledgers must remain");
     let journals_before = files.list("journal/", None, 128).await.unwrap().len();
-    assert_eq!(journals_before, 5);
+    assert!(
+        (1..=5).contains(&journals_before),
+        "setup may overlap automatic collection, but the suffix must remain"
+    );
     let checkpoint_objects = files.list("tables/", None, 128).await.unwrap().len();
     assert_eq!(
         checkpoint_objects, 6,
         "two checkpoints each have data, index and manifest, with no header object"
     );
-    let cleanup = Instant::now();
-    let mut remaining = [0; 3];
-    tokio::time::timeout(Duration::from_secs(150), async {
-        loop {
-            for (i, prefix) in ["manifests/", "indexes/", "journal/"].iter().enumerate() {
-                remaining[i] = files.list(prefix, None, 128).await.unwrap().len();
-            }
-            if remaining == [2, 1, 1] {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!("automatic native collection timed out: manifests/indexes/journals {remaining:?}")
-    });
-    let cleanup_ms = cleanup.elapsed().as_secs_f64() * 1000.0;
+    let setup_seconds = started.elapsed().as_secs_f64();
+    let cleanup_ms = collected(&files, 1).await;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     server.stop().await;
     drop((connection, files));
@@ -268,24 +283,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     // Wait for both metadata loops and all covered journals after takeover.
     // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
-    let markers = ["manifests", "indexes"]
-        .map(|prefix| format!("{prefix}/zz-collection-check.{}", Uuid::new_v4()));
-    for marker in &markers {
-        files.put(marker, Bytes::new()).await.unwrap();
-    }
-    tokio::time::timeout(Duration::from_secs(150), async {
-        loop {
-            if files.get(&markers[0], 1).await.unwrap().is_none()
-                && files.get(&markers[1], 1).await.unwrap().is_none()
-                && files.list("journal/", None, 128).await.unwrap().is_empty()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
-    .await
-    .expect("replacement collection made no progress");
+    collected(&files, 0).await;
     server.stop().await;
     drop((connection, files));
     let connection = connect(&provider, &bucket, &namespace)
@@ -317,7 +315,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
-        "cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
+        "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
         "inline_checkpoint_descriptors":true,"checkpoint_objects_before_first_sweep":checkpoint_objects,

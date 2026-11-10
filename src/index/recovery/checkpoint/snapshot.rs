@@ -18,8 +18,8 @@ struct Inner {
     header: Reference,
 }
 
-/// Data at an exact checkpoint, not a current database snapshot. Loading this
-/// handle reads only its authenticated header; pages are validated on demand.
+/// Data at an exact checkpoint, not a current database snapshot. Constructing
+/// this handle performs no I/O; immutable pages are validated on demand.
 #[derive(Clone)]
 pub struct Snapshot(Arc<Inner>);
 impl Snapshot {
