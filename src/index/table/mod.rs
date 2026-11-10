@@ -22,8 +22,7 @@ const MAX_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_BLOCK_ROWS: usize = 4096;
 const MAX_BLOCKS: usize = 1024;
 const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
-// Includes space for the database/generation prefix around a 1 KiB user key.
-const MAX_KEY_BYTES: usize = 2048;
+use super::MAX_KEY_BYTES;
 
 /// Input must be strictly ordered by key ascending, then revision descending.
 /// A tombstone is distinct from an absent row and must reach the merge caller.
@@ -217,10 +216,7 @@ impl Table {
     /// Returns the latest row visible at this revision, including deletion.
     /// None means no visible row in THIS table, not global key absence.
     pub async fn get(&self, key: &[u8], revision: u64) -> anyhow::Result<Option<Entry>> {
-        ensure!(
-            !key.is_empty() && key.len() <= MAX_KEY_BYTES,
-            "invalid table lookup key"
-        );
+        super::validate_key(key)?;
         if revision == 0 {
             return Ok(None);
         }
@@ -239,11 +235,7 @@ impl Table {
     /// One bounded block at a time. Emits tombstones so a table merge cannot
     /// resurrect an older value. Snapshot retention and authority are external.
     pub fn scan(&self, start: &[u8], end: Option<&[u8]>, revision: u64) -> anyhow::Result<Cursor> {
-        ensure!(
-            start.len() <= MAX_KEY_BYTES
-                && end.is_none_or(|end| end.len() <= MAX_KEY_BYTES && start < end),
-            "invalid table scan bounds"
-        );
+        super::validate_range(start, end)?;
         Ok(Cursor {
             table: self.clone(),
             next_block: self.seek(start, revision),

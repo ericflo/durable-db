@@ -99,6 +99,7 @@ for (const file of [
   'storage-ranges-2026-11-09.json',
   'external-files-2026-11-09.json',
   'native-tables-2026-11-09.json',
+  'table-merge-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',

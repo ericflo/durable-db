@@ -29,6 +29,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | --- | --- |
 | HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
+| Native table merging | `cargo test --locked --lib index::merge` and `scripts/check-model.sh TableMerge` |
 | Native sorted tables | `cargo test --locked --lib index::table` and `scripts/check-model.sh SortedTable` |
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
