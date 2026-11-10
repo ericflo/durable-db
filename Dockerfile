@@ -226,7 +226,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-publicationsafety
-COPY spec/PublicationSafety.tla spec/PublicationSafety.checks spec/PublicationSafety.cfg spec/UnsafeProofOrigin.cfg spec/UnsafeProofFence.cfg spec/
+COPY spec/PublicationSafety.tla spec/PublicationSafety.checks spec/PublicationSafety.cfg spec/UnsafeProof*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh PublicationSafety && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed

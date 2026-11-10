@@ -538,6 +538,103 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
 }
 
 #[tokio::test]
+async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collisions() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 256,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        attempt(&connection, &clock).await.1,
+        Outcome::Conflict
+    ));
+    let mut collision = None;
+    for epoch in 1..=3 {
+        let (mut root, outcome) = attempt(&connection, &clock).await;
+        assert!(matches!(outcome, Outcome::Confirmed));
+        clock.set(clock.now.load(Ordering::SeqCst) + 23);
+        validate(&mut root).await;
+        activate(&mut root).await;
+        if epoch > 1 {
+            let journal = super::catalog::scan(&mut root).await;
+            let identity = journal.registration().identity();
+            collision.get_or_insert_with(|| {
+                format!("{:016x}-{}", identity.epoch, identity.incarnation.simple())
+            });
+            if epoch == 2 {
+                // A staged catalog listed before the fence must not be adopted
+                // afterward. A failed publication must rebuild from its origin.
+                let request = root.select_prefix(journal).unwrap();
+                provider.pause.store(true, Ordering::SeqCst);
+                let task = tokio::spawn(request.execute());
+                provider.entered.notified().await;
+                assert!(root.budget_collection().unwrap().collect().await.unwrap() > 0);
+                provider.release.notify_one();
+                assert!(matches!(
+                    root.finish(task.await.unwrap()).unwrap(),
+                    Outcome::Conflict
+                ));
+                validate(&mut root).await;
+                let journal = super::catalog::scan(&mut root).await;
+                super::catalog::seal(&mut root, journal).await;
+            } else {
+                super::catalog::seal(&mut root, journal).await;
+            }
+        }
+        // The first sweep after takeover has a catalog and no tenant ledger.
+        // Later sweeps must protect both trees even when their key names match.
+        root.budget_collection().unwrap().collect().await.unwrap();
+        let mut replay = root.replay().unwrap();
+        for expected in 1..epoch {
+            let batch = replay.read_next().await.unwrap().unwrap();
+            assert_eq!(
+                batch.records().collect::<Vec<_>>(),
+                vec![[expected as u8].as_slice()]
+            );
+        }
+        assert!(replay.read_next().await.unwrap().is_none());
+        if let Some(name) = &collision {
+            let ledger = root.database_budget(name).unwrap().unwrap();
+            ledger.initialize_database().await.unwrap();
+            ledger.charge(1).await.unwrap();
+            let spent = ledger.status().await.unwrap();
+            root.budget_collection().unwrap().collect().await.unwrap();
+            assert_eq!(ledger.status().await.unwrap(), spent);
+            let mut replay = root.replay().unwrap();
+            assert!(replay.read_next().await.unwrap().is_some());
+        }
+        let mut writer = root.take_journal(QueueLimits::default()).unwrap();
+        let upload = writer.prepare(&[Bytes::from(vec![epoch as u8])]).unwrap();
+        writer.complete(upload.send().await).unwrap();
+        writer.pop_durable().unwrap().unwrap();
+    }
+    let collector = connection
+        .root(clock, profile())
+        .unwrap()
+        .budget_collection()
+        .unwrap();
+    // A missing/corrupt catalog is an error, not an empty protected tree.
+    let header = format!("catalogs/{}", provider.record().catalog.unwrap().simple());
+    let orphan = format!("manifests/orphan.{}", Uuid::new_v4());
+    provider.files.put(&orphan, Bytes::new()).await.unwrap();
+    provider
+        .files
+        .put(&header, Bytes::from_static(b"corrupt"))
+        .await
+        .unwrap();
+    assert!(collector.collect().await.is_err());
+    assert!(provider.files.get(&orphan, 1).await.unwrap().is_some());
+    provider.files.delete(&header).await.unwrap();
+    assert!(collector.collect().await.is_err());
+    assert!(provider.files.get(&orphan, 1).await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes() {
     let provider = Provider::new();
     let connection = provider

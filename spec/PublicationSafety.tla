@@ -1,7 +1,8 @@
 ----------------------- MODULE PublicationSafety -----------------------
 \* Native tenant-ledger metadata uses this protocol too: its publisher rebuilds
 \* fresh objects after ANY failed exact comparison, and collection lists before
-\* a nonce-changing comparison. Directory membership supplies protected objects.
+\* a nonce-changing comparison. Directory membership supplies protected objects. `live` is the union of ALL
+\* roots in the captured authority, including budget and recovery directories.
 EXTENDS Naturals, FiniteSets
 CONSTANTS Jobs, Collectors, Pages
 VARIABLES live, objects, used, fence, job, candidate, protected, gc
@@ -66,6 +67,11 @@ Next == Steps(TRUE, TRUE)
 Spec == Init /\ [][Next]_vars
 UnsafeOriginSpec == Init /\ [][Steps(FALSE, TRUE)]_vars
 UnsafeFenceSpec == Init /\ [][Steps(TRUE, FALSE)]_vars
+\* Omitting a root from protection is unsafe even with the correct fence.
+ForgetProtection(c) == /\ gc[c] = "fenced"
+                       /\ protected' = [protected EXCEPT ![c] = {}]
+                       /\ UNCHANGED <<live, objects, used, fence, job, candidate, gc>>
+UnsafeCoverageSpec == Init /\ [][Next \/ (\E c \in Collectors: ForgetProtection(c))]_vars
 TypeOK == /\ live \subseteq Pages /\ objects \subseteq Pages /\ used \subseteq Pages
           /\ fence \in Nat /\ job \in [Jobs -> JobType]
           /\ candidate \in [Collectors -> SUBSET Pages]

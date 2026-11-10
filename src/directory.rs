@@ -213,10 +213,11 @@ impl Directory {
         }
     }
     /// Caller must list these candidates BEFORE a confirmed authority fence.
+    /// Protect the union of every directory in that captured authority.
     /// Missing paths are errors, never evidence that a candidate is unreachable.
     pub async fn collect_unreachable(
         &self,
-        root: Option<&Root>,
+        roots: &[Option<Root>],
         manifests: &[String],
         indexes: &[String],
         authority: &dyn crate::publication::Authority,
@@ -226,7 +227,18 @@ impl Directory {
         for key in manifests {
             REGISTRY.event(Event::ManifestCandidates, 1);
             let db = witness(key, "manifests/")?;
-            if self.get(root, db).await?.is_none_or(|p| p.key != *key) {
+            let mut live = false;
+            for root in roots.iter().flatten() {
+                if self
+                    .get(Some(root), db)
+                    .await?
+                    .is_some_and(|p| p.key == *key)
+                {
+                    live = true;
+                    break;
+                }
+            }
+            if !live {
                 authority.delete_versions(key).await?;
                 REGISTRY.event(Event::ManifestDeleteAck, 1);
                 deleted += 1;
@@ -234,7 +246,14 @@ impl Directory {
         }
         for key in indexes {
             REGISTRY.event(Event::IndexCandidates, 1);
-            if !self.reachable(root, key).await? {
+            let mut live = false;
+            for root in roots.iter().flatten() {
+                if self.reachable(Some(root), key).await? {
+                    live = true;
+                    break;
+                }
+            }
+            if !live {
                 authority.delete_versions(key).await?;
                 REGISTRY.event(Event::IndexDeleteAck, 1);
             }

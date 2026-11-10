@@ -239,7 +239,7 @@ impl Published {
             metrics::REGISTRY.event(Event::ProposalDeleteAck, 1);
         }
         self.directory
-            .collect_unreachable(protected.as_ref(), &manifests, &indexes, &*self.authority)
+            .collect_unreachable(&[protected], &manifests, &indexes, &*self.authority)
             .await
     }
 }

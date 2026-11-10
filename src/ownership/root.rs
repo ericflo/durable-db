@@ -15,6 +15,7 @@ use crate::{
     journal::{QueueLimits, Writer},
     storage::Storage,
 };
+pub(crate) use catalog::protected as protected_catalog;
 use metadata::Phase;
 pub(crate) use metadata::Record;
 pub(crate) use metadata::{VERSION, budget as metadata_budget};
@@ -123,7 +124,12 @@ pub struct Root<C> {
 impl<C: Clock> Root<C> {
     pub(crate) fn budget_collection(&self) -> Option<crate::upload_budget::Collection> {
         self.budgeted.then(|| {
-            crate::upload_budget::Collection::new(self.session.authority(), self.files.clone())
+            crate::upload_budget::Collection::new(
+                self.session.authority(),
+                self.files.clone(),
+                self.prefix.clone(),
+                self.profile,
+            )
         })
     }
 

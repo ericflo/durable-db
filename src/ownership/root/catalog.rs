@@ -1,5 +1,5 @@
 //! Persisted prefix decisions using the existing bounded-page immutable B+tree.
-use super::{Cut, Identity, Record, Registration, Registrations};
+use super::{Cut, Identity, Profile, Record, Registration, Registrations};
 use crate::{
     directory::{self, Directory, Pointer},
     journal::{Batch, Prefix, Reader},
@@ -27,6 +27,15 @@ fn header_key(id: Uuid) -> String {
 }
 fn entry_key(identity: Identity) -> String {
     format!("{:016x}-{}", identity.epoch, identity.incarnation.simple())
+}
+pub(crate) async fn protected(
+    files: &Arc<dyn Storage>,
+    info: &BTreeMap<String, String>,
+    prefix: &str,
+    profile: Profile,
+) -> anyhow::Result<Option<directory::Root>> {
+    let record = super::metadata::decode(info, prefix, profile, true)?;
+    load(files, record.and_then(|record| record.catalog)).await
 }
 pub(super) async fn load(
     files: &Arc<dyn Storage>,

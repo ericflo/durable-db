@@ -1,4 +1,4 @@
-//! Upload-free, restartable collection of native tenant-ledger metadata only.
+//! Upload-free collection of shared native directories and provider history.
 //! Uses PublicationSafety's list-before-fence protocol and Directory membership.
 use super::*;
 use crate::directory::{Directory, witness};
@@ -34,10 +34,22 @@ impl Cursor {
 pub(crate) struct Collection {
     authority: Arc<dyn Authority>,
     files: Arc<dyn Storage>,
+    prefix: String,
+    profile: crate::ownership::root::Profile,
 }
 impl Collection {
-    pub(crate) fn new(authority: Arc<dyn Authority>, files: Arc<dyn Storage>) -> Self {
-        Self { authority, files }
+    pub(crate) fn new(
+        authority: Arc<dyn Authority>,
+        files: Arc<dyn Storage>,
+        prefix: String,
+        profile: crate::ownership::root::Profile,
+    ) -> Self {
+        Self {
+            authority,
+            files,
+            prefix,
+            profile,
+        }
     }
     pub(crate) async fn collect(&self) -> anyhow::Result<usize> {
         let before = self.authority.read().await?;
@@ -67,7 +79,16 @@ impl Collection {
             return Ok(0);
         }
         let observed = self.authority.read().await?;
-        let protected = database::root(&observed)?;
+        let protected = [
+            database::root(&observed)?,
+            crate::ownership::root::protected_catalog(
+                &self.files,
+                &observed.info,
+                &self.prefix,
+                self.profile,
+            )
+            .await?,
+        ];
         let cursor = Cursor {
             manifests: (manifests.len() == PAGE).then(|| manifests.last().unwrap().clone()),
             indexes: (indexes.len() == PAGE).then(|| indexes.last().unwrap().clone()),
@@ -82,7 +103,7 @@ impl Collection {
             return Ok(0);
         }
         Directory::new(self.files.clone())
-            .collect_unreachable(protected.as_ref(), &manifests, &indexes, &*self.authority)
+            .collect_unreachable(&protected, &manifests, &indexes, &*self.authority)
             .await
     }
 }

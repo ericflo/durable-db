@@ -256,6 +256,47 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "warm reads use the bounded cache and suffix"
     );
     elapsed.sort_by(f64::total_cmp);
+
+    // A replacement has published a recovery catalog in the same object
+    // prefixes as budget ledgers. Wait for BOTH parts of an automatic sweep
+    // before another cache-free takeover; the first-owner sweep cannot test this.
+    let files = connection.objects();
+    let markers = ["manifests", "indexes"]
+        .map(|prefix| format!("{prefix}/zz-collection-check.{}", Uuid::new_v4()));
+    for marker in &markers {
+        files.put(marker, Bytes::new()).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(150), async {
+        loop {
+            if files.get(&markers[0], 1).await.unwrap().is_none()
+                && files.get(&markers[1], 1).await.unwrap().is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .expect("replacement collection made no progress");
+    server.stop().await;
+    drop((connection, files));
+    let connection = connect(&provider, &bucket, &namespace)
+        .await
+        .with_upload_budget(UploadLimits::default())
+        .await
+        .unwrap();
+    let server = Server::start(&connection).await;
+    assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
+    for (path, revision, value) in readers {
+        let response = server.ok("POST", path, &read).await;
+        assert_eq!(response["revision"], revision);
+        assert_eq!(response["values"], json!([value]));
+    }
+    assert_eq!(server.ok("POST", commit, &write(1)).await["replayed"], true);
+    assert_eq!(
+        server.ok("POST", "/v1/databases/b/commit", &write(0)).await["replayed"],
+        true
+    );
     server.stop().await;
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"exhausted_tenant_did_not_stall_neighbor":true,
@@ -263,6 +304,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
+        "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; logical clock; old server stopped before takeover. Not physical timing, AWS or performance-SLO qualification."});
