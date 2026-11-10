@@ -26,6 +26,8 @@ Prepare == /\ published = None /\ owner = 1 /\ built # None /\ pending = <<>> /\
            /\ UNCHANGED <<owner,register,built,bytes,published,start,cursor,view,done,selected>>
 \* The captured comparison survives a lost reply; a later owner inherits the
 \* durable reference only if publication won the register race.
+\* Local renewal and checkpoint callers serialize control invocations. Renewal
+\* is a stuttering step for checkpoint data; cancellation preserves uncertainty.
 Publish == /\ pending # <<>>
            /\ (pending[1] = owner /\ pending[2] = register) \/ UnsafeCompare
            /\ published' = pending[3] /\ register' = register + 1

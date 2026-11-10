@@ -566,3 +566,88 @@ async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_
         );
     }
 }
+
+#[tokio::test]
+async fn native_renewal_waits_for_checkpoint_without_abandoning_its_invocation() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut owner = open(
+        active(&provider, &clock).await,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let control = owner.control();
+    let mut creation = owner
+        .prepare_creation("app", &create("create"), &Access::Administrator)
+        .await
+        .unwrap();
+    let uploaded = creation.upload.take().unwrap().send().await;
+    provider.pause.store(true, Ordering::SeqCst);
+    let finish = tokio::spawn(async move {
+        owner.complete(uploaded).await.unwrap();
+        owner
+    });
+    provider.entered.notified().await;
+    let calls = provider.calls.load(Ordering::SeqCst);
+    let mut renew = tokio::spawn(async move { control.renew().await.unwrap() });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut renew)
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    provider.release.notify_one();
+    let owner = finish.await.unwrap();
+    assert!(matches!(renew.await.unwrap(), Outcome::Confirmed));
+    assert!(provider.record().checkpoint.is_some());
+    assert!(owner.catalog_result(&creation).unwrap().is_some());
+    assert_eq!(
+        owner
+            .info_authorized("app", &Access::Administrator)
+            .await
+            .unwrap()
+            .revision,
+        0
+    );
+}
+
+#[tokio::test]
+async fn native_cancelled_renewal_keeps_reads_live_and_does_not_strand_the_control_gate() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+    let mut creation = owner
+        .prepare_creation("app", &create("create"), &Access::Administrator)
+        .await
+        .unwrap();
+    owner
+        .complete(creation.upload.take().unwrap().send().await)
+        .await
+        .unwrap();
+    let control = owner.control();
+    let stalled = control.clone();
+    provider.pause.store(true, Ordering::SeqCst);
+    let renewal = tokio::spawn(async move { stalled.renew().await });
+    provider.entered.notified().await;
+    // Waiting on network holds no permission mutex or owner/data borrow.
+    assert_eq!(
+        owner
+            .info_authorized("app", &Access::Administrator)
+            .await
+            .unwrap()
+            .revision,
+        0
+    );
+    renewal.abort();
+    assert!(matches!(renewal.await, Err(error) if error.is_cancelled()));
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        control.renew().await.unwrap(),
+        Outcome::Uncertain(_)
+    ));
+    assert!(matches!(control.renew().await.unwrap(), Outcome::Confirmed));
+    assert!(owner.catalog_result(&creation).unwrap().is_some());
+}

@@ -113,11 +113,13 @@ pub struct Prepared {
 
 pub struct Control<C> {
     root: Arc<Mutex<Root<C>>>,
+    request: Arc<tokio::sync::Mutex<()>>,
 }
 impl<C> Clone for Control<C> {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
+            request: self.request.clone(),
         }
     }
 }
@@ -130,6 +132,13 @@ impl<C: Clock> Control<C> {
     /// Cancelled/unknown requests are abandoned before a fresh exact validation.
     /// The old interval is never extended by the act of abandoning a request.
     pub async fn renew(&self) -> anyhow::Result<root::Outcome> {
+        let _request = self.request.lock().await;
+        self.renew_locked().await
+    }
+    // The request gate spans I/O, but permission checks take only the short
+    // root mutex. Abandon can therefore affect only a cancelled prior request,
+    // never another live caller's checkpoint or renewal.
+    async fn renew_locked(&self) -> anyhow::Result<root::Outcome> {
         let observation = self.lock()?.observe();
         let observed = observation.await?;
         let prepared = {
@@ -170,6 +179,7 @@ impl<C: Clock> Opening<C> {
         Ok(Self {
             control: Control {
                 root: Arc::new(Mutex::new(root)),
+                request: Arc::new(tokio::sync::Mutex::new(())),
             },
             replay,
             limits,
@@ -188,6 +198,7 @@ impl<C: Clock> Opening<C> {
         }
         let (origin, projection, frames) = recovered.finish_bound()?;
         let writer = {
+            let _request = self.control.request.lock().await;
             let mut root = self.control.lock()?;
             ensure!(
                 root.recovery_record()? == origin,

@@ -63,7 +63,10 @@ impl<C: Clock> Owner<C> {
             return Ok(false);
         }
         if self.maintenance.publishing.is_none() {
-            let origin = self.control.lock()?.recovery_record()?;
+            let origin = {
+                let _request = self.control.request.lock().await;
+                self.control.lock()?.recovery_record()?
+            };
             let cut = root::Cut {
                 identity: self.identity,
                 prefix: self.writer.durable_prefix(),
@@ -87,6 +90,7 @@ impl<C: Clock> Owner<C> {
                 attempted: false,
             });
         }
+        let _request = self.control.request.lock().await;
         let pending = self.maintenance.publishing.as_mut().unwrap();
         if !pending.attempted {
             let publication = self.control.lock()?.publish_checkpoint(Staged {
@@ -106,7 +110,7 @@ impl<C: Clock> Owner<C> {
             .ok()
             .is_some_and(|r| r.checkpoint == Some(pending.staged.reference));
         if !published {
-            let _outcome = self.control.renew().await?;
+            let _outcome = self.control.renew_locked().await?;
             let record = self.control.lock()?.recovery_record()?;
             if record.checkpoint != Some(pending.staged.reference) {
                 ensure!(record == pending.staged.origin, "checkpoint origin changed");

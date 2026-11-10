@@ -45,6 +45,9 @@ struct Provider {
     calls: AtomicU64,
     lose_reply: AtomicBool,
     corrupt_reply: AtomicBool,
+    pause: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 impl Provider {
     fn new() -> Arc<Self> {
@@ -61,6 +64,9 @@ impl Provider {
             calls: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
+            pause: AtomicBool::new(false),
+            entered: Default::default(),
+            release: Default::default(),
         })
     }
     fn connection(self: &Arc<Self>, prefix: &str) -> Connection {
@@ -93,6 +99,10 @@ impl Authority for Provider {
         info: BTreeMap<String, String>,
     ) -> anyhow::Result<Option<Bucket>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.pause.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         let mut history = self.history.lock().unwrap();
         let current = history.last().unwrap();
         // Keep B2's no-op shortcut; the shared nonce wrapper must prevent it.
