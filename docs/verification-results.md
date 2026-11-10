@@ -1,5 +1,13 @@
 # Verification results
 
+## Native table and manifest collection (2026-11-10)
+
+Native maintenance now reclaims obsolete checkpoint data, indexes and manifest nodes. It uses the existing collector and bounded manifest walker, protecting the published checkpoint before an exact fence. Staging cannot adopt a later collection generation after its objects may have been deleted. The live owner rebuilds invalidated staging with fresh identities. Native format `owned-candidate-12` requires a fresh namespace.
+
+Commit `ba739d2` passes the HTTP fixture on real B2 and versioned MinIO. Each starts with six checkpoint objects and retains exactly five after collection: two reused or rewritten table pairs and one manifest. After another checkpoint and sweep, five live objects remain again. Two cold reopens preserve values, retry receipts and nonrefundable budgets. The [complete evidence](evidence/native-table-collection-2026-11-10.json) includes 279 local Rust tests, 99 native client tests, the existing 175,546-state publication model with four negative controls, the 35-obligation abstract proof, and cleanup of both buckets, physical versions, the temporary B2 key and MinIO container.
+
+The initial B2 attempt stopped on an unexplained 503 before the collection checks; a rerun passed without adding request retries. The initial MinIO attempt exposed an incorrect one-table fixture assumption; the test now checks the published table count. Both failures are retained in the evidence. Raw handles are not retention pins, and traversal work grows with checkpoint size. Large-image progress, durable reader/backup retention, full tenant maintenance accounting and physical ownership timing remain open. These are component results, not production or AWS qualification.
+
 ## v0.4.0 inline checkpoint descriptors (2026-11-10)
 
 [v0.4.0](https://github.com/ericflo/durable-db/releases/tag/v0.4.0) packages commit `7535bab`, checked by [Woodpecker #118](https://ci.eflorenzano.com/repos/18/pipeline/118/1). The downloaded static Linux x86_64 archive passed standalone checks with no toolchain on `PATH`, including backup/restore and recovery after SIGKILL. The public installer downloaded the GitHub asset, verified its checksum and installed the same binary.
