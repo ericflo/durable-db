@@ -896,6 +896,63 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 }
 
 #[tokio::test(start_paused = true)]
+async fn native_http_collects_checkpointed_journals() {
+    let (router, provider, _, _, token) = fixture(8, 2).await;
+    let budget = "/v1/databases/a/upload-budget";
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":4096,"attempts":1}});
+    for _ in 0..2 {
+        assert_eq!(
+            call(&router, "POST", budget, &token, fund.clone()).await.0,
+            StatusCode::OK
+        );
+    }
+    for name in ["a", "b"] {
+        create(&router, &token, name).await;
+    }
+    for (name, revision) in [("a", 0), ("b", 0), ("a", 1)] {
+        if revision == 1 {
+            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":8192,"attempts":2}});
+            assert_eq!(
+                call(&router, "POST", budget, &token, refill).await.0,
+                StatusCode::OK
+            );
+        }
+        let mut write = commit();
+        write["request_id"] = json!(format!("write-{revision}"));
+        write["expected_revision"] = json!(revision);
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/v1/databases/{name}/commit"),
+                &token,
+                write
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    tokio::time::advance(Duration::from_secs(61)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let header = crate::index::recovery::checkpoint::Header::load(
+        provider.files.clone(),
+        provider.record().checkpoint.unwrap(),
+    )
+    .await
+    .unwrap();
+    let journals = provider.files.list("journal/", None, 128).await.unwrap();
+    assert_eq!(header.cut.prefix.position(), 4);
+    assert_eq!(journals.len(), 1);
+    assert_eq!(
+        crate::journal::LogId::parse_key(&journals[0]).unwrap(),
+        (header.cut.prefix.log(), 5)
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
     let (router, provider, _, _, token) = fixture(8, 64).await;
     tokio::task::yield_now().await; // Start the worker before advancing virtual time.

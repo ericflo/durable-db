@@ -224,12 +224,7 @@ impl Authority for S3 {
         Ok(Some(next))
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
-        if !["blocks/", "manifests/", "indexes/", "proposals/"]
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
-        {
-            bail!("invalid collection namespace");
-        }
+        super::collection_key(key)?;
         for file in self.versions(&format!("{}{key}", self.prefix)).await? {
             self.delete_version(&file).await?;
         }
@@ -306,7 +301,7 @@ mod tests {
         axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
     ) -> StatusCode {
         assert_eq!(query.get("versionId").map(String::as_str), Some("v1"));
-        assert!(id.starts_with("manifests/") || id.starts_with("indexes/"));
+        super::super::collection_key(&id).unwrap();
         state.lock().unwrap().immutable.remove(&id);
         StatusCode::NO_CONTENT
     }

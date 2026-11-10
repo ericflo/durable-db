@@ -315,12 +315,7 @@ impl Authority for Native {
         self.update(old, info).await
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
-        if !["blocks/", "manifests/", "indexes/", "proposals/"]
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
-        {
-            bail!("invalid B2 collection namespace");
-        }
+        super::collection_key(key)?;
         let name = format!("{}{key}", self.prefix);
         // Normally one version per fresh UUID; bounded batches also remove upload retry duplicates.
         let (status,body)=self.call("b2_list_file_versions",&json!({"bucketId":self.bucket_id,"prefix":name,"startFileName":name,"maxFileCount":100})).await?;

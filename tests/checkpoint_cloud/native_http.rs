@@ -176,29 +176,22 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let journals_before = files.list("journal/", None, 128).await.unwrap().len();
     assert_eq!(journals_before, 5);
     let cleanup = Instant::now();
+    let mut remaining = [0; 3];
     tokio::time::timeout(Duration::from_secs(150), async {
         loop {
-            if files
-                .list("manifests/", None, 128)
-                .await
-                .expect("list tenant metadata")
-                .len()
-                == 2
-                && files
-                    .list("indexes/", None, 128)
-                    .await
-                    .expect("list directory metadata")
-                    .len()
-                    == 1
-                && files.list("journal/", None, 128).await.unwrap().len() == 1
-            {
+            for (i, prefix) in ["manifests/", "indexes/", "journal/"].iter().enumerate() {
+                remaining[i] = files.list(prefix, None, 128).await.unwrap().len();
+            }
+            if remaining == [2, 1, 1] {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     })
     .await
-    .expect("automatic native collection made no progress");
+    .unwrap_or_else(|_| {
+        panic!("automatic native collection timed out: manifests/indexes/journals {remaining:?}")
+    });
     let cleanup_ms = cleanup.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     server.stop().await;

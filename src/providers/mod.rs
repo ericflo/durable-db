@@ -16,6 +16,22 @@ mod register;
 pub mod s3;
 mod transport;
 
+// Deletion is restricted to the namespaces with implemented collectors. Native
+// journal names additionally bind a canonical incarnation and frame position.
+fn collection_key(key: &str) -> anyhow::Result<()> {
+    if key.starts_with("journal/") {
+        crate::journal::LogId::parse_key(key)?;
+    } else {
+        anyhow::ensure!(
+            ["blocks/", "manifests/", "indexes/", "proposals/"]
+                .iter()
+                .any(|prefix| key.starts_with(prefix)),
+            "invalid collection namespace"
+        );
+    }
+    Ok(())
+}
+
 pub struct Connection {
     files: Arc<dyn Storage>,
     authority: Arc<dyn Authority>,
@@ -212,4 +228,26 @@ async fn check_native_budget(connection: Connection) {
     );
     assert!(root.observe().await.is_ok());
     assert!(connection.authority().read().await.unwrap().info.len() <= 10);
+    let journal = format!(
+        "journal/{:032x}-{}-{:016x}",
+        1,
+        uuid::Uuid::new_v4().simple(),
+        1
+    );
+    files
+        .put(&journal, bytes::Bytes::from_static(b"frame"))
+        .await
+        .unwrap();
+    let authority = connection.authority();
+    for refused in [
+        "journal/frame",
+        "journal/../ROOT",
+        "tables/retained",
+        "ownership/retained",
+    ] {
+        assert!(authority.delete_versions(refused).await.is_err());
+    }
+    assert!(files.get(&journal, 16).await.unwrap().is_some());
+    authority.delete_versions(&journal).await.unwrap();
+    assert!(files.get(&journal, 16).await.unwrap().is_none());
 }
