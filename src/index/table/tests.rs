@@ -71,6 +71,57 @@ impl Storage for Files {
 fn cache() -> Arc<Cache> {
     Arc::new(Cache::new(256 * 1024, None).unwrap())
 }
+
+#[tokio::test]
+async fn point_hits_still_validate_rows_after_the_winner() {
+    let files = Files::new();
+    let reference = build(
+        files.clone(),
+        [
+            Row {
+                key: b"a",
+                revision: 1,
+                value: Some(b"found"),
+            },
+            Row {
+                key: b"z",
+                revision: 1,
+                value: None,
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    let data = reference
+        .data
+        .read_range(files.as_ref(), 0..reference.data.size())
+        .await
+        .unwrap();
+    let index = reference
+        .index
+        .read_range(files.as_ref(), 0..reference.index.size())
+        .await
+        .unwrap();
+    for last in [b'a', b'b'] {
+        let mut bad = data.to_vec();
+        *bad.last_mut().unwrap() = last;
+        let mut blocks = codec::decode_index(&index, reference.data.size()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        // Reauthenticate the mutated bytes to test structural validation after
+        // the hit, rather than merely failing the outer SHA-256 check.
+        blocks[0].digest = Sha256::digest(&bad).into();
+        let corrupt = Reference {
+            data: Blob::upload(files.clone(), bad.into()).await.unwrap(),
+            index: Blob::upload(files.clone(), codec::index(&blocks))
+                .await
+                .unwrap(),
+        };
+        let table = Table::open(files.clone(), cache(), corrupt).await.unwrap();
+        assert!(table.get(b"a", 1).await.is_err());
+        let mut scan = table.scan(b"", None, 1).unwrap();
+        assert!(scan.next().await.is_err());
+    }
+}
 async fn collected(mut cursor: Cursor) -> Vec<(Bytes, u64, Option<Bytes>)> {
     let mut out = Vec::new();
     while let Some(row) = cursor.next().await.unwrap() {

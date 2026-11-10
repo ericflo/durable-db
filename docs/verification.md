@@ -558,3 +558,17 @@ The combined test rewrites over 256 KiB of checkpoint values with a **32-byte re
 B2 and versioned MinIO repeat the 1,024-database campaign, including nine selected suffix frames. Recovery retains **2,304 recent versions**, excluding the 1,024 checkpoint values, and **6,400 receipts** for the touched databases. It makes 27 object GETs and no control-register calls. A rewritten checkpoint reopens with four object GETs and zero resident database/value/receipt entries; all 1,024 generations are verified again. The B2 bucket's 65 versions and MinIO bucket's 79 versions were removed, both buckets deleted and the temporary B2 key revoked. [Source, tests, model and provider evidence](evidence/checkpoint-overlay-2026-11-09.json).
 
 The campaign uses debug builds, injected clocks and stopped writers. It qualifies data-path composition, not live serving, performance SLOs, Kubernetes behavior or AWS. Current recovery still requires its selected suffix and touched receipt metadata to fit admitted memory. Continuous checkpoints, live transaction admission and durability publication, current ownership, lifecycle/authorization recovery and whole-process limits are the next integration obligations.
+
+## Native point-read CPU cost
+
+The table reader now validates a block through borrowed rows and copies only the point lookup's winning row. Previously it allocated/copy-filled every row before selecting one. Scans use the same validator and still return their full decoded block. The format, hashes, row ordering and first/last bounds are unchanged; even a successful point hit must validate the rest of its block. A new adversarial test reauthenticates a malformed later row and confirms that neither point lookup nor scan returns the earlier valid row.
+
+The opt-in release measurement uses 4,096 keys, 20,000 deterministic lookups per value size, one task and a warmed 32 MiB byte cache on an AMD Ryzen AI MAX+ 395 host. Every seventh key is a tombstone. The authoritative fixture is in memory and both runs make zero provider GETs. The before/after runs use the identical measurement source and record source hashes.
+
+| Value bytes | Before mean | After mean | Mean CPU-time reduction |
+| --- | ---: | ---: | ---: |
+| 0 | 172.3 µs | 16.5 µs | 10.4× |
+| 32 | 132.8 µs | 8.8 µs | 15.1× |
+| 4,096 | 4.0 µs | 0.93 µs | 4.3× |
+
+Smaller values pack more rows into each block, so complete block validation does more work per lookup. These are single-host component measurements, with no HTTP, ownership, provider latency or concurrent workload. They are not database throughput or latency SLOs. Eight table tests and the existing SortedTable model/negative controls pass; the full regression suite and B2/MinIO checkpoint campaign also pass. [Exact measurements, source and validation](evidence/index-read-cost-2026-11-09.json). Reproduce the release measurement with the [development command](development.md#work-on-one-component).

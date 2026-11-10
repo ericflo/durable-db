@@ -104,6 +104,7 @@ for (const file of [
   'native-checkpoints-2026-11-09.json',
   'checkpoint-reads-2026-11-09.json',
   'checkpoint-overlay-2026-11-09.json',
+  'index-read-cost-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',

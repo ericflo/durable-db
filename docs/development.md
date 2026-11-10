@@ -35,6 +35,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Native memory and recovery | `cargo test --locked --lib index::memory`, `cargo test --locked --lib ownership::root::tests::transactions`, `scripts/check-model.sh MemoryIndex` and `scripts/check-model.sh TransactionRecovery` |
 | Native table merging | `cargo test --locked --lib index::merge` and `scripts/check-model.sh TableMerge` |
 | Native sorted tables | `cargo test --locked --lib index::table` and `scripts/check-model.sh SortedTable` |
+| Warm point-read CPU cost | `DURABLE_DB_INDEX_READ_REPORT=/tmp/index-reads.json cargo test --release --locked --test index_read_bench -- --ignored --exact cached_native_point_read_cost` |
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |

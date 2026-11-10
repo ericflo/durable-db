@@ -164,7 +164,13 @@ pub(super) fn decode_index(mut bytes: &[u8], size: u64) -> anyhow::Result<Vec<Bl
     );
     Ok(blocks)
 }
-pub(super) fn decode_block(mut bytes: &[u8], expected: &Block) -> anyhow::Result<Vec<Entry>> {
+/// Validate every row, including the tail after a point hit, without copying
+/// unrequested keys/values. Visitors only populate private return buffers.
+fn visit_block<'a>(
+    mut bytes: &'a [u8],
+    expected: &Block,
+    mut visit: impl FnMut(Row<'a>),
+) -> anyhow::Result<()> {
     ensure!(
         bytes.len() == expected.length as usize
             && bytes.len() <= MAX_BLOCK_BYTES
@@ -176,7 +182,7 @@ pub(super) fn decode_block(mut bytes: &[u8], expected: &Block) -> anyhow::Result
         count == expected.rows && (1..=MAX_BLOCK_ROWS).contains(&(count as usize)),
         "invalid table row count"
     );
-    let mut rows: Vec<Entry> = Vec::with_capacity(count as usize);
+    let mut previous: Option<(&[u8], u64)> = None;
     for _ in 0..count {
         let length = u16(&mut bytes)? as usize;
         let revision = u64(&mut bytes)?;
@@ -187,38 +193,67 @@ pub(super) fn decode_block(mut bytes: &[u8], expected: &Block) -> anyhow::Result
                 && (value_length == DELETE || value_length <= 64 * 1024),
             "invalid table row lengths"
         );
-        let key = Bytes::copy_from_slice(take(&mut bytes, length)?);
+        let key = take(&mut bytes, length)?;
         let value = if value_length == DELETE {
             None
         } else {
-            Some(Bytes::copy_from_slice(take(
-                &mut bytes,
-                value_length as usize,
-            )?))
+            Some(take(&mut bytes, value_length as usize)?)
         };
-        if let Some(previous) = rows.last() {
+        if let Some((prior, rev)) = previous {
             ensure!(
-                Boundary::of(&previous.as_row())
-                    .compare(&key, revision)
-                    .is_lt(),
+                prior.cmp(key).then_with(|| revision.cmp(&rev)).is_lt(),
                 "unordered table rows"
             );
+        } else {
+            ensure!(
+                expected.first.compare(key, revision).is_eq(),
+                "table block first bound mismatch"
+            );
         }
-        rows.push(Entry {
+        previous = Some((key, revision));
+        visit(Row {
             key,
             revision,
             value,
         });
     }
     ensure!(bytes.is_empty(), "table block has trailing bytes");
-    let first = &rows[0];
-    let last = &rows[rows.len() - 1];
+    let (key, revision) = previous.expect("nonempty block checked");
     ensure!(
-        expected.first.compare(&first.key, first.revision).is_eq()
-            && expected.last.compare(&last.key, last.revision).is_eq(),
-        "table block bounds mismatch"
+        expected.last.compare(key, revision).is_eq(),
+        "table block last bound mismatch"
     );
+    Ok(())
+}
+fn owned(row: Row<'_>) -> Entry {
+    Entry {
+        key: Bytes::copy_from_slice(row.key),
+        revision: row.revision,
+        value: row.value.map(Bytes::copy_from_slice),
+    }
+}
+pub(super) fn decode_block(bytes: &[u8], expected: &Block) -> anyhow::Result<Vec<Entry>> {
+    ensure!(
+        (1..=MAX_BLOCK_ROWS).contains(&(expected.rows as usize)),
+        "invalid table row count"
+    );
+    let mut rows = Vec::with_capacity(expected.rows as usize);
+    visit_block(bytes, expected, |row| rows.push(owned(row)))?;
     Ok(rows)
+}
+pub(super) fn lookup_block(
+    bytes: &[u8],
+    expected: &Block,
+    key: &[u8],
+    revision: u64,
+) -> anyhow::Result<Option<Entry>> {
+    let mut found = None;
+    visit_block(bytes, expected, |row| {
+        if found.is_none() && row.key == key && row.revision <= revision {
+            found = Some(owned(row));
+        }
+    })?;
+    Ok(found)
 }
 pub(super) fn reference(reference: &Reference) -> Bytes {
     let mut out = Vec::with_capacity(8 + 2 * REFERENCE_BYTES + 32);

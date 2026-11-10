@@ -36,15 +36,6 @@ pub struct Entry {
     pub revision: u64,
     pub value: Option<Bytes>,
 }
-impl Entry {
-    fn as_row(&self) -> Row<'_> {
-        Row {
-            key: &self.key,
-            revision: self.revision,
-            value: self.value.as_deref(),
-        }
-    }
-}
 #[derive(Clone)]
 struct Boundary {
     key: Bytes,
@@ -204,7 +195,7 @@ impl Table {
             .blocks
             .partition_point(|block| block.last.compare(key, revision).is_lt())
     }
-    async fn block(&self, number: usize) -> anyhow::Result<Vec<Entry>> {
+    async fn block_bytes(&self, number: usize) -> anyhow::Result<Bytes> {
         let block = self
             .0
             .blocks
@@ -230,7 +221,11 @@ impl Table {
             self.0.cache.insert(&key, bytes.clone()).await;
             bytes
         };
-        codec::decode_block(&bytes, block)
+        Ok(bytes)
+    }
+    async fn block(&self, number: usize) -> anyhow::Result<Vec<Entry>> {
+        let bytes = self.block_bytes(number).await?;
+        codec::decode_block(&bytes, &self.0.blocks[number])
     }
     /// Returns the latest row visible at this revision, including deletion.
     /// None means no visible row in THIS table, not global key absence.
@@ -246,10 +241,8 @@ impl Table {
         if block.first.key.as_ref() > key {
             return Ok(None);
         }
-        let rows = self.block(number).await?;
-        Ok(rows
-            .into_iter()
-            .find(|row| row.key.as_ref() == key && row.revision <= revision))
+        let bytes = self.block_bytes(number).await?;
+        codec::lookup_block(&bytes, block, key, revision)
     }
     /// One bounded block at a time. Emits tombstones so a table merge cannot
     /// resurrect an older value. Snapshot retention and authority are external.
