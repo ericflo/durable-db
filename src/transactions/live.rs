@@ -3,6 +3,7 @@
 //! Uploads and control renewal own their I/O and do not hold that borrow.
 //! Database generations must already be authorized by the caller. This is not
 //! a public wire API or a qualified physical clock/placement implementation.
+mod checkpoint;
 use super::{
     record::{Commit, Database, Mutation},
     recovery::{Resolution, Target},
@@ -36,6 +37,7 @@ pub struct Limits {
     pub validation: validation::Limits,
     pub journal: journal::QueueLimits,
     pub receipt_window: u64,
+    pub checkpoint_frames: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -44,6 +46,7 @@ impl Default for Limits {
             validation: validation::Limits::default(),
             journal: journal::QueueLimits::default(),
             receipt_window: 1024,
+            checkpoint_frames: 256,
         }
     }
 }
@@ -151,6 +154,7 @@ pub struct Opening<C> {
 impl<C: Clock> Opening<C> {
     pub fn new(mut root: Root<C>, limits: Limits, cache: Arc<Cache>) -> anyhow::Result<Self> {
         Validator::new(0, limits.validation)?;
+        ensure!(limits.checkpoint_frames > 0, "invalid checkpoint interval");
         ensure!(
             (1..=super::record::MAX_RECEIPTS).contains(&limits.receipt_window)
                 && limits.receipt_window < limits.index.receipts as u64,
@@ -170,12 +174,13 @@ impl<C: Clock> Opening<C> {
         self.control.clone()
     }
     pub async fn recover(self) -> anyhow::Result<Owner<C>> {
+        let files = self.replay.files();
         let mut recovered =
-            Recovering::begin_cached(self.replay, self.limits.index, self.cache).await?;
+            Recovering::begin_cached(self.replay, self.limits.index, self.cache.clone()).await?;
         while !recovered.is_complete() {
             recovered = recovered.advance(64).await?;
         }
-        let (origin, projection) = recovered.finish_bound()?;
+        let (origin, projection, frames) = recovered.finish_bound()?;
         let writer = {
             let mut root = self.control.lock()?;
             ensure!(
@@ -195,6 +200,7 @@ impl<C: Clock> Opening<C> {
             reserved: recovery::Usage::default(),
             validation: validation::Usage::default(),
             failed: false,
+            maintenance: checkpoint::Maintenance::new(files, self.cache, frames),
         })
     }
 }
@@ -218,6 +224,7 @@ pub struct Owner<C> {
     reserved: recovery::Usage,
     validation: validation::Usage,
     failed: bool,
+    maintenance: checkpoint::Maintenance,
 }
 impl<C: Clock> Owner<C> {
     pub fn control(&self) -> Control<C> {
@@ -253,6 +260,7 @@ impl<C: Clock> Owner<C> {
     }
     pub async fn snapshot(&mut self, database: Database<'_>) -> anyhow::Result<Snapshot> {
         self.check()?;
+        self.maintain().await?;
         self.warm(database).await?;
         let name: Arc<str> = database.name.into();
         let token = self.active[&(name.clone(), database.generation)]
@@ -331,6 +339,11 @@ impl<C: Clock> Owner<C> {
     /// between the first accepted revision and creation of its upload handle.
     pub async fn prepare(&mut self, requests: &[Request<'_>]) -> anyhow::Result<Prepared> {
         self.check()?;
+        self.maintain().await?;
+        ensure!(
+            !self.checkpoint_due(),
+            "checkpoint waiting for pending uploads"
+        );
         ensure!(
             (1..=128).contains(&requests.len()),
             "invalid transaction batch size"
@@ -440,11 +453,16 @@ impl<C: Clock> Owner<C> {
                     }
                 });
                 match plan {
-                    Err(reason) => Ticket {
-                        owner: self.identity,
-                        position: fence,
-                        result: Outcome::Rejected(reason),
-                    },
+                    Err(reason) => {
+                        if reason == Rejection::Capacity {
+                            self.maintenance.requested = true;
+                        }
+                        Ticket {
+                            owner: self.identity,
+                            position: fence,
+                            result: Outcome::Rejected(reason),
+                        }
+                    }
                     Ok(plan) => {
                         let revision = plan.revision();
                         let floor = active
@@ -501,12 +519,15 @@ impl<C: Clock> Owner<C> {
     pub async fn complete(&mut self, completion: journal::Completion) -> anyhow::Result<()> {
         self.check()?;
         self.writer.complete(completion)?;
-        self.publish().await
+        self.publish().await?;
+        self.maintain().await?;
+        Ok(())
     }
     pub async fn resolve_upload(&mut self, position: u64) -> anyhow::Result<journal::Resolution> {
         self.check()?;
         let result = self.writer.resolve(position).await?;
         self.publish().await?;
+        self.maintain().await?;
         Ok(result)
     }
     async fn publish(&mut self) -> anyhow::Result<()> {

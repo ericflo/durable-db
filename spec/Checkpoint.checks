@@ -5,3 +5,4 @@ unsafe CheckpointUnsafeReceipt.cfg checkpoint-unsafereceipt 512m Safe
 unsafe CheckpointUnsafeCompare.cfg checkpoint-unsafecompare 512m Safe
 unsafe CheckpointUnsafeExpose.cfg checkpoint-unsafeexpose 512m Safe
 unsafe CheckpointUnsafeValue.cfg checkpoint-unsafevalue 512m Safe
+unsafe CheckpointUnsafeFloor.cfg checkpoint-unsafe-floor 512m Safe

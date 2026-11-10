@@ -17,6 +17,13 @@ pub struct Reader {
 }
 
 impl Reader {
+    /// The published checkpoint establishes this already durable prefix even
+    /// when takeover has not selected the old writer's final position yet.
+    pub(crate) fn discover_from(storage: Arc<dyn Storage>, cut: Prefix) -> Self {
+        let mut reader = Self::discover(storage, cut.log);
+        reader.prefix = cut;
+        reader
+    }
     pub fn discover(storage: Arc<dyn Storage>, log: LogId) -> Self {
         Self {
             storage,

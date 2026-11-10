@@ -288,14 +288,34 @@ mod tests {
     async fn read_immutable(
         State(state): State<Arc<Mutex<Wire>>>,
         axum::extract::Path(id): axum::extract::Path<String>,
+        headers: HeaderMap,
     ) -> Response {
         let state = state.lock().unwrap();
         match state.immutable.get(&id) {
-            Some(bytes) => Response::builder()
-                .header("etag", "\"registration\"")
-                .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
-                .body(Body::from(bytes.clone()))
-                .unwrap(),
+            Some(bytes) => {
+                let mut response = Response::builder()
+                    .header("etag", "\"registration\"")
+                    .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT");
+                let body = if let Some(range) = headers.get("range") {
+                    let (start, end) = range
+                        .to_str()
+                        .unwrap()
+                        .strip_prefix("bytes=")
+                        .unwrap()
+                        .split_once('-')
+                        .unwrap();
+                    let start: usize = start.parse().unwrap();
+                    let end: usize = end.parse().unwrap();
+                    response = response.status(206).header(
+                        "content-range",
+                        format!("bytes {start}-{end}/{}", bytes.len()),
+                    );
+                    bytes.slice(start..=end)
+                } else {
+                    bytes.clone()
+                };
+                response.body(Body::from(body)).unwrap()
+            }
             None => Response::builder()
                 .status(404)
                 .body(Body::from("<Error><Code>NoSuchKey</Code></Error>"))
@@ -641,7 +661,10 @@ mod tests {
         ));
         let mut owner = Opening::new(
             root,
-            live::Limits::default(),
+            live::Limits {
+                checkpoint_frames: 3,
+                ..Default::default()
+            },
             Arc::new(Cache::new(0, None).unwrap()),
         )
         .unwrap()
@@ -724,6 +747,40 @@ mod tests {
             assert!(owner.get(&snapshot, "note").await.unwrap().is_none());
         }
         assert_eq!(state.lock().unwrap().puts, controls);
+        let third = owner
+            .prepare(&[Request {
+                snapshot: &current,
+                id: "third",
+                reads: &[],
+                mutations: &[],
+            }])
+            .await
+            .unwrap();
+        let completion = third.upload.unwrap().send().await;
+        state.lock().unwrap().lose_next_control_reply = true;
+        owner.complete(completion).await.unwrap();
+        assert_eq!(
+            owner.outcome(third.tickets[0]).unwrap(),
+            live::Outcome::Committed(3)
+        );
+        assert_eq!(owner.usage().versions, 0);
+        assert_eq!(
+            state.lock().unwrap().puts,
+            controls + 2,
+            "checkpoint CAS plus exact revalidation of its lost reply"
+        );
+        assert!(owner.get(&current, "note").await.is_err());
+        let fresh = owner.snapshot(database).await.unwrap();
+        assert_eq!(
+            owner
+                .get(&fresh, "note")
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(b"two".as_slice())
+        );
         task.abort();
         task.await.unwrap_err();
     }

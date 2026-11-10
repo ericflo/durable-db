@@ -248,6 +248,9 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         owner.outcome(first.tickets[1]).unwrap(),
         Result::Rejected(Rejection::Capacity)
     );
+    // Capacity pressure now checkpoints the completed frame and expires its
+    // old validator tokens, while retaining the receipt and current value.
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
     let second = owner
         .prepare(&[request(&snapshot, "queue", &[], &[])])
         .await
@@ -261,7 +264,7 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         owner.outcome(second.tickets[0]).unwrap(),
         Result::Committed(2)
     );
-    assert_eq!(owner.usage().versions, 1);
+    assert_eq!(owner.usage().versions, 0);
 }
 
 #[tokio::test]
@@ -314,4 +317,309 @@ async fn live_receipt_expiry_is_durable_and_pending_request_ids_cannot_be_reused
         Result::Rejected(Rejection::ReceiptExpired)
     );
     assert_eq!(owner.usage().receipts, 1);
+}
+
+#[tokio::test]
+async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_suffix() {
+    use crate::storage::Storage;
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let limits = live::Limits {
+        checkpoint_frames: 2,
+        receipt_window: 4,
+        ..Default::default()
+    };
+    let mut owner = open(active(&provider, &clock).await, limits).await;
+    // Merely reading an empty generation must not encode revision-zero rows.
+    let _empty = owner.snapshot(database("empty")).await.unwrap();
+    for n in 1..=7 {
+        let snapshot = owner.snapshot(database("a")).await.unwrap();
+        let id = format!("r{n}");
+        let mutation = [Mutation {
+            key: "x",
+            value: Some(&[n]),
+        }];
+        let prepared = owner
+            .prepare(&[request(&snapshot, &id, &[], &mutation)])
+            .await
+            .unwrap();
+        if n == 4 {
+            provider.lose_reply.store(true, Ordering::SeqCst);
+        }
+        owner
+            .complete(prepared.upload.unwrap().send().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner.outcome(prepared.tickets[0]).unwrap(),
+            Result::Committed(n as u64)
+        );
+        assert_eq!(owner.usage().versions, n as usize % 2);
+        assert!(!owner.checkpoint_due());
+    }
+    // Fixture deletion proves both discovery and replay skip covered frames.
+    // This is not permission for a runtime collector to delete them.
+    let keys = provider.files.list("journal/", None, 20).await.unwrap();
+    for key in &keys[..6] {
+        provider.files.delete(key).await.unwrap();
+    }
+    let mut root = successor(&provider, &clock).await;
+    let mut recovery = root.recovery().unwrap();
+    let mut journal = recovery.next().await.unwrap().unwrap();
+    assert!(!journal.is_selected());
+    assert_eq!(
+        journal
+            .read_next()
+            .await
+            .unwrap()
+            .unwrap()
+            .prefix()
+            .position(),
+        7
+    );
+    assert!(journal.read_next().await.unwrap().is_none());
+    assert!(recovery.next().await.unwrap().is_none());
+    seal(&mut root, journal).await;
+    drop(owner);
+    let mut owner = open(root, limits).await;
+    assert_eq!(owner.usage().versions, 1);
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    assert_eq!(snapshot.revision(), 7);
+    assert_eq!(
+        owner
+            .get(&snapshot, "x")
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .as_deref(),
+        Some([7].as_slice())
+    );
+    // Recovered suffix work counts toward the same schedule across takeovers.
+    let prepared = owner
+        .prepare(&[request(
+            &snapshot,
+            "r8",
+            &[],
+            &[Mutation {
+                key: "x",
+                value: None,
+            }],
+        )])
+        .await
+        .unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert_eq!(owner.usage().versions, 0);
+    let current = owner.snapshot(database("a")).await.unwrap();
+    assert!(
+        owner
+            .get(&current, "x")
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .is_none()
+    );
+    assert_eq!(current.revision(), 8);
+}
+
+#[tokio::test]
+async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut owner = open(
+        active(&provider, &clock).await,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    let first = owner
+        .prepare(&[request(&snapshot, "first", &[], &[])])
+        .await
+        .unwrap();
+    let next = owner
+        .prepare(&[request(&snapshot, "next", &[], &[])])
+        .await
+        .unwrap();
+    owner
+        .complete(first.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert!(owner.checkpoint_due());
+    assert!(!owner.maintain().await.unwrap());
+    assert!(
+        owner
+            .prepare(&[request(&snapshot, "third", &[], &[])])
+            .await
+            .is_err()
+    );
+    owner
+        .complete(next.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert!(!owner.checkpoint_due());
+    let retry = owner
+        .prepare(&[request(&snapshot, "first", &[], &[])])
+        .await
+        .unwrap();
+    assert!(retry.upload.is_none());
+    assert_eq!(
+        owner.outcome(retry.tickets[0]).unwrap(),
+        Result::Committed(1)
+    );
+    let fresh = owner.snapshot(database("a")).await.unwrap();
+    let third = owner
+        .prepare(&[request(&fresh, "third", &[], &[])])
+        .await
+        .unwrap();
+    assert_eq!(third.upload.as_ref().unwrap().position(), 3);
+    owner
+        .complete(third.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.outcome(third.tickets[0]).unwrap(),
+        Result::Committed(3)
+    );
+}
+
+#[tokio::test]
+async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_authority_after_io() {
+    use crate::storage::{Object, Storage, Version};
+    use bytes::Bytes;
+    struct Paused {
+        provider: Arc<Provider>,
+        clock: ManualClock,
+        pause: AtomicBool,
+        expire: AtomicBool,
+        entered: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl Authority for Paused {
+        async fn read(&self) -> anyhow::Result<Bucket> {
+            self.provider.read().await
+        }
+        async fn replace(
+            &self,
+            old: &Bucket,
+            info: BTreeMap<String, String>,
+        ) -> anyhow::Result<Option<Bucket>> {
+            let result = self.provider.replace(old, info).await?;
+            if self.pause.swap(false, Ordering::SeqCst) {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(result)
+        }
+        async fn delete_versions(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+    }
+    #[async_trait]
+    impl Storage for Paused {
+        async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
+            self.provider.files.get(key, max).await
+        }
+        async fn get_range(
+            &self,
+            key: &str,
+            range: std::ops::Range<u64>,
+            size: u64,
+        ) -> anyhow::Result<Bytes> {
+            let bytes = self.provider.files.get_range(key, range, size).await?;
+            if self.expire.swap(false, Ordering::SeqCst) {
+                self.clock.set(33);
+            }
+            Ok(bytes)
+        }
+        async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
+            self.provider.files.put(key, bytes).await
+        }
+        async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
+            unreachable!()
+        }
+        async fn list(
+            &self,
+            prefix: &str,
+            after: Option<&str>,
+            limit: usize,
+        ) -> anyhow::Result<Vec<String>> {
+            self.provider.files.list(prefix, after, limit).await
+        }
+        async fn delete(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!()
+        }
+    }
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let paused = Arc::new(Paused {
+        provider: provider.clone(),
+        clock: clock.clone(),
+        pause: AtomicBool::new(false),
+        expire: AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+    });
+    let mut root = Connection::new(paused.clone(), paused.clone(), "test")
+        .root(clock.clone(), profile())
+        .unwrap();
+    claim(&mut root).await;
+    clock.set(23);
+    validate(&mut root).await;
+    activate(&mut root).await;
+    let mut owner = Opening::new(
+        root,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+        Arc::new(Cache::new(0, None).unwrap()),
+    )
+    .unwrap()
+    .recover()
+    .await
+    .unwrap();
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    let prepared = owner
+        .prepare(&[request(
+            &snapshot,
+            "first",
+            &[],
+            &[Mutation {
+                key: "x",
+                value: Some(b"value"),
+            }],
+        )])
+        .await
+        .unwrap();
+    let completion = prepared.upload.unwrap().send().await;
+    paused.pause.store(true, Ordering::SeqCst);
+    tokio::select! {
+        result = owner.complete(completion) => panic!("publication was not paused: {result:?}"),
+        _ = paused.entered.notified() => (),
+    }
+    let objects = provider.files.list("tables/", None, 100).await.unwrap();
+    assert!(owner.checkpoint_due());
+    assert!(owner.maintain().await.unwrap());
+    assert_eq!(
+        provider.files.list("tables/", None, 100).await.unwrap(),
+        objects,
+        "resolve the exact staged image without uploading another copy"
+    );
+    assert_eq!(
+        owner.outcome(prepared.tickets[0]).unwrap(),
+        Result::Committed(1)
+    );
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    paused.expire.store(true, Ordering::SeqCst);
+    assert!(
+        owner.get(&snapshot, "x").await.is_err(),
+        "authority expired during immutable value I/O"
+    );
+    assert!(!paused.expire.load(Ordering::SeqCst));
 }

@@ -244,22 +244,31 @@ pub(super) async fn write(recovering: &Recovering) -> anyhow::Result<Staged> {
         .replay
         .cut()
         .context("checkpoint requires a selected journal boundary")?;
-    let files = recovering.replay.files();
+    write_projection(
+        &recovering.projection,
+        recovering.replay.files(),
+        recovering.replay.origin(),
+        cut,
+    )
+    .await
+}
+
+pub(crate) async fn write_projection(
+    projection: &Projection,
+    files: Arc<dyn Storage>,
+    origin: Record,
+    cut: Cut,
+) -> anyhow::Result<Staged> {
     let mut builder = Builder::new(files.clone());
-    for resident in recovering.projection.databases.values() {
+    for resident in projection.databases.values() {
         resident
             .state
             .as_ref()
             .context("checkpoint metadata is incomplete")?
             .checkpoint_complete()?;
     }
-    let mut base = recovering
-        .projection
-        .base
-        .as_ref()
-        .map(Snapshot::rows)
-        .transpose()?;
-    let mut changes = changed_rows(&recovering.projection).peekable();
+    let mut base = projection.base.as_ref().map(Snapshot::rows).transpose()?;
+    let mut changes = changed_rows(projection).peekable();
     let mut prior = None;
     let mut databases = 0u64;
     loop {
@@ -272,8 +281,7 @@ pub(super) async fn write(recovering: &Recovering) -> anyhow::Result<Staged> {
             // Changed databases supply their complete current metadata/receipt
             // window. Keeping old receipts here would resurrect expired IDs.
             if kind < 2
-                && recovering
-                    .projection
+                && projection
                     .databases
                     .contains_key(&(db.name.to_owned(), db.generation))
             {
@@ -312,10 +320,7 @@ pub(super) async fn write(recovering: &Recovering) -> anyhow::Result<Staged> {
     }
     .upload(files)
     .await?;
-    Ok(Staged {
-        origin: recovering.replay.origin(),
-        reference,
-    })
+    Ok(Staged { origin, reference })
 }
 
 fn checkpoint_row(
@@ -339,6 +344,12 @@ fn changed_rows(projection: &Projection) -> impl Iterator<Item = Entry> + '_ {
     projection
         .databases
         .iter()
+        .filter(|(_, resident)| {
+            resident
+                .state
+                .as_ref()
+                .is_some_and(|state| state.revision() > 0)
+        })
         .flat_map(|((name, generation), resident)| {
             let state = resident.state.as_ref().expect("checkpoint state validated");
             let mut prefix = name.as_bytes().to_vec();

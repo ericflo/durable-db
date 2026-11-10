@@ -79,6 +79,11 @@ impl Projection {
             usage: Usage::default(),
         })
     }
+    pub(crate) fn rebase(&mut self, base: checkpoint::Snapshot) {
+        self.base = Some(base);
+        self.databases.clear();
+        self.usage = Usage::default();
+    }
     pub fn usage(&self) -> Usage {
         self.usage
     }
@@ -335,6 +340,7 @@ fn validate_database(database: Database<'_>) -> anyhow::Result<()> {
 /// Checkpoints can be staged between steps, including within a selected journal.
 /// Only completed recovery can return a readable projection.
 pub struct Recovering {
+    frames: u64,
     replay: crate::ownership::root::Replay,
     projection: Projection,
 }
@@ -361,7 +367,11 @@ impl Recovering {
             replay.resume(base.cut()).await?;
             projection.base = Some(base);
         }
-        Ok(Self { replay, projection })
+        Ok(Self {
+            replay,
+            projection,
+            frames: 0,
+        })
     }
     pub async fn advance(mut self, frames: usize) -> anyhow::Result<Self> {
         ensure!((1..=1024).contains(&frames), "invalid recovery step budget");
@@ -369,6 +379,10 @@ impl Recovering {
             let Some(batch) = self.replay.read_next().await? else {
                 break;
             };
+            self.frames = self
+                .frames
+                .checked_add(1)
+                .context("recovery frame count overflow")?;
             for bytes in batch.records() {
                 let commit = Commit::decode(bytes)?;
                 let state = self
@@ -390,9 +404,9 @@ impl Recovering {
     }
     pub(crate) fn finish_bound(
         self,
-    ) -> anyhow::Result<(crate::ownership::root::Record, Projection)> {
+    ) -> anyhow::Result<(crate::ownership::root::Record, Projection, u64)> {
         ensure!(self.is_complete(), "native recovery is incomplete");
-        Ok((self.replay.origin(), self.projection))
+        Ok((self.replay.origin(), self.projection, self.frames))
     }
     pub async fn checkpoint(&self) -> anyhow::Result<checkpoint::Staged> {
         checkpoint::write(self).await

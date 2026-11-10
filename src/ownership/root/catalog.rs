@@ -126,10 +126,11 @@ impl Recovery {
                     header.cut.identity.epoch < self.record.identity.epoch,
                     "checkpoint is not from prior history"
                 );
-                let selected = selected(&self.files, self.index.as_ref(), header.cut.identity)
-                    .await?
-                    .context("checkpoint journal is not selected")?;
-                Reader::resume(self.files.clone(), header.cut.prefix, selected)?;
+                if let Some(selected) =
+                    selected(&self.files, self.index.as_ref(), header.cut.identity).await?
+                {
+                    Reader::resume(self.files.clone(), header.cut.prefix, selected)?;
+                }
                 self.cutoff = Some(header.cut);
             }
             self.loaded = true;
@@ -158,8 +159,18 @@ impl Recovery {
                     registration.identity() == cutoff.identity,
                     "checkpoint ancestry differs from selected history"
                 );
+                let selected = selected(&self.files, self.index.as_ref(), cutoff.identity).await?;
                 self.finished = true;
-                return Ok(None);
+                if selected.is_some() {
+                    return Ok(None);
+                }
+                return Ok(Some(JournalRecovery {
+                    record: self.record,
+                    index: self.index.clone(),
+                    registration,
+                    selected: false,
+                    reader: Reader::discover_from(self.files.clone(), cutoff.prefix),
+                }));
             }
             let prefix =
                 selected(&self.files, self.index.as_ref(), registration.identity()).await?;
