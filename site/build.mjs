@@ -86,6 +86,7 @@ for (const file of [
   'native-table-collection-2026-11-10.json',
   'checkpoint-index-reads-2026-11-10.json',
   'tenant-checkpoint-admission-2026-11-10.json',
+  'retained-receipt-admission-2026-11-10.json',
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
   'placement-requests-candidate-2026-11-09.json',

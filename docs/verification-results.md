@@ -1,6 +1,18 @@
 # Verification results
 
+## v0.7.0 retained-receipt admission (2026-11-10)
+
+Commit `d00d9ad` charges a database for the base receipt window its first post-checkpoint write may rewrite, before assigning journal order. Once a committed write dirties the database, later writes pay only their direct contribution until checkpointing. The charge uses metadata already loaded for retry resolution: no additional provider call, allocation, scan, ledger or background budget check. Concurrent first changes can overcharge, and expiring receipts still count conservatively. The runtime adds 18 net Rust lines. Native format `owned-candidate-14` requires a fresh namespace; the CLI engine remains unchanged.
+
+All 283 local Rust tests and 99 enabled native client tests pass. The TCP test rejects new-row-only funding without a PUT/allocation, accepts the exact additional 70 bytes, then admits a dirty write with only its direct 420-byte contribution. Omitting the retained-receipt charge makes this test fail. The encoder test compares cold checkpoint metadata with actual rewritten row bytes and covers reset after checkpointing and receipt expiration. The model stays at 5,776 states with three negative controls; direct work is one unit and retained receipts the other. The superseded control/config and an outdated non-HTTP recovery comment were removed, and repeated row-byte test code was consolidated.
+
+Real B2 and versioned MinIO both pass the extended HTTP fixture: 428 bytes admit the initial write, and the first change after checkpointing needs another 500 bytes (including a 72-byte retained receipt). New-row-only funding is refused before a PUT/allocation. Two cold reopens and automatic collection preserve the cumulative 928-byte allocation, receipts and values; funded neighbors continue. All disposable provider resources were removed. [Complete evidence](evidence/retained-receipt-admission-2026-11-10.json).
+
+This covers the changed database's base receipt window once per admitted first change. Unchanged shared-table rows, block/index/manifest overhead, metadata and maintenance retries/recovery remain outside tenant attribution. Physical timing/native CLI cutover, durable retention, large-image cleanup and production/AWS qualification remain open.
+
 ## v0.6.0 tenant checkpoint-row admission (2026-11-10)
+
+[v0.6.0](https://github.com/ericflo/durable-db/releases/tag/v0.6.0) packages `99d3dca`, verified by [Woodpecker #128](https://ci.eflorenzano.com/repos/18/pipeline/128/1). The downloaded static Linux x86_64 archive passes standalone transaction, ordered-read, backup/restore and SIGKILL/reopen checks without a toolchain. The public default installer verifies its GitHub asset checksum and installs the same binary.
 
 Commit `9b198aa` changes native write admission from journal-only charging to the atomic sum of journal bytes and the checkpoint rows a transaction introduces: values/tombstones, its new receipt and database metadata. It reuses the existing ledger, adds no provider call to a cached grant, and adds 20 net runtime Rust lines. Duplicate row-sizing arithmetic and the obsolete journal-only rule were removed. Native format `owned-candidate-13` requires a fresh namespace so older controllers cannot undercharge; the CLI engine and storage format are unchanged.
 
