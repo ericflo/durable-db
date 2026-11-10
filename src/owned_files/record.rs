@@ -1,4 +1,4 @@
-use super::{Blob, Content, MAX_INLINE_BYTES, MAX_NAME_BYTES, Version, blob::REFERENCE_BYTES};
+use super::{Blob, Content, MAX_INLINE_BYTES, MAX_NAME_BYTES, REFERENCE_BYTES, Version};
 use anyhow::{Context, ensure};
 use bytes::{Buf, Bytes};
 use sha2::{Digest, Sha256};

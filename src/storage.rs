@@ -1,4 +1,5 @@
 //! The only authority boundary: fresh reads, immutable uploads, and conditional replacement.
+pub mod immutable;
 mod ranges;
 pub use ranges::MAX_RANGE_BYTES;
 

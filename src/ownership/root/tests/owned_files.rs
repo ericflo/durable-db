@@ -92,7 +92,7 @@ async fn logical_files_reopen_across_selected_owners_and_exclude_late_mutations(
 
 #[tokio::test]
 async fn selected_external_files_restore_without_resident_payloads_and_deletion_keeps_old_bytes() {
-    use crate::owned_files::Blob;
+    use crate::storage::immutable::Blob;
     use bytes::Bytes;
     let provider = Provider::new();
     let clock = ManualClock::default();

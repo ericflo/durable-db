@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::Mutex;
 
-// The largest immutable object is a remote manifest. Data and index pages
-// enforce their own smaller limits after cache lookup.
+// Cache manifests, pages and native table blocks, never complete large data
+// objects. Readers enforce their own smaller limits after cache lookup.
 const MAX_OBJECT_BYTES: usize = 512 * 1024;
 
 struct Entry<T> {

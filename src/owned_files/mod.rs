@@ -4,9 +4,8 @@
 //! serving owner. Its caller must establish ownership before admission and
 //! recheck it before returning reads or acknowledgements. Recovery consumes a
 //! complete selected catalog; no bucket-register operation occurs here.
-mod blob;
 mod record;
-pub use blob::{Blob, MAX_BLOB_BYTES};
+use crate::storage::immutable::{Blob, REFERENCE_BYTES};
 
 use crate::{journal, ownership::root::Replay};
 use anyhow::{Context, ensure};
@@ -106,7 +105,7 @@ impl Content {
     fn resident_bytes(&self) -> usize {
         match self {
             Self::Inline(bytes) => bytes.len(),
-            Self::External(_) => blob::REFERENCE_BYTES,
+            Self::External(_) => REFERENCE_BYTES,
         }
     }
     fn size(&self) -> u64 {
@@ -131,7 +130,7 @@ impl InputContent<'_> {
     fn resident_bytes(self) -> usize {
         match self {
             Self::Inline(bytes) => bytes.len(),
-            Self::External(_) => blob::REFERENCE_BYTES,
+            Self::External(_) => REFERENCE_BYTES,
         }
     }
     fn owned(self) -> Content {

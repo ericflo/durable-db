@@ -214,7 +214,7 @@ async fn existing_page_collection_never_reclaims_candidate_journals_or_tables() 
     writer.complete(upload.send().await).unwrap();
     drop(writer.pop_durable().unwrap().unwrap());
     let prefix = writer.durable_prefix();
-    let table = durable_db::owned_files::Blob::upload(
+    let table = durable_db::storage::immutable::Blob::upload(
         metadata.files.clone(),
         Bytes::from_static(b"candidate table"),
     )

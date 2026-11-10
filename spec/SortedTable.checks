@@ -1,0 +1,3 @@
+safe SortedTable.cfg sorted-table 512m -
+unsafe SortedTableUnsafeSeek.cfg sorted-table-seek 512m Correct
+unsafe SortedTableUnsafeCorrupt.cfg sorted-table-corrupt 512m Correct

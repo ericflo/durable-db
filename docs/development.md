@@ -29,6 +29,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | --- | --- |
 | HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
+| Native sorted tables | `cargo test --locked --lib index::table` and `scripts/check-model.sh SortedTable` |
 | Rust journal | `cargo test --locked --lib journal` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
@@ -104,7 +105,15 @@ For the opt-in large-object range check, use the same disposable provider creden
 cargo test --locked --test provider_ranges -- --ignored --exact bounded_ranges_of_a_large_immutable_object
 ```
 
-It writes one 16 MiB object and verifies five bounded slices, missing/size errors and rejection above the 8 MiB cap. It does not retry an uncertain upload. Delete all versions and revoke the temporary key after either outcome. The [index integration experiment](design-owned-partitions.md#index-integration-on-real-object-storage) separately exercises selected-journal recovery and grouped writes.
+It writes one 16 MiB object and verifies five bounded slices, missing/size errors and rejection above the 8 MiB cap. It does not retry an uncertain upload. Delete all versions and revoke the temporary key after either outcome. The [retired index evaluation](design-owned-partitions.md#historical-third-party-index-integration) records historical selected-journal and grouped-write evidence.
+
+For native tables, set `DURABLE_DB_TABLE_REPORT` and use the same disposable provider environment:
+
+```sh
+cargo test --locked --test native_tables -- --ignored --exact native_tables_use_bounded_blocks_and_recover_revisioned_ordered_rows
+```
+
+This uploads two immutable objects for 3,072 revisioned rows, checks one-block point reads, bounded caching, ordered scans with deletion markers and cache-free reopening. It does not initialize a serving engine or publish a manifest. Remove both objects' physical versions and the dedicated bucket, and revoke its temporary key after either outcome. The native index uses the existing Rust toolchain and kache configuration.
 
 ## CI and publication
 

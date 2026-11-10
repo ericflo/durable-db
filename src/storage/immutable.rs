@@ -6,7 +6,7 @@ use std::{ops::Range, sync::Arc};
 use uuid::Uuid;
 
 pub const MAX_BLOB_BYTES: usize = 64 * 1024 * 1024;
-pub(super) const REFERENCE_BYTES: usize = 56;
+pub(crate) const REFERENCE_BYTES: usize = 56;
 
 /// A known-successful immutable upload, or its reference restored from selected
 /// history. Fields cannot be supplied by an application. This is not ownership
@@ -55,12 +55,12 @@ impl Blob {
         }
         Ok(bytes)
     }
-    pub(super) fn encode(&self, out: &mut Vec<u8>) {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(self.id.as_bytes());
         out.extend_from_slice(&self.size.to_be_bytes());
         out.extend_from_slice(&self.digest);
     }
-    pub(super) fn decode(mut bytes: &[u8]) -> anyhow::Result<Self> {
+    pub(crate) fn decode(mut bytes: &[u8]) -> anyhow::Result<Self> {
         ensure!(
             bytes.len() == REFERENCE_BYTES,
             "invalid immutable blob reference length"
