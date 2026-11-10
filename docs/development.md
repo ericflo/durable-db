@@ -53,6 +53,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
 | SDK or web-app example | `scripts/test-client.sh sdk.test.mjs` |
+| Native HTTP and client contract | `cargo test --locked --lib root::tests::http`; after `npm --prefix clients/javascript ci`, run `cargo test --locked --lib native_http_javascript_contract -- --ignored --nocapture` |
 | Pi adapter or HTTP client transport | `scripts/test-client.sh` |
 | Public documentation | `npm --prefix site ci` and `node site/build.mjs` |
 

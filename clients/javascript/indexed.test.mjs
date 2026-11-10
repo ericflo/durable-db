@@ -244,8 +244,10 @@ suite('indexed adapter failure and resource boundaries', () => {
         original = structuredClone(request);
         await client.commit(request);
         await noise(admin, 130);
-        // The real database now returns 409 for the exact evicted receipt.
-        return client.commit(request);
+        // Verify eviction instead of silently accepting a larger fixture window.
+        const expired = client.commit(request);
+        await expect(expired).rejects.toMatchObject({ status: 409 });
+        return expired;
       },
     };
     const storage = await openIndexedPiStorage(unreliable);

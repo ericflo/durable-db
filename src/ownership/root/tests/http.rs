@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    api::{self, App, Native},
+    api::{self, App, Native, RateLimits},
     auth::Auth,
     cache::Cache,
     storage::{Object, Storage, Version},
@@ -104,6 +104,7 @@ async fn fixture(
         root,
         live::Limits {
             checkpoint_frames: checkpoints,
+            receipt_window: 128,
             ..Default::default()
         },
         Arc::new(Cache::new(0, None).unwrap()),
@@ -114,7 +115,14 @@ async fn fixture(
     .unwrap();
     let auth = Auth::new(&"31".repeat(32)).unwrap();
     let token = auth.admin_token();
-    let app = App::new(Arc::new(Native::new(owner, capacity).unwrap()), auth, 64);
+    // Keep contract tests independent of the production default refill delay.
+    // Dedicated middleware tests cover the low-rate and eviction boundaries.
+    let app = App::with_rate_limits(
+        Arc::new(Native::new(owner, capacity).unwrap()),
+        auth,
+        64,
+        RateLimits::new(20_000, 20_000).unwrap(),
+    );
     (api::router(Arc::new(app)), provider, clock, faults, token)
 }
 fn request(method: &str, path: &str, token: &str, body: Value) -> Request<Body> {
@@ -546,4 +554,46 @@ async fn native_http_expired_owner_cannot_acknowledge_a_pending_upload() {
         .0,
         StatusCode::SERVICE_UNAVAILABLE
     );
+}
+
+#[tokio::test]
+#[ignore = "requires built clients/javascript and installed Node dependencies; run by Woodpecker client checks"]
+async fn native_http_javascript_contract() {
+    use std::io::Write;
+    let (router, _, _, _, token) = fixture(32, 64).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut credential = tempfile::NamedTempFile::new().unwrap();
+    writeln!(credential, "{token}").unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio::process::Command::new("node")
+            .current_dir("clients/javascript")
+            .args([
+                "node_modules/vitest/vitest.mjs",
+                "run",
+                "--pool=threads",
+                "--maxWorkers=1",
+                "--no-file-parallelism",
+                "--testTimeout=30000",
+            ])
+            .env("DURABLE_DB_TEST_URL", url)
+            .env("DURABLE_DB_TEST_TOKEN_FILE", credential.path())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    let output = output
+        .expect("native client suite deadline")
+        .expect("run Node client suite");
+    assert!(
+        output.status.success(),
+        "native client contract failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{}", String::from_utf8_lossy(&output.stdout));
 }

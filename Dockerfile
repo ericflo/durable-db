@@ -418,6 +418,9 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     && cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect \
     && cargo build --locked --release --target x86_64-unknown-linux-musl \
     && mkdir -p /out /test-tools && cp /cache/target/debug/durable-db /test-tools/durable-db \
+    && cargo test --locked --lib --no-run --message-format=json > /tmp/native-tests.json \
+    && node -e 'const fs = require("node:fs"); const artifacts = fs.readFileSync("/tmp/native-tests.json", "utf8").trim().split("\n").map(JSON.parse); const test = artifacts.find(a => a.executable && a.target.name === "durable_db" && a.profile.test); if (!test) throw Error("missing native test executable"); fs.copyFileSync(test.executable, "/test-tools/native-tests");' \
+    && strip --strip-debug /test-tools/native-tests \
     && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \
     && /out/durable-db --version && kache stats
 # Application-only edits must not invalidate the Rust checks/build layer.
@@ -429,6 +432,7 @@ COPY scripts/test-client.sh scripts/test-client.sh
 COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
 COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
 RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
+    && /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
     && mkdir -p /checks && touch /checks/javascript.passed
 
 FROM build AS assembled
