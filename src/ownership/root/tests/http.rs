@@ -773,6 +773,25 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(status, StatusCode::OK);
 }
 
+// Keep transport assertions compact while exercising the real TCP stack.
+async fn tcp_call(
+    client: &reqwest::Client,
+    method: &str,
+    url: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = client
+        .request(method.parse().unwrap(), url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap())
+}
+
 #[tokio::test]
 async fn native_http_database_budget_refuses_before_journal_and_preserves_neighbors() {
     let (router, _, _, faults, token) = fixture(8, 2).await;
@@ -783,105 +802,60 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let budget = format!("{base}/v1/databases/a/upload-budget");
     let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":4096,"attempts":1}});
     for replayed in [false, true] {
-        let result: Value = client
-            .post(&budget)
-            .bearer_auth(&token)
-            .json(&fund)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let (status, result) = tcp_call(&client, "POST", &budget, &token, fund.clone()).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(result["replayed"], replayed);
     }
     for name in ["a", "b"] {
-        let created: Value = client
-            .put(format!("{base}/v1/databases/{name}"))
-            .bearer_auth(&token)
-            .json(&json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":1000}}))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(created["info"]["revision"], 0, "{created}");
+        let (status, created) = tcp_call(
+            &client,
+            "PUT",
+            &format!("{base}/v1/databases/{name}"),
+            &token,
+            json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(created["info"]["revision"], 0);
     }
-    let credentials: Value = client
-        .post(format!("{base}/v1/tokens"))
-        .bearer_auth(&token)
-        .json(&json!({"database":"a","write":true,"ttl_seconds":3600}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, credentials) = tcp_call(
+        &client,
+        "POST",
+        &format!("{base}/v1/tokens"),
+        &token,
+        json!({"database":"a","write":true,"ttl_seconds":3600}),
+    )
+    .await;
     let writer = credentials["token"].as_str().unwrap();
-    for method in [reqwest::Method::GET, reqwest::Method::POST] {
+    for method in ["GET", "POST"] {
         assert_eq!(
-            client
-                .request(method, &budget)
-                .bearer_auth(writer)
-                .json(&fund)
-                .send()
+            tcp_call(&client, method, &budget, writer, fund.clone())
                 .await
-                .unwrap()
-                .status(),
+                .0,
             StatusCode::UNAUTHORIZED
         );
     }
     let a = format!("{base}/v1/databases/a/commit");
     assert_eq!(
-        client
-            .post(&a)
-            .bearer_auth(writer)
-            .json(&commit())
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        tcp_call(&client, "POST", &a, writer, commit()).await.0,
         StatusCode::OK
     );
-    let before: Value = client
-        .get(&budget)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (status, before) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         before["limits"]["attempts"], 1,
         "creation preserved the administrative ceiling"
     );
     let puts = faults.puts.load(Ordering::SeqCst);
-    let retry: Value = client
-        .post(&a)
-        .bearer_auth(writer)
-        .json(&commit())
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (status, retry) = tcp_call(&client, "POST", &a, writer, commit()).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(retry["replayed"], true);
     assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
     let mut next = commit();
     next["request_id"] = json!("next");
     next["expected_revision"] = json!(1);
     assert_eq!(
-        client
-            .post(&a)
-            .bearer_auth(writer)
-            .json(&next)
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        tcp_call(&client, "POST", &a, writer, next.clone()).await.0,
         StatusCode::PAYLOAD_TOO_LARGE
     );
     assert_eq!(
@@ -890,58 +864,33 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         "refusal must not upload a journal frame"
     );
     assert_eq!(
-        client
-            .post(format!("{base}/v1/databases/b/commit"))
-            .bearer_auth(&token)
-            .json(&commit())
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        tcp_call(
+            &client,
+            "POST",
+            &format!("{base}/v1/databases/b/commit"),
+            &token,
+            commit()
+        )
+        .await
+        .0,
         StatusCode::OK,
         "an exhausted neighbor must not leave a shared journal gap"
     );
-    let after: Value = client
-        .get(&budget)
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, after) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
     assert_eq!(
         before, after,
         "checkpointing and neighboring admission preserve the ledger"
     );
     let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":8192,"attempts":2}});
     assert_eq!(
-        client
-            .post(&budget)
-            .bearer_auth(&token)
-            .json(&refill)
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
     );
-    // Budget CAS may invalidate a checkpoint comparison. Resolve that bounded
-    // transient with the same transaction identity, as the public client does.
-    let mut status = StatusCode::SERVICE_UNAVAILABLE;
-    for _ in 0..3 {
-        status = client
-            .post(&a)
-            .bearer_auth(writer)
-            .json(&next)
-            .send()
-            .await
-            .unwrap()
-            .status();
-        if status != StatusCode::SERVICE_UNAVAILABLE {
-            break;
-        }
-    }
-    assert_eq!(status, StatusCode::OK);
+    // Ledger/status comparisons invalidate checkpoint observations. Maintenance
+    // revalidates and retries once without imposing a routine 503 on admission.
+    assert_eq!(
+        tcp_call(&client, "POST", &a, writer, next).await.0,
+        StatusCode::OK
+    );
     server.abort();
 }

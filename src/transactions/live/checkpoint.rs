@@ -95,33 +95,41 @@ impl<C: Clock> Owner<C> {
         }
         let _request = self.control.request.lock().await;
         let pending = self.maintenance.publishing.as_mut().unwrap();
-        if !pending.attempted {
-            let publication = self.control.lock()?.publish_checkpoint(Staged {
-                origin: pending.staged.origin,
-                reference: pending.staged.reference,
-            })?;
-            // A cancelled future may have sent its CAS. Retain this state until
-            // a fresh exact validation confirms the new or old reference.
-            pending.attempted = true;
-            let completed = publication.execute().await;
-            let _outcome = self.control.lock()?.finish(completed)?;
-        }
-        let published = self
-            .control
-            .lock()?
-            .recovery_record()
-            .ok()
-            .is_some_and(|r| r.checkpoint == Some(pending.staged.reference));
-        if !published {
-            let _outcome = self.control.renew_locked().await?;
-            let record = self.control.lock()?.recovery_record()?;
-            if record.checkpoint != Some(pending.staged.reference) {
-                ensure!(record == pending.staged.origin, "checkpoint origin changed");
-                // Exact validation changed the nonce: the old captured CAS
-                // cannot still apply. Reuse the staged bytes on the next call.
-                pending.attempted = false;
-                anyhow::bail!("checkpoint publication was not confirmed; resume maintenance")
+        for attempt in 0..2 {
+            if !pending.attempted {
+                let publication = self.control.lock()?.publish_checkpoint(Staged {
+                    origin: pending.staged.origin,
+                    reference: pending.staged.reference,
+                })?;
+                // A cancelled future may have sent its CAS. Retain this state until
+                // a fresh exact validation confirms the new or old reference.
+                pending.attempted = true;
+                let completed = publication.execute().await;
+                let _outcome = self.control.lock()?.finish(completed)?;
             }
+            let published = self
+                .control
+                .lock()?
+                .recovery_record()
+                .ok()
+                .is_some_and(|r| r.checkpoint == Some(pending.staged.reference));
+            if !published {
+                let _outcome = self.control.renew_locked().await?;
+                let record = self.control.lock()?.recovery_record()?;
+                if record.checkpoint != Some(pending.staged.reference) {
+                    ensure!(record == pending.staged.origin, "checkpoint origin changed");
+                    // Exact validation changed the nonce: the old captured CAS
+                    // cannot still apply. Reuse bytes and retry once in this call,
+                    // so routine budget changes need not fail the next admission.
+                    pending.attempted = false;
+                    ensure!(
+                        attempt == 0,
+                        "checkpoint publication was not confirmed; resume maintenance"
+                    );
+                    continue;
+                }
+            }
+            break;
         }
         self.control.check(self.identity)?;
         let pending = self.maintenance.publishing.take().unwrap();
