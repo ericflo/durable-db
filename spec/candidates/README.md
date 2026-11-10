@@ -8,6 +8,12 @@ This component starts with an empty register and unordered competing candidate i
 
 Run `scripts/check-candidate.sh RootAcquisition`. The two- and three-candidate positive instances each allow four invocations, with 89,685 and 697,663 distinct states. Removing comparisons or allowing retargeting must fail. Two reachability controls exercise competing captured predecessors and recovery after a timed-out claim actually applies. There is no symmetry reduction or guided constraint. This is a finite acquisition model, not a serving-permission, liveness or Rust-refinement proof. The root controller also relies on the separate `RootRequests`, `RootControl` and `GrantBounds` contracts; their composition with the implementation remains an obligation.
 
+## RootRegistration
+
+This extends acquisition with immutable journal registrations, durable predecessor links, uncertain uploads, positive-read resolution and explicit provider sends. Publication requires knowledge that the registration is durable. Recovery follows only the current register and persisted parent links; it does not use a process's captured observations or caches. Every winning journal remains discoverable, including former winners that might still acknowledge work under the separate permission contract.
+
+Run `scripts/check-candidate.sh RootRegistration`. Two and three candidates with three invocations check 23,865 and 196,213 distinct states. Early publication and dropping the predecessor link must fail; a third control witnesses a three-generation chain retaining two acknowledged-journal markers. There is no symmetry reduction or guided constraint. The markers deliberately overapproximate acknowledgement eligibility. This is a discoverability result, not a proof of data durability, prefix selection, serving permission, collection, physical admission, liveness or Rust refinement.
+
 Run a focused candidate and all its mandatory negative controls from the repository root:
 
 ```sh

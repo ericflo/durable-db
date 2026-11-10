@@ -1,0 +1,5 @@
+safe RootRegistration.cfg root-registration 768m -
+safe RootRegistrationThree.cfg root-registration-three 768m -
+unsafe RootRegistrationUnsafeEarly.cfg root-registration-early 512m RegistrationAvailable
+unsafe RootRegistrationUnsafeParent.cfg root-registration-parent 512m AcknowledgedDiscoverable
+unsafe RootRegistrationRecovered.cfg root-registration-recovered 768m NotThreeRegistrations

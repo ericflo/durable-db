@@ -63,16 +63,28 @@ impl Writer {
         partition: Uuid,
         limits: QueueLimits,
     ) -> anyhow::Result<Self> {
-        Ok(Self {
+        Ok(Self::with_log(storage, LogId::fresh(partition)?, limits))
+    }
+
+    pub(crate) fn for_root(
+        storage: Arc<dyn Storage>,
+        incarnation: Uuid,
+        limits: QueueLimits,
+    ) -> Self {
+        Self::with_log(storage, LogId::root(incarnation), limits)
+    }
+
+    fn with_log(storage: Arc<dyn Storage>, log: LogId, limits: QueueLimits) -> Self {
+        Self {
             storage,
             limits,
-            prefix: Prefix::empty(LogId::fresh(partition)?),
+            prefix: Prefix::empty(log),
             planned: 0,
             previous: [0; 32],
             pending: BTreeMap::new(),
             pending_bytes: 0,
             budget: Budget::new(limits.batches, limits.bytes),
-        })
+        }
     }
 
     pub fn log(&self) -> LogId {

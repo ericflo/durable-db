@@ -20,6 +20,15 @@ pub struct LogId {
 }
 
 impl LogId {
+    /// Reserved coordinator journal. Its epoch is the controller's fresh,
+    /// never-restored incarnation; only that controller may open a writer once.
+    pub(crate) fn root(incarnation: Uuid) -> Self {
+        Self {
+            partition: *Uuid::from_u128(1).as_bytes(),
+            epoch: *incarnation.as_bytes(),
+        }
+    }
+
     pub(super) fn fresh(partition: Uuid) -> anyhow::Result<Self> {
         ensure!(!partition.is_nil(), "journal partition must not be nil");
         Ok(Self {

@@ -65,7 +65,13 @@ impl Connection {
         clock: C,
         profile: crate::ownership::root::Profile,
     ) -> Result<crate::ownership::root::Root<C>, crate::ownership::root::Error> {
-        crate::ownership::root::Root::new(self.control(), &self.prefix, clock, profile)
+        crate::ownership::root::Root::new(
+            self.objects(),
+            self.control(),
+            &self.prefix,
+            clock,
+            profile,
+        )
     }
 
     /// Explicitly initialize or open the current publication engine.

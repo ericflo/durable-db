@@ -264,6 +264,8 @@ mod tests {
     use std::sync::Mutex;
 
     struct Wire {
+        registrations: BTreeMap<String, Bytes>,
+        registration_puts: usize,
         absent: bool,
         puts: usize,
         object_puts: usize,
@@ -279,6 +281,42 @@ mod tests {
             .header("etag", "\"object\"")
             .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
             .body(Body::from(state.object.clone()))
+            .unwrap()
+    }
+
+    async fn read_registration(
+        State(state): State<Arc<Mutex<Wire>>>,
+        axum::extract::Path(id): axum::extract::Path<String>,
+    ) -> Response {
+        let state = state.lock().unwrap();
+        match state.registrations.get(&id) {
+            Some(bytes) => Response::builder()
+                .header("etag", "\"registration\"")
+                .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
+                .body(Body::from(bytes.clone()))
+                .unwrap(),
+            None => Response::builder()
+                .status(404)
+                .body(Body::from("<Error><Code>NoSuchKey</Code></Error>"))
+                .unwrap(),
+        }
+    }
+
+    async fn write_registration(
+        State(state): State<Arc<Mutex<Wire>>>,
+        axum::extract::Path(id): axum::extract::Path<String>,
+        bytes: Bytes,
+    ) -> Response {
+        let mut state = state.lock().unwrap();
+        state.registration_puts += 1;
+        assert!(
+            state.registrations.insert(id, bytes).is_none(),
+            "registration PUT must not repeat"
+        );
+        Response::builder()
+            .status(state.acknowledgement)
+            .header("etag", "\"registration\"")
+            .body(Body::from("<Error><Code>InternalError</Code></Error>"))
             .unwrap()
     }
 
@@ -429,6 +467,29 @@ mod tests {
         assert_eq!(successor.permission().unwrap().unwrap().epoch, 2);
         assert!(old.permission().unwrap().is_none());
         assert_eq!(state.lock().unwrap().puts, 8);
+        assert_eq!(state.lock().unwrap().registration_puts, 2);
+        let mut registrations = successor.registrations().unwrap();
+        assert_eq!(
+            registrations
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .identity()
+                .epoch,
+            2
+        );
+        assert_eq!(
+            registrations
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .identity()
+                .epoch,
+            1
+        );
+        assert!(registrations.next().await.unwrap().is_none());
         task.abort();
         task.await.unwrap_err();
     }
@@ -454,6 +515,8 @@ mod tests {
             info: BTreeMap::new(),
         };
         let state = Arc::new(Mutex::new(Wire {
+            registrations: BTreeMap::new(),
+            registration_puts: 0,
             absent,
             puts: 0,
             object_puts: 0,
@@ -466,6 +529,10 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new()
             .route("/test/prefix/authority.json", get(read).put(write))
+            .route(
+                "/test/prefix/ownership/{id}",
+                get(read_registration).put(write_registration),
+            )
             .route(
                 "/test/prefix/journal/frame",
                 get(read_object).put(write_object),

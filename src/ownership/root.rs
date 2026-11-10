@@ -5,14 +5,20 @@
 //! This is not a serving engine: journal selection/recovery and data-view checks
 //! must still precede every permission check. There is no system clock adapter.
 mod metadata;
+mod registration;
 
 use super::timing::{self, Bounds, Clock, Deadline, Drain, Timeline};
 use crate::providers::control;
+use crate::{
+    journal::{QueueLimits, Writer},
+    storage::Storage,
+};
 use metadata::{Phase, Record};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 pub use control::Outcome;
+pub use registration::{Registration, Registrations};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,6 +36,8 @@ pub enum Error {
     NotReady,
     #[error("controller retired after an invalid confirmation")]
     Retired,
+    #[error("this incarnation's journal writer has already been opened")]
+    JournalOpened,
     #[error("control provider observation failed")]
     Provider(#[from] anyhow::Error),
     #[error(transparent)]
@@ -85,6 +93,7 @@ struct Pending {
 /// One non-reusable candidate incarnation. Only a fresh controller can target
 /// another predecessor. Retained observations/requests need caller-side bounds.
 pub struct Root<C> {
+    files: Arc<dyn Storage>,
     session: control::Session,
     timeline: Timeline<C>,
     profile: Profile,
@@ -96,10 +105,12 @@ pub struct Root<C> {
     drain: Option<Drain>,
     active: bool,
     retired: bool,
+    journal_opened: bool,
 }
 
 impl<C: Clock> Root<C> {
     pub(crate) fn new(
+        files: Arc<dyn Storage>,
         session: control::Session,
         prefix: &str,
         clock: C,
@@ -114,6 +125,7 @@ impl<C: Clock> Root<C> {
             return Err(Error::Incompatible);
         }
         Ok(Self {
+            files,
             session,
             timeline: Timeline::new(clock, profile.bounds)?,
             profile,
@@ -125,6 +137,7 @@ impl<C: Clock> Root<C> {
             drain: None,
             active: false,
             retired: false,
+            journal_opened: false,
         })
     }
 
@@ -162,7 +175,10 @@ impl<C: Clock> Root<C> {
             },
             phase: Phase::Fenced,
         };
-        let prepared = self.begin(observed.raw, record, Kind::Claim)?;
+        let registration = Registration::new(record.identity, observed.record.map(|r| r.identity));
+        let mut prepared = self.begin(observed.raw, record, Kind::Claim)?;
+        prepared.registration =
+            Some(registration.prepare(self.files.clone(), &self.prefix, self.profile));
         self.epoch = Some(epoch);
         Ok(prepared)
     }
@@ -221,7 +237,11 @@ impl<C: Clock> Root<C> {
             record,
             deadline,
         });
-        Ok(Prepared { id, raw })
+        Ok(Prepared {
+            id,
+            raw,
+            registration: None,
+        })
     }
 
     /// Abandon local interest; the remote operation may still apply. A previously
@@ -240,7 +260,13 @@ impl<C: Clock> Root<C> {
         {
             return Ok(Outcome::Ignored);
         }
-        let outcome = self.session.finish(completed.raw);
+        let outcome = match completed.raw {
+            Ok(raw) => self.session.finish(raw),
+            Err(error) => {
+                self.session.abandon();
+                Outcome::Uncertain(error)
+            }
+        };
         if matches!(outcome, Outcome::Ignored) {
             return Ok(outcome);
         }
@@ -307,6 +333,38 @@ impl<C: Clock> Root<C> {
         }
     }
 
+    /// Open this incarnation's writer exactly once, under a live interval.
+    /// Recovery and selected-prefix publication remain separate requirements
+    /// before accepting or acknowledging data through the returned journal.
+    pub fn take_journal(&mut self, limits: QueueLimits) -> Result<Writer, Error> {
+        if self.journal_opened {
+            return Err(Error::JournalOpened);
+        }
+        self.permission()?.ok_or(Error::NotReady)?;
+        self.journal_opened = true;
+        Ok(Writer::for_root(
+            self.files.clone(),
+            self.incarnation,
+            limits,
+        ))
+    }
+
+    /// Follow the durable registration chain for this candidate. Only a winning,
+    /// recovered controller with current permission may use it for serving.
+    pub fn registrations(&self) -> Result<Registrations, Error> {
+        self.available()?;
+        let epoch = self.epoch.ok_or(Error::NotOwner)?;
+        Ok(Registrations::new(
+            self.files.clone(),
+            self.prefix.clone(),
+            self.profile,
+            Identity {
+                epoch,
+                incarnation: self.incarnation,
+            },
+        ))
+    }
+
     fn drained(&mut self) -> Result<bool, Error> {
         match &self.drain {
             Some(drain) => Ok(self.timeline.drain_complete(drain)?),
@@ -335,21 +393,26 @@ impl<C: Clock> Root<C> {
 pub struct Prepared {
     id: Arc<()>,
     raw: control::Prepared,
+    registration: Option<registration::Prepared>,
 }
 
 impl Prepared {
     pub async fn execute(self) -> Completed {
-        Completed {
-            id: self.id,
-            raw: self.raw.execute().await,
+        let raw = async {
+            if let Some(registration) = self.registration {
+                registration.execute().await?;
+            }
+            Ok(self.raw.execute().await)
         }
+        .await;
+        Completed { id: self.id, raw }
     }
 }
 
 #[must_use = "finish or abandon this root request"]
 pub struct Completed {
     id: Arc<()>,
-    raw: control::Completed,
+    raw: anyhow::Result<control::Completed>,
 }
 
 #[cfg(test)]

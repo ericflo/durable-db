@@ -4,8 +4,8 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 candidate=${1:-}
 case "$candidate" in
-  OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage|PlacementRequests|PlacementTakeover|RootRequests|RootAcquisition) ;;
-  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage|PlacementRequests|PlacementTakeover|RootRequests|RootAcquisition' >&2; exit 2 ;;
+  OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage|PlacementRequests|PlacementTakeover|RootRequests|RootAcquisition|RootRegistration) ;;
+  *) echo 'Usage: scripts/check-candidate.sh OwnedWal|DelegatedGrant|RootControl|RootJournal|PartitionControl|PartitionJournal|LateControlCoverage|PlacementRequests|PlacementTakeover|RootRequests|RootAcquisition|RootRegistration' >&2; exit 2 ;;
 esac
 
 "$repo/scripts/check-model.sh" prepare
@@ -24,6 +24,9 @@ if [ "$candidate" = PartitionJournal ] || [ "$candidate" = LateControlCoverage ]
 fi
 if [ "$candidate" = LateControlCoverage ]; then
   cp "$repo/spec/candidates/PartitionJournal.tla" "$scratch/spec/"
+fi
+if [ "$candidate" = RootRegistration ]; then
+  cp "$repo/spec/candidates/RootAcquisition.tla" "$scratch/spec/"
 fi
 ln -s "$repo/.tools/tla2tools-1.7.4.jar" "$scratch/.tools/tla2tools-1.7.4.jar"
 while read -r kind config rest; do

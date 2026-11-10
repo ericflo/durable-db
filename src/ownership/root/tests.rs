@@ -1,4 +1,5 @@
 use super::*;
+mod registration;
 use crate::{
     providers::Connection,
     publication::{Authority, Bucket},
@@ -31,6 +32,7 @@ impl Clock for ManualClock {
 }
 
 struct Provider {
+    files: Arc<Remote>,
     history: Mutex<Vec<Bucket>>,
     stale: Mutex<Option<usize>>,
     calls: AtomicU64,
@@ -40,6 +42,9 @@ struct Provider {
 impl Provider {
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            files: Arc::new(
+                Remote::new(Arc::new(object_store::memory::InMemory::new()), "fixture").unwrap(),
+            ),
             history: Mutex::new(vec![Bucket {
                 revision: 0,
                 version: None,
@@ -52,13 +57,7 @@ impl Provider {
         })
     }
     fn connection(self: &Arc<Self>, prefix: &str) -> Connection {
-        Connection::new(
-            Arc::new(
-                Remote::new(Arc::new(object_store::memory::InMemory::new()), "fixture").unwrap(),
-            ),
-            self.clone(),
-            prefix,
-        )
+        Connection::new(self.files.clone(), self.clone(), prefix)
     }
     fn root(self: &Arc<Self>, clock: &ManualClock) -> Root<ManualClock> {
         self.connection("test")
@@ -414,7 +413,7 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
     let provider = Provider::new();
     let clock = ManualClock::default();
     let connection = provider.connection("test");
-    for format in ["3", "4", "5", "future"] {
+    for format in ["3", "4", "5", "owned-candidate-1", "future"] {
         provider.history.lock().unwrap()[0].info =
             BTreeMap::from([("durable-db-format".into(), format.into())]);
         let root = connection.root(clock.clone(), profile()).unwrap();
