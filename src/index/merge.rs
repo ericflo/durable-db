@@ -94,8 +94,9 @@ impl PartialEq for Head {
 impl Eq for Head {}
 
 /// One decoded block and one frontier row per source. Every source uses the
-/// same range and snapshot. I/O failures and cancellation can be retried on the
-/// same cursor; contradictory visible rows retire it permanently.
+/// same range and snapshot. Table/memory reads can retry interrupted I/O on
+/// this cursor; checkpoint-backed scans must restart after interruption.
+/// Contradictory visible rows retire any merge permanently.
 pub struct Cursor<'a> {
     sources: Vec<Source<'a>>,
     pending: VecDeque<usize>,
@@ -105,16 +106,37 @@ pub struct Cursor<'a> {
 enum Source<'a> {
     Table(table::Cursor),
     Memory(memory::Cursor<'a>),
+    Checkpoint(Box<super::recovery::checkpoint::Cursor>),
 }
 impl Source<'_> {
     async fn next(&mut self) -> anyhow::Result<Option<Entry>> {
         match self {
             Self::Table(cursor) => cursor.next().await,
             Self::Memory(cursor) => Ok(cursor.next()),
+            Self::Checkpoint(cursor) => cursor.next().await,
         }
     }
 }
 impl<'a> Cursor<'a> {
+    pub(crate) fn with_checkpoint(
+        base: Option<&super::recovery::checkpoint::DatabaseSnapshot>,
+        memory: Option<&'a memory::Memory>,
+        start: &[u8],
+        end: Option<&[u8]>,
+        revision: u64,
+    ) -> anyhow::Result<Self> {
+        let mut cursor = Self::create(&[], memory, start, end, revision)?;
+        if let Some(base) = base {
+            ensure!(revision >= base.revision(), "snapshot predates checkpoint");
+            let source = cursor.sources.len();
+            cursor.sources.push(Source::Checkpoint(Box::new(base.scan(
+                std::str::from_utf8(start)?,
+                end.map(std::str::from_utf8).transpose()?,
+            )?)));
+            cursor.pending.push_back(source);
+        }
+        Ok(cursor)
+    }
     pub fn new(
         tables: &[Table],
         start: &[u8],

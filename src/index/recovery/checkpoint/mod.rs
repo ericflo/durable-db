@@ -73,6 +73,7 @@ struct Wire {
     rows: u64,
     databases: u64,
 }
+#[derive(Clone, Copy)]
 pub(crate) struct Header {
     pub cut: Cut,
     tree: Option<(u8, Blob)>,
@@ -174,6 +175,7 @@ struct Builder {
     pending: Vec<Entry>,
     bytes: usize,
     rows: u64,
+    last: Option<Bytes>,
 }
 impl Builder {
     fn new(files: Arc<dyn Storage>) -> Self {
@@ -183,8 +185,10 @@ impl Builder {
             pending: Vec::new(),
             bytes: 0,
             rows: 0,
+            last: None,
         }
     }
+    #[cfg(test)]
     async fn push(
         &mut self,
         prefix: &[u8],
@@ -193,19 +197,20 @@ impl Builder {
         revision: u64,
         value: Option<Bytes>,
     ) -> anyhow::Result<()> {
-        let length = prefix.len() + 1 + suffix.len() + 14 + value.as_ref().map_or(0, Bytes::len);
+        self.push_row(checkpoint_row(prefix, kind, suffix, revision, value))
+            .await
+    }
+    async fn push_row(&mut self, row: Entry) -> anyhow::Result<()> {
+        ensure!(
+            self.last.as_ref().is_none_or(|last| last < &row.key),
+            "checkpoint rows are not strictly ordered"
+        );
+        let length = row.key.len() + 14 + row.value.as_ref().map_or(0, Bytes::len);
         if self.bytes + length > CHUNK_BYTES || self.pending.len() == CHUNK_ROWS {
             self.flush().await?;
         }
-        let mut key = Vec::with_capacity(prefix.len() + 1 + suffix.len());
-        key.extend_from_slice(prefix);
-        key.push(kind);
-        key.extend_from_slice(suffix);
-        self.pending.push(Entry {
-            key: key.into(),
-            revision,
-            value,
-        });
+        self.last = Some(row.key.clone());
+        self.pending.push(row);
         self.bytes += length;
         self.rows = self
             .rows
@@ -241,31 +246,59 @@ pub(super) async fn write(recovering: &Recovering) -> anyhow::Result<Staged> {
         .context("checkpoint requires a selected journal boundary")?;
     let files = recovering.replay.files();
     let mut builder = Builder::new(files.clone());
-    for ((name, generation), resident) in &recovering.projection.databases {
-        let state = resident
+    for resident in recovering.projection.databases.values() {
+        resident
             .state
             .as_ref()
-            .context("checkpoint metadata is incomplete")?;
-        state.checkpoint_complete()?;
-        let mut prefix = name.as_bytes().to_vec();
-        prefix.push(0);
-        prefix.extend_from_slice(generation.as_bytes());
-        let mut meta = state.revision().to_be_bytes().to_vec();
-        meta.extend_from_slice(&state.checkpoint_floor().to_be_bytes());
-        builder
-            .push(&prefix, 0, b"", state.revision(), Some(meta.into()))
-            .await?;
-        for (revision, request, fingerprint) in state.checkpoint_receipts() {
-            let value = Bytes::copy_from_slice(&fingerprint);
-            builder
-                .push(&prefix, 1, request.as_bytes(), revision, Some(value))
-                .await?;
+            .context("checkpoint metadata is incomplete")?
+            .checkpoint_complete()?;
+    }
+    let mut base = recovering
+        .projection
+        .base
+        .as_ref()
+        .map(Snapshot::rows)
+        .transpose()?;
+    let mut changes = changed_rows(&recovering.projection).peekable();
+    let mut prior = None;
+    let mut databases = 0u64;
+    loop {
+        while prior.is_none() {
+            let Some(cursor) = &mut base else { break };
+            let Some(row) = cursor.next().await? else {
+                break;
+            };
+            let (db, kind, _) = split_key(&row.key)?;
+            // Changed databases supply their complete current metadata/receipt
+            // window. Keeping old receipts here would resurrect expired IDs.
+            if kind < 2
+                && recovering
+                    .projection
+                    .databases
+                    .contains_key(&(db.name.to_owned(), db.generation))
+            {
+                continue;
+            }
+            prior = Some(row);
         }
-        for row in resident.memory.scan(b"", None, state.revision())? {
-            builder
-                .push(&prefix, 2, &row.key, row.revision, row.value)
-                .await?;
-        }
+        let row = match (changes.peek(), prior.as_ref()) {
+            (None, None) => break,
+            (Some(_), None) => changes.next().unwrap(),
+            (None, Some(_)) => prior.take().unwrap(),
+            (Some(new), Some(old)) => match new.key.cmp(&old.key) {
+                std::cmp::Ordering::Less => changes.next().unwrap(),
+                std::cmp::Ordering::Equal => {
+                    prior = None;
+                    changes.next().unwrap()
+                }
+                std::cmp::Ordering::Greater => prior.take().unwrap(),
+            },
+        };
+        let (_, kind, _) = split_key(&row.key)?;
+        databases = databases
+            .checked_add(u64::from(kind == 0))
+            .context("checkpoint database count overflow")?;
+        builder.push_row(row).await?;
     }
     builder.flush().await?;
     let tables = builder.tree.tables;
@@ -275,7 +308,7 @@ pub(super) async fn write(recovering: &Recovering) -> anyhow::Result<Staged> {
         tree,
         tables,
         rows: builder.rows,
-        databases: recovering.projection.usage.databases as u64,
+        databases,
     }
     .upload(files)
     .await?;
@@ -283,6 +316,63 @@ pub(super) async fn write(recovering: &Recovering) -> anyhow::Result<Staged> {
         origin: recovering.replay.origin(),
         reference,
     })
+}
+
+fn checkpoint_row(
+    prefix: &[u8],
+    kind: u8,
+    suffix: &[u8],
+    revision: u64,
+    value: Option<Bytes>,
+) -> Entry {
+    let mut key = Vec::with_capacity(prefix.len() + 1 + suffix.len());
+    key.extend_from_slice(prefix);
+    key.push(kind);
+    key.extend_from_slice(suffix);
+    Entry {
+        key: key.into(),
+        revision,
+        value,
+    }
+}
+fn changed_rows(projection: &Projection) -> impl Iterator<Item = Entry> + '_ {
+    projection
+        .databases
+        .iter()
+        .flat_map(|((name, generation), resident)| {
+            let state = resident.state.as_ref().expect("checkpoint state validated");
+            let mut prefix = name.as_bytes().to_vec();
+            prefix.push(0);
+            prefix.extend_from_slice(generation.as_bytes());
+            let mut meta = state.revision().to_be_bytes().to_vec();
+            meta.extend_from_slice(&state.checkpoint_floor().to_be_bytes());
+            let metadata = std::iter::once(checkpoint_row(
+                &prefix,
+                0,
+                b"",
+                state.revision(),
+                Some(meta.into()),
+            ));
+            let receipts_prefix = prefix.clone();
+            let receipts =
+                state
+                    .checkpoint_receipts()
+                    .map(move |(revision, request, fingerprint)| {
+                        checkpoint_row(
+                            &receipts_prefix,
+                            1,
+                            request.as_bytes(),
+                            revision,
+                            Some(Bytes::copy_from_slice(&fingerprint)),
+                        )
+                    });
+            let values = resident
+                .memory
+                .scan(b"", None, state.revision())
+                .expect("valid complete range")
+                .map(move |row| checkpoint_row(&prefix, 2, &row.key, row.revision, row.value));
+            metadata.chain(receipts).chain(values)
+        })
 }
 
 pub(super) async fn load(
@@ -362,18 +452,8 @@ fn load_row(
     current: &mut Option<(String, Uuid)>,
     row: Entry,
 ) -> anyhow::Result<()> {
-    let zero = row
-        .key
-        .iter()
-        .position(|b| *b == 0)
-        .context("invalid checkpoint key")?;
-    ensure!(row.key.len() >= zero + 18, "truncated checkpoint key");
-    let name = std::str::from_utf8(&row.key[..zero])?;
-    let generation = Uuid::from_slice(&row.key[zero + 1..zero + 17])?;
-    let kind = row.key[zero + 17];
-    let suffix = &row.key[zero + 18..];
-    let db = Database { name, generation };
-    super::validate_database(db)?;
+    let (db, kind, suffix) = split_key(&row.key)?;
+    let Database { name, generation } = db;
     let key = (name.to_owned(), generation);
     if kind == 0 {
         finish_database(projection, current.as_ref())?;
@@ -401,6 +481,7 @@ fn load_row(
                 receipts: 0,
                 receipt_bytes: 0,
                 floor: revision,
+                base: None,
             },
         );
         projection.usage.databases += 1;
@@ -457,6 +538,21 @@ fn load_row(
         _ => anyhow::bail!("invalid checkpoint row kind"),
     }
     Ok(())
+}
+fn split_key(key: &[u8]) -> anyhow::Result<(Database<'_>, u8, &[u8])> {
+    let zero = key
+        .iter()
+        .position(|b| *b == 0)
+        .context("invalid checkpoint key")?;
+    ensure!(key.len() >= zero + 18, "truncated checkpoint key");
+    let database = Database {
+        name: std::str::from_utf8(&key[..zero])?,
+        generation: Uuid::from_slice(&key[zero + 1..zero + 17])?,
+    };
+    super::validate_database(database)?;
+    let kind = key[zero + 17];
+    ensure!(kind <= 2, "invalid checkpoint row kind");
+    Ok((database, kind, &key[zero + 18..]))
 }
 fn metadata(row: &Entry, database: Database<'_>) -> anyhow::Result<State> {
     let bytes = row.value.as_ref().context("checkpoint metadata deleted")?;

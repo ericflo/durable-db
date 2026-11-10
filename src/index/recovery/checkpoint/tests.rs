@@ -133,6 +133,36 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
     for bad in 1..=4 {
         let files = Files::new(0);
         let reference = image(files.clone(), bad).await.unwrap();
+        let snapshot = Snapshot::open(
+            files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            reference,
+        )
+        .await
+        .unwrap();
+        let database = snapshot
+            .database(Database {
+                name: "app",
+                generation: Uuid::from_u128(7),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        if bad <= 2 {
+            assert!(database.restore_state(2, 1000).await.is_err());
+        } else if bad == 3 {
+            assert!(database.get("x").await.is_err());
+        } else {
+            let mut rows = snapshot.rows().unwrap();
+            loop {
+                match rows.next().await {
+                    Ok(Some(_)) => (),
+                    Ok(None) => panic!("incomplete image accepted"),
+                    Err(_) => break,
+                }
+            }
+            assert!(rows.next().await.is_err());
+        }
         let header = Header::load(files.clone(), reference).await.unwrap();
         assert!(load(files, header, Limits::default()).await.is_err());
     }
@@ -209,12 +239,13 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
             name: "app",
             generation: Uuid::from_u128(7),
         })
+        .await
         .unwrap()
         .unwrap();
-    assert!(view.get(b"x", 1).is_err());
-    assert!(view.get(b"x", 2).unwrap().unwrap().value.is_none());
+    assert!(view.get(b"x", 1).await.is_err());
+    assert!(view.get(b"x", 2).await.unwrap().unwrap().value.is_none());
     assert_eq!(
-        view.state().resolve("first", [1; 32], 0).unwrap(),
+        view.resolve("first", [1; 32], 0).await.unwrap(),
         crate::transactions::recovery::Resolution::Committed(1)
     );
 }
@@ -305,12 +336,13 @@ async fn local_checkpoint_reopens_without_process_memory_or_cache() {
             name: "app",
             generation: Uuid::from_u128(7),
         })
+        .await
         .unwrap()
         .unwrap();
-    assert_eq!(view.state().revision(), 2);
-    assert!(view.get(b"x", 2).unwrap().unwrap().value.is_none());
+    assert_eq!(view.revision(), 2);
+    assert!(view.get(b"x", 2).await.unwrap().unwrap().value.is_none());
     assert_eq!(
-        view.state().resolve("second", [2; 32], 1).unwrap(),
+        view.resolve("second", [2; 32], 1).await.unwrap(),
         crate::transactions::recovery::Resolution::Committed(2)
     );
 }

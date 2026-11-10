@@ -123,44 +123,44 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
     assert_eq!(view.usage().databases, 2);
     assert_eq!(view.usage().versions, 5);
     assert_eq!(view.usage().receipts, 4);
-    let a = view.view(database("a")).unwrap().unwrap();
-    let b = view.view(database("b")).unwrap().unwrap();
-    assert!(a.get(b"x", 2).unwrap().unwrap().value.is_none());
+    let a = view.view(database("a")).await.unwrap().unwrap();
+    let b = view.view(database("b")).await.unwrap().unwrap();
+    assert!(a.get(b"x", 2).await.unwrap().unwrap().value.is_none());
     assert_eq!(
-        a.get(b"x", 1).unwrap().unwrap().value.as_deref(),
+        a.get(b"x", 1).await.unwrap().unwrap().value.as_deref(),
         Some(b"before".as_slice())
     );
     assert_eq!(
-        a.get(b"y", 2).unwrap().unwrap().value.as_deref(),
+        a.get(b"y", 2).await.unwrap().unwrap().value.as_deref(),
         Some(b"after".as_slice())
     );
     assert_eq!(
-        b.get(b"x", 2).unwrap().unwrap().value.as_deref(),
+        b.get(b"x", 2).await.unwrap().unwrap().value.as_deref(),
         Some(b"".as_slice())
     );
-    assert!(a.get(b"x", 3).is_err());
+    assert!(a.get(b"x", 3).await.is_err());
     assert!(a.scan(b"", None, 3).is_err());
     for name in ["a", "b"] {
-        let database = view.view(database(name)).unwrap().unwrap();
-        let state = database.state();
+        let database = view.view(database(name)).await.unwrap().unwrap();
+        let state = &database;
         assert_eq!(state.revision(), 2);
         assert_eq!(
-            state.resolve("same-id", [1; 32], 0).unwrap(),
+            state.resolve("same-id", [1; 32], 0).await.unwrap(),
             Resolution::Committed(1)
         );
         assert_eq!(
-            state.resolve("next", [2; 32], 1).unwrap(),
+            state.resolve("next", [2; 32], 1).await.unwrap(),
             Resolution::Committed(2)
         );
         assert_eq!(
-            state.resolve("late", [2; 32], 1).unwrap(),
+            state.resolve("late", [2; 32], 1).await.unwrap(),
             Resolution::Missing
         );
     }
     // Flush the actual selected-journal projection through the native table
     // codec and read it after dropping the recovered memory view. This is a
     // value flush, not checkpoint publication or permission to retire history.
-    let reference = table::build(provider.files.clone(), a.rows())
+    let reference = table::build(provider.files.clone(), a.recent_rows())
         .await
         .unwrap();
     drop(view);
@@ -450,17 +450,17 @@ async fn native_recovery_bounds_are_aggregate_and_do_not_alias_database_generati
     assert_eq!(recovered.usage().receipts, 2);
     assert_eq!(recovered.usage().receipt_bytes, 90);
     for (db, expected) in [(original, b"old!"), (recreated, b"new!")] {
-        let view = recovered.view(db).unwrap().unwrap();
+        let view = recovered.view(db).await.unwrap().unwrap();
         assert_eq!(
-            view.get(b"x", 1).unwrap().unwrap().value.as_deref(),
+            view.get(b"x", 1).await.unwrap().unwrap().value.as_deref(),
             Some(expected.as_slice())
         );
         assert_eq!(
-            view.state().resolve("first", [1; 32], 0).unwrap(),
+            view.resolve("first", [1; 32], 0).await.unwrap(),
             Resolution::Committed(1)
         );
     }
-    assert!(recovered.view(database("missing")).unwrap().is_none());
+    assert!(recovered.view(database("missing")).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -503,16 +503,16 @@ async fn native_recovery_receipt_eviction_releases_only_receipt_capacity() {
     assert_eq!(recovered.usage().value_bytes, 6);
     assert_eq!(recovered.usage().receipts, 1);
     assert_eq!(recovered.usage().receipt_bytes, 43);
-    let view = recovered.view(database("a")).unwrap().unwrap();
+    let view = recovered.view(database("a")).await.unwrap().unwrap();
     assert_eq!(
-        view.state().resolve("r-1", [1; 32], 0).unwrap(),
+        view.resolve("r-1", [1; 32], 0).await.unwrap(),
         Resolution::Expired
     );
     assert_eq!(
-        view.state().resolve("r-3", [3; 32], 0).unwrap(),
+        view.resolve("r-3", [3; 32], 0).await.unwrap(),
         Resolution::Committed(3)
     );
-    assert_eq!(view.get(b"x", 1).unwrap().unwrap().revision, 1);
+    assert_eq!(view.get(b"x", 1).await.unwrap().unwrap().revision, 1);
 }
 
 #[tokio::test]
@@ -560,14 +560,15 @@ async fn native_selected_recovery_handles_ten_thousand_database_generations() {
                 name: &format!("app-{n:05}"),
                 generation: Uuid::from_u128(n as u128 + 1),
             })
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            view.state().resolve("first", [1; 32], 0).unwrap(),
+            view.resolve("first", [1; 32], 0).await.unwrap(),
             Resolution::Committed(1)
         );
-        let row = view.get(b"x", 1).unwrap().unwrap();
+        let row = view.get(b"x", 1).await.unwrap().unwrap();
         assert_eq!(row.value.as_deref(), Some(b"v".as_slice()));
-        assert!(view.get(b"x", 0).unwrap().is_none());
+        assert!(view.get(b"x", 0).await.unwrap().is_none());
     }
 }

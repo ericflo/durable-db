@@ -3,8 +3,10 @@
 //! or makes partially recovered rows/receipts available to an external reader.
 use super::{
     memory::{self, Memory},
-    table,
+    merge, table,
 };
+use crate::cache::Cache;
+use crate::transactions::recovery::Resolution;
 use crate::transactions::{
     record::{Commit, Database},
     recovery::{State, Target},
@@ -12,11 +14,13 @@ use crate::transactions::{
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use uuid::Uuid;
 pub mod checkpoint;
 
 /// Aggregate bounds for one private recovery target, not bucket/database-size
-/// limits. The current checkpoint state and subsequent versions must fit them.
+/// limits. Only databases touched by the suffix and their receipts/versions
+/// become resident; checkpoint values remain behind the bounded shared cache.
 #[derive(Clone, Copy)]
 pub struct Limits {
     pub databases: usize,
@@ -50,8 +54,10 @@ struct Resident {
     receipts: usize,
     receipt_bytes: usize,
     floor: u64,
+    base: Option<checkpoint::DatabaseSnapshot>,
 }
 pub struct Projection {
+    base: Option<checkpoint::Snapshot>,
     databases: BTreeMap<(String, Uuid), Resident>,
     limits: Limits,
     usage: Usage,
@@ -67,6 +73,7 @@ impl Projection {
             "invalid native recovery limits"
         );
         Ok(Self {
+            base: None,
             databases: BTreeMap::new(),
             limits,
             usage: Usage::default(),
@@ -75,59 +82,110 @@ impl Projection {
     pub fn usage(&self) -> Usage {
         self.usage
     }
-    pub fn view(&self, database: Database<'_>) -> anyhow::Result<Option<View<'_>>> {
+    pub async fn view(&self, database: Database<'_>) -> anyhow::Result<Option<View<'_>>> {
         validate_database(database)?;
-        let Some(resident) = self
+        let resident = self
             .databases
-            .get(&(database.name.into(), database.generation))
-        else {
-            return Ok(None);
+            .get(&(database.name.into(), database.generation));
+        let base = if let Some(resident) = resident {
+            resident.base.clone()
+        } else if let Some(base) = &self.base {
+            base.database(database).await?
+        } else {
+            None
         };
+        if resident.is_none() && base.is_none() {
+            return Ok(None);
+        }
+        let state = resident
+            .map(|r| {
+                r.state
+                    .as_ref()
+                    .context("native recovery state is being advanced")
+            })
+            .transpose()?;
         Ok(Some(View {
-            floor: resident.floor,
-            memory: &resident.memory,
-            state: resident
-                .state
-                .as_ref()
-                .context("native recovery state is being advanced")?,
+            floor: resident.map_or_else(|| base.as_ref().unwrap().revision(), |r| r.floor),
+            memory: resident.map(|r| &r.memory),
+            state,
+            base,
         }))
     }
 }
+/// A coherent immutable checkpoint plus the selected suffix at one generation.
+/// The projection is private until recovery completes; authority is external.
 pub struct View<'a> {
-    memory: &'a Memory,
-    state: &'a State,
+    memory: Option<&'a Memory>,
+    state: Option<&'a State>,
+    base: Option<checkpoint::DatabaseSnapshot>,
     floor: u64,
 }
-impl View<'_> {
-    pub fn state(&self) -> &State {
+impl<'a> View<'a> {
+    /// Only resident suffix versions, for a future incremental flush. These
+    /// rows exclude checkpoint values and are not a complete database image.
+    pub fn recent_rows(&self) -> impl Iterator<Item = table::Row<'_>> {
+        self.memory.into_iter().flat_map(Memory::rows)
+    }
+    pub fn revision(&self) -> u64 {
         self.state
+            .map_or_else(|| self.base.as_ref().unwrap().revision(), State::revision)
     }
     pub fn snapshot_floor(&self) -> u64 {
         self.floor
     }
-    pub fn get(&self, key: &[u8], revision: u64) -> anyhow::Result<Option<table::Entry>> {
+    pub async fn resolve(
+        &self,
+        request: &str,
+        fingerprint: [u8; 32],
+        snapshot: u64,
+    ) -> anyhow::Result<Resolution> {
+        if let Some(state) = self.state {
+            state.resolve(request, fingerprint, snapshot)
+        } else {
+            self.base
+                .as_ref()
+                .unwrap()
+                .resolve(request, fingerprint, snapshot)
+                .await
+        }
+    }
+    fn check_revision(&self, revision: u64) -> anyhow::Result<()> {
         ensure!(
-            (self.floor..=self.state.revision()).contains(&revision),
+            (self.floor..=self.revision()).contains(&revision),
             "snapshot is outside recovered history"
         );
-        self.memory.get(key, revision)
+        Ok(())
+    }
+    pub async fn get(&self, key: &[u8], revision: u64) -> anyhow::Result<Option<table::Entry>> {
+        self.check_revision(revision)?;
+        ensure!(
+            (1..=1024).contains(&key.len()),
+            "invalid database lookup key"
+        );
+        let text = std::str::from_utf8(key)?;
+        // All memory rows are newer than the checkpoint. A visible suffix
+        // deletion is a complete answer and must not fall through to the base.
+        if let Some(memory) = self.memory
+            && let Some(row) = memory.get(key, revision)?
+        {
+            return Ok(Some(row));
+        }
+        match &self.base {
+            Some(base) => base.get(text).await,
+            None => {
+                super::validate_key(key)?;
+                Ok(None)
+            }
+        }
     }
     pub fn scan(
         &self,
         start: &[u8],
         end: Option<&[u8]>,
         revision: u64,
-    ) -> anyhow::Result<memory::Cursor<'_>> {
-        ensure!(
-            (self.floor..=self.state.revision()).contains(&revision),
-            "snapshot is outside recovered history"
-        );
-        self.memory.scan(start, end, revision)
-    }
-    /// Input for a table flush, not a checkpoint: metadata, exact replay cut and
-    /// references still require durable publication before history is retired.
-    pub fn rows(&self) -> impl Iterator<Item = table::Row<'_>> {
-        self.memory.rows()
+    ) -> anyhow::Result<merge::Cursor<'a>> {
+        self.check_revision(revision)?;
+        merge::Cursor::with_checkpoint(self.base.as_ref(), self.memory, start, end, revision)
     }
 }
 #[async_trait]
@@ -145,21 +203,41 @@ impl Target for Projection {
             self.usage.databases < self.limits.databases,
             "native recovery database capacity exhausted"
         );
-        let state = State::empty(database)?;
+        let base = match &self.base {
+            Some(base) => base.database(database).await?,
+            None => None,
+        };
+        let state = if let Some(base) = &base {
+            base.restore_state(
+                self.limits.receipts - self.usage.receipts,
+                self.limits.receipt_bytes - self.usage.receipt_bytes,
+            )
+            .await?
+        } else {
+            State::empty(database)?
+        };
+        let (receipts, receipt_bytes) = state.receipt_usage();
+        let floor = state.revision();
         self.databases.insert(
             key,
             Resident {
-                memory: Memory::new(memory::Limits {
-                    versions: self.limits.versions,
-                    bytes: self.limits.value_bytes,
-                })?,
+                memory: Memory::from_checkpoint(
+                    floor,
+                    memory::Limits {
+                        versions: self.limits.versions,
+                        bytes: self.limits.value_bytes,
+                    },
+                )?,
                 state: None,
-                receipts: 0,
-                receipt_bytes: 0,
-                floor: 0,
+                receipts,
+                receipt_bytes,
+                floor,
+                base,
             },
         );
         self.usage.databases += 1;
+        self.usage.receipts += receipts;
+        self.usage.receipt_bytes += receipt_bytes;
         Ok(state)
     }
     async fn apply(&mut self, commit: &Commit<'_>, state: State) -> anyhow::Result<()> {
@@ -232,20 +310,27 @@ pub struct Recovering {
 }
 impl Recovering {
     pub async fn begin(
+        replay: crate::ownership::root::Replay,
+        limits: Limits,
+    ) -> anyhow::Result<Self> {
+        Self::begin_cached(replay, limits, Arc::new(Cache::new(0, None)?)).await
+    }
+    /// The controller supplies one bounded cache shared by recovery/read views.
+    pub async fn begin_cached(
         mut replay: crate::ownership::root::Replay,
         limits: Limits,
+        cache: Arc<Cache>,
     ) -> anyhow::Result<Self> {
         ensure!(
             replay.at_start(),
             "native recovery requires an unread catalog"
         );
-        let projection = if let Some(reference) = replay.origin().checkpoint {
-            let header = checkpoint::Header::load(replay.files(), reference).await?;
-            replay.resume(header.cut).await?;
-            checkpoint::load(replay.files(), header, limits).await?
-        } else {
-            Projection::new(limits)?
-        };
+        let mut projection = Projection::new(limits)?;
+        if let Some(reference) = replay.origin().checkpoint {
+            let base = checkpoint::Snapshot::open(replay.files(), cache, reference).await?;
+            replay.resume(base.cut()).await?;
+            projection.base = Some(base);
+        }
         Ok(Self { replay, projection })
     }
     pub async fn advance(mut self, frames: usize) -> anyhow::Result<Self> {

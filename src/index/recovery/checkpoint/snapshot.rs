@@ -23,6 +23,41 @@ struct Inner {
 #[derive(Clone)]
 pub struct Snapshot(Arc<Inner>);
 impl Snapshot {
+    pub(crate) fn cut(&self) -> crate::ownership::root::Cut {
+        self.0.header.cut
+    }
+    pub(crate) fn rows(&self) -> anyhow::Result<RawCursor> {
+        self.scan_raw(Bytes::new(), None)
+    }
+    /// Explicit complete-image audit. This restores a private projection under
+    /// the supplied budgets, unlike normal lazy recovery and readback.
+    pub async fn verify(
+        &self,
+        limits: super::super::Limits,
+    ) -> anyhow::Result<super::super::Usage> {
+        Ok(super::load(self.0.files.clone(), self.0.header, limits)
+            .await?
+            .usage())
+    }
+    fn scan_raw(&self, start: Bytes, end: Option<Bytes>) -> anyhow::Result<RawCursor> {
+        Ok(RawCursor {
+            snapshot: self.clone(),
+            manifest: self.seek(start.clone())?,
+            full: start.is_empty() && end.is_none(),
+            start,
+            end,
+            current: None,
+            table_end: None,
+            previous: None,
+            done: false,
+            failed: false,
+            tables: 0,
+            rows: 0,
+            declared_rows: 0,
+            databases: 0,
+        })
+    }
+
     pub async fn open(
         files: Arc<dyn Storage>,
         cache: Arc<Cache>,
@@ -173,15 +208,47 @@ impl DatabaseSnapshot {
         );
         Ok(Cursor {
             database: self.clone(),
-            manifest: self.snapshot.seek(start.clone())?,
-            start,
-            end,
-            current: None,
-            table_end: None,
-            previous: None,
-            done: false,
-            failed: false,
+            raw: self.snapshot.scan_raw(start, Some(end))?,
         })
+    }
+
+    pub(crate) async fn restore_state(
+        &self,
+        receipts: usize,
+        bytes: usize,
+    ) -> anyhow::Result<crate::transactions::recovery::State> {
+        let count = self.revision - self.receipt_floor;
+        ensure!(
+            count <= receipts as u64 && count as u128 * 41 <= bytes as u128,
+            "checkpoint receipt capacity exhausted"
+        );
+        let name_end = self.prefix.len() - 17;
+        let database = Database {
+            name: std::str::from_utf8(&self.prefix[..name_end])?,
+            generation: uuid::Uuid::from_slice(&self.prefix[name_end + 1..])?,
+        };
+        let mut state = crate::transactions::recovery::State::from_checkpoint(
+            database,
+            self.revision,
+            self.receipt_floor,
+        )?;
+        let mut cursor = self.snapshot.scan_raw(
+            composite(&self.prefix, 1, b""),
+            Some(composite(&self.prefix, 2, b"")),
+        )?;
+        let mut used = 0usize;
+        while let Some(row) = cursor.next().await? {
+            let request = std::str::from_utf8(&row.key[self.prefix.len() + 1..])?;
+            let value = row.value.context("checkpoint receipt deleted")?;
+            ensure!(
+                value.len() == 32 && request.len() + 40 <= bytes - used,
+                "checkpoint receipt capacity or length invalid"
+            );
+            used += request.len() + 40;
+            state.load_receipt(row.revision, request, value.as_ref().try_into()?)?;
+        }
+        state.seal_checkpoint()?;
+        Ok(state)
     }
     fn value(&self, mut row: Entry) -> anyhow::Result<Entry> {
         ensure!(
@@ -214,16 +281,40 @@ fn composite(prefix: &[u8], kind: u8, suffix: &[u8]) -> Bytes {
 /// cannot skip an interrupted manifest node/table and report false absence.
 pub struct Cursor {
     database: DatabaseSnapshot,
+    raw: RawCursor,
+}
+impl Cursor {
+    pub async fn next(&mut self) -> anyhow::Result<Option<Entry>> {
+        let result = self
+            .raw
+            .next()
+            .await?
+            .map(|row| self.database.value(row))
+            .transpose();
+        if result.is_err() {
+            self.raw.failed = true;
+        }
+        result
+    }
+}
+
+pub(crate) struct RawCursor {
+    snapshot: Snapshot,
     manifest: tree::Reader,
+    full: bool,
+    tables: u64,
+    rows: u64,
+    declared_rows: u64,
+    databases: u64,
     start: Bytes,
-    end: Bytes,
+    end: Option<Bytes>,
     current: Option<table::Cursor>,
     table_end: Option<Bytes>,
     previous: Option<Bytes>,
     done: bool,
     failed: bool,
 }
-impl Cursor {
+impl RawCursor {
     pub async fn next(&mut self) -> anyhow::Result<Option<Entry>> {
         ensure!(!self.failed, "checkpoint scan retired");
         self.failed = true;
@@ -240,13 +331,25 @@ impl Cursor {
                         "unordered checkpoint scan"
                     );
                     self.previous = Some(row.key.clone());
-                    return Ok(Some(self.database.value(row)?));
+                    self.rows = self
+                        .rows
+                        .checked_add(1)
+                        .context("checkpoint row count overflow")?;
+                    if self.full {
+                        let (_, kind, _) = super::split_key(&row.key)?;
+                        self.databases += u64::from(kind == 0);
+                        ensure!(
+                            self.rows <= self.snapshot.0.header.rows,
+                            "extra checkpoint rows"
+                        );
+                    }
+                    return Ok(Some(row));
                 }
                 self.current = None;
                 if self
-                    .table_end
+                    .end
                     .as_ref()
-                    .is_some_and(|last| last >= &self.end)
+                    .is_some_and(|end| self.table_end.as_ref().is_some_and(|last| last >= end))
                 {
                     self.done = true;
                     break;
@@ -256,19 +359,48 @@ impl Cursor {
                 self.done = true;
                 break;
             };
-            let table = self.database.snapshot.table(routed).await?;
+            let table = self.snapshot.table(routed).await?;
+            self.tables = self
+                .tables
+                .checked_add(1)
+                .context("checkpoint table count overflow")?;
+            self.declared_rows = self
+                .declared_rows
+                .checked_add(table.row_count())
+                .context("checkpoint row count overflow")?;
+            if self.full {
+                ensure!(
+                    self.tables <= self.snapshot.0.header.tables
+                        && self.declared_rows <= self.snapshot.0.header.rows,
+                    "extra checkpoint tables or rows"
+                );
+            }
             ensure!(
                 self.table_end
                     .as_ref()
                     .is_none_or(|last| last.as_ref() < table.first_key()),
                 "overlapping checkpoint tables"
             );
-            if table.first_key() >= self.end.as_ref() {
+            if self
+                .end
+                .as_ref()
+                .is_some_and(|end| table.first_key() >= end.as_ref())
+            {
                 self.done = true;
                 break;
             }
             self.table_end = Some(Bytes::copy_from_slice(table.last_key()));
-            self.current = Some(table.scan(&self.start, Some(&self.end), u64::MAX)?);
+            self.current = Some(table.scan(&self.start, self.end.as_deref(), u64::MAX)?);
+        }
+        if self.full {
+            let header = &self.snapshot.0.header;
+            ensure!(
+                self.tables == header.tables
+                    && self.rows == header.rows
+                    && self.rows == self.declared_rows
+                    && self.databases == header.databases,
+                "checkpoint image counts mismatch"
+            );
         }
         Ok(None)
     }

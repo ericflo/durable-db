@@ -252,6 +252,37 @@ async fn receipt_resolution_checks_identity_and_retention_before_snapshot_age() 
 }
 
 #[tokio::test]
+async fn touched_database_receipts_are_bounded_and_restart_cleanly_after_interruption() {
+    let files = Files::new();
+    let reference = fixture(files.clone()).await;
+    let view = open(files.clone(), reference, 0).await;
+    for (count, bytes) in [(1, 1000), (2, 85)] {
+        assert!(view.restore_state(count, bytes).await.is_err());
+    }
+    files.fail.store(true, Ordering::SeqCst);
+    assert!(view.restore_state(2, 86).await.is_err());
+    files.pause.store(true, Ordering::SeqCst);
+    {
+        let restoring = view.restore_state(2, 86);
+        tokio::pin!(restoring);
+        tokio::select! {
+            _ = &mut restoring => panic!("restoration must remain pending"),
+            permit = files.entered.acquire() => { permit.unwrap().forget(); }
+        }
+    }
+    let state = view.restore_state(2, 86).await.unwrap();
+    assert_eq!(state.receipt_usage(), (2, 86));
+    assert_eq!(
+        state.resolve("r-2", [2; 32], 0).unwrap(),
+        Resolution::Committed(2)
+    );
+    assert_eq!(
+        state.resolve("r-1", [1; 32], 0).unwrap(),
+        Resolution::Expired
+    );
+}
+
+#[tokio::test]
 async fn cold_work_tracks_tree_height_and_warm_reads_need_no_provider_calls() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;

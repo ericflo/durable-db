@@ -43,6 +43,300 @@ async fn finish(mut recovery: Recovering) -> crate::index::recovery::Projection 
 }
 
 #[tokio::test]
+async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generations_and_receipts() {
+    use crate::{cache::Cache, transactions::record::Commit};
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut first = active(&provider, &clock).await;
+    let mut writer = first.take_journal(QueueLimits::default()).unwrap();
+    let neighbor = Database {
+        name: "app",
+        generation: Uuid::from_u128(78),
+    };
+    let new = Database {
+        name: "later",
+        generation: Uuid::from_u128(79),
+    };
+    let keys: Vec<_> = (0..64).map(|n| format!("bulk/{n:03}")).collect();
+    let large = vec![42; 4096];
+    let mut mutations: Vec<_> = keys
+        .iter()
+        .map(|key| Mutation {
+            key,
+            value: Some(large.as_slice()),
+        })
+        .collect();
+    mutations.extend([
+        Mutation {
+            key: "a",
+            value: Some(b"old-a"),
+        },
+        Mutation {
+            key: "b",
+            value: Some(b"old-b"),
+        },
+    ]);
+    mutations.sort_by_key(|m| m.key);
+    let frames = [
+        vec![
+            record(db(), 1, "r-1", &mutations),
+            record(
+                neighbor,
+                1,
+                "r-1",
+                &[Mutation {
+                    key: "a",
+                    value: Some(b"neighbor"),
+                }],
+            ),
+        ],
+        vec![record(
+            db(),
+            2,
+            "r-2",
+            &[
+                Mutation {
+                    key: "a",
+                    value: None,
+                },
+                Mutation {
+                    key: "new",
+                    value: Some(b"fresh"),
+                },
+            ],
+        )],
+        vec![
+            Commit::encode(
+                db(),
+                3,
+                2,
+                1,
+                "r-3",
+                [3; 32],
+                &[Mutation {
+                    key: "b",
+                    value: Some(b""),
+                }],
+            )
+            .unwrap(),
+        ],
+        vec![record(
+            new,
+            1,
+            "r-1",
+            &[Mutation {
+                key: "z",
+                value: Some(b"first"),
+            }],
+        )],
+    ];
+    for frame in &frames {
+        let upload = writer.prepare(frame).unwrap();
+        writer.complete(upload.send().await).unwrap();
+        writer.pop_durable().unwrap().unwrap();
+    }
+    let mut root = selected(&provider, &clock).await;
+    let initial = Recovering::begin(root.replay().unwrap(), Limits::default())
+        .await
+        .unwrap()
+        .advance(1)
+        .await
+        .unwrap();
+    let staged = initial.checkpoint().await.unwrap();
+    let request = root.publish_checkpoint(staged).unwrap();
+    assert!(matches!(
+        root.finish(request.execute().await).unwrap(),
+        Outcome::Confirmed
+    ));
+    let limits = Limits {
+        databases: 2,
+        versions: 4,
+        value_bytes: 32,
+        receipts: 3,
+        receipt_bytes: 256,
+    };
+    for limited in [
+        Limits {
+            versions: 3,
+            ..limits
+        },
+        Limits {
+            value_bytes: 8,
+            ..limits
+        },
+        Limits {
+            receipts: 2,
+            ..limits
+        },
+        Limits {
+            databases: 1,
+            ..limits
+        },
+    ] {
+        assert!(
+            Recovering::begin(root.replay().unwrap(), limited)
+                .await
+                .unwrap()
+                .advance(4)
+                .await
+                .is_err()
+        );
+    }
+    let recovered = Recovering::begin_cached(
+        root.replay().unwrap(),
+        limits,
+        Arc::new(Cache::new(1024 * 1024, None).unwrap()),
+    )
+    .await
+    .unwrap()
+    .advance(4)
+    .await
+    .unwrap();
+    assert!(recovered.is_complete());
+    // Rewrite must stream the original large values despite only 32 resident
+    // value bytes being admitted, including the completely untouched generation.
+    let rewritten = recovered.checkpoint().await.unwrap();
+    let original = recovered.finish().unwrap();
+    assert_eq!(original.usage().databases, 2);
+    assert_eq!(original.usage().versions, 4);
+    assert_eq!(original.usage().receipts, 3);
+    assert!(original.usage().value_bytes <= 32);
+    let view = original.view(db()).await.unwrap().unwrap();
+    for revision in 1..=3 {
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert(
+            "a".to_owned(),
+            if revision == 1 {
+                Some(Bytes::from_static(b"old-a"))
+            } else {
+                None
+            },
+        );
+        expected.insert(
+            "b".to_owned(),
+            Some(if revision == 3 {
+                Bytes::new()
+            } else {
+                Bytes::from_static(b"old-b")
+            }),
+        );
+        for key in &keys {
+            expected.insert(key.clone(), Some(Bytes::copy_from_slice(&large)));
+        }
+        if revision >= 2 {
+            expected.insert("new".to_owned(), Some(Bytes::from_static(b"fresh")));
+        }
+        let mut scan = view.scan(b"", None, revision).unwrap();
+        for (key, value) in expected {
+            assert_eq!(
+                view.get(key.as_bytes(), revision)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .value,
+                value
+            );
+            let row = scan.next().await.unwrap().unwrap();
+            assert_eq!(row.key, key.as_bytes());
+            assert_eq!(row.value, value);
+        }
+        assert!(scan.next().await.unwrap().is_none());
+    }
+    assert_eq!(
+        view.resolve("r-1", [1; 32], 0).await.unwrap(),
+        Resolution::Expired
+    );
+    assert_eq!(
+        view.resolve("r-2", [2; 32], 1).await.unwrap(),
+        Resolution::Committed(2)
+    );
+    let request = root.publish_checkpoint(rewritten).unwrap();
+    assert!(matches!(
+        root.finish(request.execute().await).unwrap(),
+        Outcome::Confirmed
+    ));
+    let replacement = finish(
+        Recovering::begin_cached(
+            root.replay().unwrap(),
+            Limits {
+                databases: 1,
+                versions: 1,
+                value_bytes: 1,
+                receipts: 1,
+                receipt_bytes: 1,
+            },
+            Arc::new(Cache::new(1024 * 1024, None).unwrap()),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        replacement.usage(),
+        crate::index::recovery::Usage::default()
+    );
+    let latest = replacement.view(db()).await.unwrap().unwrap();
+    assert_eq!(latest.snapshot_floor(), 3);
+    assert!(latest.get(b"a", 2).await.is_err());
+    assert!(latest.get(b"a", 3).await.unwrap().unwrap().value.is_none());
+    assert_eq!(
+        latest.get(b"b", 3).await.unwrap().unwrap().value,
+        Some(Bytes::new())
+    );
+    for key in &keys {
+        assert_eq!(
+            latest
+                .get(key.as_bytes(), 3)
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(large.as_slice())
+        );
+    }
+    assert_eq!(
+        latest.resolve("r-1", [1; 32], 0).await.unwrap(),
+        Resolution::Expired
+    );
+    assert_eq!(
+        latest.resolve("r-3", [3; 32], 2).await.unwrap(),
+        Resolution::Committed(3)
+    );
+    assert_eq!(
+        replacement
+            .view(neighbor)
+            .await
+            .unwrap()
+            .unwrap()
+            .get(b"a", 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        Some(Bytes::from_static(b"neighbor"))
+    );
+    assert_eq!(
+        replacement
+            .view(new)
+            .await
+            .unwrap()
+            .unwrap()
+            .get(b"z", 1)
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        Some(Bytes::from_static(b"first"))
+    );
+    // Existing immutable views remain coherent; publishing is not collection.
+    assert_eq!(
+        view.get(b"a", 1).await.unwrap().unwrap().value,
+        Some(Bytes::from_static(b"old-a"))
+    );
+}
+
+#[tokio::test]
 async fn checkpoint_inside_a_selected_journal_recovers_suffix_without_covered_frames() {
     let provider = Provider::new();
     let clock = ManualClock::default();
@@ -90,27 +384,27 @@ async fn checkpoint_inside_a_selected_journal_recovers_suffix_without_covered_fr
         .await
         .unwrap();
     let projection = finish(restored).await;
-    let view = projection.view(db()).unwrap().unwrap();
+    let view = projection.view(db()).await.unwrap().unwrap();
     assert_eq!(view.snapshot_floor(), 2);
-    assert!(view.get(b"x", 1).is_err());
-    assert!(view.get(b"x", 2).unwrap().unwrap().value.is_none());
+    assert!(view.get(b"x", 1).await.is_err());
+    assert!(view.get(b"x", 2).await.unwrap().unwrap().value.is_none());
     assert_eq!(
-        view.get(b"x", 3).unwrap().unwrap().value,
+        view.get(b"x", 3).await.unwrap().unwrap().value,
         Some(Bytes::new())
     );
     assert_eq!(
-        view.get(b"x", 4).unwrap().unwrap().value.as_deref(),
+        view.get(b"x", 4).await.unwrap().unwrap().value.as_deref(),
         Some(b"next-owner".as_slice())
     );
     for revision in 1..=4 {
         assert_eq!(
-            view.state()
-                .resolve(&format!("r-{revision}"), [revision as u8; 32], revision - 1)
+            view.resolve(&format!("r-{revision}"), [revision as u8; 32], revision - 1)
+                .await
                 .unwrap(),
             Resolution::Committed(revision)
         );
     }
-    assert_eq!(projection.usage().versions, 3); // one checkpoint row + two suffix versions
+    assert_eq!(projection.usage().versions, 2); // only the selected suffix is resident
 }
 
 #[tokio::test]
@@ -167,10 +461,7 @@ async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_order
                 .unwrap(),
         )
         .await;
-        assert_eq!(
-            projection.view(db()).unwrap().unwrap().state().revision(),
-            1
-        );
+        assert_eq!(projection.view(db()).await.unwrap().unwrap().revision(), 1);
     }
 }
 
@@ -224,10 +515,10 @@ async fn stale_checkpoint_cannot_replace_a_newer_cut_and_snapshot_floor_advances
             .unwrap(),
     )
     .await;
-    assert_eq!(projection.usage().versions, 1);
-    let view = projection.view(db()).unwrap().unwrap();
+    assert_eq!(projection.usage().versions, 0);
+    let view = projection.view(db()).await.unwrap().unwrap();
     assert_eq!(view.snapshot_floor(), 3);
-    assert!(view.get(b"x", 2).is_err());
+    assert!(view.get(b"x", 2).await.is_err());
 }
 
 #[tokio::test]
@@ -273,20 +564,19 @@ async fn repeated_checkpoints_bound_recovery_versions_while_preserving_receipts(
         checkpoints += 1;
     };
     assert_eq!(checkpoints, 140);
-    assert_eq!(projection.usage().versions, 1);
-    assert_eq!(projection.usage().receipts, 128);
-    let view = projection.view(db()).unwrap().unwrap();
-    assert_eq!(view.state().revision(), 140);
+    assert_eq!(projection.usage(), crate::index::recovery::Usage::default());
+    let view = projection.view(db()).await.unwrap().unwrap();
+    assert_eq!(view.revision(), 140);
     assert_eq!(
-        view.state().resolve("r-1", [1; 32], 0).unwrap(),
+        view.resolve("r-1", [1; 32], 0).await.unwrap(),
         Resolution::Expired
     );
     assert_eq!(
-        view.state().resolve("r-13", [13; 32], 12).unwrap(),
+        view.resolve("r-13", [13; 32], 12).await.unwrap(),
         Resolution::Committed(13)
     );
     assert_eq!(
-        view.state().resolve("r-140", [140; 32], 139).unwrap(),
+        view.resolve("r-140", [140; 32], 139).await.unwrap(),
         Resolution::Committed(140)
     );
 }
@@ -339,28 +629,37 @@ async fn checkpoints_page_ten_thousand_generations_in_shared_tables() {
         provider.files.delete(&key).await.unwrap();
     }
     let projection = finish(
-        Recovering::begin(root.replay().unwrap(), Limits::default())
-            .await
-            .unwrap(),
+        Recovering::begin_cached(
+            root.replay().unwrap(),
+            Limits {
+                databases: 1,
+                versions: 1,
+                value_bytes: 1,
+                receipts: 1,
+                receipt_bytes: 1,
+            },
+            Arc::new(crate::cache::Cache::new(1024 * 1024, None).unwrap()),
+        )
+        .await
+        .unwrap(),
     )
     .await;
-    assert_eq!(projection.usage().databases, 10005);
-    assert_eq!(projection.usage().versions, 10005);
-    assert_eq!(projection.usage().receipts, 10005);
+    assert_eq!(projection.usage(), crate::index::recovery::Usage::default());
     for n in 0..10005 {
         let view = projection
             .view(Database {
                 name: &format!("app-{n:05}"),
                 generation: Uuid::from_u128(n + 1),
             })
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            view.get(b"x", 1).unwrap().unwrap().value,
+            view.get(b"x", 1).await.unwrap().unwrap().value,
             Some(Bytes::new())
         );
         assert_eq!(
-            view.state().resolve("same-request", [1; 32], 0).unwrap(),
+            view.resolve("same-request", [1; 32], 0).await.unwrap(),
             Resolution::Committed(1)
         );
     }
@@ -414,9 +713,11 @@ async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered
     assert_eq!(
         projection
             .view(db())
+            .await
             .unwrap()
             .unwrap()
             .get(b"x", 2)
+            .await
             .unwrap()
             .unwrap()
             .value
