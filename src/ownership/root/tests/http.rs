@@ -660,13 +660,14 @@ async fn native_http_javascript_contract() {
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut credential = tempfile::NamedTempFile::new().unwrap();
     writeln!(credential, "{token}").unwrap();
-    let output = tokio::time::timeout(
+    let status = tokio::time::timeout(
         Duration::from_secs(90),
         tokio::process::Command::new("node")
             .current_dir("clients/javascript")
             .args([
                 "node_modules/vitest/vitest.mjs",
                 "run",
+                "--reporter=verbose",
                 "--pool=threads",
                 "--maxWorkers=1",
                 "--no-file-parallelism",
@@ -675,21 +676,15 @@ async fn native_http_javascript_contract() {
             .env("DURABLE_DB_TEST_URL", url)
             .env("DURABLE_DB_TEST_TOKEN_FILE", credential.path())
             .kill_on_drop(true)
-            .output(),
+            .status(),
     )
     .await;
     server.abort();
     let _ = server.await;
-    let output = output
+    let status = status
         .expect("native client suite deadline")
         .expect("run Node client suite");
-    assert!(
-        output.status.success(),
-        "native client contract failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    println!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(status.success(), "native client contract failed: {status}");
 }
 
 #[tokio::test(start_paused = true)]

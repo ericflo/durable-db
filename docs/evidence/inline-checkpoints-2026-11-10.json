@@ -230,5 +230,13 @@
     "Full tenant maintenance/request/egress accounting",
     "Obsolete table/manifest reachability and reclamation with reader/backup retention",
     "Sustained B2/AWS performance, failure and production qualification"
-  ]
+  ],
+  "preceding_ci_failure": {
+    "pipeline": 117,
+    "url": "https://ci.eflorenzano.com/repos/18/pipeline/117/1",
+    "source_commit": "8c4d2d51599c7a32562c65f125ef10e7e992711b",
+    "failure": "Native JavaScript contract suite exceeded its unchanged 90-second deadline; the captured child output was lost on cancellation. Rust/capacity checks, legacy JavaScript/Pi contracts and binary compilation passed.",
+    "local_reproduction": "Two complete native contract runs passed: 99 tests, one opt-in test skipped; 26.66 and 26.96 seconds. Timeout cause not established.",
+    "harness_change": "Stream verbose test output so a future timeout identifies completed and pending tests; remove buffered-output handling. No timeout increase or skipped coverage."
+  }
 }
