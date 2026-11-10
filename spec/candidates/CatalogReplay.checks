@@ -1,0 +1,5 @@
+safe CatalogReplay.cfg catalog-replay 512m -
+unsafe CatalogReplayUnsafeSkip.cfg catalog-replay-skip 512m CompleteHistory
+unsafe CatalogReplayUnsafeExtend.cfg catalog-replay-extend 512m OrderedPrefix
+unsafe CatalogReplayUnsafeOrder.cfg catalog-replay-order 512m OrderedPrefix
+unsafe CatalogReplayComplete.cfg catalog-replay-complete 512m NotCompleteNonempty

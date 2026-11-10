@@ -529,6 +529,15 @@ mod tests {
         while journal.read_next().await.unwrap().is_some() {}
         assert_eq!(journal.finished_prefix().unwrap().position(), 1);
         assert_eq!(state.lock().unwrap().puts, 10);
+        let mut replay = successor.replay().unwrap();
+        let batch = replay.read_next().await.unwrap().unwrap();
+        assert_eq!(batch.identity().epoch, 1);
+        assert_eq!(
+            batch.records().collect::<Vec<_>>(),
+            vec![b"first".as_slice()]
+        );
+        assert!(replay.read_next().await.unwrap().is_none());
+        assert!(replay.completed());
 
         task.abort();
         task.await.unwrap_err();

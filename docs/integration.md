@@ -8,6 +8,8 @@ Each site may provision multiple databases. The bucket directory must support a 
 
 **Rollout is blocked.** The first real-B2 test with four concurrent database writers exhausted retries under maintenance; delaying maintenance still left heavy publication contention. The 100,005-entry directory test does not establish capacity for that many active sites. Resolve the [production gates](production-readiness.md), including the measured throughput failure, before onboarding production sites.
 
+The shared serving path is being replaced. The candidate now has a bounded journal, conflict validator, ownership controller, durable journal registrations, selected-prefix catalog and ordered history replay. These components do not yet serve application transactions. Existing cloud, Harness and autoscaling results qualify the current engine only. Platform rollout must repeat those workloads against the completed replacement, including its routing, transaction/receipt recovery, clock contract and per-site physical admission.
+
 ## Acceptance scenario
 
 1. Create a site and persist its database provisioning request ID/configuration before calling protected PUT creation. Retry the identical request after uncertainty; retain the returned incarnation and site mapping in the service control plane, then mint a scoped token. A matching database name alone does not establish provisioning ownership.
@@ -15,13 +17,13 @@ Each site may provision multiple databases. The bucket directory must support a 
 3. Start a Pi Harness with storage under a dedicated prefix and submit an idempotent request.
 4. Interrupt a tool/model turn, replace API pods, and explicitly transfer the Session owner after the harness host restarts.
 5. Reopen and resume with no cache state. Validate the transcript, task checkpoints, documents, and request deduplication.
-6. Scale API compute 1→3→1 while writers/readers across independent sites continue; kill a pod during manifest publication and during collection. Resolve uncertain writes without duplicates. Measure each site's latency and progress so aggregate throughput cannot hide starvation of one site.
+6. Scale API compute 1→3→1 while writers/readers across independent sites continue; kill a pod during durable batch publication, ownership transfer and collection. Resolve uncertain writes without duplicates. Measure each site's latency and progress so aggregate throughput cannot hide starvation of one site.
 7. Revoke access, rotate keys, enforce provider spend/rate budgets, export a tenant, and delete it with a defined retention policy.
 
 ## Decisions still required
 
 - The existing platform uses B2. B2 is a required authority, using native bucket revision publication rather than S3 conditional file overwrites. The common B2/S3 protocol passes real-B2 integration and a short CPU-driven kind HPA/fault/cold-recovery campaign. Complete independent-node, abuse, latency, and soak qualification before platform rollout. See [the B2 design](b2.md).
-- Pi Session execution has one owner even though database API pods are interchangeable. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
+- Pi Session execution has one owner. HTTP ingress routing, database partition ownership and Harness execution are separate responsibilities. Scheduling/fencing a running Harness and external tool side effects needs a host protocol in addition to database transactions.
 - Browser identity, CORS, individual-user row authorization, and billing belong to the gateway. Per-database scoped credentials alone do not provide row-level access control.
 - The indexed Pi adapter passes upstream conformance with scoped credentials and has direct record/index/document storage. B2 conformance and cache-free host restart with explicit takeover pass; eight actual Harness recovery/cancellation cases now pass on three B2 API processes, including competing owners and complete API replacement. Complete sustained-load and host/external-effect fencing qualification before production onboarding; the bounded journal remains a reference fixture.
 - Fresh namespaces can enable the format-5 shared immutable-upload ledger and upload-free data collector. Initialize both ceilings at provisioning, keep replenishment IDs/revisions in the control plane, and monitor stranded grants and remaining authoritative capacity. This ceiling does not isolate sites from each other; per-site admission and request/egress budgets still need implementation; sustained cleanup under hostile workload needs qualification.

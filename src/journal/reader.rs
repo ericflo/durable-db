@@ -37,6 +37,17 @@ impl Reader {
         }
     }
 
+    /// Reuse this reader's frame budget across selected journals. A retained
+    /// frame (even one whose Rust borrow ended) must not free its allocation slot.
+    pub(crate) fn reset(&mut self, selected: Prefix) -> anyhow::Result<()> {
+        ensure!(self.finished, "previous journal replay is incomplete");
+        let _reservation = self.budget.reserve(MAX_BATCH_BYTES)?;
+        self.prefix = Prefix::empty(selected.log);
+        self.selected = Some(selected);
+        self.finished = false;
+        Ok(())
+    }
+
     /// Available only after complete successful discovery/replay, never after an error.
     pub fn finished_prefix(&self) -> Option<Prefix> {
         self.finished.then_some(self.prefix)

@@ -91,6 +91,7 @@ for (const file of [
   'root-controller-2026-11-09.json',
   'root-registration-2026-11-09.json',
   'root-catalog-2026-11-09.json',
+  'catalog-replay-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',

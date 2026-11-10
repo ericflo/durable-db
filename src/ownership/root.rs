@@ -7,6 +7,7 @@
 mod catalog;
 mod metadata;
 mod registration;
+mod replay;
 
 use super::timing::{self, Bounds, Clock, Deadline, Drain, Timeline};
 use crate::providers::control;
@@ -21,6 +22,7 @@ use uuid::Uuid;
 pub use catalog::{JournalRecovery, Recovery};
 pub use control::Outcome;
 pub use registration::{Registration, Registrations};
+pub use replay::{Replay, ReplayBatch};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -375,18 +377,31 @@ impl<C: Clock> Root<C> {
     /// Begin old-journal discovery only after activation has completed the drain.
     /// The returned cursor owns its snapshot and can be awaited outside the lock.
     pub fn recovery(&mut self) -> Result<Recovery, Error> {
-        let identity = self.permission()?.ok_or(Error::NotReady)?;
-        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
-        let record =
-            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
-        if record.identity != identity || record.phase != Phase::Open {
-            return Err(Error::NotReady);
-        }
+        let record = self.recovery_record()?;
         Ok(Recovery::new(
             self.files.clone(),
             record,
             self.registrations()?,
         ))
+    }
+
+    /// Stream every prior selected journal in transaction order. The cursor
+    /// checks catalog completeness before returning frames and holds no root
+    /// lock across I/O. Completion still requires a final permission check.
+    pub fn replay(&mut self) -> Result<Replay, Error> {
+        let record = self.recovery_record()?;
+        Ok(Replay::new(self.files.clone(), record))
+    }
+
+    fn recovery_record(&mut self) -> Result<Record, Error> {
+        let identity = self.permission()?.ok_or(Error::NotReady)?;
+        let raw = self.session.confirmed().ok_or(Error::NotReady)?;
+        let record =
+            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
+        if record.identity != identity || record.phase != Phase::Open {
+            return Err(Error::NotReady);
+        }
+        Ok(record)
     }
 
     /// Persist a complete discovery against an unchanged confirmed catalog.

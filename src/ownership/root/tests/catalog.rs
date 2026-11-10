@@ -2,7 +2,7 @@ use super::*;
 use crate::{journal::PreparedUpload, storage::Storage};
 use bytes::Bytes;
 
-async fn successor(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
+pub(super) async fn successor(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
     let mut root = provider.root(clock);
     claim(&mut root).await;
     clock.set(clock.now.load(Ordering::SeqCst) + 23);
@@ -10,7 +10,7 @@ async fn successor(provider: &Arc<Provider>, clock: &ManualClock) -> Root<Manual
     activate(&mut root).await;
     root
 }
-async fn source(
+pub(super) async fn source(
     provider: &Arc<Provider>,
     clock: &ManualClock,
 ) -> (Root<ManualClock>, PreparedUpload) {
@@ -30,13 +30,13 @@ async fn source(
         .unwrap();
     (root, late)
 }
-async fn scan(root: &mut Root<ManualClock>) -> JournalRecovery {
+pub(super) async fn scan(root: &mut Root<ManualClock>) -> JournalRecovery {
     let mut recovery = root.recovery().unwrap();
     let mut journal = recovery.next().await.unwrap().unwrap();
     while journal.read_next().await.unwrap().is_some() {}
     journal
 }
-async fn seal(root: &mut Root<ManualClock>, journal: JournalRecovery) {
+pub(super) async fn seal(root: &mut Root<ManualClock>, journal: JournalRecovery) {
     let request = root.select_prefix(journal).unwrap();
     assert!(matches!(
         root.finish(request.execute().await).unwrap(),

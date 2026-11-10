@@ -1,6 +1,7 @@
 use super::*;
 mod catalog;
 mod registration;
+mod replay;
 use crate::{
     providers::Connection,
     publication::{Authority, Bucket},

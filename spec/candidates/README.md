@@ -8,6 +8,12 @@ This component starts with an empty register and unordered competing candidate i
 
 Run `scripts/check-candidate.sh RootAcquisition`. The two- and three-candidate positive instances each allow four invocations, with 89,685 and 697,663 distinct states. Removing comparisons or allowing retargeting must fail. Two reachability controls exercise competing captured predecessors and recovery after a timed-out claim actually applies. There is no symmetry reduction or guided constraint. This is a finite acquisition model, not a serving-permission, liveness or Rust-refinement proof. The root controller also relies on the separate `RootRequests`, `RootControl` and `GrantBounds` contracts; their composition with the implementation remains an obligation.
 
+## CatalogReplay
+
+Ordered replay from a complete immutable selected catalog, assuming catalog and frame durability. Three journals with zero to two selected frames check all 27 initial cut combinations and 2,303 distinct states. Required controls detect skipping a prefix, extending it with late uploads and reversing epoch order; a fourth witnesses nonempty completion. Run `scripts/check-candidate.sh CatalogReplay`.
+
+This is a byte-stream property, not a proof of the catalog's durability, storage-tree implementation, transaction recovery, bounded execution time or serving permission. A completed replay may outlive its root interval and still needs a final permission check before exposing a reconstructed view.
+
 ## RootCatalog
 
 Conditional prefix catalogs with separate scan, immutable upload, positive knowledge, provider send, apply, reply and timeout events. Claims inherit existing selections, and exact comparison rejects stale publications. Renewal may refresh a scan's comparison only while its catalog is unchanged. Old uploads may arrive after selection; scans before the ownership drain are forbidden.

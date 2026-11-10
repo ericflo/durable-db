@@ -15,6 +15,25 @@ use std::{
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn resetting_selected_replay_preserves_the_budget_of_a_retained_frame() {
+    let files = Arc::new(Files::default());
+    let mut writer = Writer::new(files.clone(), Uuid::new_v4(), QueueLimits::default()).unwrap();
+    let upload = writer.prepare(&[Bytes::from_static(b"retained")]).unwrap();
+    writer.complete(upload.send().await).unwrap();
+    let prefix = writer.pop_durable().unwrap().unwrap().prefix();
+    let mut reader = Reader::replay(files.clone(), prefix);
+    assert!(reader.reset(prefix).is_err());
+    let batch = reader.read_next().await.unwrap().unwrap();
+    assert!(reader.read_next().await.unwrap().is_none());
+    let gets = files.gets.load(Ordering::SeqCst);
+    assert!(reader.reset(prefix).is_err());
+    assert_eq!(files.gets.load(Ordering::SeqCst), gets);
+    drop(batch);
+    reader.reset(prefix).unwrap();
+    assert!(reader.read_next().await.unwrap().is_some());
+}
+
 #[derive(Default)]
 struct Files {
     objects: Mutex<BTreeMap<String, Bytes>>,

@@ -28,7 +28,7 @@ fn header_key(id: Uuid) -> String {
 fn entry_key(identity: Identity) -> String {
     format!("{:016x}-{}", identity.epoch, identity.incarnation.simple())
 }
-async fn load(
+pub(super) async fn load(
     files: &Arc<dyn Storage>,
     id: Option<Uuid>,
 ) -> anyhow::Result<Option<directory::Root>> {
@@ -54,13 +54,13 @@ async fn load(
     header.index.validate()?;
     Ok(Some(header.index))
 }
-async fn selected(
+pub(super) async fn selected(
     files: &Arc<dyn Storage>,
     index: Option<&directory::Root>,
-    registration: Registration,
+    identity: Identity,
 ) -> anyhow::Result<Option<Prefix>> {
     let Some(pointer) = Directory::new(files.clone())
-        .get(index, &entry_key(registration.identity()))
+        .get(index, &entry_key(identity))
         .await?
     else {
         return Ok(None);
@@ -75,7 +75,7 @@ async fn selected(
     );
     let prefix = Prefix::decode(&object.bytes)?;
     ensure!(
-        prefix.log() == registration.journal(),
+        prefix.log() == crate::journal::LogId::root(identity.incarnation),
         "selected prefix names a different journal"
     );
     Ok(Some(prefix))
@@ -128,7 +128,8 @@ impl Recovery {
                 registration.identity().epoch < self.record.identity.epoch,
                 "invalid recovery ancestry"
             );
-            let prefix = selected(&self.files, self.index.as_ref(), registration).await?;
+            let prefix =
+                selected(&self.files, self.index.as_ref(), registration.identity()).await?;
             let reader = match prefix {
                 Some(prefix) => Reader::replay(self.files.clone(), prefix),
                 None => Reader::discover(self.files.clone(), registration.journal()),

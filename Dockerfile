@@ -287,7 +287,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh RootCatalog && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-catalogreplay
+COPY spec/candidates/CatalogReplay.tla spec/candidates/CatalogReplay.checks spec/candidates/CatalogReplay*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh CatalogReplay && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-candidate-catalogreplay /checks/ /checks/
 COPY --from=model-candidate-rootcatalog /checks/ /checks/
 COPY --from=model-candidate-rootregistration /checks/ /checks/
 COPY --from=model-candidate-rootacquisition /checks/ /checks/

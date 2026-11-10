@@ -630,6 +630,9 @@ mod tests {
             } else {
                 assert!(recovery.next().await.unwrap().is_none());
             }
+            let mut replay = successor.replay().unwrap();
+            assert!(replay.read_next().await.unwrap().is_none());
+            assert!(replay.completed());
             // The compatibility engine must refuse this experimental namespace.
             assert!(connection.into_published(None).await.is_err());
             assert_eq!(
