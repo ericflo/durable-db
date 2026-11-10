@@ -1,10 +1,14 @@
 # Verification results
 
-## Native local CLI (2026-11-10)
+## v0.9.0 native local CLI (2026-11-10)
+
+[v0.9.0](https://github.com/ericflo/durable-db/releases/tag/v0.9.0) packages `cf1a2bf`, verified by [Woodpecker #136](https://ci.eflorenzano.com/repos/18/pipeline/136/1). The downloaded static Linux x86_64 binary passes standalone checks without a toolchain, and the public default installer installs that exact binary after checksum verification. The musl 10,005-database regression passes in 198.29 seconds. All 99 enabled client tests pass against the new local CLI in 11.33 seconds; the separate native library fixture also passes all 99 in 64.87 seconds.
 
 Local `serve --data` now selects the native journal, index, recovered HTTP worker, checkpoints and automatic collection. A lifetime directory lock supplies single-host exclusion; no physical ownership clock is required. Shared/network filesystems and cloned live process memory remain unsupported. The cloud CLI stays on the shared publication engine while physical timing and placement are qualified.
 
 All 287 local Rust tests, 99 enabled client/Pi tests and four web-app tests pass. Real process tests cover pause, duplicate-server refusal, resume, kill, two cold reopens, exact receipts, automatic collection and missing-authority refusal. Removing the blocking mutation guard fails the cancellation regression. The new ownership model checks 57 states with two negative controls; the existing checkpoint model and nine controls also pass. The published v0.8.0 binary exports three values; the new binary refuses its directory, restores into a fresh native directory, and verifies values and quotas after SIGKILL/reopen.
+
+Real B2 and versioned MinIO also pass the shared collector fixture, preserving values, receipts and budgets through two cold reopens. Both buckets, remaining physical versions, the B2 key and MinIO container were removed. These fixtures use logical clocks and stopped predecessors.
 
 [Complete evidence](evidence/native-local-cli-2026-11-10.json) records the checks and two corrected harness errors. This removes legacy local CLI selection, its separate maintenance task, the optional native-collection branch and obsolete benchmark provisioning. It does not qualify clustered timing or production operation. [Existing local directories require export and restore](recovery.md#local-format-upgrades).
 

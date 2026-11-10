@@ -118,7 +118,7 @@ Info, reads, writes, and write-receipt replay authorize against the same validat
 
 ## Cumulative upload admission
 
-v0.7.0 supports [format-5 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
+The cloud CLI supports [format-5 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
 
 The administrator GET returns `configuration_revision`, `limits: {bytes, attempts}`, and `allocated: {bytes, attempts}`. Allocation includes whole grants, uncertain allocations, and unused credit lost with a process. It is deliberately conservative. POST takes absolute replacement ceilings:
 
