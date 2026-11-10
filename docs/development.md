@@ -134,7 +134,7 @@ This uploads four immutable objects for 3,072 history rows and 1,025 newer rows,
 
 ## CI and publication
 
-The [v0.3.0 delivery record](evidence/release-0.3.0-2026-11-10.json) binds the release to its Woodpecker build, artifact hashes, standalone checks and the actual public-installer download.
+The [release verification record](verification-results.md) links source commits, Woodpecker builds, artifact hashes, standalone checks and actual public-installer downloads.
 
 [Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds push the public documentation with a repository-scoped SSH deploy key, then wait up to ten minutes for the public `deployment.json` marker to match `CI_COMMIT_SHA`. A successful push alone does not qualify publication: GitHub can fail the later Pages deployment while leaving the previous site live. On failure, inspect the public site's deployment status and retry the same checked artifact; do not claim the site is current until its marker and evidence match. A newer source push cancels the previous running pipeline in this setup; finish local iteration before pushing and let the required run complete so verification and publication can finish.
 
@@ -143,6 +143,8 @@ Within that delivery window, an explicitly failed public deployment permits one 
 The [Docker build](https://github.com/ericflo/durable-db/blob/main/Dockerfile) requires Rust formatting, lints and tests; the full client/Pi suite; every maintained model and its controls; and the publication, journal and candidate proofs. It builds the static Linux executable, runtime image and documentation artifacts. The 10,005-database regression retains every assertion and runs in release mode; the rest of the Rust suite runs in debug mode. Before publishing artifacts, `scripts/check-release.mjs` checks the archive checksum, contents and source version, then runs its binary with an empty `PATH`: protected creation, exact retries, ordered reads, backup/restore and recovery after a forced stop. It removes its temporary server, data and credentials and writes `checks/release.json` into the artifact image. Rerun it against a downloaded archive with `node scripts/check-release.mjs PATH/TO/durable-db-linux-amd64.tar.gz` (optional second argument: an older version to check).
 
 Rust, JavaScript, individual models and individual proofs have separate cache stages. Changing the client reuses the same source-built executable without repeating unchanged Rust work. A shared lock serializes formal-check heaps on the builder. Compiler stages stop their kache daemon on exit while preserving the compilation cache.
+
+The build step forwards TERM/INT to its `buildctl` child and waits for remote cancellation before exiting. This lets the client cancel remote work explicitly before the shell exits. A disposable BuildKit job canceled in 5.8 seconds; success and failure exit codes were also preserved. The [qualification record](evidence/checkpoint-index-reads-2026-11-10.json) retains the preceding canceled-build delay and probe setup failures.
 
 The pipeline archives its exact commit with canonical file permissions. Uncommitted files and checkout metadata are excluded, and the temporary context is removed on exit. File metadata matters to Docker cache reuse as well as content. [Docker cache invalidation](https://docs.docker.com/build/cache/invalidation/), [Git archive](https://git-scm.com/docs/git-archive).
 

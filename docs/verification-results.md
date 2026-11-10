@@ -1,10 +1,14 @@
 # Verification results
 
-## Checkpoint index reads (2026-11-10)
+## v0.5.1 checkpoint index reads (2026-11-10)
+
+[v0.5.1](https://github.com/ericflo/durable-db/releases/tag/v0.5.1) packages commit `7eae7de`, verified by [Woodpecker #125](https://ci.eflorenzano.com/repos/18/pipeline/125/1). The exact downloaded static Linux x86_64 archive passed standalone transaction, ordered-read, backup/restore and SIGKILL/reopen checks without a toolchain on `PATH`. The public default installer verified the GitHub asset checksum and installed the same binary. Native client contracts passed 99 enabled tests in CI (66 seconds).
 
 Commit `9e0892c` removes table-index reads for unchanged checkpoint ranges. An uncached 183-table fixture drops from 187 reads to four manifest reads for an unchanged image. Deleting a value exactly at an upper bound uses ten reads, touches no objects belonging to the two idle database generations and preserves all 540 values/deletions and exact retry windows. The runtime change adds ten net Rust lines, with no new cache, ledger or storage format. A four-line follow-up rejects cross-leaf manifest disorder before a resident range lookup; its negative control reproduces the former panic. The old unconditional index scan and brittle table-packing assertions were removed.
 
-The native HTTP fixture passes on real B2 and versioned MinIO, preserving values, receipts and nonrefundable budgets across two cold reopens and automatic collection. Each sweep retains exactly three published checkpoint objects in this fixture. Both buckets, all remaining physical versions, the B2 test key and MinIO container were removed. [Complete evidence](evidence/checkpoint-index-reads-2026-11-10.json) includes the 280-test local Rust suite, 99 native client tests, the unchanged 31,104-state model with eight negative controls, and Rust controls that fail for the previous implementation and an incorrect boundary comparison.
+The native HTTP fixture passes on real B2 and versioned MinIO, preserving values, receipts and nonrefundable budgets across two cold reopens and automatic collection. Each sweep retains exactly three published checkpoint objects in this fixture. Both buckets, all remaining physical versions, the B2 test key and MinIO container were removed. [Complete evidence](evidence/checkpoint-index-reads-2026-11-10.json) includes the 281-test local Rust suite, 99 native client tests, the unchanged 31,104-state model with eight negative controls, and Rust controls that fail for the previous implementation and an incorrect boundary comparison.
+
+The Woodpecker step now forwards termination signals to `buildctl` and preserves normal exit codes. A real disposable BuildKit job canceled in 5.8 seconds; its temporary context was removed. The record includes the preceding canceled-build delay and probe setup failures. No GitHub Actions workflow was added.
 
 This reduces shared maintenance amplification; it does not complete tenant maintenance accounting. Full-manifest traversal remains. Retained objects are checked when read or explicitly audited; rewriting a checkpoint is not a full-image audit. Physical ownership timing/native CLI cutover, durable retention, large-image cleanup progress and production/AWS qualification remain open. Native format stays `owned-candidate-12`.
 

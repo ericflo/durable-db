@@ -45,21 +45,31 @@ steps:
       - DURABLE_DB_BUILD_CONTEXT=$$(scripts/prepare-build-context.sh)
       - export DURABLE_DB_BUILD_CONTEXT
       - trap 'rm -rf "$${DURABLE_DB_BUILD_CONTEXT}"' EXIT
+      - |
+        run_buildctl() {
+          buildctl "$$@" &
+          build_pid=$$!
+          trap 'kill -TERM "$${build_pid}" 2>/dev/null || :; wait "$${build_pid}" || :; exit 143' TERM INT
+          build_status=0
+          wait "$${build_pid}" || build_status=$$?
+          trap - TERM INT
+          return "$${build_status}"
+        }
       - >-
-        buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
+        run_buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
         --frontend dockerfile.v0 --local context=$${DURABLE_DB_BUILD_CONTEXT}/tree --local dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree
         --opt target=artifacts --opt platform=linux/amd64
         --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
         --export-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,mode=max,registry.insecure=true
         --output type=local,dest=.artifacts
       - >-
-        buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
+        run_buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
         --frontend dockerfile.v0 --local context=$${DURABLE_DB_BUILD_CONTEXT}/tree --local dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree
         --opt target=runtime --opt platform=linux/amd64
         --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
         --output type=image,name=registry.clouderic.svc.cluster.local:5000/durable-db:$${CI_COMMIT_SHA},push=true,registry.insecure=true
       - >-
-        buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
+        run_buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
         --frontend dockerfile.v0 --local context=$${DURABLE_DB_BUILD_CONTEXT}/tree --local dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree
         --opt target=artifacts --opt platform=linux/amd64
         --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
