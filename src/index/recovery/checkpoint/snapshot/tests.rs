@@ -171,7 +171,10 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
     let snapshot = Snapshot::new(files.clone(), cache(0), reference);
     let mut manifest = snapshot.seek(Bytes::new()).unwrap();
     let mut idle = std::collections::BTreeSet::new();
+    let mut data_sizes = std::collections::BTreeMap::new();
     while let Some(table) = manifest.next().await.unwrap() {
+        let data = table.reference.blobs()[0];
+        data_sizes.insert(data.key(), data.size());
         if super::super::split_key(&table.last).unwrap().0 != db(7) {
             idle.extend(table.reference.blobs().map(|b| b.key()));
         }
@@ -201,6 +204,31 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
     )
     .unwrap();
     let commit = Commit::decode(&encoded).unwrap();
+    files.reads.store(0, Ordering::SeqCst);
+    files.keys.lock().unwrap().clear();
+    let copies = projection
+        .checkpoint_rewrite_bytes(
+            db(7),
+            &[Mutation {
+                key: "k/0179",
+                value: None,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        files.reads.load(Ordering::SeqCst),
+        4,
+        "two indexed seeks; no full manifest walk"
+    );
+    assert!(
+        files
+            .keys
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|key| !data_sizes.contains_key(key) && !idle.contains(key))
+    );
     let state = projection
         .take_state(db(7))
         .await
@@ -219,6 +247,17 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
         "four manifest and three index/data pairs"
     );
     assert!(files.keys.lock().unwrap().iter().all(|k| !idle.contains(k)));
+    let copied: u64 = files
+        .keys
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|key| data_sizes.get(key))
+        .sum();
+    assert_eq!(
+        copies, copied,
+        "admission covers every rewritten base table, including an exact upper-bound deletion"
+    );
     assert_eq!(
         rewritten.rows,
         reference.rows - 1,

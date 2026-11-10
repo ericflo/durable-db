@@ -158,6 +158,19 @@ async fn collected(connection: &Connection, expected: [usize; 3]) -> (f64, usize
     (start.elapsed().as_secs_f64() * 1000.0, remaining[3])
 }
 
+async fn checkpoint_data(
+    files: &dyn durable_db::storage::Storage,
+) -> std::collections::BTreeMap<String, u64> {
+    let mut data = std::collections::BTreeMap::new();
+    for key in files.list("tables/", None, 128).await.unwrap() {
+        let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
+        if object.bytes.starts_with(b"DDBBLK01") {
+            data.insert(key, object.bytes.len() as u64);
+        }
+    }
+    data
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh disposable B2/S3 bucket and a native HTTP report path"]
 async fn native_http_budgets_cleanup_and_cold_recovery() {
@@ -193,6 +206,10 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             .await;
     }
     let commit = "/v1/databases/a/commit";
+    let initial_data = checkpoint_data(connection.objects().as_ref()).await;
+    assert_eq!(initial_data.len(), 1);
+    let initial_copies = initial_data.values().sum::<u64>();
+    let first_admission = 428 + initial_copies;
     // 254 journal bytes + 174 checkpoint-row bytes. The old journal-only
     // rule would admit this underfunded write; no PUT may precede refusal.
     let puts = calls("object_put");
@@ -208,7 +225,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             "POST",
             budget,
             &json!({"request_id":"rows","expected_configuration_revision":1,
-        "limits":{"bytes":428,"attempts":2}}),
+        "limits":{"bytes":first_admission,"attempts":2}}),
         )
         .await;
     assert_eq!(server.ok("POST", commit, &write(0)).await["revision"], 1);
@@ -227,12 +244,20 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         server.ok("POST", "/v1/databases/b/commit", &write(0)).await["revision"],
         1
     );
+    let current_data = checkpoint_data(connection.objects().as_ref()).await;
+    let replaced: Vec<_> = current_data
+        .iter()
+        .filter(|(key, _)| !initial_data.contains_key(*key))
+        .collect();
+    assert_eq!(replaced.len(), 1);
+    let copies = *replaced[0].1;
+    let second_admission = 428 + copies;
     server
         .ok(
             "POST",
             budget,
             &json!({"request_id":"more","expected_configuration_revision":2,
-        "limits":{"bytes":856,"attempts":2}}),
+        "limits":{"bytes":first_admission + 428,"attempts":2}}),
         )
         .await;
     let puts = calls("object_put");
@@ -243,14 +268,14 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     assert_eq!(calls("object_put"), puts);
     assert_eq!(
         server.ok("GET", budget, &json!({})).await["allocated"]["bytes"],
-        428
+        first_admission
     );
     server
         .ok(
             "POST",
             budget,
-            &json!({"request_id":"retained","expected_configuration_revision":3,
-        "limits":{"bytes":928,"attempts":2}}),
+            &json!({"request_id":"copies","expected_configuration_revision":3,
+        "limits":{"bytes":first_admission + second_admission,"attempts":2}}),
         )
         .await;
     assert_eq!(server.ok("POST", commit, &write(1)).await["revision"], 2);
@@ -376,7 +401,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
-        "admission_bytes_per_write":[428,500],"retained_receipt_rewrite_bytes":72,
+        "admission_bytes_per_write":[first_admission,second_admission],"base_copy_bytes_per_write":[initial_copies,copies],
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,

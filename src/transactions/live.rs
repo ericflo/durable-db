@@ -214,6 +214,7 @@ impl<C: Clock> Owner<C> {
         &mut self,
         database: Database<'_>,
         bytes: usize,
+        mutations: &[Mutation<'_>],
     ) -> anyhow::Result<bool> {
         if database.name == catalog::CATALOG.name
             && database.generation == catalog::CATALOG.generation
@@ -229,7 +230,14 @@ impl<C: Clock> Owner<C> {
             }
             self.budgets.insert(Arc::from(database.name), budget);
         }
-        match self.budgets[database.name].charge(bytes as u64).await {
+        let bytes = (bytes as u64)
+            .checked_add(
+                self.projection
+                    .checkpoint_rewrite_bytes(database, mutations)
+                    .await?,
+            )
+            .context("database admission overflow")?;
+        match self.budgets[database.name].charge(bytes).await {
             Ok(()) => Ok(true),
             Err(e)
                 if e.downcast_ref::<crate::upload_budget::Exhausted>()
@@ -356,11 +364,10 @@ impl<C: Clock> Owner<C> {
                 .view(request.snapshot.database())
                 .await?
                 .unwrap();
-            resolved.push((
+            resolved.push(
                 view.resolve(request.id, *fingerprint, request.snapshot.revision())
                     .await?,
-                view.checkpoint_receipt_rewrite_bytes()?,
-            ));
+            );
         }
         // Charge the stable name before reserving shared journal order. A
         // refusal must not create a hole that prevents other tenants committing.
@@ -368,7 +375,7 @@ impl<C: Clock> Owner<C> {
         // failures may strand credit but can never create new rights.
         let mut admissions = BTreeMap::new();
         let mut admitted = Vec::with_capacity(requests.len());
-        for ((request, fingerprint), (resolution, retained)) in
+        for ((request, fingerprint), resolution) in
             requests.iter().zip(&fingerprints).zip(&resolved)
         {
             let key = (
@@ -388,9 +395,10 @@ impl<C: Clock> Owner<C> {
                         database,
                         request.id,
                         request.mutations,
-                    )
-                    + retained;
-                let allowed = self.charge_database(database, bytes).await?;
+                    );
+                let allowed = self
+                    .charge_database(database, bytes, request.mutations)
+                    .await?;
                 admissions.insert((key, *fingerprint), allowed);
                 allowed
             };
@@ -403,7 +411,7 @@ impl<C: Clock> Owner<C> {
         self.failed = true; // any unexpected error after admission retires the view
         let mut records = Vec::new();
         let mut tickets = Vec::with_capacity(requests.len());
-        for (((request, fingerprint), (resolved, _)), admitted) in requests
+        for (((request, fingerprint), resolved), admitted) in requests
             .iter()
             .zip(fingerprints.iter().copied())
             .zip(resolved)

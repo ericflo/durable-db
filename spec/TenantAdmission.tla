@@ -1,13 +1,14 @@
 --------------------------- MODULE TenantAdmission ---------------------------
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS Tenants, Nodes, Grants, Operations, Capacity, InitialCapacity, MaxAttempts,
-          UnsafeLateCheck, UnsafeCrossScope, UnsafeRetainedOmission
+          UnsafeLateCheck, UnsafeCrossScope, UnsafeCopyOmission
 ASSUME Cardinality(Tenants) = 2
-\* Byte-dimension abstraction of a first change to a checkpointed database:
-\* direct work (journal + new rows) and retained-receipt rewriting need credit.
-\* Runtime charges their sum and ONE attempt; subsequent dirty writes need
-\* no additional base-receipt charge. Other rewrites/overhead are not modeled.
-Components == {"direct", "retained"}
+\* Byte-dimension abstraction of one transaction: direct work (journal +
+\* new rows) and base-table copies need same-name credit before assignment.
+\* The writer pays even for a neighbor's rows in a shared table. Runtime
+\* charges the sum and ONE attempt. Range selection/byte sizing are checked
+\* separately against actual rewrites; overhead and retry costs are omitted.
+Components == {"direct", "copies"}
 Required(o) == {<<o,c>>: c \in Components}
 A == CHOOSE t \in Tenants: TRUE
 B == CHOOSE t \in Tenants: t # A
@@ -31,7 +32,7 @@ Init == /\ Credita!Init /\ Creditb!Init /\ assigned = {}
 Charged(t) == IF t = A THEN chargeda ELSE chargedb
 Assign(t,o) == /\ <<t,o>> \notin assigned
                /\ Required(o) \subseteq Charged(t) \/ UnsafeLateCheck
-                  \/ (UnsafeRetainedOmission /\ (Required(o) \ {<<o,"retained">>}) \subseteq Charged(t))
+                  \/ (UnsafeCopyOmission /\ (Required(o) \ {<<o,"copies">>}) \subseteq Charged(t))
                   \/ (UnsafeCrossScope /\ \E u \in Tenants \ {t}: Required(o) \subseteq Charged(u))
                /\ assigned' = assigned \cup {<<t,o>>}
                /\ UNCHANGED <<<<initializeda, runninga, allocateda, ceilinga, issueda, ownera, amounta, currenta, remaininga, chargeda, delivereda, refundeda>>, <<initializedb, runningb, allocatedb, ceilingb, issuedb, ownerb, amountb, currentb, remainingb, chargedb, deliveredb, refundedb>>>>

@@ -4,7 +4,7 @@
 
 durable-db is an ordered key-value database written in Rust. Keep authoritative data in object storage, run interchangeable API servers, and use bounded memory and optional local disk to make immutable reads cheaper. On a laptop, a local directory replaces the object store.
 
-**Status: experimental, v0.7.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
+**Status: experimental, v0.8.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
 
 | What you get | How it works |
 | --- | --- |
@@ -20,11 +20,11 @@ The current shared read/publication path does not meet the performance brief and
 
 The replacement index now recovers an immutable checkpoint plus a bounded recent journal layer. Values stay in shared sorted tables, reads fetch the relevant blocks, and bounded memory/disk caches are disposable. Checkpoints bind values and retry receipts to an exact journal cut, reusing unchanged tables without reading their indexes. Their descriptors live directly in the authority record, eliminating header uploads and orphan header objects. Automatic maintenance also reclaims obsolete table data, indexes and manifest nodes; checkpoint staging cannot adopt a later collection generation. Native HTTP tests on real B2 and versioned MinIO preserve tenant budgets, values and retry receipts across cold recovery; 100 warmed point reads and scans make zero provider calls. These [component results](docs/verification-results.md#native-http-budgets-and-recovery-2026-11-10) use an injected clock and do not qualify production timing or sustained performance.
 
-Native write admission now charges each database for its journal record, the checkpoint rows it introduces and the retained receipt window its first post-checkpoint write may rewrite before assigning shared journal order. An underfunded write is refused without a PUT; funded neighbors and exact retries continue. This reuses the existing allocator, with no extra provider call for cached grants. [Accounting scope](docs/design-upload-admission.md#native-serving) still excludes unrelated shared-table rows and maintenance overhead. Native format `owned-candidate-14` requires a fresh namespace; the CLI format is unchanged.
+Native write admission charges each database for its journal record, new checkpoint rows and the base tables its changes can force maintenance to copy—including neighbors’ unchanged rows—before assigning shared journal order. An underfunded write is refused without a PUT; funded neighbors and exact retries continue. Pricing uses authenticated manifest sizes and the bounded cache, without reading table indexes or values. [Accounting scope](docs/design-upload-admission.md#native-serving) still excludes complete maintenance overhead and retries. Native format `owned-candidate-15` requires a fresh namespace; the CLI format is unchanged.
 
 ## Start locally
 
-[v0.7.0](https://github.com/ericflo/durable-db/releases/tag/v0.7.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
+[v0.8.0](https://github.com/ericflo/durable-db/releases/tag/v0.8.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -73,7 +73,7 @@ await db.transaction(async (tx) => {
 });
 ```
 
-The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Use the matching v0.7.0 client checkout.
+The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Use the matching v0.8.0 client checkout.
 
 ## Scale without moving the database
 

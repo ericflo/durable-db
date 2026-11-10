@@ -101,6 +101,54 @@ impl Snapshot {
         }))
     }
 
+    /// Conservative copy contribution, derived only from authenticated manifest
+    /// descriptors. A changed metadata/receipt interval and each mutation key
+    /// can replace its routed base table, including any neighboring rows.
+    pub(super) async fn rewrite_bytes(
+        &self,
+        database: Database<'_>,
+        mutations: &[crate::transactions::record::Mutation<'_>],
+    ) -> anyhow::Result<u64> {
+        let mut prefix = database.name.as_bytes().to_vec();
+        prefix.push(0);
+        prefix.extend_from_slice(database.generation.as_bytes());
+        let mut ranges = vec![(composite(&prefix, 0, b""), composite(&prefix, 2, b""))];
+        ranges.extend(mutations.iter().map(|m| {
+            let key = composite(&prefix, 2, m.key.as_bytes());
+            (key.clone(), key)
+        }));
+        ranges.sort_unstable();
+        let mut charged_through: Option<Bytes> = None;
+        let mut bytes = 0u64;
+        for (start, end) in ranges {
+            if charged_through.as_ref().is_some_and(|last| last >= &end) {
+                continue;
+            }
+            let mut manifest = self.seek(start)?;
+            let mut previous = None;
+            while let Some(routed) = manifest.next().await? {
+                ensure!(
+                    previous.as_ref().is_none_or(|last| last < &routed.last),
+                    "unordered checkpoint admission bounds"
+                );
+                previous = Some(routed.last.clone());
+                if charged_through
+                    .as_ref()
+                    .is_none_or(|last| last < &routed.last)
+                {
+                    bytes = bytes
+                        .checked_add(routed.reference.blobs()[0].size())
+                        .context("checkpoint copy admission overflow")?;
+                    charged_through = Some(routed.last.clone());
+                }
+                if routed.last >= end {
+                    break;
+                }
+            }
+        }
+        Ok(bytes)
+    }
+
     pub(super) fn seek(&self, key: Bytes) -> anyhow::Result<tree::Reader> {
         tree::Reader::seek(
             self.0.files.clone(),

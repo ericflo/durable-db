@@ -270,21 +270,6 @@ impl<'a> View<'a> {
     pub fn statistics(&self) -> Statistics {
         self.statistics
     }
-    /// The first change to a clean checkpoint may rewrite its retained receipt
-    /// window. Once dirty, that contribution was already admitted. Concurrent
-    /// first changes may overcharge; rejected/cancelled work never refunds it.
-    pub(crate) fn checkpoint_receipt_rewrite_bytes(&self) -> anyhow::Result<usize> {
-        let state = self
-            .state
-            .context("receipt admission requires resident metadata")?;
-        if state.revision() > self.floor {
-            return Ok(0);
-        }
-        let (count, bytes) = state.receipt_usage();
-        // receipt_usage includes the revision's eight bytes, already part of
-        // the table row header. All base receipts count, even if about to expire.
-        Ok(bytes + count * (table::encoded_row_len(state.database().name.len() + 18, 32) - 40))
-    }
     /// Only resident suffix versions, for a future incremental flush. These
     /// rows exclude checkpoint values and are not a complete database image.
     pub fn recent_rows(&self) -> impl Iterator<Item = table::Row<'_>> {

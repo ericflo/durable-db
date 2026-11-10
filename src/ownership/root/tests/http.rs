@@ -768,6 +768,18 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(status, StatusCode::OK);
 }
 
+// Inspect actual fixture data objects independently of the admission calculator.
+async fn checkpoint_data(files: &dyn Storage) -> std::collections::BTreeMap<String, u64> {
+    let mut data = std::collections::BTreeMap::new();
+    for key in files.list("tables/", None, 128).await.unwrap() {
+        let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
+        if object.bytes.starts_with(b"DDBBLK01") {
+            data.insert(key, object.bytes.len() as u64);
+        }
+    }
+    data
+}
+
 // Keep transport assertions compact while exercising the real TCP stack.
 async fn tcp_call(
     client: &reqwest::Client,
@@ -789,7 +801,7 @@ async fn tcp_call(
 
 #[tokio::test]
 async fn native_http_database_budget_refuses_before_journal_and_preserves_neighbors() {
-    let (router, _, _, faults, token) = fixture(8, 2).await;
+    let (router, provider, _, faults, token) = fixture(8, 2).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -831,6 +843,9 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         );
     }
     let a = format!("{base}/v1/databases/a/commit");
+    let initial_data = checkpoint_data(provider.files.as_ref()).await;
+    assert_eq!(initial_data.len(), 1);
+    let first_admission = 420 + initial_data.values().sum::<u64>();
     // This request needs 250 journal bytes and 170 checkpoint row bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
@@ -840,7 +855,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
     let (_, refused) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
     assert_eq!(refused["allocated"]["bytes"], 0);
-    let exact = json!({"request_id":"rows","expected_configuration_revision":1,"limits":{"bytes":420,"attempts":2}});
+    let exact = json!({"request_id":"rows","expected_configuration_revision":1,"limits":{"bytes":first_admission,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, exact).await.0,
         StatusCode::OK
@@ -890,13 +905,21 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         before, after,
         "checkpointing and neighboring admission preserve the ledger"
     );
-    let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":840,"attempts":2}});
+    let current_data = checkpoint_data(provider.files.as_ref()).await;
+    let replaced: Vec<_> = current_data
+        .iter()
+        .filter(|(key, _)| !initial_data.contains_key(*key))
+        .collect();
+    assert_eq!(replaced.len(), 1, "one new shared table after checkpoint");
+    let copies = *replaced[0].1;
+    let second_total = first_admission + 418 + copies;
+    let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
     );
-    // The new rows fit, but rewriting the checkpoint's retained receipt needs
-    // another 70 bytes. Refusal allocates no credit and sends no immutable PUT.
+    // One byte below the direct work plus complete shared-table copy must
+    // refuse without allocating credit or issuing an immutable PUT.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
         tcp_call(&client, "POST", &a, writer, next.clone()).await.0,
@@ -904,8 +927,8 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
     let (_, refused) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
-    assert_eq!(refused["allocated"]["bytes"], 420);
-    let refill = json!({"request_id":"retained","expected_configuration_revision":3,"limits":{"bytes":908,"attempts":2}});
+    assert_eq!(refused["allocated"]["bytes"], first_admission);
+    let refill = json!({"request_id":"copies","expected_configuration_revision":3,"limits":{"bytes":second_total,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
@@ -914,9 +937,9 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         tcp_call(&client, "POST", &a, writer, next).await.0,
         StatusCode::OK
     );
-    // A second write before the next checkpoint pays its new rows, without
-    // charging the already dirty receipt window again (420 bytes exactly).
-    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":1328,"attempts":3}});
+    // A dirty write conservatively pays the same base-copy contribution again.
+    // This needs no persistent paid-table set or cross-transaction refund.
+    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 420 + copies,"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK

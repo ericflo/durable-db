@@ -41,6 +41,19 @@ pub(crate) fn contribution_bytes(
             .sum::<usize>()
 }
 
+impl Projection {
+    pub(crate) async fn checkpoint_rewrite_bytes(
+        &self,
+        database: Database<'_>,
+        mutations: &[Mutation<'_>],
+    ) -> anyhow::Result<u64> {
+        match &self.base {
+            Some(base) => base.rewrite_bytes(database, mutations).await,
+            None => Ok(0),
+        }
+    }
+}
+
 /// Can only be produced by staging a private native recovery at a complete
 /// frame boundary. It grants neither publication nor serving permission.
 pub struct Staged {
