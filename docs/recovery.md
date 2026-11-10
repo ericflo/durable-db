@@ -4,6 +4,8 @@ The binary provides `durable-db backup export`, `inspect`, and `restore`. An exp
 
 This is an operator-driven recovery tool. Scheduled retained snapshots, point-in-time recovery, independent backup storage, and recurring restore drills remain production gates.
 
+The next native retention increment is an administrator-owned durable reference to a fully published checkpoint, including its exact journal cut. Registration must capture the existing collection generation and compare the authoritative root; a failed comparison cannot bless a stale image. Collection must protect the union of the current checkpoint and every retained reference. Release must be explicit and idempotent, with no clock-dependent expiry in the first increment. The existing `PublicationSafety` protocol supplies the publication/collection boundary; retention metadata, authorization, resource bounds, lost replies and cold recovery still need implementation and qualification. Shared checkpoints contain multiple databases, so this initial scope is namespace backup retention, not tenant-isolated snapshots or point-in-time recovery. Raw snapshot handles remain unpinned today.
+
 ## Local format upgrades
 
 v0.11.0 retains the local storage format used by v0.9.0 and v0.10.0. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions.
