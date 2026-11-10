@@ -112,7 +112,7 @@ For the opt-in large-object range check, use the same disposable provider creden
 cargo test --locked --test provider_ranges -- --ignored --exact bounded_ranges_of_a_large_immutable_object
 ```
 
-It writes one 16 MiB object and verifies five bounded slices, missing/size errors and rejection above the 8 MiB cap. It does not retry an uncertain upload. Delete all versions and revoke the temporary key after either outcome. The [retired index evaluation](design-owned-partitions.md#historical-third-party-index-integration) records historical selected-journal and grouped-write evidence.
+It writes one 16 MiB object and verifies five bounded slices, missing/size errors and rejection above the 8 MiB cap. It does not retry an uncertain upload. Delete all versions and revoke the temporary key after either outcome. The [live transaction checks](verification.md#live-native-transactions) exercise the current grouped-write and selected-recovery path.
 
 For native tables and their overlapping snapshot merge, set `DURABLE_DB_TABLE_REPORT` and use the same disposable provider environment:
 
