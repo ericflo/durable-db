@@ -1,0 +1,9 @@
+safe RootCatalog.cfg root-catalog 768m -
+safe RootCatalogThree.cfg root-catalog-three 768m -
+unsafe RootCatalogUnsafeCompare.cfg root-catalog-compare 768m ImmutableSelection
+unsafe RootCatalogUnsafeInherit.cfg root-catalog-inherit 768m ImmutableSelection
+unsafe RootCatalogUnsafeReseal.cfg root-catalog-reseal 768m ImmutableSelection
+unsafe RootCatalogUnsafeEarly.cfg root-catalog-early 768m DurableCatalog
+unsafe RootCatalogUnsafeScan.cfg root-catalog-scan 768m SelectedHistory
+unsafe RootCatalogLate.cfg root-catalog-late 768m NotLateSelection
+unsafe RootCatalogInherited.cfg root-catalog-inherited 768m NotInheritedSelection

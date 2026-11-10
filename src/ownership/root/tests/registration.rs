@@ -6,9 +6,10 @@ use crate::{
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
-struct Faults {
+pub(super) struct Faults {
     inner: Arc<Remote>,
     mode: AtomicU64,
+    fail_prefix: Option<&'static str>,
     puts: AtomicU64,
     delayed: Mutex<Option<(String, Bytes)>>,
 }
@@ -17,9 +18,25 @@ impl Faults {
         Arc::new(Self {
             inner,
             mode: AtomicU64::new(mode),
+            fail_prefix: None,
             puts: AtomicU64::new(0),
             delayed: Mutex::new(None),
         })
+    }
+    pub(super) fn fail_at(inner: Arc<Remote>, prefix: &'static str, mode: u64) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            mode: AtomicU64::new(mode),
+            fail_prefix: Some(prefix),
+            puts: AtomicU64::new(0),
+            delayed: Mutex::new(None),
+        })
+    }
+    pub(super) async fn release(&self) {
+        let delayed = self.delayed.lock().unwrap().take();
+        if let Some((key, bytes)) = delayed {
+            self.inner.put(&key, bytes).await.unwrap();
+        }
     }
 }
 #[async_trait]
@@ -29,7 +46,11 @@ impl Storage for Faults {
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.puts.fetch_add(1, Ordering::SeqCst);
-        let mode = self.mode.swap(0, Ordering::SeqCst);
+        let mode = if key.starts_with(self.fail_prefix.unwrap_or("")) {
+            self.mode.swap(0, Ordering::SeqCst)
+        } else {
+            0
+        };
         if mode == 2 {
             *self.delayed.lock().unwrap() = Some((key.into(), bytes));
             anyhow::bail!("upload still pending");

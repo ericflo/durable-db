@@ -1,4 +1,5 @@
 use super::*;
+mod catalog;
 mod registration;
 use crate::{
     providers::Connection,
@@ -413,7 +414,14 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
     let provider = Provider::new();
     let clock = ManualClock::default();
     let connection = provider.connection("test");
-    for format in ["3", "4", "5", "owned-candidate-1", "future"] {
+    for format in [
+        "3",
+        "4",
+        "5",
+        "owned-candidate-1",
+        "owned-candidate-2",
+        "future",
+    ] {
         provider.history.lock().unwrap()[0].info =
             BTreeMap::from([("durable-db-format".into(), format.into())]);
         let root = connection.root(clock.clone(), profile()).unwrap();
@@ -454,11 +462,18 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
         invalid.insert("durable-db-owned-root".into(), value);
         assert!(metadata::decode(&invalid, "test", profile()).is_err());
     }
-    for field in ["epoch", "incarnation", "lifetime_ns", "error_ns", "extra"] {
+    for field in [
+        "epoch",
+        "incarnation",
+        "catalog",
+        "lifetime_ns",
+        "error_ns",
+        "extra",
+    ] {
         let mut invalid = valid.clone();
         let mut wire: serde_json::Value =
             serde_json::from_str(&invalid["durable-db-owned-root"]).unwrap();
-        wire[field] = if field == "incarnation" {
+        wire[field] = if field == "incarnation" || field == "catalog" {
             serde_json::json!(Uuid::nil().to_string())
         } else {
             serde_json::json!(0)

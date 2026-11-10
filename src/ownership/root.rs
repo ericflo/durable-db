@@ -4,6 +4,7 @@
 //! confirmation begins a conservative drain; activation never extends the interval.
 //! This is not a serving engine: journal selection/recovery and data-view checks
 //! must still precede every permission check. There is no system clock adapter.
+mod catalog;
 mod metadata;
 mod registration;
 
@@ -17,6 +18,7 @@ use metadata::{Phase, Record};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
+pub use catalog::{JournalRecovery, Recovery};
 pub use control::Outcome;
 pub use registration::{Registration, Registrations};
 
@@ -38,6 +40,8 @@ pub enum Error {
     Retired,
     #[error("this incarnation's journal writer has already been opened")]
     JournalOpened,
+    #[error("the confirmed recovery catalog changed; restart from a fresh snapshot")]
+    StaleRecovery,
     #[error("control provider observation failed")]
     Provider(#[from] anyhow::Error),
     #[error(transparent)]
@@ -81,6 +85,7 @@ enum Kind {
     Claim,
     Validate,
     Activate,
+    Select,
 }
 
 struct Pending {
@@ -174,6 +179,7 @@ impl<C: Clock> Root<C> {
                 incarnation: self.incarnation,
             },
             phase: Phase::Fenced,
+            catalog: observed.record.and_then(|r| r.catalog),
         };
         let registration = Registration::new(record.identity, observed.record.map(|r| r.identity));
         let mut prepared = self.begin(observed.raw, record, Kind::Claim)?;
@@ -241,6 +247,7 @@ impl<C: Clock> Root<C> {
             id,
             raw,
             registration: None,
+            catalog: None,
         })
     }
 
@@ -365,6 +372,46 @@ impl<C: Clock> Root<C> {
         ))
     }
 
+    /// Begin old-journal discovery only after activation has completed the drain.
+    /// The returned cursor owns its snapshot and can be awaited outside the lock.
+    pub fn recovery(&mut self) -> Result<Recovery, Error> {
+        let identity = self.permission()?.ok_or(Error::NotReady)?;
+        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
+        let record =
+            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
+        if record.identity != identity || record.phase != Phase::Open {
+            return Err(Error::NotReady);
+        }
+        Ok(Recovery::new(
+            self.files.clone(),
+            record,
+            self.registrations()?,
+        ))
+    }
+
+    /// Persist a complete discovery against an unchanged confirmed catalog.
+    /// Renewal can refresh the comparison while a scan is running. A changed
+    /// catalog requires a new snapshot; an already selected prefix never extends.
+    pub fn select_prefix(&mut self, recovered: JournalRecovery) -> Result<Prepared, Error> {
+        let identity = self.permission()?.ok_or(Error::NotReady)?;
+        if recovered.record.identity != identity {
+            return Err(Error::NotOwner);
+        }
+        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
+        let confirmed =
+            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
+        if confirmed != recovered.record {
+            return Err(Error::StaleRecovery);
+        }
+        let id = Uuid::new_v4();
+        let catalog = recovered.publication(self.files.clone(), id)?;
+        let mut record = recovered.record;
+        record.catalog = Some(id);
+        let mut prepared = self.begin(raw, record, Kind::Select)?;
+        prepared.catalog = Some(catalog);
+        Ok(prepared)
+    }
+
     fn drained(&mut self) -> Result<bool, Error> {
         match &self.drain {
             Some(drain) => Ok(self.timeline.drain_complete(drain)?),
@@ -394,6 +441,7 @@ pub struct Prepared {
     id: Arc<()>,
     raw: control::Prepared,
     registration: Option<registration::Prepared>,
+    catalog: Option<catalog::Publication>,
 }
 
 impl Prepared {
@@ -401,6 +449,9 @@ impl Prepared {
         let raw = async {
             if let Some(registration) = self.registration {
                 registration.execute().await?;
+            }
+            if let Some(catalog) = self.catalog {
+                catalog.execute().await?;
             }
             Ok(self.raw.execute().await)
         }

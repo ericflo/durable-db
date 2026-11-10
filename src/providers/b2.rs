@@ -605,11 +605,36 @@ mod tests {
             );
             assert_eq!(state.update_calls.load(Ordering::SeqCst), 5);
             assert_eq!(state.bucket.lock().unwrap().info["head"], "current");
+            let mut recovery = successor.recovery().unwrap();
+            if apply_before_successor {
+                let mut journal = recovery.next().await.unwrap().unwrap();
+                assert!(journal.read_next().await.unwrap().is_none());
+                let request = successor.select_prefix(journal).unwrap();
+                state.lose_update_ack.store(true, Ordering::SeqCst);
+                assert!(matches!(
+                    successor.finish(request.execute().await).unwrap(),
+                    Outcome::Uncertain(_)
+                ));
+                assert_eq!(state.update_calls.load(Ordering::SeqCst), 6);
+                let observed = successor.observe().await.unwrap();
+                let request = successor.validate(observed).unwrap();
+                assert!(matches!(
+                    successor.finish(request.execute().await).unwrap(),
+                    Outcome::Confirmed
+                ));
+                let mut recovered = successor.recovery().unwrap();
+                let mut journal = recovered.next().await.unwrap().unwrap();
+                assert!(journal.is_selected());
+                assert!(journal.read_next().await.unwrap().is_none());
+                assert_eq!(state.update_calls.load(Ordering::SeqCst), 7);
+            } else {
+                assert!(recovery.next().await.unwrap().is_none());
+            }
             // The compatibility engine must refuse this experimental namespace.
             assert!(connection.into_published(None).await.is_err());
             assert_eq!(
                 state.bucket.lock().unwrap().info["durable-db-format"],
-                "owned-candidate-2"
+                "owned-candidate-3"
             );
         })
         .await;

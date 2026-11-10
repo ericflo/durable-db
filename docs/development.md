@@ -35,6 +35,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Ownership intervals | `cargo test --locked --lib ownership::timing` and `scripts/check-proof.sh GrantBounds` |
 | Candidate root controller | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootAcquisition` |
 | Durable root registrations | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootRegistration` |
+| Durable prefix catalog | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootCatalog` |
 | Candidate root request lifecycle | `scripts/check-candidate.sh RootRequests` and `scripts/check-proof.sh RootRequests` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
@@ -53,7 +54,7 @@ scripts/check-candidate.sh PartitionJournal
 scripts/check-proof.sh PartitionJournal
 ```
 
-The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal`, `LateControlCoverage`, `PlacementRequests`, `PlacementTakeover`, `RootRequests`, `RootAcquisition` and `RootRegistration`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `RootRequests`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
+The candidate checker also supports `OwnedWal`, `DelegatedGrant`, `RootControl`, `RootJournal`, `LateControlCoverage`, `PlacementRequests`, `PlacementTakeover`, `RootRequests`, `RootAcquisition`, `RootRegistration` and `RootCatalog`. The proof checker supports `PublicationSafety` (the default), `Journal`, `GrantBounds`, `RootControl`, `RootJournal`, `RootRequests`, `PartitionControl` and `PartitionJournal`. Imported proofs are checked before their dependents. See the [candidate catalog](https://github.com/ericflo/durable-db/tree/main/spec/candidates) and [owned-partition design](design-owned-partitions.md) for the purpose of each component.
 
 ## Formal check inputs
 
@@ -93,7 +94,7 @@ The register fixture permits at most thirteen conditional attempts, including a 
 
 For component work, `Native::connect_storage` and `S3::connect_storage` return the same `providers::Connection`. Its `objects()` and `authority()` expose transports without initializing publication metadata. `into_published` explicitly opens the current engine. Each conditional register replacement receives a fresh mutation identity, including replacements with otherwise identical metadata. Raw connections do not grant serving permission or provide tenant admission. HTTP regressions check that immutable writes leave authority metadata untouched and that redirects or lost replies do not cause a second PUT.
 
-The experimental `Connection::root(clock, profile)` controller binds the same provider connection to a fresh candidate identity and a durable timing profile. It has no operating-system clock adapter, serving API or automatic driver. Its `owned-candidate-2` format requires a fresh namespace and is rejected by the existing publication engine. The earlier unregistered candidate format is also refused; no migration is implemented. Every claim first persists an immutable registration. `take_journal` opens that incarnation's writer once, and `registrations` streams durable ancestry without listing. These interfaces do not select recovery prefixes or authorize database acknowledgements. Use only disposable fixtures while journal/placement recovery and the platform contract remain unqualified. The observation and mutation futures own their request state; await them outside the controller lock, then match the completion before consulting permission. Returned identities and durations are not transferable authority. See [controller scope](verification.md#candidate-root-controller).
+The experimental `Connection::root(clock, profile)` controller binds the same provider connection to a fresh candidate identity and a durable timing profile. It has no operating-system clock adapter, serving API or automatic driver. Its `owned-candidate-3` format requires a fresh namespace and is rejected by the existing publication engine. Earlier candidate formats are also refused; no migration is implemented. Every claim first persists an immutable registration. `take_journal` opens that incarnation's writer once, and `registrations` streams durable ancestry without listing. `recovery` begins after activation and `select_prefix` conditionally persists complete discoveries in the immutable catalog. Renewals can run during a scan if its catalog stays unchanged. These interfaces do not authorize database acknowledgements. Use only disposable fixtures while transaction/placement recovery and the platform contract remain unqualified. The observation and mutation futures own their request state; await them outside the controller lock, then match the completion before consulting permission. Returned identities and durations are not transferable authority. See [controller scope](verification.md#candidate-root-controller).
 
 ## CI and publication
 
@@ -115,3 +116,5 @@ npm --prefix site audit
 ```
 
 The Rust audit verifies the pinned cargo-audit binary, fetches current advisories, rejects vulnerabilities and warnings without exemptions, and records the advisory database commit. CI runs dependency audits outside Docker's layer cache, so new advisories can block an unchanged lockfile. A failed advisory fetch fails the gate. Audit success does not rule out undiscovered vulnerabilities.
+
+The disposable server started by `scripts/test-client.sh` uses explicit bounded request budgets of 1,000,000 units/second and burst units. This keeps receipt-eviction and Pi conformance tests from sleeping on production admission defaults. The dedicated Rust and HTTP admission tests still exercise those defaults, refill, shared principals and exhaustion. This fixture setting is not a production recommendation or a database throughput result.

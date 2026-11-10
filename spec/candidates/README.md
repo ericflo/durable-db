@@ -8,6 +8,14 @@ This component starts with an empty register and unordered competing candidate i
 
 Run `scripts/check-candidate.sh RootAcquisition`. The two- and three-candidate positive instances each allow four invocations, with 89,685 and 697,663 distinct states. Removing comparisons or allowing retargeting must fail. Two reachability controls exercise competing captured predecessors and recovery after a timed-out claim actually applies. There is no symmetry reduction or guided constraint. This is a finite acquisition model, not a serving-permission, liveness or Rust-refinement proof. The root controller also relies on the separate `RootRequests`, `RootControl` and `GrantBounds` contracts; their composition with the implementation remains an obligation.
 
+## RootCatalog
+
+Conditional prefix catalogs with separate scan, immutable upload, positive knowledge, provider send, apply, reply and timeout events. Claims inherit existing selections, and exact comparison rejects stale publications. Renewal may refresh a scan's comparison only while its catalog is unchanged. Old uploads may arrive after selection; scans before the ownership drain are forbidden.
+
+Run `scripts/check-candidate.sh RootCatalog`. Two epochs, three invocations and two frames check 2,816,947 distinct states. Three epochs, three invocations and one frame check 4,196,373 states. Five unsafe controls exercise comparison, inheritance, reselection, premature publication and early scans; two coverage controls witness late application after timeout and inheritance across a third epoch. No symmetry reduction or guided constraint is used.
+
+Drain completion abstracts the ending of every earlier acknowledgement interval. Ordered epochs and discoverable journals are assumptions, established separately by other components rather than composed into this model. It does not prove physical timing, complete database/receipt recovery, collection, bounded service time, liveness or Rust refinement.
+
 ## RootRegistration
 
 This extends acquisition with immutable journal registrations, durable predecessor links, uncertain uploads, positive-read resolution and explicit provider sends. Publication requires knowledge that the registration is durable. Recovery follows only the current register and persisted parent links; it does not use a process's captured observations or caches. Every winning journal remains discoverable, including former winners that might still acknowledge work under the separate permission contract.

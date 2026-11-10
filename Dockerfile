@@ -281,7 +281,14 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh RootRegistration && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-candidate-rootcatalog
+COPY spec/candidates/RootCatalog.tla spec/candidates/RootCatalog.checks spec/candidates/RootCatalog*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh RootCatalog && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM scratch AS model
+COPY --from=model-candidate-rootcatalog /checks/ /checks/
 COPY --from=model-candidate-rootregistration /checks/ /checks/
 COPY --from=model-candidate-rootacquisition /checks/ /checks/
 COPY --from=proof-root-requests /checks/ /checks/

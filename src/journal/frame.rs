@@ -82,6 +82,8 @@ pub struct Prefix {
 }
 
 impl Prefix {
+    pub const ENCODED_BYTES: usize = PREFIX_BYTES;
+
     pub(super) fn empty(log: LogId) -> Self {
         Self {
             log,

@@ -6,7 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-const VERSION: &str = "owned-candidate-2";
+const VERSION: &str = "owned-candidate-3";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
@@ -21,6 +21,7 @@ pub(super) enum Phase {
 pub(super) struct Record {
     pub identity: Identity,
     pub phase: Phase,
+    pub catalog: Option<Uuid>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -31,6 +32,7 @@ struct Wire {
     phase: Phase,
     lifetime_ns: u64,
     error_ns: u64,
+    catalog: Option<String>,
 }
 
 pub(super) fn decode(
@@ -62,6 +64,16 @@ pub(super) fn decode(
         .ok_or(Error::Incompatible)?;
     let wire: Wire = serde_json::from_str(encoded).map_err(|_| Error::Incompatible)?;
     let incarnation = Uuid::parse_str(&wire.incarnation).map_err(|_| Error::Incompatible)?;
+    let catalog = wire
+        .catalog
+        .map(|s| {
+            let id = Uuid::parse_str(&s).map_err(|_| Error::Incompatible)?;
+            if id.is_nil() || id.to_string() != s {
+                return Err(Error::Incompatible);
+            }
+            Ok(id)
+        })
+        .transpose()?;
     if wire.epoch == 0
         || incarnation.is_nil()
         || incarnation.to_string() != wire.incarnation
@@ -76,6 +88,7 @@ pub(super) fn decode(
             incarnation,
         },
         phase: wire.phase,
+        catalog,
     }))
 }
 
@@ -99,6 +112,7 @@ pub(super) fn encode(
             phase: record.phase,
             lifetime_ns: profile.bounds.root_lifetime().as_nanos() as u64,
             error_ns: profile.error.as_nanos() as u64,
+            catalog: record.catalog.map(|id| id.to_string()),
         })
         .map_err(|_| Error::Incompatible)?,
     );

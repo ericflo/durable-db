@@ -264,7 +264,7 @@ mod tests {
     use std::sync::Mutex;
 
     struct Wire {
-        registrations: BTreeMap<String, Bytes>,
+        immutable: BTreeMap<String, Bytes>,
         registration_puts: usize,
         absent: bool,
         puts: usize,
@@ -273,6 +273,7 @@ mod tests {
         bucket: Bucket,
         etag: String,
         acknowledgement: u16,
+        lose_next_control_reply: bool,
     }
 
     async fn read_object(State(state): State<Arc<Mutex<Wire>>>) -> Response {
@@ -284,12 +285,12 @@ mod tests {
             .unwrap()
     }
 
-    async fn read_registration(
+    async fn read_immutable(
         State(state): State<Arc<Mutex<Wire>>>,
         axum::extract::Path(id): axum::extract::Path<String>,
     ) -> Response {
         let state = state.lock().unwrap();
-        match state.registrations.get(&id) {
+        match state.immutable.get(&id) {
             Some(bytes) => Response::builder()
                 .header("etag", "\"registration\"")
                 .header("last-modified", "Sun, 08 Nov 2026 00:00:00 GMT")
@@ -302,16 +303,18 @@ mod tests {
         }
     }
 
-    async fn write_registration(
+    async fn write_immutable(
         State(state): State<Arc<Mutex<Wire>>>,
         axum::extract::Path(id): axum::extract::Path<String>,
         bytes: Bytes,
     ) -> Response {
         let mut state = state.lock().unwrap();
-        state.registration_puts += 1;
+        if id.starts_with("ownership/") {
+            state.registration_puts += 1;
+        }
         assert!(
-            state.registrations.insert(id, bytes).is_none(),
-            "registration PUT must not repeat"
+            state.immutable.insert(id, bytes).is_none(),
+            "immutable PUT must not repeat"
         );
         Response::builder()
             .status(state.acknowledgement)
@@ -373,10 +376,15 @@ mod tests {
         state.bucket = serde_json::from_slice(&bytes).unwrap();
         state.absent = false;
         state.etag = format!("\"revision-{}\"", state.bucket.revision);
+        let acknowledgement = if std::mem::take(&mut state.lose_next_control_reply) {
+            503
+        } else {
+            state.acknowledgement
+        };
         // The authoritative update has happened. Simulate a gateway/server
         // losing its successful acknowledgement and returning a transient error.
         Response::builder()
-            .status(state.acknowledgement)
+            .status(acknowledgement)
             .header("etag", &state.etag)
             .header("location", "/test/prefix/authority.json")
             .body(Body::from("<Error><Code>InternalError</Code></Error>"))
@@ -435,6 +443,13 @@ mod tests {
             Outcome::Confirmed
         ));
         assert_eq!(old.permission().unwrap().unwrap().epoch, 1);
+        let mut writer = old
+            .take_journal(crate::journal::QueueLimits::default())
+            .unwrap();
+        let upload = writer.prepare(&[Bytes::from_static(b"first")]).unwrap();
+        writer.complete(upload.send().await).unwrap();
+        assert!(writer.pop_durable().unwrap().is_some());
+        let late = writer.prepare(&[Bytes::from_static(b"late")]).unwrap();
 
         clock.0.store(27, Ordering::SeqCst);
         let observed = old.observe().await.unwrap();
@@ -490,6 +505,31 @@ mod tests {
             1
         );
         assert!(registrations.next().await.unwrap().is_none());
+        let mut recovery = successor.recovery().unwrap();
+        let mut journal = recovery.next().await.unwrap().unwrap();
+        while journal.read_next().await.unwrap().is_some() {}
+        assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+        let request = successor.select_prefix(journal).unwrap();
+        state.lock().unwrap().lose_next_control_reply = true;
+        assert!(matches!(
+            successor.finish(request.execute().await).unwrap(),
+            Outcome::Uncertain(_)
+        ));
+        assert_eq!(state.lock().unwrap().puts, 9);
+        let _completion = late.send().await;
+        let observed = successor.observe().await.unwrap();
+        let request = successor.validate(observed).unwrap();
+        assert!(matches!(
+            successor.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        let mut recovery = successor.recovery().unwrap();
+        let mut journal = recovery.next().await.unwrap().unwrap();
+        assert!(journal.is_selected());
+        while journal.read_next().await.unwrap().is_some() {}
+        assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+        assert_eq!(state.lock().unwrap().puts, 10);
+
         task.abort();
         task.await.unwrap_err();
     }
@@ -515,7 +555,7 @@ mod tests {
             info: BTreeMap::new(),
         };
         let state = Arc::new(Mutex::new(Wire {
-            registrations: BTreeMap::new(),
+            immutable: BTreeMap::new(),
             registration_puts: 0,
             absent,
             puts: 0,
@@ -524,14 +564,15 @@ mod tests {
             bucket: initial,
             etag: "\"old\"".into(),
             acknowledgement,
+            lose_next_control_reply: false,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = axum::Router::new()
             .route("/test/prefix/authority.json", get(read).put(write))
             .route(
-                "/test/prefix/ownership/{id}",
-                get(read_registration).put(write_registration),
+                "/test/prefix/{*id}",
+                get(read_immutable).put(write_immutable),
             )
             .route(
                 "/test/prefix/journal/frame",

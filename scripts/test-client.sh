@@ -7,7 +7,10 @@ tmp=$(mktemp -d)
 pid=''
 cleanup() { if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; rm -rf "$tmp"; }
 trap cleanup EXIT HUP INT TERM
-"$binary" serve --data "$tmp/data" --listen "127.0.0.1:$port" > "$tmp/server.log" 2>&1 &
+# These are storage/conformance tests. Dedicated Rust/HTTP tests exercise the
+# production admission defaults; keep this fixture bounded without throttling it.
+"$binary" serve --data "$tmp/data" --listen "127.0.0.1:$port" \
+  --request-units-per-second 1000000 --request-burst-units 1000000 > "$tmp/server.log" 2>&1 &
 pid=$!
 n=0
 until curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1; do
