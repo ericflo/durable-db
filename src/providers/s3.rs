@@ -679,13 +679,24 @@ mod tests {
         let snapshot = owner.snapshot(database).await.unwrap();
         state.lock().unwrap().acknowledgement = 503;
         let wire_request = serde_json::from_str(r#"{"expected_revision":0,"request_id":"first","writes":[{"key":"note","value":"b25l"}]}"#).unwrap();
+        let other = Database {
+            name: "other",
+            ..database
+        };
         let first = owner
-            .prepare_request(database, &wire_request)
+            .prepare_requests(&[(database, &wire_request), (other, &wire_request)])
             .await
             .unwrap();
         let upload = first.upload.unwrap();
         let position = upload.position();
+        let puts = state.lock().unwrap().immutable.len();
         owner.complete(upload.send().await).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().immutable.len(),
+            puts + 1,
+            "both databases share one immutable PUT"
+        );
+        assert!(owner.commit_result(first.tickets[1]).unwrap().is_none());
         assert_eq!(
             owner.outcome(first.tickets[0]).unwrap(),
             live::Outcome::Pending
@@ -721,6 +732,14 @@ mod tests {
         assert_eq!(
             owner.resolve_upload(position).await.unwrap(),
             crate::journal::Resolution::Durable
+        );
+        assert_eq!(
+            owner
+                .commit_result(first.tickets[1])
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
         );
         assert_eq!(
             owner.outcome(first.tickets[0]).unwrap(),

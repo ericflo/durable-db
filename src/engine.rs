@@ -289,6 +289,7 @@ pub struct CommitRequest {
     pub writes: Vec<Write>,
 }
 pub(crate) struct DecodedCommit {
+    pub bytes: usize,
     pub digest: [u8; 32],
     pub checks: Vec<(String, Option<Vec<u8>>)>,
     pub writes: BTreeMap<String, Option<Vec<u8>>>,
@@ -332,6 +333,7 @@ impl CommitRequest {
             return Err(Error::Limit("commit exceeds 1 MiB".into()));
         }
         Ok(DecodedCommit {
+            bytes: encoded.len(),
             digest: Sha256::digest(encoded).into(),
             checks,
             writes,

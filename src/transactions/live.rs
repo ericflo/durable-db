@@ -301,6 +301,12 @@ impl<C: Clock> Owner<C> {
     /// Group up to 128 transactions into one immutable PUT. No await occurs
     /// between the first accepted revision and creation of its upload handle.
     pub async fn prepare(&mut self, requests: &[Request<'_>]) -> anyhow::Result<Prepared> {
+        self.check()?;
+        self.maintain().await?;
+        ensure!(
+            !self.checkpoint_due(),
+            "checkpoint waiting for pending uploads"
+        );
         self.prepare_hashed(requests, None).await
     }
     async fn prepare_hashed(
@@ -309,11 +315,6 @@ impl<C: Clock> Owner<C> {
         fingerprints: Option<&[[u8; 32]]>,
     ) -> anyhow::Result<Prepared> {
         self.check()?;
-        self.maintain().await?;
-        ensure!(
-            !self.checkpoint_due(),
-            "checkpoint waiting for pending uploads"
-        );
         ensure!(
             (1..=128).contains(&requests.len()),
             "invalid transaction batch size"

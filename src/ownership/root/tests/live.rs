@@ -971,3 +971,148 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         ));
     }
 }
+
+#[tokio::test]
+async fn live_wire_batches_group_independent_databases_and_validate_before_admission() {
+    use crate::{Error, engine::CommitRequest};
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+    let write: CommitRequest = serde_json::from_str(
+        r#"{"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":""}]}"#,
+    )
+    .unwrap();
+    let mut invalid = write.clone();
+    invalid.writes[0].value = Some("invalid!".into());
+    assert!(matches!(
+        owner
+            .prepare_requests(&[(database("a"), &write), (database("b"), &invalid)])
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(owner.usage(), crate::index::recovery::Usage::default());
+    let mut changed = write.clone();
+    changed.writes[0].value = None;
+    assert!(matches!(
+        owner
+            .prepare_requests(&[(database("a"), &write), (database("a"), &changed)])
+            .await,
+        Err(Error::Invalid(_))
+    ));
+    let mut conflict = write.clone();
+    conflict.request_id = "conflict".into();
+    let prepared = owner
+        .prepare_requests(&[
+            (database("a"), &write),
+            (database("a"), &write),
+            (database("a"), &conflict),
+            (database("b"), &write),
+        ])
+        .await
+        .unwrap();
+    let upload = prepared.upload.unwrap();
+    assert_eq!(
+        upload.position(),
+        1,
+        "rejected batches consumed no position"
+    );
+    assert_eq!(prepared.tickets.len(), 4);
+    for ticket in &prepared.tickets {
+        assert!(owner.commit_result(*ticket).unwrap().is_none());
+    }
+    owner.complete(upload.send().await).await.unwrap();
+    for (i, replayed) in [(0, false), (1, true), (3, false)] {
+        let result = owner.commit_result(prepared.tickets[i]).unwrap().unwrap();
+        assert_eq!((result.revision, result.replayed), (1, replayed));
+    }
+    assert!(matches!(
+        owner.commit_result(prepared.tickets[2]),
+        Err(Error::Conflict)
+    ));
+    let mixed = owner
+        .prepare_requests(&[
+            (database("a"), &write),
+            (database("a"), &conflict),
+            (database("c"), &write),
+        ])
+        .await
+        .unwrap();
+    assert!(
+        owner
+            .commit_result(mixed.tickets[0])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    assert!(matches!(
+        owner.commit_result(mixed.tickets[1]),
+        Err(Error::Conflict)
+    ));
+    assert!(owner.commit_result(mixed.tickets[2]).unwrap().is_none());
+    let upload = mixed.upload.unwrap();
+    assert_eq!(upload.position(), 2);
+    owner.complete(upload.send().await).await.unwrap();
+    assert!(
+        !owner
+            .commit_result(mixed.tickets[2])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    // Request/aggregate byte bounds are applied before any database is warmed.
+    assert!(
+        owner
+            .prepare_requests(&vec![(database("a"), &write); 129])
+            .await
+            .is_err()
+    );
+    let mut large = write.clone();
+    large.writes[0].value = Some("eA==".repeat(20_000)); // malformed base64
+    assert!(
+        owner
+            .prepare_requests(&[(database("a"), &large)])
+            .await
+            .is_err()
+    );
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    large.writes[0].value = Some(STANDARD.encode(vec![0; 64 * 1024]));
+    let before = owner.usage();
+    assert!(matches!(
+        owner
+            .prepare_requests(&vec![(database("new"), &large); 49])
+            .await,
+        Err(Error::Limit(_))
+    ));
+    assert_eq!(owner.usage(), before);
+}
+
+#[tokio::test]
+async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapshot() {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut limits = live::Limits::default();
+    limits.index.databases = 2; // warming one generation reaches the soft threshold
+    let mut owner = open(active(&provider, &clock).await, limits).await;
+    let write = serde_json::from_str(
+        r#"{"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":""}]}"#,
+    )
+    .unwrap();
+    let prepared = owner.prepare_request(database("a"), &write).await.unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .commit_result(prepared.tickets[0])
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    assert_eq!(
+        owner.usage().databases,
+        0,
+        "checkpoint runs after publication"
+    );
+}
