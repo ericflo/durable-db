@@ -1088,6 +1088,7 @@ async fn live_wire_batches_group_independent_databases_and_validate_before_admis
 
 #[tokio::test]
 async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapshot() {
+    use crate::storage::Storage;
     let provider = Provider::new();
     let clock = ManualClock::default();
     let mut limits = live::Limits::default();
@@ -1114,5 +1115,32 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
         owner.usage().databases,
         0,
         "checkpoint runs after publication"
+    );
+    let before = provider
+        .files
+        .list("tables/", None, 100)
+        .await
+        .unwrap()
+        .len();
+    let retry = owner.prepare_request(database("a"), &write).await.unwrap();
+    assert!(retry.upload.is_none());
+    assert!(
+        owner
+            .commit_result(retry.tickets[0])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    assert!(owner.maintain().await.unwrap());
+    assert_eq!(
+        provider
+            .files
+            .list("tables/", None, 100)
+            .await
+            .unwrap()
+            .len()
+            - before,
+        1,
+        "a warmed retry uploads only the cut header, retaining values, receipts and manifest"
     );
 }

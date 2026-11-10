@@ -7,6 +7,8 @@ Pairs == Databases \X Keys
 Records == [db: Databases, key: Keys, value: 0..2]
 \* Zero is deletion, -1 is absence. Request identities are unique frame
 \* positions here; retention/fingerprint checks are modeled separately.
+\* Loading base receipt metadata is a stutter: only a selected commit adds a
+\* database to touched. A warmed but unchanged database retains its base rows.
 VARIABLES history, cut, applied, recent, touched, receipts, phase, rewritten
 vars == <<history, cut, applied, recent, touched, receipts, phase, rewritten>>
 RECURSIVE Fold(_)

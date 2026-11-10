@@ -531,6 +531,9 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
     assert_eq!(old.len(), 7);
     let mut projection = Projection::new(Limits::default()).unwrap();
     projection.rebase(snapshot.clone());
+    // Exact retries and refused writes may warm receipts without a commit.
+    assert_eq!(projection.warm(db, 0, 0).await.unwrap(), (2, 0));
+    assert_eq!(projection.usage().receipts, 2);
     let puts = files.puts.load(Ordering::SeqCst);
     files.ranges.lock().unwrap().clear();
     let unchanged = build_projection(&projection, files.clone(), cut())
@@ -714,6 +717,48 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
             .unwrap()
             .value
             .is_some()
+    );
+    // A changed neighbor can share a table with warmed, unchanged metadata.
+    // Rebuilding that table must retain the clean database's receipt window.
+    let mut manifest = rewritten.seek(Bytes::new()).unwrap();
+    let first = manifest.next().await.unwrap().unwrap();
+    let table = rewritten.table(&first).await.unwrap();
+    assert_eq!(split_key(table.first_key()).unwrap().0.name, "aaa");
+    assert_eq!(split_key(table.last_key()).unwrap().0.name, "app");
+    let mut mixed = Projection::new(Limits::default()).unwrap();
+    mixed.rebase(rewritten.clone());
+    mixed.warm(db, 0, 0).await.unwrap();
+    let neighbor = Database { name: "aaa", ..db };
+    let encoded = Commit::encode(neighbor, 2, 1, 1, "again", [4; 32], &[]).unwrap();
+    let commit = Commit::decode(&encoded).unwrap();
+    let state = mixed
+        .take_state(neighbor)
+        .await
+        .unwrap()
+        .advance(&commit)
+        .unwrap();
+    mixed.apply(&commit, state).await.unwrap();
+    let reference = build_projection(&mixed, files.clone(), cut())
+        .await
+        .unwrap();
+    let mixed = Snapshot::open(
+        files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        reference,
+    )
+    .await
+    .unwrap();
+    mixed.verify(Limits::default()).await.unwrap();
+    assert_eq!(
+        mixed
+            .database(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .resolve("third", [3; 32], 2)
+            .await
+            .unwrap(),
+        Resolution::Committed(3)
     );
     let current = references(&rewritten).await;
     let retained = current.intersection(&old).next().unwrap();
