@@ -514,6 +514,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_budget_bootstrap_uses_b2_revision_checks() {
+        let (native, _, server) = fixture().await;
+        let files =
+            Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
+        super::super::check_native_budget(super::super::Connection::new(files, native, "test"))
+            .await;
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn cancelled_control_http_request_requires_revalidation_and_fences_late_application() {
         for apply_before_revalidation in [false, true] {
             cancelled_control_request(apply_before_revalidation).await;
@@ -645,7 +655,7 @@ mod tests {
             assert!(connection.into_published(None).await.is_err());
             assert_eq!(
                 state.bucket.lock().unwrap().info["durable-db-format"],
-                "owned-candidate-6"
+                "owned-candidate-7"
             );
         })
         .await;

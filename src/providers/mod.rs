@@ -20,6 +20,7 @@ pub struct Connection {
     files: Arc<dyn Storage>,
     authority: Arc<dyn Authority>,
     prefix: String,
+    budgeted: bool,
 }
 
 impl Connection {
@@ -32,6 +33,7 @@ impl Connection {
             files,
             authority: Arc::new(register::Register(authority)),
             prefix: prefix.into(),
+            budgeted: false,
         }
     }
 
@@ -40,6 +42,23 @@ impl Connection {
     /// use the separate authority for conditional control updates.
     pub fn objects(&self) -> Arc<dyn Storage> {
         Arc::new(crate::measured::Files(self.files.clone()))
+    }
+
+    /// Initialize a fresh native namespace's cumulative upload ceiling, or open
+    /// its existing ledger without resetting counters or changing limits. All
+    /// objects from this connection, including bootstrap registrations, are
+    /// charged before PUT. Unused local credit is lost on connection loss.
+    /// Existing unbudgeted/legacy namespaces require a separate migration.
+    pub async fn with_upload_budget(mut self, limits: UploadLimits) -> anyhow::Result<Self> {
+        anyhow::ensure!(!self.budgeted, "connection already has an upload budget");
+        let authority = self.authority();
+        crate::upload_budget::initialize_native(&authority, &self.prefix, limits).await?;
+        self.files = Arc::new(crate::upload_budget::Files {
+            inner: self.files,
+            allocator: Arc::new(crate::upload_budget::Allocator::new(authority)),
+        });
+        self.budgeted = true;
+        Ok(self)
     }
 
     /// Raw observations may be stale. A successful replacement is durable, but
@@ -71,6 +90,7 @@ impl Connection {
             &self.prefix,
             clock,
             profile,
+            self.budgeted,
         )
     }
 
@@ -78,4 +98,52 @@ impl Connection {
     pub async fn into_published(self, limits: Option<UploadLimits>) -> anyhow::Result<Published> {
         Published::open_with_budget(self.files, self.authority, &self.prefix, limits).await
     }
+}
+
+#[cfg(test)]
+async fn check_native_budget(connection: Connection) {
+    use crate::ownership::{
+        root::{Outcome, Profile},
+        timing::Clock,
+    };
+    use std::time::Duration;
+    struct Fixed;
+    impl Clock for Fixed {
+        fn read(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+    }
+    let limits = UploadLimits {
+        bytes: 4096,
+        attempts: 2,
+    };
+    let connection = connection.with_upload_budget(limits).await.unwrap();
+    for confirmed in [false, true] {
+        let mut root = connection
+            .root(
+                Fixed,
+                Profile::new(Duration::from_secs(10), Duration::from_millis(1)).unwrap(),
+            )
+            .unwrap();
+        let observed = root.observe().await.unwrap();
+        let claim = root.claim(observed).unwrap();
+        let outcome = root.finish(claim.execute().await).unwrap();
+        assert!(if confirmed {
+            matches!(outcome, Outcome::Confirmed)
+        } else {
+            matches!(outcome, Outcome::Conflict)
+        });
+    }
+    let files = connection.objects();
+    assert!(
+        files
+            .put("tables/refused", bytes::Bytes::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        files.upload_budget().await.unwrap().unwrap().allocated,
+        limits
+    );
+    assert!(connection.authority().read().await.unwrap().info.len() <= 10);
 }

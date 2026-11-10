@@ -327,6 +327,9 @@ fn cursor<'a>(bucket: &'a Bucket, field: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    if info.get("durable-db-format").map(String::as_str) == Some(crate::ownership::root::VERSION) {
+        return crate::ownership::root::metadata_budget(info);
+    }
     // Admission must leave room for later reads and maintenance. Otherwise a valid
     // create could fill the directory and prevent its own read/collection fences.
     let mut reserved = info.clone();

@@ -157,6 +157,17 @@ impl<C> Drop for Native<C> {
 
 #[async_trait]
 impl<C: Clock + Send + 'static> Backend for Native<C> {
+    async fn upload_budget(&self) -> Result<Option<crate::upload_budget::UploadStatus>> {
+        let files = self.owner.read().await.files();
+        Ok(files.upload_budget().await?)
+    }
+    async fn replenish_upload_budget(
+        &self,
+        request: &crate::upload_budget::UploadRequest,
+    ) -> Result<crate::upload_budget::UploadResult> {
+        let files = self.owner.read().await.files();
+        files.replenish_upload_budget(request).await
+    }
     async fn ready(&self) -> bool {
         self.check().is_ok() && self.owner.read().await.check().is_ok()
     }

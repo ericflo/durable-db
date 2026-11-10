@@ -1,4 +1,5 @@
 use super::*;
+mod budget;
 mod catalog;
 mod checkpoint;
 mod http;
@@ -80,10 +81,13 @@ impl Provider {
             .unwrap()
     }
     fn record(&self) -> Record {
+        let history = self.history.lock().unwrap();
+        let info = &history.last().unwrap().info;
         metadata::decode(
-            &self.history.lock().unwrap().last().unwrap().info,
+            info,
             "test",
             profile(),
+            info.contains_key(crate::upload_budget::FIELD),
         )
         .unwrap()
         .unwrap()
@@ -479,7 +483,7 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
     for value in ["{}".to_owned(), "x".repeat(1025)] {
         let mut invalid = valid.clone();
         invalid.insert("durable-db-owned-root".into(), value);
-        assert!(metadata::decode(&invalid, "test", profile()).is_err());
+        assert!(metadata::decode(&invalid, "test", profile(), false).is_err());
     }
     for field in [
         "epoch",
@@ -499,7 +503,7 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
         };
         invalid.insert("durable-db-owned-root".into(), wire.to_string());
         assert!(
-            metadata::decode(&invalid, "test", profile()).is_err(),
+            metadata::decode(&invalid, "test", profile(), false).is_err(),
             "{field}"
         );
     }

@@ -424,6 +424,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_budget_bootstrap_uses_s3_preconditions() {
+        let (connection, state, server) = fixture(200, true).await;
+        super::super::check_native_budget(connection).await;
+        assert_eq!(state.lock().unwrap().registration_puts, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn exhausted_upload_credit_preserves_bounded_ranges_without_control_calls() {
         use crate::upload_budget::{Allocator, Files, UploadLimits};
         let (connection, state, task) = fixture(200, true).await;

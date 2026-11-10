@@ -101,17 +101,18 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
 }
 fn record(bucket: &Bucket) -> anyhow::Result<Record> {
+    record_info(&bucket.info)
+}
+fn record_info(info: &std::collections::BTreeMap<String, String>) -> anyhow::Result<Record> {
     ensure!(
         matches!(
-            bucket.info.get("durable-db-format").map(String::as_str),
-            Some("4" | "5")
+            info.get("durable-db-format").map(String::as_str),
+            Some("4" | "5" | crate::ownership::root::VERSION)
         ),
-        "upload budget requires publication format 4 or 5"
+        "unsupported upload budget format"
     );
     let record: Record = serde_json::from_str(
-        bucket
-            .info
-            .get(FIELD)
+        info.get(FIELD)
             .context("missing authoritative upload budget")?,
     )?;
     record.validate()?;
@@ -130,6 +131,58 @@ pub(crate) fn initial(limits: UploadLimits) -> anyhow::Result<String> {
 }
 pub(crate) fn validate(bucket: &Bucket) -> anyhow::Result<()> {
     record(bucket).map(|_| ())
+}
+pub(crate) fn validate_info(
+    info: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    record_info(info).map(|_| ())
+}
+
+pub(crate) async fn initialize_native(
+    authority: &Arc<dyn Authority>,
+    prefix: &str,
+    limits: UploadLimits,
+) -> anyhow::Result<()> {
+    limits.validate()?;
+    ensure!(
+        !prefix.is_empty()
+            && prefix.len() <= 128
+            && prefix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)),
+        "invalid native namespace"
+    );
+    for _ in 0..8 {
+        let before = authority.read().await?;
+        if before.info.contains_key("durable-db-format") {
+            ensure!(
+                before.info.get("durable-db-format").map(String::as_str)
+                    == Some(crate::ownership::root::VERSION)
+                    && before.info.get("durable-db-prefix").map(String::as_str) == Some(prefix),
+                "native upload budget requires a fresh namespace or its existing ledger"
+            );
+            validate(&before)?;
+            crate::ownership::root::metadata_budget(&before.info)?;
+            return Ok(());
+        }
+        ensure!(
+            !before.info.keys().any(|k| k.starts_with("durable-db-")
+                && !["durable-db-probe", "durable-db-read-fence"].contains(&k.as_str())),
+            "unrecognized native namespace metadata"
+        );
+        let mut info = before.info.clone();
+        info.insert(
+            "durable-db-format".into(),
+            crate::ownership::root::VERSION.into(),
+        );
+        info.insert("durable-db-prefix".into(), prefix.into());
+        info.insert(FIELD.into(), initial(limits)?);
+        crate::ownership::root::metadata_budget(&info)?;
+        if authority.replace(&before, info).await?.is_some() {
+            return Ok(());
+        }
+    }
+    bail!("native upload budget initialization contention budget exceeded")
 }
 
 pub(crate) struct Allocator {
@@ -287,6 +340,12 @@ pub(crate) struct Files {
 }
 #[async_trait]
 impl Storage for Files {
+    async fn upload_budget(&self) -> anyhow::Result<Option<UploadStatus>> {
+        Ok(Some(self.allocator.status().await?))
+    }
+    async fn replenish_upload_budget(&self, request: &UploadRequest) -> Result<UploadResult> {
+        self.allocator.replenish(request).await
+    }
     async fn get_range(
         &self,
         key: &str,

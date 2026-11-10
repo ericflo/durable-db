@@ -17,6 +17,7 @@ use crate::{
 };
 use metadata::Phase;
 pub(crate) use metadata::Record;
+pub(crate) use metadata::{VERSION, budget as metadata_budget};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
@@ -116,6 +117,7 @@ pub struct Root<C> {
     active: bool,
     retired: bool,
     journal_opened: bool,
+    budgeted: bool,
 }
 
 impl<C: Clock> Root<C> {
@@ -125,6 +127,7 @@ impl<C: Clock> Root<C> {
         prefix: &str,
         clock: C,
         profile: Profile,
+        budgeted: bool,
     ) -> Result<Self, Error> {
         if prefix.is_empty()
             || prefix.len() > 128
@@ -148,6 +151,7 @@ impl<C: Clock> Root<C> {
             active: false,
             retired: false,
             journal_opened: false,
+            budgeted,
         })
     }
 
@@ -158,10 +162,11 @@ impl<C: Clock> Root<C> {
         let observation = self.session.observe();
         let prefix = self.prefix.clone();
         let profile = self.profile;
+        let budgeted = self.budgeted;
         async move {
             available?;
             let raw = observation.await?;
-            let record = metadata::decode(raw.metadata(), &prefix, profile)?;
+            let record = metadata::decode(raw.metadata(), &prefix, profile, budgeted)?;
             Ok(Observation { raw, record })
         }
     }
@@ -218,7 +223,8 @@ impl<C: Clock> Root<C> {
         }
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         let mut record =
-            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
+            metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
+                .ok_or(Error::NotReady)?;
         if record.phase != Phase::Fenced
             || Some(record.identity.epoch) != self.epoch
             || record.identity.incarnation != self.incarnation
@@ -238,7 +244,13 @@ impl<C: Clock> Root<C> {
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
-        let metadata = metadata::encode(observed.metadata(), &self.prefix, self.profile, record)?;
+        let metadata = metadata::encode(
+            observed.metadata(),
+            &self.prefix,
+            self.profile,
+            record,
+            self.budgeted,
+        )?;
         let start = self.timeline.begin()?;
         let deadline = self.timeline.root_deadline(&start)?;
         let raw = self.session.begin(observed, metadata)?;
@@ -297,7 +309,7 @@ impl<C: Clock> Root<C> {
 
     fn confirm(&mut self, pending: Pending) -> Result<(), Error> {
         let raw = self.session.confirmed().ok_or(Error::Incompatible)?;
-        let record = metadata::decode(raw.metadata(), &self.prefix, self.profile)?;
+        let record = metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?;
         if record != Some(pending.record) {
             return Err(Error::Incompatible);
         }
@@ -433,8 +445,8 @@ impl<C: Clock> Root<C> {
     pub(crate) fn recovery_record(&mut self) -> Result<Record, Error> {
         let identity = self.permission()?.ok_or(Error::NotReady)?;
         let raw = self.session.confirmed().ok_or(Error::NotReady)?;
-        let record =
-            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
+        let record = metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
+            .ok_or(Error::NotReady)?;
         if record.identity != identity || record.phase != Phase::Open {
             return Err(Error::NotReady);
         }
@@ -451,7 +463,8 @@ impl<C: Clock> Root<C> {
         }
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         let confirmed =
-            metadata::decode(raw.metadata(), &self.prefix, self.profile)?.ok_or(Error::NotReady)?;
+            metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
+                .ok_or(Error::NotReady)?;
         if confirmed != recovered.record {
             return Err(Error::StaleRecovery);
         }

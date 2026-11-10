@@ -196,7 +196,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-uploadcredits
-COPY spec/UploadCredits.tla spec/UploadCredits.checks spec/UploadCredits.cfg spec/UnsafeUploadRefund.cfg spec/UnsafeUploadRestore.cfg spec/UnsafeUploadBeforeCharge.cfg spec/UnsafeUploadRefillReset.cfg spec/
+COPY spec/UploadCredits.tla spec/UploadCredits.checks spec/UploadCredits.cfg spec/UnsafeUploadRefund.cfg spec/UnsafeUploadRestore.cfg spec/UnsafeUploadBeforeCharge.cfg spec/UnsafeUploadRefillReset.cfg spec/UnsafeUploadInitializeReset.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh UploadCredits && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed

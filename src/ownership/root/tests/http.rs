@@ -93,10 +93,24 @@ async fn fixture(
         inner: provider.files.clone(),
         faults: faults.clone(),
     });
-    let mut root = Connection::new(files, provider.clone(), "test")
-        .root(clock.clone(), profile())
+    let connection = Connection::new(files, provider.clone(), "test")
+        .with_upload_budget(crate::upload_budget::UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        })
+        .await
         .unwrap();
-    claim(&mut root).await;
+    // The first credit grant changes the captured comparison. Its registration
+    // remains charged; a fresh incarnation uses the already confirmed credit.
+    let mut root = connection.root(clock.clone(), profile()).unwrap();
+    let observed = root.observe().await.unwrap();
+    let claim = root.claim(observed).unwrap();
+    assert!(matches!(
+        root.finish(claim.execute().await).unwrap(),
+        Outcome::Conflict
+    ));
+    let mut root = connection.root(clock.clone(), profile()).unwrap();
+    super::claim(&mut root).await;
     clock.set(23);
     validate(&mut root).await;
     activate(&mut root).await;
@@ -323,16 +337,48 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
             .status(),
         StatusCode::NOT_IMPLEMENTED
     );
+    let budget_url = format!("{base}/v1/storage/upload-budget");
     assert_eq!(
         client
-            .get(format!("{base}/v1/storage/upload-budget"))
-            .bearer_auth(&token)
+            .get(&budget_url)
+            .bearer_auth(reader)
             .send()
             .await
             .unwrap()
             .status(),
-        StatusCode::NOT_IMPLEMENTED
+        StatusCode::UNAUTHORIZED
     );
+    let status: crate::upload_budget::UploadStatus = client
+        .get(&budget_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(status.allocated.attempts >= 2);
+    assert_eq!(status.limits.attempts, 10_000);
+    let funding = json!({"request_id":"fund-native", "expected_configuration_revision":status.configuration_revision,
+        "limits":{"bytes":status.limits.bytes + 1, "attempts":status.limits.attempts}});
+    for replayed in [false, true] {
+        let result: crate::upload_budget::UploadResult = client
+            .post(&budget_url)
+            .bearer_auth(&token)
+            .json(&funding)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result.replayed, replayed);
+        assert_eq!(result.status.allocated, status.allocated);
+    }
     clock.set(100);
     assert_eq!(
         client

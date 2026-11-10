@@ -30,6 +30,9 @@ impl Maintenance {
     }
 }
 impl<C: Clock> Owner<C> {
+    pub(crate) fn files(&self) -> Arc<dyn Storage> {
+        self.maintenance.files.clone()
+    }
     pub(crate) fn cache(&self) -> Arc<Cache> {
         self.maintenance.cache.clone()
     }

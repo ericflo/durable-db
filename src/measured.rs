@@ -11,6 +11,15 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) struct Files(pub Arc<dyn Storage>);
 #[async_trait]
 impl Storage for Files {
+    async fn upload_budget(&self) -> anyhow::Result<Option<crate::upload_budget::UploadStatus>> {
+        self.0.upload_budget().await
+    }
+    async fn replenish_upload_budget(
+        &self,
+        request: &crate::upload_budget::UploadRequest,
+    ) -> crate::Result<crate::upload_budget::UploadResult> {
+        self.0.replenish_upload_budget(request).await
+    }
     async fn get_range(
         &self,
         key: &str,

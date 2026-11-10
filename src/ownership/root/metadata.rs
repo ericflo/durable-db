@@ -6,7 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-const VERSION: &str = "owned-candidate-6";
+pub(crate) const VERSION: &str = "owned-candidate-7";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
@@ -41,11 +41,13 @@ pub(super) fn decode(
     info: &BTreeMap<String, String>,
     prefix: &str,
     profile: Profile,
+    budgeted: bool,
 ) -> Result<Option<Record>, Error> {
     if !info.contains_key(FORMAT) {
-        if info
-            .keys()
-            .any(|k| k.starts_with("durable-db-") && k != PROBE && k != LEGACY_PROBE)
+        if budgeted
+            || info
+                .keys()
+                .any(|k| k.starts_with("durable-db-") && k != PROBE && k != LEGACY_PROBE)
         {
             return Err(Error::Incompatible);
         }
@@ -53,12 +55,29 @@ pub(super) fn decode(
     }
     if info.get(FORMAT).map(String::as_str) != Some(VERSION)
         || info.get(PREFIX).map(String::as_str) != Some(prefix)
+        || info.contains_key(crate::upload_budget::FIELD) != budgeted
         || info.keys().any(|k| {
             k.starts_with("durable-db-")
-                && ![FORMAT, PREFIX, ROOT, PROBE, LEGACY_PROBE].contains(&k.as_str())
+                && ![
+                    FORMAT,
+                    PREFIX,
+                    ROOT,
+                    PROBE,
+                    LEGACY_PROBE,
+                    crate::upload_budget::FIELD,
+                ]
+                .contains(&k.as_str())
         })
     {
         return Err(Error::Incompatible);
+    }
+    if budgeted {
+        crate::upload_budget::validate_info(info).map_err(|_| Error::Incompatible)?;
+        // Budget bootstrap must precede the first registration upload. No
+        // ownership identity or permission exists until the ordinary claim.
+        if !info.contains_key(ROOT) {
+            return Ok(None);
+        }
     }
     let encoded = info
         .get(ROOT)
@@ -106,10 +125,11 @@ pub(super) fn encode(
     prefix: &str,
     profile: Profile,
     record: Record,
+    budgeted: bool,
 ) -> Result<BTreeMap<String, String>, Error> {
     // Validate before replacing anything, including stale observations and
     // namespaces belonging to the existing publication engine.
-    decode(observed, prefix, profile)?;
+    decode(observed, prefix, profile, budgeted)?;
     let mut info = observed.clone();
     info.insert(FORMAT.into(), VERSION.into());
     info.insert(PREFIX.into(), prefix.into());
@@ -128,8 +148,41 @@ pub(super) fn encode(
     );
     // Use the B2 subset, reserving a field for the common mutation identity.
     // Session additionally bounds total bytes before invoking the provider.
-    if info.len() + usize::from(!info.contains_key(PROBE)) > 10 {
-        return Err(Error::Incompatible);
-    }
+    budget(&info).map_err(|_| Error::Incompatible)?;
     Ok(info)
+}
+
+/// Reserve space for the owner, both provider probes and a full budget receipt
+/// window, so initialization/refill cannot make subsequent control work fail.
+pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
+    let mut reserved = info.clone();
+    for (field, bytes) in [
+        (ROOT, 1024),
+        (PROBE, 36),
+        (
+            LEGACY_PROBE,
+            if info.contains_key(crate::upload_budget::FIELD) {
+                36
+            } else {
+                0
+            },
+        ),
+        (
+            crate::upload_budget::FIELD,
+            if info.contains_key(crate::upload_budget::FIELD) {
+                2304
+            } else {
+                0
+            },
+        ),
+    ] {
+        if bytes > 0 && reserved.get(field).is_none_or(|v| v.len() < bytes) {
+            reserved.insert(field.into(), "0".repeat(bytes));
+        }
+    }
+    anyhow::ensure!(
+        reserved.len() <= 10 && serde_json::to_vec(&reserved)?.len() <= 8192 - 128,
+        "native authority metadata budget exceeded"
+    );
+    Ok(())
 }
