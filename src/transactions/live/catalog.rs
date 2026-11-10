@@ -354,6 +354,12 @@ impl<C: Clock> Owner<C> {
         caller: &Access,
     ) -> Result<Option<CommitResult>> {
         caller.check_scope(&ticket.name, true)?;
+        // A pending ticket has no response to authorize yet. Avoid cold catalog
+        // reads on every worker event while its upload is outstanding. Check
+        // policy/generation again before releasing either success or rejection.
+        if self.outcome(ticket.ticket)? == Outcome::Pending {
+            return Ok(None);
+        }
         let entry = self
             .catalog_entry(&ticket.name)
             .await?

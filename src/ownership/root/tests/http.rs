@@ -19,9 +19,12 @@ use tower::ServiceExt;
 #[derive(Default)]
 struct Faults {
     pause: AtomicBool,
+    pause_read: AtomicBool,
+    fail_checkpoint: AtomicBool,
     entered: Notify,
     release: Notify,
     puts: AtomicU64,
+    range_reads: AtomicU64,
 }
 struct Files {
     inner: Arc<Remote>,
@@ -38,6 +41,11 @@ impl Storage for Files {
         range: std::ops::Range<u64>,
         size: u64,
     ) -> anyhow::Result<Bytes> {
+        self.faults.range_reads.fetch_add(1, Ordering::SeqCst);
+        if self.faults.pause_read.swap(false, Ordering::SeqCst) {
+            self.faults.entered.notify_one();
+            self.faults.release.notified().await;
+        }
         self.inner.get_range(key, range, size).await
     }
     async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
@@ -45,6 +53,9 @@ impl Storage for Files {
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.faults.puts.fetch_add(1, Ordering::SeqCst);
+        if key.starts_with("tables/") && self.faults.fail_checkpoint.load(Ordering::SeqCst) {
+            anyhow::bail!("checkpoint uploads unavailable");
+        }
         if self.faults.pause.swap(false, Ordering::SeqCst) {
             self.faults.entered.notify_one();
             self.faults.release.notified().await;
@@ -349,9 +360,10 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
 
 #[tokio::test]
 async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during_uploads() {
-    let (router, provider, _, faults, token) = fixture(2, 256).await;
+    let (router, provider, _, faults, token) = fixture(2, 3).await;
     create(&router, &token, "a").await;
     create(&router, &token, "b").await;
+    create(&router, &token, "checkpoint").await;
     let calls = provider.calls.load(Ordering::SeqCst);
     let puts = faults.puts.load(Ordering::SeqCst);
     faults.pause.store(true, Ordering::SeqCst);
@@ -409,6 +421,13 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         .1["revision"],
         0
     );
+    let ranges = faults.range_reads.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(110)).await;
+    assert_eq!(
+        faults.range_reads.load(Ordering::SeqCst),
+        ranges,
+        "pending reply polling must not reread cold catalog tables"
+    );
     a.abort();
     let _ = a.await;
     faults.release.notify_one();
@@ -431,5 +450,100 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         provider.calls.load(Ordering::SeqCst),
         calls,
         "ordinary reads and writes never renew control"
+    );
+}
+
+#[tokio::test]
+async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold_admission() {
+    let (router, provider, _, faults, token) = fixture(2, 2).await;
+    create(&router, &token, "app").await;
+    faults.fail_checkpoint.store(true, Ordering::SeqCst);
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/databases/app/commit",
+            &token,
+            commit()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(provider.record().checkpoint.is_none());
+    // No next request is needed to recover maintenance after the provider heals.
+    faults.fail_checkpoint.store(false, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while provider.record().checkpoint.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // No byte cache: pause the worker's cold lookup, before admission finishes.
+    // Cancelling the HTTP handler must not cancel that exclusive operation.
+    faults.pause_read.store(true, Ordering::SeqCst);
+    let mut next = commit();
+    next["expected_revision"] = json!(1);
+    next["request_id"] = json!("next");
+    let attempt = tokio::spawn(router.clone().oneshot(request(
+        "POST",
+        "/v1/databases/app/commit",
+        &token,
+        next.clone(),
+    )));
+    tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
+        .await
+        .unwrap();
+    attempt.abort();
+    let _ = attempt.await;
+    faults.release.notify_one();
+    // The identical request shares the accepted result even if it reaches the
+    // queue before the original upload finishes.
+    let retry = call(&router, "POST", "/v1/databases/app/commit", &token, next).await;
+    assert_eq!(retry.0, StatusCode::OK);
+    assert_eq!(retry.1["replayed"], true);
+    assert_eq!(retry.1["revision"], 2);
+}
+
+#[tokio::test]
+async fn native_http_expired_owner_cannot_acknowledge_a_pending_upload() {
+    let (router, _, clock, faults, token) = fixture(2, 256).await;
+    create(&router, &token, "app").await;
+    faults.pause.store(true, Ordering::SeqCst);
+    let attempt = tokio::spawn(router.clone().oneshot(request(
+        "POST",
+        "/v1/databases/app/commit",
+        &token,
+        commit(),
+    )));
+    tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
+        .await
+        .unwrap();
+    clock.set(100);
+    faults.release.notify_one();
+    let response = tokio::time::timeout(Duration::from_secs(2), attempt)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        call(&router, "GET", "/health/ready", &token, Value::Null)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/databases/app/read",
+            &token,
+            json!({"keys":["x"]})
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
     );
 }
