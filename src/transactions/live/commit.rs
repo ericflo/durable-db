@@ -252,7 +252,7 @@ impl<C: Clock> Owner<C> {
                 Rejection::ReceiptExpired => Error::ReceiptExpired,
                 Rejection::Capacity => Error::Busy,
                 Rejection::PhysicalBudget => {
-                    Error::Limit("database journal upload budget exhausted".into())
+                    Error::Limit("database write admission budget exhausted".into())
                 }
                 Rejection::Quota => Error::Limit("database quota exceeded".into()),
                 Rejection::Validation(error) => match error {

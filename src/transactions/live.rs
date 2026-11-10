@@ -379,15 +379,15 @@ impl<C: Clock> Owner<C> {
             } else if let Some(allowed) = admissions.get(&(key.clone(), *fingerprint)) {
                 *allowed
             } else {
+                let database = request.snapshot.database();
                 let bytes = 120
-                    + Commit::encoded_len(
-                        request.snapshot.database(),
+                    + Commit::encoded_len(database, request.id, request.mutations)?
+                    + recovery::checkpoint::contribution_bytes(
+                        database,
                         request.id,
                         request.mutations,
-                    )?;
-                let allowed = self
-                    .charge_database(request.snapshot.database(), bytes)
-                    .await?;
+                    );
+                let allowed = self.charge_database(database, bytes).await?;
                 admissions.insert((key, *fingerprint), allowed);
                 allowed
             };

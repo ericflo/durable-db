@@ -55,6 +55,10 @@ impl Boundary {
         }
     }
 }
+pub(crate) fn encoded_row_len(key_bytes: usize, value_bytes: usize) -> usize {
+    14 + key_bytes + value_bytes
+}
+
 struct Block {
     first: Boundary,
     last: Boundary,
@@ -103,7 +107,7 @@ pub async fn build<'a>(
                 "table rows are not strictly ordered"
             );
         }
-        let length = codec::row_length(&row);
+        let length = encoded_row_len(row.key.len(), row.value.map_or(0, <[u8]>::len));
         if count > 0 && (pending.len() + length > BLOCK_TARGET || count == MAX_BLOCK_ROWS) {
             codec::finish_block(
                 &mut data,

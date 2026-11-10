@@ -442,6 +442,19 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
     activate(&mut root).await;
     let mut owner = live::open(root, Limits::default()).await;
     let admin = Access::Administrator;
+    let database = crate::transactions::record::Database {
+        name: "a",
+        generation: Uuid::from_u128(1),
+    };
+    let mutations = [crate::transactions::record::Mutation {
+        key: "x",
+        value: Some(b"x"),
+    }];
+    let journal = 120
+        + crate::transactions::record::Commit::encoded_len(database, "first", &mutations).unwrap();
+    let rows =
+        crate::index::recovery::checkpoint::contribution_bytes(database, "first", &mutations);
+    let admission = (journal + rows) as u64;
     for name in ["a", "b"] {
         owner
             .database_budget(name)
@@ -451,8 +464,12 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
                 request_id: "fund".into(),
                 expected_configuration_revision: 0,
                 limits: UploadLimits {
-                    bytes: 4096,
-                    attempts: 1,
+                    bytes: if name == "a" {
+                        admission - 1
+                    } else {
+                        admission
+                    },
+                    attempts: 2,
                 },
             })
             .await
@@ -474,6 +491,45 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
             .unwrap();
     }
     let first: CommitRequest = serde_json::from_value(serde_json::json!({"request_id":"first","expected_revision":0,"writes":[{"key":"x","value":"eA=="}]})).unwrap();
+    // Journal alone fits, but its checkpoint contribution does not. Refusal
+    // must precede both durable credit allocation and shared journal ordering.
+    let mut files_before = Vec::new();
+    for prefix in ["manifests/", "indexes/", "journal/", "tables/"] {
+        files_before.push((
+            prefix,
+            provider.files.list(prefix, None, 1000).await.unwrap(),
+        ));
+    }
+    let calls = provider.calls.load(Ordering::SeqCst);
+    let refused = owner
+        .prepare_authorized(&[("a", &first, &admin)])
+        .await
+        .unwrap();
+    assert!(refused.upload.is_none());
+    assert!(matches!(
+        owner.authorized_result(&refused.tickets[0], &admin).await,
+        Err(crate::Error::Limit(_))
+    ));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    for (prefix, before) in files_before {
+        assert_eq!(
+            provider.files.list(prefix, None, 1000).await.unwrap(),
+            before
+        );
+    }
+    let budget = owner.database_budget("a").unwrap().unwrap();
+    assert_eq!(budget.status().await.unwrap().allocated.bytes, 0);
+    budget
+        .replenish(&UploadRequest {
+            request_id: "row-credit".into(),
+            expected_configuration_revision: 1,
+            limits: UploadLimits {
+                bytes: admission,
+                attempts: 2,
+            },
+        })
+        .await
+        .unwrap();
     let group = owner
         .prepare_authorized(&[("a", &first, &admin), ("a", &first, &admin)])
         .await

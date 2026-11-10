@@ -17,9 +17,6 @@ pub(super) fn validate_row(row: &Row<'_>) -> anyhow::Result<()> {
     );
     Ok(())
 }
-pub(super) fn row_length(row: &Row<'_>) -> usize {
-    14 + row.key.len() + row.value.map_or(0, <[u8]>::len)
-}
 pub(super) fn write_row(row: &Row<'_>, out: &mut Vec<u8>) {
     out.extend_from_slice(&(row.key.len() as u16).to_be_bytes());
     out.extend_from_slice(&row.revision.to_be_bytes());

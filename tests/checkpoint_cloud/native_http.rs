@@ -179,7 +179,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .unwrap_or_else(|_| panic!("native budget initialization failed"));
     let server = Server::start(&connection).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":4096,"attempts":1}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":427,"attempts":2}});
     for replayed in [false, true] {
         assert_eq!(server.ok("POST", budget, &fund).await["replayed"], replayed);
     }
@@ -193,6 +193,24 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             .await;
     }
     let commit = "/v1/databases/a/commit";
+    // 254 journal bytes + 174 checkpoint-row bytes. The old journal-only
+    // rule would admit this underfunded write; no PUT may precede refusal.
+    let puts = calls("object_put");
+    assert_eq!(
+        server.call("POST", commit, &write(0)).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(calls("object_put"), puts);
+    let refused = server.ok("GET", budget, &json!({})).await;
+    assert_eq!(refused["allocated"]["bytes"], 0);
+    server
+        .ok(
+            "POST",
+            budget,
+            &json!({"request_id":"rows","expected_configuration_revision":1,
+        "limits":{"bytes":428,"attempts":2}}),
+        )
+        .await;
     assert_eq!(server.ok("POST", commit, &write(0)).await["revision"], 1);
     let puts = calls("object_put");
     assert_eq!(server.ok("POST", commit, &write(0)).await["replayed"], true);
@@ -213,8 +231,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .ok(
             "POST",
             budget,
-            &json!({"request_id":"more","expected_configuration_revision":1,
-        "limits":{"bytes":8192,"attempts":2}}),
+            &json!({"request_id":"more","expected_configuration_revision":2,
+        "limits":{"bytes":856,"attempts":2}}),
         )
         .await;
     assert_eq!(server.ok("POST", commit, &write(1)).await["revision"], 2);
@@ -339,7 +357,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     server.stop().await;
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
-        "refusal_and_retry_immutable_puts":0,"automatic_collection":true,
+        "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
+        "exact_admission_bytes_per_write":428,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],

@@ -90,6 +90,66 @@ fn meta(revision: u64, floor: u64) -> Bytes {
 fn receipt(fingerprint: u8) -> Bytes {
     Bytes::from(vec![fingerprint; 32])
 }
+#[tokio::test]
+async fn contribution_matches_encoded_rows_including_tombstones_and_block_splits() {
+    use crate::transactions::{record::Commit, recovery::Target};
+    let name = "d".repeat(64);
+    let request = "r".repeat(128);
+    let value = vec![42; 64 * 1024];
+    let keys: Vec<_> = (0..128)
+        .map(|n| format!("{n:03}{}", "k".repeat(1021)))
+        .collect();
+    for count in [0, 1, 128] {
+        let files = Files::new(0);
+        let db = Database {
+            name: &name,
+            generation: Uuid::from_u128(7),
+        };
+        let mutations: Vec<_> = keys[..count]
+            .iter()
+            .enumerate()
+            .map(|(n, key)| Mutation {
+                key,
+                value: match n % 16 {
+                    0 => None,
+                    15 => Some(&value),
+                    _ => Some(b""),
+                },
+            })
+            .collect();
+        let encoded = Commit::encode(db, 1, 0, 0, &request, [1; 32], &mutations).unwrap();
+        let commit = Commit::decode(&encoded).unwrap();
+        let mut projection = Projection::new(Limits::default()).unwrap();
+        let state = projection
+            .take_state(db)
+            .await
+            .unwrap()
+            .advance(&commit)
+            .unwrap();
+        projection.apply(&commit, state).await.unwrap();
+        let reference = build_projection(&projection, files.clone(), cut())
+            .await
+            .unwrap();
+        let snapshot = Snapshot::new(
+            files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            reference,
+        );
+        let mut tables = snapshot.seek(Bytes::new()).unwrap();
+        let mut row_bytes = 0;
+        while let Some(table) = tables.next().await.unwrap() {
+            let [data, index] = table.reference.blobs();
+            let bytes = index
+                .read_range(files.as_ref(), 0..index.size())
+                .await
+                .unwrap();
+            let blocks = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+            row_bytes += data.size() as usize - 12 * blocks as usize;
+        }
+        assert_eq!(row_bytes, contribution_bytes(db, &request, &mutations));
+        snapshot.verify(Limits::default()).await.unwrap();
+    }
+}
 async fn image(files: Arc<dyn Storage>, bad: u8) -> anyhow::Result<Reference> {
     let mut builder = Builder::new(files.clone());
     let prefix = prefix();

@@ -795,7 +795,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::new();
     let budget = format!("{base}/v1/databases/a/upload-budget");
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":4096,"attempts":1}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":419,"attempts":2}});
     for replayed in [false, true] {
         let (status, result) = tcp_call(&client, "POST", &budget, &token, fund.clone()).await;
         assert_eq!(status, StatusCode::OK);
@@ -831,6 +831,20 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         );
     }
     let a = format!("{base}/v1/databases/a/commit");
+    // This request needs 250 journal bytes and 170 checkpoint row bytes.
+    let puts = faults.puts.load(Ordering::SeqCst);
+    assert_eq!(
+        tcp_call(&client, "POST", &a, writer, commit()).await.0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
+    let (_, refused) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
+    assert_eq!(refused["allocated"]["bytes"], 0);
+    let exact = json!({"request_id":"rows","expected_configuration_revision":1,"limits":{"bytes":420,"attempts":2}});
+    assert_eq!(
+        tcp_call(&client, "POST", &budget, &token, exact).await.0,
+        StatusCode::OK
+    );
     assert_eq!(
         tcp_call(&client, "POST", &a, writer, commit()).await.0,
         StatusCode::OK
@@ -838,7 +852,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let (status, before) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        before["limits"]["attempts"], 1,
+        before["limits"]["attempts"], 2,
         "creation preserved the administrative ceiling"
     );
     let puts = faults.puts.load(Ordering::SeqCst);
@@ -876,7 +890,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         before, after,
         "checkpointing and neighboring admission preserve the ledger"
     );
-    let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":8192,"attempts":2}});
+    let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":840,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK

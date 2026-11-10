@@ -10,7 +10,7 @@ use crate::{
     journal::{LogId, Prefix},
     ownership::root::{Cut, Identity, Record},
     storage::{Storage, immutable::Blob},
-    transactions::record::Database,
+    transactions::record::{Database, Mutation},
 };
 use anyhow::{Context, ensure};
 use bytes::Bytes;
@@ -22,6 +22,24 @@ use uuid::Uuid;
 const MAX_DESCRIPTOR_BYTES: usize = 1024;
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const CHUNK_ROWS: usize = 4096;
+
+/// Direct row contribution of a validated transaction: metadata, its new
+/// receipt, and mutations (including tombstones). Charged once at admission;
+/// this excludes retained-row rewrites, block headers, indexes and manifests.
+/// It is not a reservation authorizing any future physical upload.
+pub(crate) fn contribution_bytes(
+    database: Database<'_>,
+    request_id: &str,
+    mutations: &[Mutation<'_>],
+) -> usize {
+    let prefix = database.name.len() + 18; // NUL, generation, row kind
+    table::encoded_row_len(prefix, 32)
+        + table::encoded_row_len(prefix + request_id.len(), 32)
+        + mutations
+            .iter()
+            .map(|m| table::encoded_row_len(prefix + m.key.len(), m.value.map_or(0, <[u8]>::len)))
+            .sum::<usize>()
+}
 
 /// Can only be produced by staging a private native recovery at a complete
 /// frame boundary. It grants neither publication nor serving permission.
@@ -177,7 +195,8 @@ impl Builder {
             self.last.as_ref().is_none_or(|last| last < &row.key),
             "checkpoint rows are not strictly ordered"
         );
-        let length = row.key.len() + 14 + row.value.as_ref().map_or(0, Bytes::len);
+        let length =
+            table::encoded_row_len(row.key.len(), row.value.as_ref().map_or(0, Bytes::len));
         if self.bytes + length > CHUNK_BYTES || self.pending.len() == CHUNK_ROWS {
             self.flush().await?;
         }

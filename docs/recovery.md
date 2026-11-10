@@ -1,6 +1,6 @@
 # Logical backup and restore
 
-v0.5.1 includes `durable-db backup export`, `inspect`, and `restore`. An export contains the keys and values of one database revision, its original logical quotas, and source identity. Restore creates a new protected database with a fresh authorization incarnation and verifies every value. It does not restore credentials, policy history, transaction receipts, or the original revision number.
+v0.6.0 includes `durable-db backup export`, `inspect`, and `restore`. An export contains the keys and values of one database revision, its original logical quotas, and source identity. Restore creates a new protected database with a fresh authorization incarnation and verifies every value. It does not restore credentials, policy history, transaction receipts, or the original revision number.
 
 This is an operator-driven recovery tool. Scheduled retained snapshots, point-in-time recovery, independent backup storage, and recurring restore drills remain production gates.
 
