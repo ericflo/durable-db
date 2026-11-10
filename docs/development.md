@@ -33,6 +33,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
 | Native checkpoints | `cargo test --locked --lib checkpoint` and `scripts/check-model.sh Checkpoint` |
 | Lazy checkpoint reads | `cargo test --locked --lib index::recovery::checkpoint::snapshot` and `scripts/check-model.sh CheckpointRead` |
+| Checkpoint table reuse | `cargo test --locked --lib rewrites_reuse` and `scripts/check-model.sh CheckpointOverlay` |
 | Checkpoint/suffix composition | `cargo test --locked --lib checkpoint` and `scripts/check-model.sh CheckpointOverlay` |
 | Native memory and recovery | `cargo test --locked --lib index::memory`, `cargo test --locked --lib ownership::root::tests::transactions`, `scripts/check-model.sh MemoryIndex` and `scripts/check-model.sh TransactionRecovery` |
 | Native table merging | `cargo test --locked --lib index::merge` and `scripts/check-model.sh TableMerge` |

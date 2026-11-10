@@ -259,6 +259,14 @@ pub(crate) async fn write_projection(
     origin: Record,
     cut: Cut,
 ) -> anyhow::Result<Staged> {
+    let reference = build_projection(projection, files, cut).await?;
+    Ok(Staged { origin, reference })
+}
+async fn build_projection(
+    projection: &Projection,
+    files: Arc<dyn Storage>,
+    cut: Cut,
+) -> anyhow::Result<Reference> {
     let mut builder = Builder::new(files.clone());
     for resident in projection.databases.values() {
         resident
@@ -267,51 +275,110 @@ pub(crate) async fn write_projection(
             .context("checkpoint metadata is incomplete")?
             .checkpoint_complete()?;
     }
-    let mut base = projection.base.as_ref().map(Snapshot::rows).transpose()?;
     let mut changes = changed_rows(projection).peekable();
-    let mut prior = None;
-    let mut databases = 0u64;
-    loop {
-        while prior.is_none() {
-            let Some(cursor) = &mut base else { break };
-            let Some(row) = cursor.next().await? else {
-                break;
-            };
-            let (db, kind, _) = split_key(&row.key)?;
-            // Changed databases supply their complete current metadata/receipt
-            // window. Keeping old receipts here would resurrect expired IDs.
-            if kind < 2
-                && projection
-                    .databases
-                    .contains_key(&(db.name.to_owned(), db.generation))
+    let mut databases = projection
+        .base
+        .as_ref()
+        .map_or(0, |base| base.header().databases);
+    for resident in projection.databases.values() {
+        if resident.base.is_none() && resident.state.as_ref().unwrap().revision() > 0 {
+            databases = databases
+                .checked_add(1)
+                .context("checkpoint database count overflow")?;
+        }
+    }
+    if let Some(base) = &projection.base {
+        let mut tables = base.seek(Bytes::new())?;
+        let mut count = 0u64;
+        let mut rows = 0u64;
+        let mut boundary: Option<Bytes> = None;
+        while let Some(routed) = tables.next().await? {
+            let table = base.table(&routed).await?;
+            ensure!(
+                boundary
+                    .as_ref()
+                    .is_none_or(|last| last.as_ref() < table.first_key()),
+                "overlapping checkpoint tables"
+            );
+            boundary = Some(routed.last.clone());
+            count = count
+                .checked_add(1)
+                .context("checkpoint table count overflow")?;
+            rows = rows
+                .checked_add(table.row_count())
+                .context("checkpoint row count overflow")?;
+            ensure!(
+                count <= base.header().tables && rows <= base.header().rows,
+                "extra checkpoint tables or rows"
+            );
+            while changes
+                .peek()
+                .is_some_and(|row| row.key.as_ref() < table.first_key())
             {
+                builder.push_row(changes.next().unwrap()).await?;
+            }
+            // A changed database replaces its entire receipt window, including
+            // expired rows absent from `changes`. Check that interval too.
+            let (first, kind, _) = split_key(table.first_key())?;
+            let (last, _, _) = split_key(table.last_key())?;
+            let first = (first.name.to_owned(), first.generation);
+            let last = (last.name.to_owned(), last.generation);
+            let replaces_metadata = projection
+                .databases
+                .range(first.clone()..=last)
+                .any(|(key, _)| key != &first || kind < 2);
+            if !replaces_metadata && changes.peek().is_none_or(|row| row.key > routed.last) {
+                builder.flush().await?;
+                builder.rows = builder
+                    .rows
+                    .checked_add(table.row_count())
+                    .context("checkpoint row count overflow")?;
+                builder.last = Some(routed.last.clone());
+                builder.tree.push(routed.reference, routed.last).await?;
                 continue;
             }
-            prior = Some(row);
-        }
-        let row = match (changes.peek(), prior.as_ref()) {
-            (None, None) => break,
-            (Some(_), None) => changes.next().unwrap(),
-            (None, Some(_)) => prior.take().unwrap(),
-            (Some(new), Some(old)) => match new.key.cmp(&old.key) {
-                std::cmp::Ordering::Less => changes.next().unwrap(),
-                std::cmp::Ordering::Equal => {
-                    prior = None;
-                    changes.next().unwrap()
+            let mut source = table.scan(b"", None, u64::MAX)?;
+            let mut seen = 0u64;
+            while let Some(old) = source.next().await? {
+                seen += 1;
+                let (db, kind, _) = split_key(&old.key)?;
+                if kind < 2
+                    && projection
+                        .databases
+                        .contains_key(&(db.name.to_owned(), db.generation))
+                {
+                    continue;
                 }
-                std::cmp::Ordering::Greater => prior.take().unwrap(),
-            },
-        };
-        let (_, kind, _) = split_key(&row.key)?;
-        databases = databases
-            .checked_add(u64::from(kind == 0))
-            .context("checkpoint database count overflow")?;
+                while changes.peek().is_some_and(|new| new.key < old.key) {
+                    builder.push_row(changes.next().unwrap()).await?;
+                }
+                let row = if changes.peek().is_some_and(|new| new.key == old.key) {
+                    changes.next().unwrap()
+                } else {
+                    old
+                };
+                builder.push_row(row).await?;
+            }
+            ensure!(
+                seen == table.row_count(),
+                "checkpoint contains hidden row versions"
+            );
+            while changes.peek().is_some_and(|row| row.key <= routed.last) {
+                builder.push_row(changes.next().unwrap()).await?;
+            }
+        }
+        ensure!(
+            count == base.header().tables && rows == base.header().rows,
+            "checkpoint image counts mismatch"
+        );
+    }
+    for row in changes {
         builder.push_row(row).await?;
     }
     builder.flush().await?;
     let tables = builder.tree.tables;
     let tree = builder.tree.finish().await?;
-    let reference = Header {
+    Header {
         cut,
         tree,
         tables,
@@ -319,8 +386,7 @@ pub(crate) async fn write_projection(
         databases,
     }
     .upload(files)
-    .await?;
-    Ok(Staged { origin, reference })
+    .await
 }
 
 fn checkpoint_row(

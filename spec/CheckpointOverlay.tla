@@ -1,6 +1,6 @@
 -------------------------- MODULE CheckpointOverlay -------------------------
 EXTENDS Integers, Sequences, FiniteSets, TLC
-CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite
+CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse
 Databases == 1..2
 Keys == 1..2
 Pairs == Databases \X Keys
@@ -41,8 +41,14 @@ Finish == /\ phase = "recovering" /\ cut + applied = 3
           /\ UNCHANGED <<history, cut, applied, recent, touched, receipts, rewritten>>
 Fail == /\ phase = "recovering" /\ phase' = "failed"
         /\ UNCHANGED <<history, cut, applied, recent, touched, receipts, rewritten>>
+\* Ordered tables cover positions 1..3 and 4; the first crosses a database
+\* boundary. An unchanged table reuses its authenticated prior reference.
+Position(p) == 2*(p[1]-1)+p[2]
+SameTable(p,q) == (Position(p) <= 3) = (Position(q) <= 3)
+Reuse(p) == UnsafeReuse \/ \A q \in Pairs: SameTable(p,q) => recent[q] = -1
+Merged == [p \in Pairs |-> IF Reuse(p) THEN Base[p] ELSE Visible[p]]
 Rewrite == /\ phase = "ready" /\ rewritten = {}
-           /\ rewritten' = {IF UnsafeRewrite THEN recent ELSE Visible}
+           /\ rewritten' = {IF UnsafeRewrite THEN recent ELSE Merged}
            /\ UNCHANGED <<history, cut, applied, recent, touched, receipts, phase>>
 Next == Advance \/ Finish \/ Fail \/ Rewrite
 Spec == Init /\ [][Next]_vars

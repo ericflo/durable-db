@@ -15,7 +15,6 @@ const docs = [
   'web-app',
   'development',
   'production-readiness',
-  'roadmap',
 ];
 await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true });
@@ -37,7 +36,7 @@ md.renderer.rules.heading_open = (tokens, index, options, env, self) => {
 };
 const nav = `<a class="wordmark" href="index.html"><span class="mark" aria-hidden="true">▤</span> durable-db</a><nav aria-label="Main"><a href="architecture.html">Architecture</a><a href="api.html">API</a><a href="verification.html">Verification</a><a class="nav-button" href="development.html">Build it ↗</a></nav>`;
 function layout(title, body, home = false) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="An experimental Rust transactional database with authoritative B2 or S3 storage and disposable compute."><meta name="color-scheme" content="light"><title>${title} · durable-db</title><link rel="icon" href="icon.svg" type="image/svg+xml"><link rel="stylesheet" href="style.css"></head><body><header>${nav}</header>${body}<footer><a class="wordmark" href="index.html">durable-db</a><p>Apache-2.0 · Built in Rust · Verified within explicit bounds</p><a href="roadmap.html">Experimental. Follow the work ↗</a></footer>${home ? '<script src="demo.js" defer></script>' : ''}</body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="An experimental Rust transactional database with authoritative B2 or S3 storage and disposable compute."><meta name="color-scheme" content="light"><title>${title} · durable-db</title><link rel="icon" href="icon.svg" type="image/svg+xml"><link rel="stylesheet" href="style.css"></head><body><header>${nav}</header>${body}<footer><a class="wordmark" href="index.html">durable-db</a><p>Apache-2.0 · Built in Rust · Verified within explicit bounds</p><a href="production-readiness.html">Experimental. Follow the work ↗</a></footer>${home ? '<script src="demo.js" defer></script>' : ''}</body></html>`;
 }
 const designDocs = [
   'design-owned-partitions',
@@ -70,6 +69,8 @@ for (const doc of [...docs, ...designDocs]) {
     ),
   );
 }
+// Preserve the old public URL; release work has one maintained source.
+await writeFile(new URL('roadmap.html', out), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Release plan · durable-db</title><meta http-equiv="refresh" content="0;url=production-readiness.html"><link rel="canonical" href="production-readiness.html"></head><body><a href="production-readiness.html">Production readiness and release plan</a></body></html>');
 const home = await readFile(new URL('home.html', import.meta.url), 'utf8');
 await writeFile(
   new URL('index.html', out),

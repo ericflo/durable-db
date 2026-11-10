@@ -23,11 +23,11 @@ struct Inner {
 #[derive(Clone)]
 pub struct Snapshot(Arc<Inner>);
 impl Snapshot {
+    pub(super) fn header(&self) -> &Header {
+        &self.0.header
+    }
     pub(crate) fn cut(&self) -> crate::ownership::root::Cut {
         self.0.header.cut
-    }
-    pub(crate) fn rows(&self) -> anyhow::Result<RawCursor> {
-        self.scan_raw(Bytes::new(), None)
     }
     /// Explicit complete-image audit. This restores a private projection under
     /// the supplied budgets, unlike normal lazy recovery and readback.
@@ -60,7 +60,6 @@ impl Snapshot {
             } else {
                 self.seek(start.clone())?
             },
-            full: !reverse && start.is_empty() && end.is_none(),
             start,
             end,
             current: None,
@@ -69,10 +68,6 @@ impl Snapshot {
             done: false,
             failed: false,
             reverse,
-            tables: 0,
-            rows: 0,
-            declared_rows: 0,
-            databases: 0,
         })
     }
 
@@ -115,7 +110,7 @@ impl Snapshot {
         }))
     }
 
-    fn seek(&self, key: Bytes) -> anyhow::Result<tree::Reader> {
+    pub(super) fn seek(&self, key: Bytes) -> anyhow::Result<tree::Reader> {
         tree::Reader::seek(
             self.0.files.clone(),
             self.0.header.tree,
@@ -123,9 +118,13 @@ impl Snapshot {
             self.0.cache.clone(),
         )
     }
-    async fn table(&self, routed: tree::RoutedTable) -> anyhow::Result<Table> {
-        let table =
-            Table::open(self.0.files.clone(), self.0.cache.clone(), routed.reference).await?;
+    pub(super) async fn table(&self, routed: &tree::RoutedTable) -> anyhow::Result<Table> {
+        let table = Table::open(
+            self.0.files.clone(),
+            self.0.cache.clone(),
+            routed.reference.clone(),
+        )
+        .await?;
         ensure!(
             table.last_key() == routed.last.as_ref(),
             "checkpoint table boundary mismatch"
@@ -137,7 +136,7 @@ impl Snapshot {
         let Some(routed) = manifest.next().await? else {
             return Ok(None);
         };
-        self.table(routed).await?.get(&key, u64::MAX).await
+        self.table(&routed).await?.get(&key, u64::MAX).await
     }
 }
 
@@ -329,14 +328,9 @@ impl Cursor {
     }
 }
 
-pub(crate) struct RawCursor {
+struct RawCursor {
     snapshot: Snapshot,
     manifest: tree::Reader,
-    full: bool,
-    tables: u64,
-    rows: u64,
-    declared_rows: u64,
-    databases: u64,
     start: Bytes,
     end: Option<Bytes>,
     current: Option<table::Cursor>,
@@ -367,18 +361,6 @@ impl RawCursor {
                         "unordered checkpoint scan"
                     );
                     self.previous = Some(row.key.clone());
-                    self.rows = self
-                        .rows
-                        .checked_add(1)
-                        .context("checkpoint row count overflow")?;
-                    if self.full {
-                        let (_, kind, _) = super::split_key(&row.key)?;
-                        self.databases += u64::from(kind == 0);
-                        ensure!(
-                            self.rows <= self.snapshot.0.header.rows,
-                            "extra checkpoint rows"
-                        );
-                    }
                     return Ok(Some(row));
                 }
                 self.current = None;
@@ -399,22 +381,7 @@ impl RawCursor {
                 self.done = true;
                 break;
             };
-            let table = self.snapshot.table(routed).await?;
-            self.tables = self
-                .tables
-                .checked_add(1)
-                .context("checkpoint table count overflow")?;
-            self.declared_rows = self
-                .declared_rows
-                .checked_add(table.row_count())
-                .context("checkpoint row count overflow")?;
-            if self.full {
-                ensure!(
-                    self.tables <= self.snapshot.0.header.tables
-                        && self.declared_rows <= self.snapshot.0.header.rows,
-                    "extra checkpoint tables or rows"
-                );
-            }
+            let table = self.snapshot.table(&routed).await?;
             ensure!(
                 self.table_boundary
                     .as_ref()
@@ -446,16 +413,6 @@ impl RawCursor {
                 u64::MAX,
                 self.reverse,
             )?);
-        }
-        if self.full {
-            let header = &self.snapshot.0.header;
-            ensure!(
-                self.tables == header.tables
-                    && self.rows == header.rows
-                    && self.rows == self.declared_rows
-                    && self.databases == header.databases,
-                "checkpoint image counts mismatch"
-            );
         }
         Ok(None)
     }

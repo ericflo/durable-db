@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct Files {
     inner: Remote,
     puts: AtomicUsize,
+    ranges: std::sync::Mutex<std::collections::BTreeSet<String>>,
     lose: usize,
     pause: AtomicUsize,
     entered: tokio::sync::Semaphore,
@@ -19,6 +20,7 @@ impl Files {
             )
             .unwrap(),
             puts: AtomicUsize::new(0),
+            ranges: Default::default(),
             lose,
             pause: AtomicUsize::new(0),
             entered: tokio::sync::Semaphore::new(0),
@@ -31,6 +33,7 @@ impl Storage for Files {
         self.inner.get(k, m).await
     }
     async fn get_range(&self, k: &str, r: std::ops::Range<u64>, s: u64) -> anyhow::Result<Bytes> {
+        self.ranges.lock().unwrap().insert(k.into());
         self.inner.get_range(k, r, s).await
     }
     async fn put(&self, k: &str, b: Bytes) -> anyhow::Result<()> {
@@ -162,16 +165,6 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
             assert!(database.restore_state(2, 1000).await.is_err());
         } else if bad == 3 {
             assert!(database.get("x").await.is_err());
-        } else if bad == 4 {
-            let mut rows = snapshot.rows().unwrap();
-            loop {
-                match rows.next().await {
-                    Ok(Some(_)) => (),
-                    Ok(None) => panic!("incomplete image accepted"),
-                    Err(_) => break,
-                }
-            }
-            assert!(rows.next().await.is_err());
         }
         let header = Header::load(files.clone(), reference).await.unwrap();
         assert!(load(files, header, Limits::default()).await.is_err());
@@ -406,4 +399,263 @@ async fn malformed_routing_nodes_retire_the_reader_and_maximum_bounds_roundtrip(
         assert!(reader.next().await.is_err());
         assert!(reader.next().await.is_err());
     }
+}
+
+#[tokio::test]
+async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
+    use crate::transactions::{
+        record::{Commit, Mutation},
+        recovery::{Resolution, Target},
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    async fn references(snapshot: &Snapshot) -> BTreeSet<Bytes> {
+        let mut manifest = snapshot.seek(Bytes::new()).unwrap();
+        let mut references = BTreeSet::new();
+        while let Some(table) = manifest.next().await.unwrap() {
+            references.insert(table.reference.encode());
+        }
+        references
+    }
+    let files = Files::new(0);
+    let db = Database {
+        name: "app",
+        generation: Uuid::from_u128(7),
+    };
+    let prefix = prefix();
+    let mut builder = Builder::new(files.clone());
+    let mut metadata = meta(2, 0).to_vec();
+    metadata[16..24].copy_from_slice(&160u64.to_be_bytes());
+    metadata[24..32].copy_from_slice(&(160u64 * (8 + 256)).to_be_bytes());
+    builder
+        .push(&prefix, 0, b"", 2, Some(metadata.into()))
+        .await
+        .unwrap();
+    // Separate metadata from receipt rows: expired receipts must be removed
+    // even when their table contains no key present in the new receipt window.
+    builder.flush().await.unwrap();
+    for (id, revision) in [(b"first".as_slice(), 1), (b"second", 2)] {
+        builder
+            .push(&prefix, 1, id, revision, Some(receipt(revision as u8)))
+            .await
+            .unwrap();
+    }
+    builder.flush().await.unwrap();
+    let mut expected = BTreeMap::new();
+    for n in 0..160 {
+        let key = format!("key/{n:04}");
+        let value = Bytes::from(vec![42; 256]);
+        builder
+            .push(&prefix, 2, key.as_bytes(), 2, Some(value.clone()))
+            .await
+            .unwrap();
+        expected.insert(key, value);
+        if n % 32 == 31 {
+            builder.flush().await.unwrap();
+        }
+    }
+    let tables = builder.tree.tables;
+    let reference = Header {
+        cut: cut(),
+        tables,
+        tree: builder.tree.finish().await.unwrap(),
+        rows: builder.rows,
+        databases: 1,
+    }
+    .upload(files.clone())
+    .await
+    .unwrap();
+    let snapshot = Snapshot::open(
+        files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        reference,
+    )
+    .await
+    .unwrap();
+    snapshot.verify(Limits::default()).await.unwrap();
+    let old = references(&snapshot).await;
+    assert_eq!(old.len(), 7);
+    let mut projection = Projection::new(Limits::default()).unwrap();
+    projection.rebase(snapshot.clone());
+    let puts = files.puts.load(Ordering::SeqCst);
+    files.ranges.lock().unwrap().clear();
+    let unchanged = build_projection(&projection, files.clone(), cut())
+        .await
+        .unwrap();
+    assert_eq!(
+        files.puts.load(Ordering::SeqCst) - puts,
+        2,
+        "only manifest and header uploads"
+    );
+    for reference in &old {
+        let key = format!(
+            "tables/{}",
+            Uuid::from_slice(&reference[8..24]).unwrap().simple()
+        );
+        assert!(
+            !files.ranges.lock().unwrap().contains(&key),
+            "no reused data-block reads"
+        );
+    }
+    let unchanged = Snapshot::open(
+        files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        unchanged,
+    )
+    .await
+    .unwrap();
+    assert_eq!(references(&unchanged).await, old);
+    let encoded = Commit::encode(
+        db,
+        3,
+        2,
+        2,
+        "third",
+        [3; 32],
+        &[
+            Mutation {
+                key: "key/0031",
+                value: None,
+            },
+            Mutation {
+                key: "key/0032",
+                value: Some(b""),
+            },
+            Mutation {
+                key: "key/0040",
+                value: Some(b"x"),
+            },
+            Mutation {
+                key: "key/0160",
+                value: Some(b"y"),
+            },
+        ],
+    )
+    .unwrap();
+    let commit = Commit::decode(&encoded).unwrap();
+    let state = projection
+        .take_state(db)
+        .await
+        .unwrap()
+        .advance(&commit)
+        .unwrap();
+    projection.apply(&commit, state).await.unwrap();
+    for name in ["aaa", "zzz"] {
+        let db = Database {
+            name,
+            generation: db.generation,
+        };
+        let encoded = Commit::encode(
+            db,
+            1,
+            0,
+            0,
+            "new",
+            [1; 32],
+            &[Mutation {
+                key: "x",
+                value: Some(b""),
+            }],
+        )
+        .unwrap();
+        let commit = Commit::decode(&encoded).unwrap();
+        let state = projection
+            .take_state(db)
+            .await
+            .unwrap()
+            .advance(&commit)
+            .unwrap();
+        projection.apply(&commit, state).await.unwrap();
+    }
+    let puts = files.puts.load(Ordering::SeqCst);
+    let reference = build_projection(&projection, files.clone(), cut())
+        .await
+        .unwrap();
+    assert_eq!(files.puts.load(Ordering::SeqCst) - puts, 6);
+    let rewritten = Snapshot::open(
+        files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        reference,
+    )
+    .await
+    .unwrap();
+    assert_eq!(references(&rewritten).await.intersection(&old).count(), 3);
+    // Cancelling after an upload can strand fresh bytes, but exposes no new
+    // reference and cannot damage either the source or the completed image.
+    files
+        .pause
+        .store(files.puts.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+    tokio::select! {
+        result = build_projection(&projection, files.clone(), cut()) => panic!("paused build completed: {}", result.is_ok()),
+        permit = files.entered.acquire() => permit.unwrap().forget(),
+    }
+    files.pause.store(0, Ordering::SeqCst);
+    rewritten.verify(Limits::default()).await.unwrap();
+    assert_eq!(rewritten.header().databases, 3);
+    for name in ["aaa", "zzz"] {
+        let view = rewritten
+            .database(Database {
+                name,
+                generation: db.generation,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            view.get("x").await.unwrap().unwrap().value,
+            Some(Bytes::new())
+        );
+    }
+    let view = rewritten.database(db).await.unwrap().unwrap();
+    assert_eq!(
+        view.resolve("first", [1; 32], 0).await.unwrap(),
+        Resolution::Expired
+    );
+    assert_eq!(
+        view.resolve("second", [2; 32], 1).await.unwrap(),
+        Resolution::Expired
+    );
+    assert_eq!(
+        view.resolve("third", [3; 32], 2).await.unwrap(),
+        Resolution::Committed(3)
+    );
+    expected.remove("key/0031");
+    expected.insert("key/0032".into(), Bytes::new());
+    expected.insert("key/0040".into(), Bytes::from_static(b"x"));
+    expected.insert("key/0160".into(), Bytes::from_static(b"y"));
+    for (key, value) in &expected {
+        assert_eq!(
+            view.get(key).await.unwrap().unwrap().value.as_ref(),
+            Some(value)
+        );
+    }
+    assert!(view.get("key/0031").await.unwrap().unwrap().value.is_none());
+    assert_eq!(view.statistics().keys, expected.len() as u64);
+    assert_eq!(
+        view.statistics().bytes,
+        expected
+            .iter()
+            .map(|(k, v)| (k.len() + v.len()) as u64)
+            .sum::<u64>()
+    );
+    assert!(
+        snapshot
+            .database(db)
+            .await
+            .unwrap()
+            .unwrap()
+            .get("key/0031")
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .is_some()
+    );
+    let current = references(&rewritten).await;
+    let retained = current.intersection(&old).next().unwrap();
+    let index = format!(
+        "tables/{}",
+        Uuid::from_slice(&retained[64..80]).unwrap().simple()
+    );
+    files.inner.delete(&index).await.unwrap();
+    assert!(build_projection(&projection, files, cut()).await.is_err());
 }

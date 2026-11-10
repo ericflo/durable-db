@@ -51,7 +51,7 @@ impl<C: Clock> Owner<C> {
 
     /// Called by admission and completion; a runtime can also drive this after
     /// a failed/cancelled call. Returns false while an upload is still pending.
-    /// The current full rewrite pauses data mutation during I/O. Independent
+    /// Checkpoint construction pauses data mutation during I/O. Independent
     /// control renewal must continue; immutable objects are never deleted here.
     pub async fn maintain(&mut self) -> anyhow::Result<bool> {
         self.check()?;
