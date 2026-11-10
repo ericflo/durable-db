@@ -1,6 +1,6 @@
 # Working on durable-db
 
-Build a small, auditable transactional ordered database. Apache-2.0. Commit directly to main; no pull requests unless the owner changes that policy. Keep the repository private until explicitly instructed otherwise. The documentation website may be public.
+Build a small, auditable transactional ordered database. The replacement value index is native Rust owned by durable-db; the SlateDB evaluation has been retired. Apache-2.0. Commit directly to main; no pull requests unless the owner changes that policy. Keep the repository private until explicitly instructed otherwise. The documentation website may be public.
 
 Protocol changes start in `spec/`, followed by implementation and adversarial tests. Never describe bounded model checking as a proof of the Rust implementation or of every possible deployment. Record assumptions, checked bounds, results, and remaining obligations in `docs/verification.md`.
 
