@@ -56,6 +56,8 @@ Finish == /\ start >= 0 /\ ~done /\ (cursor = selected \/ UnsafeExpose)
 \* A committed checkpoint replaces only its covered journal prefix. Flattening
 \* epochs assumes selected history and monotone checkpoint publication; object
 \* naming, provider comparisons and Rust refinement have separate obligations.
+\* A closed older epoch is wholly before the cut; late bytes outside its
+\* selected prefix never enter History. Deleting them is a stuttering step.
 Collect(cut) == /\ \E n \in frames: n <= cut /\ frames' = frames \ {n}
                 /\ UNCHANGED <<History,owner,register,built,pending,bytes,published,start,cursor,view,done,selected>>
 Next == /\ UNCHANGED History

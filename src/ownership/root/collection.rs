@@ -1,6 +1,6 @@
 //! Upload-free collection of native metadata, covered journal frames and provider history.
 //! Uses PublicationSafety's list-before-fence protocol and Directory membership.
-use super::{Profile, catalog, metadata};
+use super::{Profile, Registration, catalog, metadata};
 use crate::{
     directory::{Directory, witness},
     index::recovery::checkpoint::Header,
@@ -141,10 +141,29 @@ impl Collection {
             .collect_unreachable(&protected, &manifests, &indexes, &*self.authority)
             .await?;
         if let Some(cut) = cut {
+            // Keys group frames by incarnation. Retain one validated registration,
+            // not one provider GET per frame or an unbounded epoch cache.
+            let mut registration: Option<Registration> = None;
             for key in journal {
                 let (log, position) = LogId::parse_key(&key)?;
                 REGISTRY.event(Event::DataCandidates, 1);
-                if log == cut.prefix.log() && position <= cut.prefix.position() {
+                if log.partition() != cut.prefix.log().partition() {
+                    continue;
+                }
+                if registration.is_none_or(|r| r.identity().incarnation != log.epoch()) {
+                    registration = Some(
+                        Registration::load(&self.files, log.epoch(), &self.prefix, self.profile)
+                            .await?,
+                    );
+                }
+                let identity = registration.unwrap().identity();
+                ensure!(
+                    identity.incarnation != cut.identity.incarnation || identity == cut.identity,
+                    "checkpoint and registration epochs differ"
+                );
+                if identity.epoch < cut.identity.epoch
+                    || (identity == cut.identity && position <= cut.prefix.position())
+                {
                     self.authority.delete_versions(&key).await?;
                     REGISTRY.event(Event::DataDeleteAck, 1);
                     deleted += 1;

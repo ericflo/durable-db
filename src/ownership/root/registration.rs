@@ -57,7 +57,7 @@ impl Registration {
 
     fn decode(
         bytes: &[u8],
-        expected: Identity,
+        expected: Uuid,
         prefix: &str,
         profile: Profile,
     ) -> anyhow::Result<Self> {
@@ -78,7 +78,7 @@ impl Registration {
         let identity = read_identity(&mut input)?;
         let parent = read_identity(&mut input)?;
         ensure!(
-            identity == expected && identity.epoch > 0 && !identity.incarnation.is_nil(),
+            identity.incarnation == expected && identity.epoch > 0 && !expected.is_nil(),
             "registration identity mismatch"
         );
         let parent = if identity.epoch == 1 {
@@ -111,6 +111,19 @@ impl Registration {
         Ok(Self { identity, parent })
     }
 
+    pub(super) async fn load(
+        files: &Arc<dyn Storage>,
+        incarnation: Uuid,
+        prefix: &str,
+        profile: Profile,
+    ) -> anyhow::Result<Self> {
+        let object = files
+            .get(&key(incarnation), MAX_BYTES)
+            .await?
+            .context("registered root is missing")?;
+        Self::decode(&object.bytes, incarnation, prefix, profile)
+    }
+
     pub(super) fn prepare(
         self,
         files: Arc<dyn Storage>,
@@ -119,14 +132,14 @@ impl Registration {
     ) -> Prepared {
         Prepared {
             files,
-            key: key(self.identity),
+            key: key(self.identity.incarnation),
             bytes: self.encode(prefix, profile),
         }
     }
 }
 
-fn key(identity: Identity) -> String {
-    format!("ownership/{}", identity.incarnation.simple())
+fn key(incarnation: Uuid) -> String {
+    format!("ownership/{}", incarnation.simple())
 }
 fn take<const N: usize>(input: &mut &[u8]) -> anyhow::Result<[u8; N]> {
     let (value, rest) = input
@@ -192,13 +205,17 @@ impl Registrations {
         let Some(identity) = self.next else {
             return Ok(None);
         };
-        let object = self
-            .files
-            .get(&key(identity), MAX_BYTES)
-            .await?
-            .context("registered root is missing")?;
-        let registration =
-            Registration::decode(&object.bytes, identity, &self.prefix, self.profile)?;
+        let registration = Registration::load(
+            &self.files,
+            identity.incarnation,
+            &self.prefix,
+            self.profile,
+        )
+        .await?;
+        ensure!(
+            registration.identity == identity,
+            "registration epoch mismatch"
+        );
         self.next = registration.parent;
         Ok(Some(registration))
     }

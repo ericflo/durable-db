@@ -173,6 +173,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         initial > 2,
         "fixture must leave obsolete ledgers to collect"
     );
+    let journals_before = files.list("journal/", None, 128).await.unwrap().len();
+    assert_eq!(journals_before, 5);
     let cleanup = Instant::now();
     tokio::time::timeout(Duration::from_secs(150), async {
         loop {
@@ -188,6 +190,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
                     .expect("list directory metadata")
                     .len()
                     == 1
+                && files.list("journal/", None, 128).await.unwrap().len() == 1
             {
                 break;
             }
@@ -220,7 +223,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         StatusCode::PAYLOAD_TOO_LARGE
     );
     let read = json!({"keys":["x"],"scans":[{"prefix":"","limit":10}]});
-    let readers = [
+    let mut readers = [
         ("/v1/databases/a/read", 2, "dHdv"),
         ("/v1/databases/b/read", 1, "b25l"),
     ];
@@ -258,9 +261,14 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     );
     elapsed.sort_by(f64::total_cmp);
 
-    // A replacement has published a recovery catalog in the same object
-    // prefixes as budget ledgers. Wait for BOTH parts of an automatic sweep
-    // before another cache-free takeover; the first-owner sweep cannot test this.
+    // A new checkpoint covers both the prior epoch and this owner's frame.
+    assert_eq!(
+        server.ok("POST", "/v1/databases/b/commit", &write(1)).await["revision"],
+        2
+    );
+    readers[1] = ("/v1/databases/b/read", 2, "dHdv");
+    // Wait for both metadata loops and all covered journals after takeover.
+    // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
     let markers = ["manifests", "indexes"]
         .map(|prefix| format!("{prefix}/zz-collection-check.{}", Uuid::new_v4()));
@@ -271,6 +279,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         loop {
             if files.get(&markers[0], 1).await.unwrap().is_none()
                 && files.get(&markers[1], 1).await.unwrap().is_none()
+                && files.list("journal/", None, 128).await.unwrap().is_empty()
             {
                 break;
             }
@@ -301,6 +310,10 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         server.ok("POST", "/v1/databases/b/commit", &write(0)).await["replayed"],
         true
     );
+    assert_eq!(
+        server.ok("POST", "/v1/databases/b/commit", &write(1)).await["replayed"],
+        true
+    );
     server.stop().await;
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
@@ -309,6 +322,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
+        "journal_objects_before":journals_before,"journal_objects_after_first_sweep":1,
+        "journal_objects_after_takeover_sweep":0,"closed_journal_epochs_reclaimed":true,
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; logical clock; old server stopped before takeover. Not physical timing, AWS or performance-SLO qualification."});

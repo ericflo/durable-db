@@ -661,22 +661,23 @@ async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered
     );
 }
 
+async fn budgeted_active(connection: &Connection, clock: &ManualClock) -> Root<ManualClock> {
+    for _ in 0..2 {
+        let (mut root, outcome) = super::budget::attempt(connection, clock).await;
+        if matches!(outcome, Outcome::Confirmed) {
+            clock.set(clock.now.load(Ordering::SeqCst) + 23);
+            validate(&mut root).await;
+            activate(&mut root).await;
+            return root;
+        }
+        assert!(matches!(outcome, Outcome::Conflict));
+    }
+    panic!("bootstrap did not confirm");
+}
+
 #[tokio::test]
 async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suffix() {
     use crate::{index::recovery::checkpoint::Staged, upload_budget::UploadLimits};
-    async fn next(connection: &Connection, clock: &ManualClock) -> Root<ManualClock> {
-        for _ in 0..2 {
-            let (mut root, outcome) = super::budget::attempt(connection, clock).await;
-            if matches!(outcome, Outcome::Confirmed) {
-                clock.set(clock.now.load(Ordering::SeqCst) + 23);
-                validate(&mut root).await;
-                activate(&mut root).await;
-                return root;
-            }
-            assert!(matches!(outcome, Outcome::Conflict));
-        }
-        panic!("bootstrap did not confirm");
-    }
     let provider = Provider::new();
     let clock = ManualClock::default();
     let connection = provider
@@ -687,13 +688,13 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
         })
         .await
         .unwrap();
-    let mut old = next(&connection, &clock).await;
+    let mut old = budgeted_active(&connection, &clock).await;
     let mut writer = old.take_journal(QueueLimits::default()).unwrap();
     append(&mut writer, 1, Some(b"one")).await;
     append(&mut writer, 2, None).await;
     append(&mut writer, 3, Some(b"")).await;
     let original = provider.files.list("journal/", None, 10).await.unwrap();
-    let mut root = next(&connection, &clock).await;
+    let mut root = budgeted_active(&connection, &clock).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
@@ -792,7 +793,7 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
     validate(&mut root).await;
     let mut current = root.take_journal(QueueLimits::default()).unwrap();
     append(&mut current, 4, Some(b"next-owner")).await;
-    let mut successor = next(&connection, &clock).await;
+    let mut successor = budgeted_active(&connection, &clock).await;
     let journal = scan(&mut successor).await;
     seal(&mut successor, journal).await;
     let projection = finish(
@@ -820,6 +821,174 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
                 .await
                 .unwrap(),
             Resolution::Committed(revision)
+        );
+    }
+}
+
+#[tokio::test]
+async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
+    use crate::upload_budget::UploadLimits;
+    async fn checkpoint(root: &mut Root<ManualClock>) {
+        let mut recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
+            .await
+            .unwrap();
+        while !recovery.is_complete() {
+            recovery = recovery.advance(32).await.unwrap();
+        }
+        let staged = recovery.checkpoint().await.unwrap();
+        validate(root).await;
+        let request = root.publish_checkpoint(staged).unwrap();
+        assert!(matches!(
+            root.finish(request.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+    }
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 8 * 1024 * 1024,
+            attempts: 1024,
+        })
+        .await
+        .unwrap();
+    let mut first = budgeted_active(&connection, &clock).await;
+    let mut writer = first.take_journal(QueueLimits::default()).unwrap();
+    for revision in 1..=130 {
+        append(&mut writer, revision, Some(b"first")).await;
+    }
+    let late = writer
+        .prepare(&[Bytes::from_static(b"unselected old tail")])
+        .unwrap();
+    let mut second = budgeted_active(&connection, &clock).await;
+    let journal = scan(&mut second).await;
+    seal(&mut second, journal).await;
+    checkpoint(&mut second).await;
+    // A new collector instance resumes the durable cursor after each page.
+    for remaining in [2, 0] {
+        let collector = connection
+            .root(clock.clone(), profile())
+            .unwrap()
+            .collection()
+            .unwrap();
+        collector.collect().await.unwrap();
+        assert_eq!(
+            provider
+                .files
+                .list("journal/", None, 200)
+                .await
+                .unwrap()
+                .len(),
+            remaining
+        );
+    }
+    let mut current = second.take_journal(QueueLimits::default()).unwrap();
+    append(&mut current, 131, Some(b"second")).await;
+    let mut third = budgeted_active(&connection, &clock).await;
+    let journal = scan(&mut third).await;
+    seal(&mut third, journal).await;
+    checkpoint(&mut third).await;
+    let cut = crate::index::recovery::checkpoint::Header::load(
+        connection.objects(),
+        third.checkpoint_reference().unwrap().unwrap(),
+    )
+    .await
+    .unwrap()
+    .cut;
+    let mut live = third.take_journal(QueueLimits::default()).unwrap();
+    append(&mut live, 132, Some(b"live")).await;
+    // Another incarnation with the cut's epoch is not that checkpoint's journal.
+    let other = Identity {
+        epoch: cut.identity.epoch,
+        incarnation: Uuid::new_v4(),
+    };
+    Registration::new(
+        other,
+        Some(Identity {
+            epoch: 1,
+            incarnation: writer.log().epoch(),
+        }),
+    )
+    .prepare(provider.files.clone(), "test", profile())
+    .execute()
+    .await
+    .unwrap();
+    let mut peer = Writer::for_root(
+        provider.files.clone(),
+        other.incarnation,
+        QueueLimits::default(),
+    );
+    let mut partition = Writer::new(
+        provider.files.clone(),
+        Uuid::from_u128(2),
+        QueueLimits::default(),
+    )
+    .unwrap();
+    for foreign in [&mut peer, &mut partition] {
+        let upload = foreign.prepare(&[Bytes::from_static(b"foreign")]).unwrap();
+        foreign.complete(upload.send().await).unwrap();
+        foreign.pop_durable().unwrap().unwrap();
+    }
+    let _late_completion = late.send().await;
+    let collector = third.collection().unwrap();
+    let registration_key = format!("ownership/{}", writer.log().epoch().simple());
+    let saved = provider
+        .files
+        .get(&registration_key, 256)
+        .await
+        .unwrap()
+        .unwrap()
+        .bytes;
+    provider
+        .files
+        .put(&registration_key, Bytes::from_static(b"corrupt"))
+        .await
+        .unwrap();
+    assert!(collector.collect().await.is_err());
+    provider.files.delete(&registration_key).await.unwrap();
+    assert!(collector.collect().await.is_err());
+    provider.files.put(&registration_key, saved).await.unwrap();
+    collector.collect().await.unwrap();
+    let mut remaining: Vec<_> = provider
+        .files
+        .list("journal/", None, 200)
+        .await
+        .unwrap()
+        .iter()
+        .map(|key| crate::journal::LogId::parse_key(key).unwrap().0)
+        .collect();
+    let mut protected = vec![live.log(), peer.log(), partition.log()];
+    for logs in [&mut remaining, &mut protected] {
+        logs.sort_by_key(|log| (log.partition(), log.epoch()));
+    }
+    assert_eq!(remaining, protected);
+    // Discovery stops at the new checkpoint; it never reads the reclaimed old
+    // epochs or adopts the delayed tail, peer incarnation or foreign partition.
+    let mut fourth = budgeted_active(&connection, &clock).await;
+    let journal = scan(&mut fourth).await;
+    seal(&mut fourth, journal).await;
+    let projection = finish(
+        Recovering::begin(fourth.replay().unwrap(), Limits::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let view = projection.view(db()).await.unwrap().unwrap();
+    assert_eq!(
+        view.get(b"x", 132).await.unwrap().unwrap().value.as_deref(),
+        Some(b"live".as_slice())
+    );
+    for revision in 1..=132 {
+        assert_eq!(
+            view.resolve(&format!("r-{revision}"), [revision as u8; 32], revision - 1)
+                .await
+                .unwrap(),
+            if revision <= 4 {
+                Resolution::Expired
+            } else {
+                Resolution::Committed(revision)
+            }
         );
     }
 }
