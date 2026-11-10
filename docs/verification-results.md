@@ -1,5 +1,13 @@
 # Verification results
 
+## Checkpoint index reads (2026-11-10)
+
+Commit `9e0892c` removes table-index reads for unchanged checkpoint ranges. An uncached 183-table fixture drops from 187 reads to four manifest reads for an unchanged image. Deleting a value exactly at an upper bound uses ten reads, touches no objects belonging to the two idle database generations and preserves all 540 values/deletions and exact retry windows. The runtime change adds ten net Rust lines, with no new cache, ledger or storage format. The old unconditional index scan and brittle table-packing assertions were removed.
+
+The native HTTP fixture passes on real B2 and versioned MinIO, preserving values, receipts and nonrefundable budgets across two cold reopens and automatic collection. Each sweep retains exactly three published checkpoint objects in this fixture. Both buckets, all remaining physical versions, the B2 test key and MinIO container were removed. [Complete evidence](evidence/checkpoint-index-reads-2026-11-10.json) includes the 280-test local Rust suite, 99 native client tests, the unchanged 31,104-state model with eight negative controls, and Rust controls that fail for the previous implementation and an incorrect boundary comparison.
+
+This reduces shared maintenance amplification; it does not complete tenant maintenance accounting. Full-manifest traversal remains. Retained objects are checked when read or explicitly audited; rewriting a checkpoint is not a full-image audit. Physical ownership timing/native CLI cutover, durable retention, large-image cleanup progress and production/AWS qualification remain open. Native format stays `owned-candidate-12`.
+
 ## v0.5.0 native table and manifest collection (2026-11-10)
 
 [v0.5.0](https://github.com/ericflo/durable-db/releases/tag/v0.5.0) packages commit `99db9f2`, verified by [Woodpecker #121](https://ci.eflorenzano.com/repos/18/pipeline/121/1). Its downloaded static Linux x86_64 archive passed standalone checks without a toolchain on `PATH`, including backup/restore and recovery after SIGKILL. The public default installer verified the GitHub asset checksum and installed the same binary. The native JavaScript contract passed 99 enabled tests in CI (67 seconds); the CLI still uses the shared publication engine.
