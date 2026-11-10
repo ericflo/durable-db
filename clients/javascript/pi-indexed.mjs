@@ -97,7 +97,8 @@ export async function openIndexedPiStorage(
       const observed = await observe(client, prefix);
       if (observed.meta?.owner === owner)
         return new IndexedStorage(client, prefix, owner, observed.encoded, bounds);
-      if (!(error instanceof DbError) || error.status !== 409) throw error;
+      if (!(error instanceof DbError) || error.status !== 409 || error.code !== 'conflict')
+        throw error;
       // A fence or a write by the SAME target can cause a definite conflict.
       // Retry its fresh snapshot without silently targeting another Session.
       const held = observed.meta?.owner ?? null;
@@ -152,7 +153,13 @@ class IndexedStorage {
         try {
           return copy(await call(await this.snapshot()));
         } catch (error) {
-          if (!(error instanceof DbError) || error.status !== 409 || attempt === 11) throw error;
+          if (
+            !(error instanceof DbError) ||
+            error.status !== 409 ||
+            error.code !== 'conflict' ||
+            attempt === 11
+          )
+            throw error;
           await pause(attempt);
         }
       }
@@ -244,6 +251,7 @@ class IndexedStorage {
               if (
                 error instanceof DbError &&
                 error.status === 409 &&
+                error.code === 'conflict' &&
                 observed.encoded === this.encoded &&
                 attempt < 11
               ) {
@@ -269,6 +277,7 @@ class IndexedStorage {
           if (
             error instanceof DbError &&
             error.status === 409 &&
+            error.code === 'conflict' &&
             !mutationStarted &&
             attempt < 11
           ) {
@@ -372,6 +381,7 @@ class IndexedStorage {
           if (
             error instanceof DbError &&
             error.status === 409 &&
+            error.code === 'conflict' &&
             current.encoded === this.encoded &&
             attempt < 11
           ) {

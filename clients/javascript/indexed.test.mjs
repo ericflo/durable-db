@@ -61,9 +61,9 @@ suite('indexed adapter failure and resource boundaries', () => {
         attempts++;
         if (attempts === 1) {
           await commit(old, [entry(2)]);
-          throw new DbError(409, { error: 'revision_conflict' });
+          throw new DbError(409, { error: 'conflict' });
         }
-        if (attempts === 2) throw new DbError(409, { error: 'collection_fence_conflict' });
+        if (attempts === 2) throw new DbError(409, { error: 'conflict' });
         return client.commit(request);
       },
     };
@@ -94,7 +94,7 @@ suite('indexed adapter failure and resource boundaries', () => {
         return client.read(request);
       },
       commit: (request) => {
-        if (++attempts === 1) throw new DbError(409, { error: 'collection_fence_conflict' });
+        if (++attempts === 1) throw new DbError(409, { error: 'conflict' });
         return client.commit(request);
       },
     };

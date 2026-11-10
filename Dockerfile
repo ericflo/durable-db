@@ -124,7 +124,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-transactionclient
-COPY spec/TransactionClient.tla spec/TransactionClient.checks spec/TransactionClient.cfg spec/UnsafeTransactionRetry.cfg spec/
+COPY spec/TransactionClient.tla spec/TransactionClient.checks spec/TransactionClient.cfg spec/UnsafeTransactionRetry.cfg spec/UnsafeTransactionExpired.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh TransactionClient && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed

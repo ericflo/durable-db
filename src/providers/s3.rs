@@ -678,16 +678,9 @@ mod tests {
         };
         let snapshot = owner.snapshot(database).await.unwrap();
         state.lock().unwrap().acknowledgement = 503;
+        let wire_request = serde_json::from_str(r#"{"expected_revision":0,"request_id":"first","writes":[{"key":"note","value":"b25l"}]}"#).unwrap();
         let first = owner
-            .prepare(&[Request {
-                snapshot: &snapshot,
-                id: "first",
-                reads: &[],
-                mutations: &[Mutation {
-                    key: "note",
-                    value: Some(b"one"),
-                }],
-            }])
+            .prepare_request(database, &wire_request)
             .await
             .unwrap();
         let upload = first.upload.unwrap();
@@ -697,6 +690,12 @@ mod tests {
             owner.outcome(first.tickets[0]).unwrap(),
             live::Outcome::Pending
         );
+        let duplicate = owner
+            .prepare_request(database, &wire_request)
+            .await
+            .unwrap();
+        assert!(duplicate.upload.is_none());
+        assert!(owner.commit_result(duplicate.tickets[0]).unwrap().is_none());
         state.lock().unwrap().acknowledgement = 200;
         let next = owner
             .prepare(&[Request {
@@ -730,6 +729,20 @@ mod tests {
         assert_eq!(
             owner.outcome(next.tickets[0]).unwrap(),
             live::Outcome::Committed(2)
+        );
+        assert!(
+            owner
+                .commit_result(duplicate.tickets[0])
+                .unwrap()
+                .unwrap()
+                .replayed
+        );
+        assert!(
+            !owner
+                .commit_result(first.tickets[0])
+                .unwrap()
+                .unwrap()
+                .replayed
         );
         let current = owner.snapshot(database).await.unwrap();
         assert_eq!(
@@ -780,6 +793,18 @@ mod tests {
                 .value
                 .as_deref(),
             Some(b"two".as_slice())
+        );
+        let retry = owner
+            .prepare_request(database, &wire_request)
+            .await
+            .unwrap();
+        assert!(retry.upload.is_none());
+        assert!(
+            owner
+                .commit_result(retry.tickets[0])
+                .unwrap()
+                .unwrap()
+                .replayed
         );
         task.abort();
         task.await.unwrap_err();

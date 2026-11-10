@@ -1,7 +1,7 @@
 --------------------------- MODULE LiveTransactions ---------------------------
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 CONSTANTS Requests, MaxWrites, UnsafeGap, UnsafeRead, UnsafeReject,
-          UnsafePermission, UnsafeRetry
+          UnsafePermission, UnsafeRetry, UnsafeCondition
 VARIABLES history, stored, visible, live, conflicts, answers, reads
 vars == <<history, stored, visible, live, conflicts, answers, reads>>
 Init == /\ history = <<>> /\ stored = {} /\ visible = 0 /\ live = TRUE
@@ -10,10 +10,11 @@ Init == /\ history = <<>> /\ stored = {} /\ visible = 0 /\ live = TRUE
    A retry resolves its existing pending/committed identity before validation.
    Ownership supplies live; its clock, drain and registration contracts are
    modeled separately. Each response records permission at its final check. *)
-Accept(request, snapshot) ==
+Accept(request, snapshot, condition) ==
     /\ live /\ Len(history) < MaxWrites /\ snapshot = Len(history)
-    /\ UnsafeRetry \/ request \notin {history[i] : i \in 1..Len(history)}
-    /\ history' = Append(history, request)
+    /\ (condition \/ UnsafeCondition)
+    /\ UnsafeRetry \/ request \notin {history[i].id : i \in 1..Len(history)}
+    /\ history' = Append(history, [id |-> request, condition |-> condition])
     /\ UNCHANGED <<stored, visible, live, conflicts, answers, reads>>
 Upload(i) == /\ i \in 1..Len(history) /\ stored' = stored \cup {i}
              /\ UNCHANGED <<history, visible, live, conflicts, answers, reads>>
@@ -37,7 +38,7 @@ Read == /\ live \/ UnsafePermission
         /\ UNCHANGED <<history, stored, visible, live, conflicts, answers>>
 Expire == /\ live /\ live' = FALSE
           /\ UNCHANGED <<history, stored, visible, conflicts, answers, reads>>
-Next == (\E r \in Requests, s \in 0..MaxWrites: Accept(r,s))
+Next == (\E r \in Requests, s \in 0..MaxWrites, c \in BOOLEAN: Accept(r,s,c))
         \/ (\E i \in 1..MaxWrites: Upload(i) \/ Publish(i)
             \/ Answer(i,"commit") \/ Answer(i,"reject"))
         \/ (\E s \in 0..MaxWrites: Reject(s)) \/ Read \/ Expire
@@ -45,5 +46,6 @@ Spec == Init /\ [][Next]_vars
 DurableView == 1..visible \subseteq stored
 DurableResponses == \A r \in answers \cup reads: 1..r.at \subseteq stored
 Permission == \A r \in answers \cup reads: r.permission
-AtMostOnce == \A i,j \in 1..Len(history): history[i] = history[j] => i = j
+AtMostOnce == \A i,j \in 1..Len(history): history[i].id = history[j].id => i = j
+Conditions == \A i \in 1..Len(history): history[i].condition
 =============================================================================

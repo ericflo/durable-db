@@ -817,3 +817,157 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
         ];
     }
 }
+
+#[tokio::test]
+async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_expiry() {
+    use crate::{Error, engine::CommitRequest};
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let limits = live::Limits {
+        checkpoint_frames: 2,
+        receipt_window: 2,
+        ..Default::default()
+    };
+    let mut owner = open(active(&provider, &clock).await, limits).await;
+    let first: CommitRequest = serde_json::from_str(r#"{"expected_revision":0,"request_id":"first","checks":[{"key":"a","value":null}],"writes":[{"key":"b","value":""},{"key":"a","value":""},{"key":"a","value":"b25l"}]}"#).unwrap();
+    let prepared = owner.prepare_request(database("a"), &first).await.unwrap();
+    assert!(owner.commit_result(prepared.tickets[0]).unwrap().is_none());
+    let duplicate = owner.prepare_request(database("a"), &first).await.unwrap();
+    assert!(duplicate.upload.is_none());
+    let mut changed = first.clone();
+    changed.checks[0].value = Some("".into());
+    let reused = owner
+        .prepare_request(database("a"), &changed)
+        .await
+        .unwrap();
+    assert!(reused.upload.is_none());
+    let mut stale = first.clone();
+    stale.request_id = "stale".into();
+    let conflict = owner.prepare_request(database("a"), &stale).await.unwrap();
+    assert!(conflict.upload.is_none());
+    for ticket in [duplicate.tickets[0], reused.tickets[0], conflict.tickets[0]] {
+        assert!(owner.commit_result(ticket).unwrap().is_none());
+    }
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    let result = owner.commit_result(prepared.tickets[0]).unwrap().unwrap();
+    assert_eq!(result.revision, 1);
+    assert!(!result.replayed);
+    assert!(
+        owner
+            .commit_result(duplicate.tickets[0])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    assert!(matches!(
+        owner.commit_result(reused.tickets[0]),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        owner.commit_result(conflict.tickets[0]),
+        Err(Error::Conflict)
+    ));
+    // A committed retry resolves before its now-false value/revision checks.
+    let retry = owner.prepare_request(database("a"), &first).await.unwrap();
+    assert!(retry.upload.is_none());
+    assert!(
+        owner
+            .commit_result(retry.tickets[0])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    for revision in [1, u64::MAX] {
+        stale.expected_revision = revision;
+        let conflict = owner.prepare_request(database("a"), &stale).await.unwrap();
+        assert!(conflict.upload.is_none());
+        assert!(matches!(
+            owner.commit_result(conflict.tickets[0]),
+            Err(Error::Conflict)
+        ));
+    }
+    let second: CommitRequest = serde_json::from_str(r#"{"expected_revision":1,"request_id":"second","checks":[{"key":"a","value":"b25l"},{"key":"b","value":""},{"key":"missing","value":null}],"writes":[{"key":"a","value":""},{"key":"b","value":null}]}"#).unwrap();
+    let prepared = owner.prepare_request(database("a"), &second).await.unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert_eq!(owner.usage().versions, 0, "second frame checkpoints");
+    let retry = owner.prepare_request(database("a"), &first).await.unwrap();
+    assert!(retry.upload.is_none());
+    assert_eq!(
+        owner
+            .commit_result(retry.tickets[0])
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    let mut root = successor(&provider, &clock).await;
+    let journal = scan(&mut root).await;
+    seal(&mut root, journal).await;
+    assert!(owner.commit_result(retry.tickets[0]).is_err());
+    drop(owner);
+    let mut owner = open(root, limits).await;
+    let retry = owner.prepare_request(database("a"), &first).await.unwrap();
+    assert!(retry.upload.is_none());
+    assert!(
+        owner
+            .commit_result(retry.tickets[0])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    let reused = owner
+        .prepare_request(database("a"), &changed)
+        .await
+        .unwrap();
+    assert!(matches!(
+        owner.commit_result(reused.tickets[0]),
+        Err(Error::Invalid(_))
+    ));
+    // Same ID and request in another generation cannot see this receipt.
+    let other = Database {
+        name: "a",
+        generation: Uuid::from_u128(11),
+    };
+    let separate = owner.prepare_request(other, &first).await.unwrap();
+    owner
+        .complete(separate.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert!(
+        !owner
+            .commit_result(separate.tickets[0])
+            .unwrap()
+            .unwrap()
+            .replayed
+    );
+    let third: CommitRequest = serde_json::from_str(r#"{"expected_revision":2,"request_id":"third","checks":[{"key":"a","value":""},{"key":"b","value":null}],"writes":[{"key":"a","value":null}]}"#).unwrap();
+    let prepared = owner.prepare_request(database("a"), &third).await.unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    let expired = owner.prepare_request(database("a"), &first).await.unwrap();
+    assert!(expired.upload.is_none());
+    assert!(matches!(
+        owner.commit_result(expired.tickets[0]),
+        Err(Error::ReceiptExpired)
+    ));
+    clock.failed.store(true, Ordering::SeqCst);
+    assert!(owner.commit_result(prepared.tickets[0]).is_err());
+    // Validation precedes even the permission check, which currently fails.
+    for (key, value) in [("", Some("eA==")), ("a", Some("%%%")), ("a\0b", None)] {
+        let mut invalid = third.clone();
+        invalid.writes[0].key = key.into();
+        invalid.writes[0].value = value.map(str::to_owned);
+        assert!(matches!(
+            owner.prepare_request(database("a"), &invalid).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+}

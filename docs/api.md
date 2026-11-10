@@ -84,6 +84,8 @@ Checks observe the pre-commit snapshot. Writes are applied in order, so repeated
 
 A client must retain its exact serialized operation intent across transport retries. Do not mint a new request ID or read a new revision after an unknown write outcome and blindly reapply a non-idempotent operation. The last 128 receipts are retained. Beyond that window, an unchanged retry fails its original revision; the application may need to inspect state to resolve the outcome.
 
+Only `409 conflict` authorizes a fresh transaction attempt before any uncertain write outcome. The native engine also distinguishes `409 receipt_expired`: the receipt no longer establishes the original outcome, so reconcile using the original request instead of generating a new ID. The JSON SDK raises `UncertainCommitError` for this case; Pi adapters stop instead of rebuilding the write. This distinction is implemented in the native library while HTTP router integration remains pending.
+
 ## Durable token revocation
 
 PUT creation starts protected. For an existing legacy database, upgrade all servers, then enable its database policy with an administrator request:

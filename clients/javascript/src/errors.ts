@@ -4,7 +4,7 @@ import type { CommitRequest } from '../client.mjs';
 export class UncertainCommitError extends Error {
   readonly request: CommitRequest;
   constructor(request: CommitRequest, cause: unknown) {
-    super('The transaction outcome is unresolved. Its original request can be retried unchanged.', {
+    super('The transaction outcome is unresolved. Keep its original request for reconciliation.', {
       cause,
     });
     this.name = 'UncertainCommitError';

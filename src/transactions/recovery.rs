@@ -33,6 +33,7 @@ pub struct State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
     Committed(u64),
+    Reused,
     /// No receipt can have expired for a transaction from this snapshot.
     Missing,
     /// Absence cannot establish failure. Never rerun an uncertain request.
@@ -155,11 +156,11 @@ impl State {
             "invalid transaction request identity"
         );
         if let Some(receipt) = self.by_request.get(request) {
-            ensure!(
-                receipt.fingerprint == fingerprint,
-                "request identity reused for different contents"
-            );
-            return Ok(Resolution::Committed(receipt.revision));
+            return Ok(if receipt.fingerprint == fingerprint {
+                Resolution::Committed(receipt.revision)
+            } else {
+                Resolution::Reused
+            });
         }
         ensure!(
             snapshot <= self.revision,
@@ -191,6 +192,7 @@ impl State {
             commit.snapshot_revision(),
         )? {
             Resolution::Missing => (),
+            Resolution::Reused => bail!("request identity reused in selected history"),
             Resolution::Committed(_) => bail!("repeated committed request in selected history"),
             Resolution::Expired => bail!("selected transaction used an expired receipt window"),
         }

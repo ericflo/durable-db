@@ -1,2 +1,3 @@
 safe TransactionClient.cfg transaction-client 512m -
 unsafe UnsafeTransactionRetry.cfg transaction-retry 512m AtMostOneEffect
+unsafe UnsafeTransactionExpired.cfg transaction-expired 512m AtMostOneEffect

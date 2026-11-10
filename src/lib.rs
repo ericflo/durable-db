@@ -29,6 +29,8 @@ pub enum Error {
     Invalid(String),
     #[error("revision conflict; read a fresh snapshot before retrying")]
     Conflict,
+    #[error("request outcome is no longer retained; do not retry with a new request ID")]
+    ReceiptExpired,
     #[error("database not found")]
     NotFound,
     #[error("authentication or permission denied")]
@@ -52,6 +54,7 @@ impl IntoResponse for Error {
         let (status, code) = match &self {
             Self::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             Self::Conflict => (StatusCode::CONFLICT, "conflict"),
+            Self::ReceiptExpired => (StatusCode::CONFLICT, "receipt_expired"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Limit(_) => (StatusCode::PAYLOAD_TOO_LARGE, "limit_exceeded"),

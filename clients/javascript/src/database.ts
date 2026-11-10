@@ -85,7 +85,8 @@ export class Database {
         request = await transaction.finish();
       } catch (error) {
         transaction.close();
-        if (!(error instanceof DbError) || error.status !== 409) throw error;
+        if (!(error instanceof DbError) || error.status !== 409 || error.code !== 'conflict')
+          throw error;
         lastError = error;
         await sleep(attempt);
         continue;
@@ -98,7 +99,9 @@ export class Database {
           return result;
         } catch (error) {
           lastError = error;
-          if (error instanceof DbError && error.status === 409) {
+          if (error instanceof DbError && error.code === 'receipt_expired')
+            throw new UncertainCommitError(request, error);
+          if (error instanceof DbError && error.status === 409 && error.code === 'conflict') {
             if (uncertain) throw new UncertainCommitError(request, error);
             break; // Definite conflict before uncertainty: rerun the callback.
           }

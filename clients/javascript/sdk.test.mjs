@@ -148,6 +148,23 @@ suite('JSON SDK transactions', () => {
     expect(callbacks).toBe(1);
     expect((await raw.info()).revision).toBe(1);
   });
+  it('does not recompute when an expired receipt arrives without prior local uncertainty', async () => {
+    let callbacks = 0,
+      requests = 0;
+    const { db } = await fixture(async ({ response }) => {
+      requests++;
+      response.writeHead(409, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'receipt_expired' }));
+      return true;
+    });
+    const result = db.transaction((tx) => {
+      callbacks++;
+      tx.set('count', callbacks);
+    });
+    await expect(result).rejects.toBeInstanceOf(UncertainCommitError);
+    expect(callbacks).toBe(1);
+    expect(requests).toBe(1);
+  });
   it('keeps pagination consistent and rejects a cursor used for another prefix', async () => {
     const { db } = await fixture();
     await db.transaction((tx) => {

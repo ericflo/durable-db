@@ -4,3 +4,4 @@ unsafe LiveTransactionsUnsafeRead.cfg live-transactions-read 512m DurableRespons
 unsafe LiveTransactionsUnsafeReject.cfg live-transactions-reject 512m DurableResponses
 unsafe LiveTransactionsUnsafePermission.cfg live-transactions-permission 512m Permission
 unsafe LiveTransactionsUnsafeRetry.cfg live-transactions-retry 512m AtMostOnce
+unsafe LiveTransactionsUnsafeCondition.cfg live-transactions-condition 512m Conditions

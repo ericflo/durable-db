@@ -245,7 +245,10 @@ async fn receipt_resolution_checks_identity_and_retention_before_snapshot_age() 
             Resolution::Committed(2)
         );
     }
-    assert!(view.resolve("r-2", [3; 32], 0).await.is_err());
+    assert_eq!(
+        view.resolve("r-2", [3; 32], 0).await.unwrap(),
+        Resolution::Reused
+    );
     assert_eq!(
         view.resolve("r-1", [1; 32], 0).await.unwrap(),
         Resolution::Expired

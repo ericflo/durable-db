@@ -2,8 +2,9 @@
 //! borrowed for admission/publication; immutable reads can run concurrently.
 //! Uploads and control renewal own their I/O and do not hold that borrow.
 //! Database generations must already be authorized by the caller. This is not
-//! a public wire API or a qualified physical clock/placement implementation.
+//! a public HTTP router or a qualified physical clock/placement implementation.
 mod checkpoint;
+mod commit;
 mod read;
 use super::{
     record::{Commit, Database, Mutation},
@@ -100,6 +101,7 @@ pub struct Ticket {
     owner: root::Identity,
     position: u64,
     result: Outcome,
+    replayed: bool,
 }
 pub struct Prepared {
     pub tickets: Vec<Ticket>,
@@ -299,6 +301,13 @@ impl<C: Clock> Owner<C> {
     /// Group up to 128 transactions into one immutable PUT. No await occurs
     /// between the first accepted revision and creation of its upload handle.
     pub async fn prepare(&mut self, requests: &[Request<'_>]) -> anyhow::Result<Prepared> {
+        self.prepare_hashed(requests, None).await
+    }
+    async fn prepare_hashed(
+        &mut self,
+        requests: &[Request<'_>],
+        fingerprints: Option<&[[u8; 32]]>,
+    ) -> anyhow::Result<Prepared> {
         self.check()?;
         self.maintain().await?;
         ensure!(
@@ -310,7 +319,6 @@ impl<C: Clock> Owner<C> {
             "invalid transaction batch size"
         );
         let mut length = 116usize; // journal envelope plus per-record lengths
-        let mut fingerprints = Vec::with_capacity(requests.len());
         for request in requests {
             length += 4 + Commit::encoded_len(
                 request.snapshot.database(),
@@ -325,8 +333,11 @@ impl<C: Clock> Owner<C> {
                 request.reads,
                 &request.mutations.iter().map(|m| m.key).collect::<Vec<_>>(),
             )?;
-            fingerprints.push(fingerprint(request));
         }
+        let fingerprints = match fingerprints {
+            Some(fingerprints) => fingerprints.to_vec(),
+            None => requests.iter().map(fingerprint).collect(),
+        };
         // Only committed metadata is warmed here. Cancellation or storage errors
         // leave no accepted transaction, taken metadata or partial value view.
         let mut resolved = Vec::with_capacity(requests.len());
@@ -348,7 +359,11 @@ impl<C: Clock> Owner<C> {
         self.failed = true; // any unexpected error after admission retires the view
         let mut records = Vec::new();
         let mut tickets = Vec::with_capacity(requests.len());
-        for ((request, fingerprint), resolved) in requests.iter().zip(fingerprints).zip(resolved) {
+        for ((request, fingerprint), resolved) in requests
+            .iter()
+            .zip(fingerprints.iter().copied())
+            .zip(resolved)
+        {
             let key = (
                 request.snapshot.name.clone(),
                 request.snapshot.generation,
@@ -356,10 +371,14 @@ impl<C: Clock> Owner<C> {
             );
             let ticket = if let Some(pending) = self.pending.get(&key) {
                 if pending.fingerprint == fingerprint {
-                    pending.ticket
+                    Ticket {
+                        replayed: true,
+                        ..pending.ticket
+                    }
                 } else {
                     Ticket {
                         owner: self.identity,
+                        replayed: false,
                         position: fence,
                         result: Outcome::Rejected(Rejection::IdentityReused),
                     }
@@ -367,13 +386,16 @@ impl<C: Clock> Owner<C> {
             } else if let Resolution::Committed(revision) = resolved {
                 Ticket {
                     owner: self.identity,
+                    replayed: true,
                     position: 0,
                     result: Outcome::Committed(revision),
                 }
             } else {
                 let active = self.active.get_mut(&request.snapshot.key()).unwrap();
                 let writes: Vec<_> = request.mutations.iter().map(|m| m.key).collect();
-                let plan = if resolved == Resolution::Expired
+                let plan = if resolved == Resolution::Reused {
+                    Err(Rejection::IdentityReused)
+                } else if resolved == Resolution::Expired
                     || request.snapshot.revision() < active.floor
                 {
                     Err(Rejection::ReceiptExpired)
@@ -420,6 +442,7 @@ impl<C: Clock> Owner<C> {
                         }
                         Ticket {
                             owner: self.identity,
+                            replayed: false,
                             position: fence,
                             result: Outcome::Rejected(reason),
                         }
@@ -451,6 +474,7 @@ impl<C: Clock> Owner<C> {
                         self.reserved.receipt_bytes += receipt_bytes;
                         let ticket = Ticket {
                             owner: self.identity,
+                            replayed: false,
                             position,
                             result: Outcome::Committed(revision),
                         };

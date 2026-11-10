@@ -288,6 +288,56 @@ pub struct CommitRequest {
     pub checks: Vec<Check>,
     pub writes: Vec<Write>,
 }
+pub(crate) struct DecodedCommit {
+    pub digest: [u8; 32],
+    pub checks: Vec<(String, Option<Vec<u8>>)>,
+    pub writes: BTreeMap<String, Option<Vec<u8>>>,
+}
+impl CommitRequest {
+    /// Validate the complete request before storage I/O. The original wire
+    /// fields, including order and duplicate writes, define retry identity.
+    pub(crate) fn decode(&self) -> Result<DecodedCommit> {
+        if self.request_id.is_empty()
+            || self.request_id.len() > 128
+            || self.writes.is_empty()
+            || self.writes.len() + self.checks.len() > MAX_OPS
+        {
+            return Err(Error::Invalid(
+                "commit needs a 1..128-byte request_id and 1..128 operations".into(),
+            ));
+        }
+        let mut checks = Vec::new();
+        let mut writes = BTreeMap::new();
+        let mut size = self.request_id.len();
+        for (key, value, check) in self
+            .checks
+            .iter()
+            .map(|c| (&c.key, &c.value, true))
+            .chain(self.writes.iter().map(|w| (&w.key, &w.value, false)))
+        {
+            validate_key(key)?;
+            size += key.len() + value.as_ref().map_or(0, String::len);
+            if size > MAX_BODY {
+                return Err(Error::Limit("commit exceeds 1 MiB".into()));
+            }
+            let value = decode_value(value)?;
+            if check {
+                checks.push((key.clone(), value));
+            } else {
+                writes.insert(key.clone(), value);
+            }
+        }
+        let encoded = serde_json::to_vec(self).context("serialize request")?;
+        if encoded.len() > MAX_BODY {
+            return Err(Error::Limit("commit exceeds 1 MiB".into()));
+        }
+        Ok(DecodedCommit {
+            digest: Sha256::digest(encoded).into(),
+            checks,
+            writes,
+        })
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitResult {
     pub revision: u64,
@@ -514,20 +564,8 @@ impl Engine {
         access: &Access,
     ) -> Result<CommitResult> {
         validate_db(db)?;
-        if request.request_id.is_empty()
-            || request.request_id.len() > 128
-            || request.writes.is_empty()
-            || request.writes.len() + request.checks.len() > MAX_OPS
-        {
-            return Err(Error::Invalid(
-                "commit needs a 1..128-byte request_id and 1..128 operations".into(),
-            ));
-        }
-        let encoded = serde_json::to_vec(request).context("serialize request")?;
-        if encoded.len() > MAX_BODY {
-            return Err(Error::Limit("commit exceeds 1 MiB".into()));
-        }
-        let digest = hex::encode(Sha256::digest(encoded));
+        let decoded = request.decode()?;
+        let digest = hex::encode(decoded.digest);
         let (mut m, version) = self.manifest(db).await?;
         m.authorize(db, access, true)?;
         if let Some(receipt) = m.receipts.iter().find(|r| r.id == request.request_id) {
@@ -546,39 +584,36 @@ impl Engine {
         }
         let mut loaded = BTreeMap::new();
         let mut work = 0;
-        for key in request
+        for key in decoded
             .writes
-            .iter()
-            .map(|w| &w.key)
-            .chain(request.checks.iter().map(|c| &c.key))
+            .keys()
+            .chain(decoded.checks.iter().map(|(key, _)| key))
         {
-            validate_key(key)?;
             if let Some(i) = page_for(&m, key)
                 && !self.load(&m, i, &mut loaded, &mut work).await?
             {
                 return Err(Error::Conflict);
             }
         }
-        for check in &request.checks {
-            let actual = page_for(&m, &check.key).and_then(|i| loaded[&i].get(&check.key));
-            if actual != decode_value(&check.value)?.as_ref() {
+        for (key, value) in &decoded.checks {
+            let actual = page_for(&m, key).and_then(|i| loaded[&i].get(key));
+            if actual != value.as_ref() {
                 return Err(Error::Conflict);
             }
         }
         let mut changed = BTreeSet::new();
         let mut new_block = Block::new();
-        for write in &request.writes {
-            let value = decode_value(&write.value)?;
-            let block = if let Some(i) = page_for(&m, &write.key) {
+        for (key, value) in decoded.writes {
+            let block = if let Some(i) = page_for(&m, &key) {
                 changed.insert(i);
                 loaded.get_mut(&i).expect("loaded above")
             } else {
                 &mut new_block
             };
             if let Some(value) = value {
-                block.insert(write.key.clone(), value);
+                block.insert(key, value);
             } else {
-                block.remove(&write.key);
+                block.remove(&key);
             }
         }
         let mut pages = Vec::new();

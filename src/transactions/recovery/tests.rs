@@ -92,7 +92,10 @@ fn receipt_window_never_treats_an_expired_retry_as_proven_absent() {
         state.resolve("r-3", [3; 32], 0).unwrap(),
         Resolution::Committed(3)
     );
-    assert!(state.resolve("r-3", [4; 32], 2).is_err());
+    assert_eq!(
+        state.resolve("r-3", [4; 32], 2).unwrap(),
+        Resolution::Reused
+    );
     assert_eq!(
         state.resolve("unused", [0; 32], 1).unwrap(),
         Resolution::Expired

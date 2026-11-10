@@ -195,11 +195,11 @@ impl DatabaseSnapshot {
                     && row.revision <= self.revision,
                 "invalid checkpoint receipt"
             );
-            ensure!(
-                value.as_ref() == fingerprint,
-                "request identity reused for different contents"
-            );
-            return Ok(Resolution::Committed(row.revision));
+            return Ok(if value.as_ref() == fingerprint {
+                Resolution::Committed(row.revision)
+            } else {
+                Resolution::Reused
+            });
         }
         ensure!(
             snapshot <= self.revision,

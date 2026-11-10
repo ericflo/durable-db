@@ -104,7 +104,7 @@ export async function openReferencePiStorage(
       try {
         return await retryRead(() => client.commit(req));
       } catch (e) {
-        if (!(e instanceof DbError) || e.status !== 409) throw e;
+        if (!(e instanceof DbError) || e.status !== 409 || e.code !== 'conflict') throw e;
       }
     }
     throw new Error('Pi storage contention retry budget exceeded');
