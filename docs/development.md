@@ -134,6 +134,8 @@ This uploads four immutable objects for 3,072 history rows and 1,025 newer rows,
 
 ## CI and publication
 
+The [v0.3.0 delivery record](evidence/release-0.3.0-2026-11-10.json) binds the release to its Woodpecker build, artifact hashes, standalone checks and the actual public-installer download.
+
 [Woodpecker](https://github.com/ericflo/durable-db/blob/main/.woodpecker.yaml) is the only CI system. GitHub Actions are disabled. Changes go directly to `main` while the repository is private. Successful main builds push the public documentation with a repository-scoped SSH deploy key, then wait up to ten minutes for the public `deployment.json` marker to match `CI_COMMIT_SHA`. A successful push alone does not qualify publication: GitHub can fail the later Pages deployment while leaving the previous site live. On failure, inspect the public site's deployment status and retry the same checked artifact; do not claim the site is current until its marker and evidence match. A newer source push cancels the previous running pipeline in this setup; finish local iteration before pushing and let the required run complete so verification and publication can finish.
 
 Within that delivery window, an explicitly failed public deployment permits one empty-commit retry of the identical site tree. The script checks that the remote branch has not moved, uses a normal non-forced push, and never retries merely because the API is unavailable, rate-limited or still pending. Public status inspection needs no API token. Repeated failure still fails CI. `node --test scripts/test-publish-docs.mjs` checks matching/stale markers, HTTP errors, invalid source identities, recovery, unknown status, a competing publisher and the retry bound using isolated transport/clock doubles.
