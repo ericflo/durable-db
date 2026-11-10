@@ -7,7 +7,7 @@ struct Files {
     inner: Remote,
     puts: AtomicUsize,
     ranges: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    lose: usize,
+    lose: AtomicUsize,
     pause: AtomicUsize,
     entered: tokio::sync::Semaphore,
 }
@@ -21,7 +21,7 @@ impl Files {
             .unwrap(),
             puts: AtomicUsize::new(0),
             ranges: Default::default(),
-            lose,
+            lose: AtomicUsize::new(lose),
             pause: AtomicUsize::new(0),
             entered: tokio::sync::Semaphore::new(0),
         })
@@ -43,7 +43,7 @@ impl Storage for Files {
             self.entered.add_permits(1);
             futures::future::pending::<()>().await;
         }
-        ensure!(n != self.lose, "lost upload reply");
+        ensure!(n != self.lose.load(Ordering::SeqCst), "lost upload reply");
         Ok(())
     }
     async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
@@ -504,6 +504,16 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
     .await
     .unwrap();
     assert_eq!(references(&unchanged).await, old);
+    files
+        .lose
+        .store(files.puts.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+    assert!(
+        build_projection(&projection, files.clone(), cut())
+            .await
+            .is_err()
+    );
+    files.lose.store(0, Ordering::SeqCst);
+    snapshot.verify(Limits::default()).await.unwrap();
     let encoded = Commit::encode(
         db,
         3,

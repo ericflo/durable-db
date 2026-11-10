@@ -326,10 +326,14 @@ async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
     let recovery_ms = start.elapsed().as_secs_f64() * 1000.0;
     let recovery_gets = calls("object_get") - gets;
     let rewrite_started = Instant::now();
-    let rewritten = recovery
-        .checkpoint()
-        .await
-        .unwrap_or_else(|_| panic!("overlay checkpoint rewrite failed"));
+    let rewritten = recovery.checkpoint().await.unwrap_or_else(|error| {
+        panic!(
+            "overlay checkpoint rewrite failed: {}",
+            error
+                .downcast_ref::<&str>()
+                .unwrap_or(&"provider or encoding failure (details redacted)")
+        )
+    });
     let rewrite_ms = rewrite_started.elapsed().as_secs_f64() * 1000.0;
     let projection = recovery.finish().unwrap();
     assert_eq!(projection.usage().versions, 2304);
