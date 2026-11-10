@@ -1,6 +1,21 @@
 ------------------------ MODULE GrantBoundsProof ------------------------
 EXTENDS GrantBounds, TLAPS
 
+\* A bounded-error timestamp source fits the existing elapsed-clock contract
+\* without 3/2 rate scaling. The caller must still retire backwards readings
+\* and detect restored/cloned incarnations before granting any permission.
+THEOREM ReportedSampleBounds ==
+  ASSUME NEW maxError \in Nat, NEW before \in Int, NEW after \in Int,
+         NEW sampleBefore \in Int, NEW sampleAfter \in Int,
+         after >= before,
+         before - maxError <= sampleBefore,
+         sampleBefore <= before + maxError,
+         after - maxError <= sampleAfter,
+         sampleAfter <= after + maxError
+  PROVE /\ sampleAfter - sampleBefore >= after - before - SampleElapsedError(maxError)
+        /\ sampleAfter - sampleBefore <= 2 * (after - before) + SampleElapsedError(maxError)
+  BY SMT DEF SampleElapsedError
+
 \* A root grant measured from request start cannot remain valid beyond this
 \* abstract elapsed-time bound, including a slow reading's additive error.
 THEOREM RootExpirationBound ==

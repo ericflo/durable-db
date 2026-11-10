@@ -1,3 +1,4 @@
 tag|grant-bounds
+negative|grant-sample-error|ReportedSampleBounds|SampleElapsedError(maxError)|s!SampleElapsedError(maxError) == 2 \* maxError!SampleElapsedError(maxError) == maxError!
 negative|grant-drain||DrainWait(lease, error)|s!2 \* lease + 3 \* error!2 * lease + error!
 negative|grant-child||ChildDuration(remaining, error)|s!(remaining - 3 \* error) \\div 2!remaining \\div 2!

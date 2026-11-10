@@ -258,10 +258,13 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
 FROM proof-tools AS proof-grant-bounds
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 COPY scripts/check-proof.sh scripts/check-proof.sh
+COPY scripts/check-vm-clock.py scripts/test-vm-clock.py scripts/
 COPY spec/candidates/GrantBounds.tla spec/candidates/GrantBoundsProof.tla spec/candidates/GrantBounds.proof spec/candidates/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-proof.sh GrantBounds && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
+    scripts/check-proof.sh GrantBounds && mkdir -p /checks && cp .tools/proof-*.log /checks/ \
+    && python3 scripts/test-vm-clock.py > /checks/clock-capabilities.log 2>&1 && touch /checks/passed
 
 FROM proof-tools AS proof-root-control
 COPY scripts/check-proof.sh scripts/check-proof.sh

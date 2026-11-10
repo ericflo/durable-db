@@ -1,5 +1,13 @@
 # Verification results
 
+## Clock error prerequisites (2026-11-10)
+
+The existing timing proof now has **21 strict TLAPS obligations** and three required negative controls. Its added lemma shows that per-reading maximum error `A` supplies the elapsed error `E = 2A`; no replacement lease algorithm or rate scaling is needed. Treating missing maximum-error flags as zero fails the separate capability regression. All 288 Rust tests, strict clippy, formatting and the existing physical process-pause test pass.
+
+The new capability mode reuses the VM harness and completes in **2.27 seconds** with its cached stock image, without compiling Rust or a custom kernel. QEMU 10.1.5 exposes a disruption marker but an invalid counter, unknown clock status and no maximum-error or generation fields. The development host and all three cluster nodes lack VMClock. Their NIC PTP devices do not by themselves establish calibrated error bounds. **These platforms do not qualify the proposed VMClock source.** Repeating pause tests on the marker-only device cannot supply the missing guarantee.
+
+[Evidence](evidence/vm-clock-2026-11-10.json) contains the raw device header, read-only host inventory, proof results and an unchanged stock-kernel probe regression. The existing evidence record and docs were updated; obsolete four-lemma/two-control counts and the claim that native HTTP never uses the timing component were removed. Disposable guests and test files were cleaned up. No runtime code, storage format or binary release changes; v0.10.0 remains current. Clustered native serving stays gated on a calibrated source, incarnation handling and placement qualification.
+
 ## v0.10.0 shared-table index admission (2026-11-10)
 
 [v0.10.0](https://github.com/ericflo/durable-db/releases/tag/v0.10.0) packages `eb2915a`, verified by [Woodpecker #139](https://ci.eflorenzano.com/repos/18/pipeline/139/1). The exact downloaded static Linux x86_64 binary passes standalone transactions, ordered reads, backup/restore and SIGKILL/reopen without a toolchain. The public default installer verifies the checksum and installs that same binary. The musl 10,005-database test passes in 198.61 seconds; 99 enabled tests pass against the local CLI in 10.65 seconds and against the separate native library fixture in 64.33 seconds.

@@ -26,6 +26,51 @@ SCENARIOS = ('baseline', 'qmp-stop', 'cgroup-freeze', 'guest-suspend',
              'guest-suspend-short', 'clocksource-fallback', 'snapshot-restore', 'sleep-disabled')
 
 
+def capabilities(header):
+    """Inspect one kernel-consistent VMClock v1 read; never grant permission."""
+    size = int.from_bytes(header[4:8], 'little')
+    if (len(header) < 32 or header[:4] != b'VCLK' or size < 32
+            or int.from_bytes(header[8:10], 'little') != 1
+            or int.from_bytes(header[12:16], 'little') & 1
+            or len(header) < min(size, 112)):
+        raise ValueError('invalid, incomplete or updating VMClock v1 header')
+
+    def field(offset, length=8):
+        return (int.from_bytes(header[offset:offset + length], 'little')
+                if offset + length <= min(size, len(header)) else None)
+
+    flags = field(24)
+    rate_error = field(64) if flags & (1 << 4) else None
+    time_error = field(96) if flags & (1 << 6) else None
+    generation = field(104) if flags & (1 << 8) else None
+    checks = {
+        'no_supported_counter': header[10] not in (0, 1),
+        'no_tai_time': header[11] != 1,
+        'clock_not_reliable': field(34, 1) not in (2, 3),
+        'missing_max_rate_error': rate_error is None,
+        'missing_max_time_error': time_error is None,
+        'invalid_counter_period': field(48) in (None, 0),
+        'missing_generation_counter': generation is None,
+    }
+    return {'header_hex': header.hex(), 'size': size, 'flags': flags,
+            'counter_id': header[10], 'time_type': header[11],
+            'clock_status': field(34, 1), 'disruption_marker': field(16),
+            'counter_period_shift': field(39, 1), 'counter_period_frac_sec': field(48),
+            'counter_period_maxerror_rate_frac_sec': rate_error,
+            'time_maxerror_nanosec': time_error, 'vm_generation_counter': generation,
+            'missing_requirements': [name for name, missing in checks.items() if missing],
+            'requirements_present': not any(checks.values()), 'qualified_for_serving': False}
+
+
+def device_capabilities(path):
+    try:
+        with path.open('rb', buffering=0) as device:
+            return {'device': str(path), **capabilities(os.pread(device.fileno(), 112, 0))}
+    except (OSError, ValueError) as error:
+        return {'device': str(path), 'unavailable': str(error),
+                'requirements_present': False, 'qualified_for_serving': False}
+
+
 def run(*args, **kwargs):
     result = subprocess.run(args, text=True, capture_output=True,
                             timeout=kwargs.pop('timeout', 60), **kwargs)
@@ -228,12 +273,13 @@ def owner_child():
 def prepare(work, binary):
     root = work / 'root'
     root.mkdir()
-    shutil.copy2(binary, root / 'tests')
-    run('strip', '--strip-debug', str(root / 'tests'))
-    for library in set(re.findall(r'/[^\s()]+', run('ldd', str(binary)))):
-        target = root / library.lstrip('/')
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(library, target)
+    if binary:
+        shutil.copy2(binary, root / 'tests')
+        run('strip', '--strip-debug', str(root / 'tests'))
+        for library in set(re.findall(r'/[^\s()]+', run('ldd', str(binary)))):
+            target = root / library.lstrip('/')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(library, target)
     run('docker', 'run', '--rm', '--network', 'none', '--user', str(os.getuid()),
         '-v', f'{work}:/work', '-w', '/work/root', IMAGE, 'sh', '-ec',
         'mkdir -p bin lib etc/ssl/certs; cp /bin/busybox bin/; cp /lib/ld-musl* lib/; '
@@ -251,6 +297,11 @@ mount -t sysfs sysfs /sys
 mount -t proc proc /proc
 if test -f /vmclock.ko; then insmod /vmclock.ko; fi
 . /env
+if [ "$DURABLE_DB_VM_TEST" = capabilities ]; then
+    dd if=/dev/vmclock0 of=/tmp/vmclock.bin bs=112 count=1 2>/dev/null
+    echo "VMCLOCK $(od -An -v -tx1 -N112 /tmp/vmclock.bin | tr -d ' \\n')"
+    exec sleep 60
+fi
 if [ "${DURABLE_DB_PAUSE_GUEST:-}" = 1 ]; then
     test "$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)" = tsc
     if test -f /e1000.ko; then insmod /e1000.ko; fi
@@ -272,7 +323,15 @@ def main():
     parser.add_argument('--repeat', type=int, choices=range(1, 17), default=1, metavar='1..16')
     parser.add_argument('--owner', action='store_true', help='exercise native takeover across memory restore, including the unsafe control')
     parser.add_argument('--test-binary', type=Path, help='reuse a cargo test --lib --no-run artifact; otherwise build with the repository kache configuration')
+    parser.add_argument('--capabilities', action='store_true', help='inspect VMClock prerequisites in a disposable VM; no Rust build or ownership')
+    parser.add_argument('--device', type=Path, help='inspect this local VMClock device instead of starting a VM; no build or mutation')
     args = parser.parse_args()
+    if args.capabilities or args.device:
+        if args.owner or args.scenario or args.clocksource or args.repeat != 1 or args.test_binary or args.kernel != 'stock':
+            parser.error('capability inspection does not use interval/owner experiment options')
+    if args.device:
+        args.output.write_text(json.dumps(device_capabilities(args.device), indent=2) + '\n')
+        return 0  # Successful inspection is not successful qualification.
     if args.owner and (args.scenario or args.clocksource or args.repeat != 1):
         parser.error('--owner has its own fixed takeover scenarios')
     if args.owner and args.kernel != 'nosleep':
@@ -282,7 +341,9 @@ def main():
         parser.error('the scenario requires the other kernel profile')
     global IMAGE
     IMAGE = 'durable-db-vm-clock:local' if args.kernel == 'stock' else 'durable-db-vm-nosleep:local'
-    if args.test_binary:
+    if args.capabilities:
+        binary = None
+    elif args.test_binary:
         binary = args.test_binary.resolve()
     else:
         build = run('cargo', 'test', '--locked', '--lib', '--no-run', '--message-format=json', timeout=600)
@@ -298,7 +359,12 @@ def main():
         run('docker', 'build', '--target', args.kernel, '-t', IMAGE,
             '-f', str(dockerfile), str(dockerfile.parent), timeout=1800)
         prepare(work, binary)
-        if args.owner:
+        if args.capabilities:
+            pack(work, {'DURABLE_DB_VM_TEST': 'capabilities'})
+            with guest(work, 'tsc') as (stream, _, version, _):
+                header = bytes.fromhex(read_until(stream, 'VMCLOCK ').removeprefix('VMCLOCK '))
+                runs = [{'qemu': version, **capabilities(header)}]
+        elif args.owner:
             output = run(str(binary), '--exact', TEST_PREFIX + 'physical_owner_pause_fences_reads_and_late_acknowledgements',
                          '--nocapture', env={**os.environ, 'DURABLE_DB_PAUSE_VM_ROOT': str(work), 'DURABLE_DB_VM_IMAGE': IMAGE}, timeout=90)
             runs = [json.loads(line) for line in (work / 'owners.jsonl').read_text().splitlines()]
@@ -309,13 +375,14 @@ def main():
         report = {'kind': 'finite VM clock boundary experiment; not production qualification',
                   'host': run('uname', '-srmo'),
                   'image_id': run('docker', 'image', 'inspect', '--format', '{{.Id}}', IMAGE),
-                  'test_binary_sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
+                  'test_binary_sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest() if binary else None,
                   'kernel_sha256': hashlib.sha256((work / 'kernel').read_bytes()).hexdigest(),
-                  'configuration': 'KVM, host CPU, one vCPU, 512 MiB, VMClock device; test-only 3/2 clock scaling and 1 ms error allowance',
+                  'configuration': 'KVM, host CPU, one vCPU, 512 MiB, VMClock device' +
+                                   ('' if args.capabilities else '; test-only 3/2 clock scaling and 1 ms error allowance'),
                   'kernel_profile': args.kernel,
-                  'mode': 'owner-restore' if args.owner else 'clock-intervals', 'runs': runs}
+                  'mode': 'capabilities' if args.capabilities else 'owner-restore' if args.owner else 'clock-intervals', 'runs': runs}
         args.output.write_text(json.dumps(report, indent=2) + '\n')
-        if args.owner:
+        if args.owner or args.capabilities:
             return 0
         for result in report['runs']:
             print(result['guest'], [(s['mode'], s['guarded_scenario_passed']) for s in result['samples']])
