@@ -17,11 +17,19 @@ use std::{
 };
 
 const SOURCE: &str = "/sys/devices/system/clocksource/clocksource0/current_clocksource";
+const SLEEP: &str = "/sys/power/state";
+
+struct Guard {
+    device: File,
+    marker: u64,
+    source: File,
+    sleep: File,
+}
 
 #[derive(Clone)]
 pub(super) struct BootClock {
     frozen: Arc<AtomicU64>,
-    guard: Option<Arc<(File, u64, File)>>,
+    guard: Option<Arc<Guard>>,
     pid: u32,
 }
 
@@ -63,7 +71,12 @@ impl BootClock {
         let file = File::open("/dev/vmclock0").unwrap();
         let initial = marker(&file).expect("valid VMClock v1 header");
         Self {
-            guard: Some(Arc::new((file, initial, File::open(SOURCE).unwrap()))),
+            guard: Some(Arc::new(Guard {
+                device: file,
+                marker: initial,
+                source: File::open(SOURCE).unwrap(),
+                sleep: File::open(SLEEP).unwrap(),
+            })),
             ..Self::default()
         }
     }
@@ -79,8 +92,12 @@ impl BootClock {
         self.pid == getpid().as_raw_nonzero().get() as u32
             && self.guard.as_ref().is_none_or(|g| {
                 let mut source = [0u8; 16];
-                marker(&g.0) == Some(g.1)
-                    && g.2
+                let mut sleep = [0u8; 1];
+                // An empty kernel capability list is required. Missing files,
+                // denied reads and enabled sleep modes never count as disabled.
+                g.sleep.read_at(&mut sleep, 0).is_ok_and(|n| n == 0)
+                    && marker(&g.device) == Some(g.marker)
+                    && g.source
                         .read_at(&mut source, 0)
                         .is_ok_and(|n| &source[..n] == b"tsc\n")
             })
@@ -106,10 +123,11 @@ impl Clock for BootClock {
 #[test]
 fn vm_marker_failure_retires_the_owner_timeline() {
     use crate::ownership::timing::{Bounds, Error, Timeline};
-    for fault in ["changed", "version", "short", "updating", "source"] {
+    for fault in ["changed", "version", "short", "updating", "source", "sleep"] {
         let file = tempfile::tempfile().unwrap();
         let source = tempfile::tempfile().unwrap();
         source.write_all_at(b"tsc\n", 0).unwrap();
+        let sleep = tempfile::tempfile().unwrap();
         let mut header = [0u8; 32];
         header[..4].copy_from_slice(b"VCLK");
         header[4..8].copy_from_slice(&32u32.to_le_bytes());
@@ -117,11 +135,12 @@ fn vm_marker_failure_retires_the_owner_timeline() {
         header[16..24].copy_from_slice(&7u64.to_le_bytes());
         file.write_all_at(&header, 0).unwrap();
         let clock = BootClock {
-            guard: Some(Arc::new((
-                file.try_clone().unwrap(),
-                7,
-                source.try_clone().unwrap(),
-            ))),
+            guard: Some(Arc::new(Guard {
+                device: file.try_clone().unwrap(),
+                marker: 7,
+                source: source.try_clone().unwrap(),
+                sleep: sleep.try_clone().unwrap(),
+            })),
             ..Default::default()
         };
         let mut time = Timeline::new(
@@ -137,6 +156,7 @@ fn vm_marker_failure_retires_the_owner_timeline() {
             "short" => file.set_len(23).unwrap(),
             "updating" => file.write_all_at(&1u32.to_le_bytes(), 12).unwrap(),
             "source" => source.write_all_at(b"kvm-clock\n", 0).unwrap(),
+            "sleep" => sleep.write_all_at(b"freeze mem disk\n", 0).unwrap(),
             _ => unreachable!(),
         }
         assert_eq!(time.remaining(&deadline), Err(Error::Retired), "{fault}");
@@ -144,6 +164,7 @@ fn vm_marker_failure_retires_the_owner_timeline() {
         file.write_all_at(&header, 0).unwrap();
         source.set_len(4).unwrap();
         source.write_all_at(b"tsc\n", 0).unwrap();
+        sleep.set_len(0).unwrap();
         assert_eq!(time.remaining(&deadline), Err(Error::Retired));
     }
 }
@@ -191,6 +212,15 @@ fn physical_clock_probe() {
         } else if let Some(source) = line.trim().strip_prefix("source ") {
             std::fs::write(SOURCE, source).unwrap();
             assert_eq!(std::fs::read_to_string(SOURCE).unwrap().trim(), source);
+        } else if line.trim() == "sleep-disabled" {
+            assert!(std::fs::read(SLEEP).unwrap().is_empty());
+            for state in ["freeze", "standby", "mem", "disk"] {
+                assert!(
+                    std::fs::write(SLEEP, state).is_err(),
+                    "kernel accepted {state}"
+                );
+            }
+            println!("SLEEP_DISABLED");
         } else if line.trim() == "suspend" {
             // Suspend only the disposable guest. The host driver wakes it with
             // QMP; wall time continues outside this process and guest kernel.
@@ -201,7 +231,7 @@ fn physical_clock_probe() {
         let mono = nanos(ClockId::Monotonic).unwrap();
         let real = nanos(ClockId::Realtime).unwrap();
         let accepted = clock.read().is_some();
-        let token = marker(&clock.guard.as_ref().unwrap().0).unwrap();
+        let token = marker(&clock.guard.as_ref().unwrap().device).unwrap();
         println!("SAMPLE {boot} {mono} {real} {token} {}", u8::from(accepted));
         std::io::stdout().flush().unwrap();
     }

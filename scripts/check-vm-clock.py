@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Opt-in KVM clock boundary test; requires Docker and /dev/kvm, never pauses the host.
 
-Exit 1 means an accepted guest timestamp violated the candidate bounds. Passing
-these finite scenarios does not qualify a production clock or deployment.
+Exit 1 means admission differed from the expected kernel/source policy or an
+accepted interval violated the bounds. Finite passes do not qualify production.
 """
 import argparse
 from contextlib import ExitStack, contextmanager
@@ -21,12 +21,9 @@ import time
 import uuid
 
 IMAGE = 'durable-db-vm-clock:local'
-DOCKERFILE = '''FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
-RUN apk add --no-cache qemu-system-x86_64 qemu-img linux-virt cpio
-'''
 TEST_PREFIX = 'providers::s3::tests::timing::'
 SCENARIOS = ('baseline', 'qmp-stop', 'cgroup-freeze', 'guest-suspend',
-             'guest-suspend-short', 'clocksource-fallback', 'snapshot-restore')
+             'guest-suspend-short', 'clocksource-fallback', 'snapshot-restore', 'sleep-disabled')
 
 
 def run(*args, **kwargs):
@@ -123,7 +120,7 @@ def read_until(stream, prefix):
             raise RuntimeError('\n'.join(lines[-15:]))
 
 
-def exercise(work, source, scenario=None, repeat=1):
+def exercise(work, source, scenario=None, repeat=1, kernel='stock'):
     with guest(work, source) as (stream, command, version, name):
         guest_info = read_until(stream, 'READY ')
         if not guest_info.endswith(' ' + source):
@@ -134,7 +131,9 @@ def exercise(work, source, scenario=None, repeat=1):
             return list(map(int, read_until(stream, 'SAMPLE ').split()[1:]))
 
         rows = []
-        cases = [(mode, iteration) for mode in ([scenario] if scenario else SCENARIOS)
+        modes = [mode for mode in SCENARIOS if
+                 (not mode.startswith('guest-suspend') if kernel == 'nosleep' else mode != 'sleep-disabled')]
+        cases = [(mode, iteration) for mode in ([scenario] if scenario else modes)
                  for iteration in range(1, repeat + 1)]
         for mode, iteration in cases:
             before = sample('reset')
@@ -154,7 +153,8 @@ def exercise(work, source, scenario=None, repeat=1):
                     if time.monotonic() >= deadline:
                         raise RuntimeError('guest did not enter ACPI suspend')
                     time.sleep(.05)
-            time.sleep(.05 if mode in ('clocksource-fallback', 'guest-suspend-short') else 3)
+            time.sleep(0 if mode == 'sleep-disabled' else
+                       .05 if mode in ('clocksource-fallback', 'guest-suspend-short') else 3)
             if mode == 'qmp-stop':
                 command('cont')
             elif mode == 'cgroup-freeze':
@@ -166,17 +166,21 @@ def exercise(work, source, scenario=None, repeat=1):
             elif mode.startswith('guest-suspend'):
                 command('system_wakeup')
             after = (list(map(int, read_until(stream, 'SAMPLE ').split()[1:])) if mode.startswith('guest-suspend')
-                     else sample('source kvm-clock' if mode == 'clocksource-fallback' else 'sample'))
+                     else sample('source kvm-clock' if mode == 'clocksource-fallback' else
+                                 'sleep-disabled' if mode == 'sleep-disabled' else 'sample'))
             elapsed = time.monotonic_ns() - started
             delta = [b - a for a, b in zip(before, after)]
             normalized = delta[0] * 3 // 2
             within = elapsed - 1_000_000 <= normalized <= 2 * elapsed + 1_000_000
+            must_accept = (kernel == 'nosleep' and source == 'tsc'
+                           and mode not in ('clocksource-fallback', 'snapshot-restore'))
             rows.append({'mode': mode, 'iteration': iteration, 'host_ns': elapsed, 'guest_boottime_ns': delta[0],
                          'guest_monotonic_ns': delta[1], 'guest_realtime_ns': delta[2],
                          'marker_before': before[3], 'marker_after': after[3],
                          'guard_accepts_timestamp': bool(after[4]),
                          'normalized_boottime_ns': normalized, 'within_candidate_bounds': within,
-                         'guarded_scenario_passed': (not after[4] if mode == 'clocksource-fallback' else not after[4] or within)})
+                         'expected_admission': must_accept,
+                         'guarded_scenario_passed': bool(after[4]) == must_accept and (not after[4] or within)})
             if mode == 'clocksource-fallback':
                 # A new raw probe sample is not a new owner: a Timeline that saw
                 # the refusal stays retired, as the focused Rust test checks.
@@ -193,6 +197,8 @@ def pack(work, variables):
 
 def owner_child():
     work = Path(os.environ['DURABLE_DB_PAUSE_VM_ROOT'])
+    global IMAGE
+    IMAGE = os.environ.get('DURABLE_DB_VM_IMAGE', IMAGE)
     report = Path(os.environ['DURABLE_DB_PAUSE_REPORT'])
     variables = {key: os.environ[key] for key in ['DURABLE_DB_PAUSE_FREEZE', 'DURABLE_DB_PAUSE_REPORT']}
     variables.update(DURABLE_DB_PAUSE_GUEST='1',
@@ -232,8 +238,9 @@ def prepare(work, binary):
         '-v', f'{work}:/work', '-w', '/work/root', IMAGE, 'sh', '-ec',
         'mkdir -p bin lib etc/ssl/certs; cp /bin/busybox bin/; cp /lib/ld-musl* lib/; '
         'cp /etc/ssl/certs/ca-certificates.crt etc/ssl/certs/; '
+        'if test -d /lib/modules; then '
         'gzip -dc /lib/modules/*/kernel/drivers/ptp/ptp_vmclock.ko.gz > vmclock.ko; '
-        'gzip -dc /lib/modules/*/kernel/drivers/net/ethernet/intel/e1000/e1000.ko.gz > e1000.ko; '
+        'gzip -dc /lib/modules/*/kernel/drivers/net/ethernet/intel/e1000/e1000.ko.gz > e1000.ko; fi; '
         'cp /boot/vmlinuz-virt /work/kernel')
     (root / 'init').write_text('''#!/bin/busybox sh
 set -eu
@@ -242,11 +249,11 @@ mkdir -p /dev /sys /proc /tmp
 mount -t devtmpfs devtmpfs /dev
 mount -t sysfs sysfs /sys
 mount -t proc proc /proc
-insmod /vmclock.ko
+if test -f /vmclock.ko; then insmod /vmclock.ko; fi
 . /env
 if [ "${DURABLE_DB_PAUSE_GUEST:-}" = 1 ]; then
     test "$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource)" = tsc
-    insmod /e1000.ko
+    if test -f /e1000.ko; then insmod /e1000.ko; fi
     ip link set eth0 up
     ip addr add 10.0.2.15/24 dev eth0
     ip route add default via 10.0.2.2
@@ -260,6 +267,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--clocksource', choices=['kvm-clock', 'tsc'])
+    parser.add_argument('--kernel', choices=['stock', 'nosleep'], default='stock')
     parser.add_argument('--scenario', choices=SCENARIOS, help='run one clock fault for a focused check')
     parser.add_argument('--repeat', type=int, choices=range(1, 17), default=1, metavar='1..16')
     parser.add_argument('--owner', action='store_true', help='exercise native takeover across memory restore, including the unsafe control')
@@ -267,6 +275,13 @@ def main():
     args = parser.parse_args()
     if args.owner and (args.scenario or args.clocksource or args.repeat != 1):
         parser.error('--owner has its own fixed takeover scenarios')
+    if args.owner and args.kernel != 'nosleep':
+        parser.error('--owner requires --kernel nosleep; stock kernels must refuse admission')
+    if args.scenario and ((args.kernel == 'nosleep' and args.scenario.startswith('guest-suspend'))
+                          or (args.kernel == 'stock' and args.scenario == 'sleep-disabled')):
+        parser.error('the scenario requires the other kernel profile')
+    global IMAGE
+    IMAGE = 'durable-db-vm-clock:local' if args.kernel == 'stock' else 'durable-db-vm-nosleep:local'
     if args.test_binary:
         binary = args.test_binary.resolve()
     else:
@@ -279,23 +294,25 @@ def main():
     with tempfile.TemporaryDirectory(prefix='durable-db-clock-') as directory, ExitStack() as cleanup:
         work = Path(directory)
         cleanup.callback(cleanup_guest, work)
-        (work / 'Dockerfile').write_text(DOCKERFILE)
-        run('docker', 'build', '-t', IMAGE, str(work), timeout=240)
+        dockerfile = Path(__file__).with_name('vm-clock.Dockerfile')
+        run('docker', 'build', '--target', args.kernel, '-t', IMAGE,
+            '-f', str(dockerfile), str(dockerfile.parent), timeout=1800)
         prepare(work, binary)
         if args.owner:
             output = run(str(binary), '--exact', TEST_PREFIX + 'physical_owner_pause_fences_reads_and_late_acknowledgements',
-                         '--nocapture', env={**os.environ, 'DURABLE_DB_PAUSE_VM_ROOT': str(work)}, timeout=90)
+                         '--nocapture', env={**os.environ, 'DURABLE_DB_PAUSE_VM_ROOT': str(work), 'DURABLE_DB_VM_IMAGE': IMAGE}, timeout=90)
             runs = [json.loads(line) for line in (work / 'owners.jsonl').read_text().splitlines()]
             print(output)
         else:
             pack(work, {'DURABLE_DB_VM_TEST': TEST_PREFIX + 'clock::physical_clock_probe'})
-            runs = [exercise(work, source, args.scenario, args.repeat) for source in ([args.clocksource] if args.clocksource else ['kvm-clock', 'tsc'])]
+            runs = [exercise(work, source, args.scenario, args.repeat, args.kernel) for source in ([args.clocksource] if args.clocksource else ['kvm-clock', 'tsc'])]
         report = {'kind': 'finite VM clock boundary experiment; not production qualification',
                   'host': run('uname', '-srmo'),
                   'image_id': run('docker', 'image', 'inspect', '--format', '{{.Id}}', IMAGE),
                   'test_binary_sha256': hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest(),
                   'kernel_sha256': hashlib.sha256((work / 'kernel').read_bytes()).hexdigest(),
                   'configuration': 'KVM, host CPU, one vCPU, 512 MiB, VMClock device; test-only 3/2 clock scaling and 1 ms error allowance',
+                  'kernel_profile': args.kernel,
                   'mode': 'owner-restore' if args.owner else 'clock-intervals', 'runs': runs}
         args.output.write_text(json.dumps(report, indent=2) + '\n')
         if args.owner:
