@@ -69,6 +69,10 @@ impl Session {
         }
     }
 
+    pub(crate) fn authority(&self) -> Arc<dyn Authority> {
+        self.authority.clone()
+    }
+
     /// A raw observation may be stale. It never changes `confirmed()`.
     pub fn observe(&self) -> impl Future<Output = anyhow::Result<Observation>> + Send + use<> {
         // Own the transport and identity so a controller need not keep its

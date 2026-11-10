@@ -14,7 +14,7 @@ use crate::{
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-const CATALOG: Database<'static> = Database {
+pub(super) const CATALOG: Database<'static> = Database {
     name: "durable-catalog",
     generation: Uuid::from_u128(1),
 };
@@ -206,6 +206,9 @@ impl<C: Clock> Owner<C> {
         }
         if let Some(entry) = self.catalog_entry(db).await? {
             return self.catalog_reply(CatalogResult::Created(entry.creation.recover(request)?));
+        }
+        if let Some(budget) = self.database_budget(db)? {
+            budget.initialize_database().await?;
         }
         let policy = Policy::created();
         let creation = CreationReceipt::created(request, &policy)?;

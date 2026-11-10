@@ -157,6 +157,28 @@ impl<C> Drop for Native<C> {
 
 #[async_trait]
 impl<C: Clock + Send + 'static> Backend for Native<C> {
+    async fn database_upload_budget(&self, db: &str) -> Result<crate::upload_budget::UploadStatus> {
+        let budget = self
+            .owner
+            .read()
+            .await
+            .database_budget(db)?
+            .ok_or(Error::Unsupported("database upload budgeting is disabled"))?;
+        Ok(budget.status().await?)
+    }
+    async fn replenish_database_upload_budget(
+        &self,
+        db: &str,
+        request: &crate::upload_budget::UploadRequest,
+    ) -> Result<crate::upload_budget::UploadResult> {
+        let budget = self
+            .owner
+            .read()
+            .await
+            .database_budget(db)?
+            .ok_or(Error::Unsupported("database upload budgeting is disabled"))?;
+        budget.replenish(request).await
+    }
     async fn upload_budget(&self) -> Result<Option<crate::upload_budget::UploadStatus>> {
         let files = self.owner.read().await.files();
         Ok(files.upload_budget().await?)

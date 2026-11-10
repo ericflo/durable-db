@@ -269,3 +269,246 @@ async fn native_budget_unknown_grant_and_late_upload_never_refund_credit() {
         ["tables/late"]
     );
 }
+
+#[tokio::test]
+async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
+    let provider = Provider::new();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        })
+        .await
+        .unwrap();
+    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let a = root.database_budget("a").unwrap().unwrap();
+    let b = root.database_budget("b").unwrap().unwrap();
+    for ledger in [&a, &b] {
+        ledger
+            .replenish(&UploadRequest {
+                request_id: "fund".into(),
+                expected_configuration_revision: 0,
+                limits: UploadLimits {
+                    bytes: 100,
+                    attempts: 1,
+                },
+            })
+            .await
+            .unwrap();
+    }
+    // Race two allocations from the same directory root. The loser must retain
+    // the winner's ledger when rebuilding its path, not resurrect old counters.
+    provider.pause.store(true, Ordering::SeqCst);
+    let waiting = {
+        let a = a.clone();
+        tokio::spawn(async move { a.charge(60).await })
+    };
+    provider.entered.notified().await;
+    b.charge(80).await.unwrap();
+    provider.release.notify_one();
+    waiting.await.unwrap().unwrap();
+    for ledger in [&a, &b] {
+        assert!(
+            ledger
+                .charge(1)
+                .await
+                .unwrap_err()
+                .downcast_ref::<crate::upload_budget::Exhausted>()
+                .unwrap()
+                .database
+        );
+        assert_eq!(ledger.status().await.unwrap().allocated.attempts, 1);
+    }
+    // Keep both byte and attempt dimensions; discarded rights never return.
+    let c = root.database_budget("c").unwrap().unwrap();
+    c.replenish(&UploadRequest {
+        request_id: "fund".into(),
+        expected_configuration_revision: 0,
+        limits: UploadLimits {
+            bytes: 100,
+            attempts: 10,
+        },
+    })
+    .await
+    .unwrap();
+    c.charge(100).await.unwrap();
+    assert!(c.charge(1).await.is_err());
+    let d = root.database_budget("d").unwrap().unwrap();
+    d.replenish(&UploadRequest {
+        request_id: "fund".into(),
+        expected_configuration_revision: 0,
+        limits: UploadLimits {
+            bytes: 100,
+            attempts: 1,
+        },
+    })
+    .await
+    .unwrap();
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(d.charge(50).await.is_err());
+    assert!(
+        d.charge(50).await.is_err(),
+        "a lost allocation response creates no local rights"
+    );
+    let reopened = connection
+        .root(ManualClock::default(), profile())
+        .unwrap()
+        .database_budget("d")
+        .unwrap()
+        .unwrap();
+    reopened.initialize_database().await.unwrap();
+    assert_eq!(
+        reopened.status().await.unwrap().limits.attempts,
+        1,
+        "creation cannot reset preprovisioned limits"
+    );
+    assert!(reopened.charge(1).await.is_err());
+    // More entries than one directory page and far more than bucket fields.
+    for i in 0..130 {
+        root.database_budget(&format!("tenant-{i:03}"))
+            .unwrap()
+            .unwrap()
+            .initialize_database()
+            .await
+            .unwrap();
+    }
+    for name in ["a", "b", "c", "d"] {
+        let reopened = root.database_budget(name).unwrap().unwrap();
+        assert!(reopened.charge(1).await.is_err());
+    }
+    let before = provider.read().await.unwrap();
+    let directory: crate::directory::Root =
+        serde_json::from_str(&before.info[crate::upload_budget::DATABASE_FIELD]).unwrap();
+    assert_eq!(directory.count, 134);
+    assert!(directory.height > 1);
+    metadata::budget(&before.info).unwrap();
+    assert!(before.info.len() <= 10);
+    assert!(
+        root.observe().await.is_ok(),
+        "owner metadata accepts and preserves the budget directory"
+    );
+}
+
+#[tokio::test]
+async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
+    use crate::{
+        auth::Access,
+        engine::{CommitRequest, CreateRequest},
+        transactions::live::Limits,
+    };
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        })
+        .await
+        .unwrap();
+    let _ = attempt(&connection, &clock).await;
+    let (mut root, outcome) = attempt(&connection, &clock).await;
+    assert!(matches!(outcome, Outcome::Confirmed));
+    clock.set(23);
+    validate(&mut root).await;
+    activate(&mut root).await;
+    let mut owner = live::open(root, Limits::default()).await;
+    let admin = Access::Administrator;
+    for name in ["a", "b"] {
+        owner
+            .database_budget(name)
+            .unwrap()
+            .unwrap()
+            .replenish(&UploadRequest {
+                request_id: "fund".into(),
+                expected_configuration_revision: 0,
+                limits: UploadLimits {
+                    bytes: 4096,
+                    attempts: 1,
+                },
+            })
+            .await
+            .unwrap();
+        let request = CreateRequest {
+            request_id: "create".into(),
+            limits: crate::engine::Limits {
+                max_keys: 10,
+                max_bytes: 1000,
+            },
+        };
+        let mut creation = owner
+            .prepare_creation(name, &request, &admin)
+            .await
+            .unwrap();
+        owner
+            .complete(creation.upload.take().unwrap().send().await)
+            .await
+            .unwrap();
+    }
+    let first: CommitRequest = serde_json::from_value(serde_json::json!({"request_id":"first","expected_revision":0,"writes":[{"key":"x","value":"eA=="}]})).unwrap();
+    let group = owner
+        .prepare_authorized(&[("a", &first, &admin), ("a", &first, &admin)])
+        .await
+        .unwrap();
+    let pending = owner
+        .prepare_authorized(&[("a", &first, &admin)])
+        .await
+        .unwrap();
+    assert!(pending.upload.is_none());
+    owner
+        .complete(group.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    for (ticket, replayed) in [
+        (&group.tickets[0], false),
+        (&group.tickets[1], true),
+        (&pending.tickets[0], true),
+    ] {
+        let result = owner
+            .authorized_result(ticket, &admin)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.revision, 1);
+        assert_eq!(result.replayed, replayed);
+    }
+    let retry = owner
+        .prepare_authorized(&[("a", &first, &admin)])
+        .await
+        .unwrap();
+    assert!(retry.upload.is_none());
+    let mut second = first.clone();
+    second.request_id = "second".into();
+    second.expected_revision = 1;
+    let group = owner
+        .prepare_authorized(&[
+            ("a", &second, &admin),
+            ("a", &second, &admin),
+            ("b", &first, &admin),
+        ])
+        .await
+        .unwrap();
+    for ticket in &group.tickets[..2] {
+        assert!(
+            matches!(
+                owner.authorized_result(ticket, &admin).await,
+                Err(crate::Error::Limit(_))
+            ),
+            "refusal needs no journal durability fence"
+        );
+    }
+    owner
+        .complete(group.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .authorized_result(&group.tickets[2], &admin)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+}

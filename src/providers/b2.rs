@@ -655,7 +655,7 @@ mod tests {
             assert!(connection.into_published(None).await.is_err());
             assert_eq!(
                 state.bucket.lock().unwrap().info["durable-db-format"],
-                "owned-candidate-7"
+                "owned-candidate-8"
             );
         })
         .await;

@@ -145,5 +145,39 @@ async fn check_native_budget(connection: Connection) {
         files.upload_budget().await.unwrap().unwrap().allocated,
         limits
     );
+    files
+        .replenish_upload_budget(&crate::upload_budget::UploadRequest {
+            request_id: "fund-tenant-metadata".into(),
+            expected_configuration_revision: 0,
+            limits: UploadLimits {
+                bytes: 1024 * 1024,
+                attempts: 100,
+            },
+        })
+        .await
+        .unwrap();
+    let root = connection
+        .root(
+            Fixed,
+            Profile::new(Duration::from_secs(10), Duration::from_millis(1)).unwrap(),
+        )
+        .unwrap();
+    for name in ["a", "b"] {
+        let ledger = root.database_budget(name).unwrap().unwrap();
+        ledger
+            .replenish(&crate::upload_budget::UploadRequest {
+                request_id: "fund".into(),
+                expected_configuration_revision: 0,
+                limits: UploadLimits {
+                    bytes: 100,
+                    attempts: 1,
+                },
+            })
+            .await
+            .unwrap();
+        ledger.charge(100).await.unwrap();
+        assert!(ledger.charge(1).await.is_err());
+    }
+    assert!(root.observe().await.is_ok());
     assert!(connection.authority().read().await.unwrap().info.len() <= 10);
 }

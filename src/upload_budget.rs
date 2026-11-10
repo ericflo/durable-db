@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod database;
+pub(crate) use database::FIELD as DATABASE_FIELD;
+
 pub(crate) const FIELD: &str = "durable-db-upload-budget";
 const MAX_UNITS: u64 = (1 << 53) - 1;
 const GRANT_BYTES: u64 = 8 * 1024 * 1024;
@@ -24,6 +27,12 @@ const RECEIPTS: usize = 8;
 #[derive(Debug, thiserror::Error)]
 #[error("immutable upload admission failed before sending the object")]
 pub(crate) struct NotSent;
+
+#[derive(Debug, thiserror::Error)]
+#[error("immutable upload budget exhausted")]
+pub(crate) struct Exhausted {
+    pub(crate) database: bool,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +82,16 @@ struct Record {
     receipts: Vec<Receipt>,
 }
 impl Record {
+    fn empty() -> Self {
+        Self {
+            status: UploadStatus {
+                configuration_revision: 0,
+                limits: UploadLimits::default(),
+                allocated: UploadLimits::default(),
+            },
+            receipts: vec![],
+        }
+    }
     fn validate(&self) -> anyhow::Result<()> {
         self.status.limits.validate()?;
         ensure!(
@@ -193,6 +212,7 @@ pub(crate) async fn initialize_native(
 
 pub(crate) struct Allocator {
     authority: Arc<dyn Authority>,
+    database: Option<database::Ledger>,
     // Volatile rights only. Never save these to disk or reconstruct them from
     // the authority's cumulative allocation on restart or response loss.
     remaining: Mutex<UploadLimits>,
@@ -201,18 +221,22 @@ impl Allocator {
     pub(crate) fn new(authority: Arc<dyn Authority>) -> Self {
         Self {
             authority,
+            database: None,
             remaining: Mutex::new(UploadLimits::default()),
         }
     }
     pub(crate) async fn status(&self) -> anyhow::Result<UploadStatus> {
-        Ok(record(&self.authority.read_fresh().await?)?.status)
+        Ok(self
+            .record(&self.authority.read_fresh().await?)
+            .await?
+            .status)
     }
-    async fn charge(&self, bytes: u64) -> anyhow::Result<()> {
+    pub(crate) async fn charge(&self, bytes: u64) -> anyhow::Result<()> {
         let mut remaining = self.remaining.lock().await;
         if remaining.bytes >= bytes && remaining.attempts > 0 {
             remaining.bytes -= bytes;
             remaining.attempts -= 1;
-            charged(bytes);
+            self.charged(bytes);
             return Ok(());
         }
         // Replenish only the deficient dimensions. Existing rights remain
@@ -223,14 +247,19 @@ impl Allocator {
         };
         for attempt in 0..8 {
             let before = self.authority.read().await?;
-            let mut record = record(&before)?;
+            let mut record = self.record(&before).await?;
             let available = UploadLimits {
                 bytes: record.status.limits.bytes - record.status.allocated.bytes,
                 attempts: record.status.limits.attempts - record.status.allocated.attempts,
             };
             if available.bytes < needed.bytes || available.attempts < needed.attempts {
-                REGISTRY.event(Event::UploadBudgetExhausted, 1);
-                bail!("immutable upload budget exhausted");
+                if self.database.is_none() {
+                    REGISTRY.event(Event::UploadBudgetExhausted, 1);
+                }
+                return Err(Exhausted {
+                    database: self.database.is_some(),
+                }
+                .into());
             }
             let grant = UploadLimits {
                 bytes: if needed.bytes > 0 {
@@ -246,10 +275,7 @@ impl Allocator {
             };
             record.status.allocated.bytes += grant.bytes;
             record.status.allocated.attempts += grant.attempts;
-            let mut info = before.info.clone();
-            info.insert(FIELD.into(), serde_json::to_string(&record)?);
-            crate::publication::budget(&info)?;
-            if self.authority.replace(&before, info).await?.is_some() {
+            if self.publish(&before, &record).await? {
                 // No await/cancellation point between confirmed allocation
                 // and spending this request's charge. An unknown CAS result
                 // exits above without adding any unconfirmed local rights.
@@ -257,9 +283,11 @@ impl Allocator {
                     bytes: remaining.bytes + grant.bytes - bytes,
                     attempts: remaining.attempts + grant.attempts - 1,
                 };
-                REGISTRY.event(Event::UploadGrantBytes, grant.bytes as usize);
-                REGISTRY.event(Event::UploadGrantAttempts, grant.attempts as usize);
-                charged(bytes);
+                if self.database.is_none() {
+                    REGISTRY.event(Event::UploadGrantBytes, grant.bytes as usize);
+                    REGISTRY.event(Event::UploadGrantAttempts, grant.attempts as usize);
+                }
+                self.charged(bytes);
                 return Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
@@ -281,7 +309,7 @@ impl Allocator {
         ));
         for _ in 0..8 {
             let before = self.authority.read_fresh().await?;
-            let mut record = record(&before)?;
+            let mut record = self.record(&before).await?;
             if let Some(receipt) = record.receipts.iter().find(|r| r.id == request.request_id) {
                 if receipt.digest != digest {
                     return Err(Error::Invalid(
@@ -319,13 +347,7 @@ impl Allocator {
             if record.receipts.len() > RECEIPTS {
                 record.receipts.remove(0);
             }
-            let mut info = before.info.clone();
-            info.insert(
-                FIELD.into(),
-                serde_json::to_string(&record).map_err(anyhow::Error::from)?,
-            );
-            crate::publication::budget(&info)?;
-            if self.authority.replace(&before, info).await?.is_some() {
+            if self.publish(&before, &record).await? {
                 return Ok(UploadResult {
                     status: record.status,
                     replayed: false,
@@ -334,10 +356,31 @@ impl Allocator {
         }
         Err(Error::Busy)
     }
-}
-fn charged(bytes: u64) {
-    REGISTRY.event(Event::UploadChargedBytes, bytes as usize);
-    REGISTRY.event(Event::UploadChargedAttempts, 1);
+    async fn record(&self, before: &Bucket) -> anyhow::Result<Record> {
+        match &self.database {
+            Some(ledger) => Ok(ledger.read(before).await?.unwrap_or_else(Record::empty)),
+            None => record(before),
+        }
+    }
+    async fn publish(&self, before: &Bucket, record: &Record) -> anyhow::Result<bool> {
+        let mut info = before.info.clone();
+        match &self.database {
+            Some(ledger) => {
+                info.insert(DATABASE_FIELD.into(), ledger.write(before, record).await?);
+            }
+            None => {
+                info.insert(FIELD.into(), serde_json::to_string(record)?);
+            }
+        }
+        crate::publication::budget(&info)?;
+        Ok(self.authority.replace(before, info).await?.is_some())
+    }
+    fn charged(&self, bytes: u64) {
+        if self.database.is_none() {
+            REGISTRY.event(Event::UploadChargedBytes, bytes as usize);
+            REGISTRY.event(Event::UploadChargedAttempts, 1);
+        }
+    }
 }
 
 pub(crate) struct Files {

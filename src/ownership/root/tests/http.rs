@@ -424,10 +424,35 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
 
 #[tokio::test]
 async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during_uploads() {
-    let (router, provider, _, faults, token) = fixture(2, 3).await;
+    let (router, provider, _, faults, token) = fixture(2, 5).await;
     create(&router, &token, "a").await;
     create(&router, &token, "b").await;
+    // Allocate local tenant grants before pausing a journal PUT. Checkpoint
+    // rebasing must preserve these grants, keeping warm admission control-free.
+    for db in ["a", "b"] {
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/v1/databases/{db}/commit"),
+                &token,
+                json!({"request_id":"prime","expected_revision":0,"writes":[{"key":"prime","value":"cA=="}]})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
     create(&router, &token, "checkpoint").await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while provider.record().checkpoint.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut write = commit();
+    write["expected_revision"] = json!(1);
     let calls = provider.calls.load(Ordering::SeqCst);
     let puts = faults.puts.load(Ordering::SeqCst);
     faults.pause.store(true, Ordering::SeqCst);
@@ -435,7 +460,7 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         "POST",
         "/v1/databases/a/commit",
         &token,
-        commit(),
+        write.clone(),
     )));
     tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
         .await
@@ -450,13 +475,13 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         )
         .await
         .1["revision"],
-        0
+        1
     );
     let b = tokio::spawn(router.clone().oneshot(request(
         "POST",
         "/v1/databases/b/commit",
         &token,
-        commit(),
+        write.clone(),
     )));
     tokio::time::timeout(Duration::from_secs(2), async {
         while faults.puts.load(Ordering::SeqCst) != puts + 2 {
@@ -468,9 +493,15 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
     // Both pending tickets hold capacity, including an identical retry. The
     // second upload can finish but cannot expose a value across the first gap.
     assert_eq!(
-        call(&router, "POST", "/v1/databases/a/commit", &token, commit())
-            .await
-            .0,
+        call(
+            &router,
+            "POST",
+            "/v1/databases/a/commit",
+            &token,
+            write.clone()
+        )
+        .await
+        .0,
         StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(
@@ -483,7 +514,7 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         )
         .await
         .1["revision"],
-        0
+        1
     );
     let ranges = faults.range_reads.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(110)).await;
@@ -501,10 +532,17 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         .unwrap()
         .unwrap();
     assert_eq!(reply.status(), StatusCode::OK);
-    let retried = call(&router, "POST", "/v1/databases/a/commit", &token, commit()).await;
+    let retried = call(
+        &router,
+        "POST",
+        "/v1/databases/a/commit",
+        &token,
+        write.clone(),
+    )
+    .await;
     assert_eq!(retried.0, StatusCode::OK);
     assert_eq!(retried.1["replayed"], true);
-    assert_eq!(retried.1["revision"], 1);
+    assert_eq!(retried.1["revision"], 2);
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
         puts + 2,
@@ -691,8 +729,8 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
         8,
         64,
         crate::upload_budget::UploadLimits {
-            bytes: 4096,
-            attempts: 2,
+            bytes: 8192,
+            attempts: 4,
         },
     )
     .await;
@@ -708,8 +746,8 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert!(!waiting.is_finished());
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
-        2,
-        "only bootstrap registrations reached storage"
+        4,
+        "only registrations and database ledger initialization reached storage"
     );
     let (status, body) = call(
         &router,
@@ -717,7 +755,7 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
         "/v1/storage/upload-budget",
         &token,
         json!({"request_id":"fund", "expected_configuration_revision":0,
-            "limits":{"bytes":8192,"attempts":6}}),
+            "limits":{"bytes":16384,"attempts":10}}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -728,9 +766,182 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
-        3,
+        5,
         "the admitted journal frame is uploaded once"
     );
     let (status, _) = call(&router, "GET", "/v1/databases/app", &token, json!({})).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn native_http_database_budget_refuses_before_journal_and_preserves_neighbors() {
+    let (router, _, _, faults, token) = fixture(8, 2).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let budget = format!("{base}/v1/databases/a/upload-budget");
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":4096,"attempts":1}});
+    for replayed in [false, true] {
+        let result: Value = client
+            .post(&budget)
+            .bearer_auth(&token)
+            .json(&fund)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["replayed"], replayed);
+    }
+    for name in ["a", "b"] {
+        let created: Value = client
+            .put(format!("{base}/v1/databases/{name}"))
+            .bearer_auth(&token)
+            .json(&json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":1000}}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["info"]["revision"], 0, "{created}");
+    }
+    let credentials: Value = client
+        .post(format!("{base}/v1/tokens"))
+        .bearer_auth(&token)
+        .json(&json!({"database":"a","write":true,"ttl_seconds":3600}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let writer = credentials["token"].as_str().unwrap();
+    for method in [reqwest::Method::GET, reqwest::Method::POST] {
+        assert_eq!(
+            client
+                .request(method, &budget)
+                .bearer_auth(writer)
+                .json(&fund)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let a = format!("{base}/v1/databases/a/commit");
+    assert_eq!(
+        client
+            .post(&a)
+            .bearer_auth(writer)
+            .json(&commit())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let before: Value = client
+        .get(&budget)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        before["limits"]["attempts"], 1,
+        "creation preserved the administrative ceiling"
+    );
+    let puts = faults.puts.load(Ordering::SeqCst);
+    let retry: Value = client
+        .post(&a)
+        .bearer_auth(writer)
+        .json(&commit())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retry["replayed"], true);
+    assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
+    let mut next = commit();
+    next["request_id"] = json!("next");
+    next["expected_revision"] = json!(1);
+    assert_eq!(
+        client
+            .post(&a)
+            .bearer_auth(writer)
+            .json(&next)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        faults.puts.load(Ordering::SeqCst),
+        puts,
+        "refusal must not upload a journal frame"
+    );
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/databases/b/commit"))
+            .bearer_auth(&token)
+            .json(&commit())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an exhausted neighbor must not leave a shared journal gap"
+    );
+    let after: Value = client
+        .get(&budget)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "checkpointing and neighboring admission preserve the ledger"
+    );
+    let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":8192,"attempts":2}});
+    assert_eq!(
+        client
+            .post(&budget)
+            .bearer_auth(&token)
+            .json(&refill)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    // Budget CAS may invalidate a checkpoint comparison. Resolve that bounded
+    // transient with the same transaction identity, as the public client does.
+    let mut status = StatusCode::SERVICE_UNAVAILABLE;
+    for _ in 0..3 {
+        status = client
+            .post(&a)
+            .bearer_auth(writer)
+            .json(&next)
+            .send()
+            .await
+            .unwrap()
+            .status();
+        if status != StatusCode::SERVICE_UNAVAILABLE {
+            break;
+        }
+    }
+    assert_eq!(status, StatusCode::OK);
+    server.abort();
 }

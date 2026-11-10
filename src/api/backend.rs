@@ -36,6 +36,20 @@ pub trait Backend: Send + Sync {
             "physical collection is not available on this backend",
         ))
     }
+    async fn database_upload_budget(&self, _db: &str) -> Result<UploadStatus> {
+        Err(Error::Unsupported(
+            "database upload budgets are not available on this backend",
+        ))
+    }
+    async fn replenish_database_upload_budget(
+        &self,
+        _db: &str,
+        _request: &UploadRequest,
+    ) -> Result<UploadResult> {
+        Err(Error::Unsupported(
+            "database upload budgets are not available on this backend",
+        ))
+    }
     async fn upload_budget(&self) -> Result<Option<UploadStatus>> {
         Err(Error::Unsupported(
             "physical upload budgets are not available on this backend",

@@ -8,7 +8,7 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 
 The shared router can also serve a recovered native owner through `api::Native::new(owner, capacity)` and `App::new`. This library path supports protected creation, info, reads, commits, tokens, and access-policy changes with the same authentication and request budgets. Its bounded server-owned worker continues accepted writes after a caller disconnects, pipelines immutable uploads outside the owner lock, resolves unknown PUT outcomes by exact GET, and retries checkpoint maintenance. Capacity bounds queued, executing and pending replies, including duplicate requests. Each HTTP commit currently occupies one journal frame; cross-request batching remains open.
 
-Native readiness also checks current ownership permission. `api::Native::renewing(owner, capacity, period, timeout)` owns renewal alongside the serving worker; `Native::new` leaves renewal to the caller. Renewal attempts serialize with checkpoint control operations, have a timeout, and skip missed ticks. Dropping or retiring the worker stops its renewal task. Scheduling never replaces the injected clock contract or final permission checks. No production physical clock or placement runtime is selected, and the CLI still uses the existing engine. Native legacy POST creation, `/gc`, and upload-budget endpoints return `501 unsupported_operation`; native physical budgets and collection are not implemented. Do not use the native adapter as a public multitenant service yet.
+Native readiness also checks current ownership permission. `api::Native::renewing(owner, capacity, period, timeout)` owns renewal alongside the serving worker; `Native::new` leaves renewal to the caller. Renewal attempts serialize with checkpoint control operations, have a timeout, and skip missed ticks. Dropping or retiring the worker stops its renewal task. Scheduling never replaces the injected clock contract or final permission checks. No production physical clock or placement runtime is selected, and the CLI still uses the existing engine. Native legacy POST creation and `/gc` return `501 unsupported_operation`. Native namespace upload ceilings and per-database journal admission are implemented; physical collection and complete tenant cost attribution remain open. Do not use the native adapter as a public multitenant service yet.
 
 ## Endpoints
 
@@ -24,6 +24,8 @@ Native readiness also checks current ownership permission. `api::Native::renewin
 | `POST /v1/tokens` | Admin: mint a database-scoped token |
 | `GET /v1/storage/upload-budget` | Admin: authoritative cumulative upload ceilings and allocation, or `null` when unbudgeted |
 | `POST /v1/storage/upload-budget` | Admin: revision-checked, idempotent increase of upload ceilings |
+| `GET /v1/databases/{db}/upload-budget` | Admin, native backend: database journal allowance and allocation; a missing ledger reports zeros |
+| `POST /v1/databases/{db}/upload-budget` | Admin, native backend: preprovision or increase the database journal allowance |
 | `GET /metrics` | Administrator or metrics-only credential: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
 | `GET /health/live` | Process is serving HTTP |
 | `GET /health/ready` | Startup completed and server is not draining |
@@ -148,3 +150,5 @@ Errors use `{error,message}`: 400 invalid request, 401 invalid/mismatched creden
 | Request deadline | 30 seconds |
 
 Quota accounting includes user key and value bytes. Physical object bytes, receipts, manifests, and transient orphan uploads are additional. Limits reject before publishing; they never silently truncate. Use bounded scans and values, and choose an ingress spend/rate budget for an Internet-facing deployment.
+
+Native database budgets use these same request/result shapes at `/v1/databases/{db}/upload-budget`. Defaults on protected creation are 64 MiB of journal admission and 16,384 admissions; an administrator-preprovisioned ledger is preserved. Exhaustion returns `413 limit_exceeded` before assigning journal order, so another funded database can continue. Credential rotation and checkpoints do not reset spent credit. The unit and shared-cost exclusions are described in [native upload admission](design-upload-admission.md#native-serving). The existing CLI engine returns `501` for the database-specific budget routes.

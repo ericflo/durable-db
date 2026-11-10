@@ -88,6 +88,7 @@ pub enum Rejection {
     IdentityReused,
     Capacity,
     Quota,
+    PhysicalBudget,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -161,6 +162,7 @@ impl<C: Clock> Opening<C> {
             writer,
             limits: self.limits,
             active: BTreeMap::new(),
+            budgets: BTreeMap::new(),
             pending: BTreeMap::new(),
             catalog_pending: BTreeMap::new(),
             reserved: recovery::Usage::default(),
@@ -186,6 +188,8 @@ pub struct Owner<C> {
     writer: journal::Writer,
     limits: Limits,
     active: BTreeMap<(Arc<str>, Uuid), Active>,
+    // Local rights survive checkpoint eviction but never owner replacement.
+    budgets: BTreeMap<Arc<str>, Arc<crate::upload_budget::Allocator>>,
     pending: BTreeMap<RequestKey, Pending>,
     catalog_pending: BTreeMap<Arc<str>, catalog::PendingChange>,
     reserved: recovery::Usage,
@@ -196,6 +200,42 @@ pub struct Owner<C> {
 impl<C: Clock> Owner<C> {
     pub fn control(&self) -> Control<C> {
         self.control.clone()
+    }
+    pub(crate) fn database_budget(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<Arc<crate::upload_budget::Allocator>>> {
+        self.control.lock()?.database_budget(name)
+    }
+    async fn charge_database(
+        &mut self,
+        database: Database<'_>,
+        bytes: usize,
+    ) -> anyhow::Result<bool> {
+        if database.name == catalog::CATALOG.name
+            && database.generation == catalog::CATALOG.generation
+        {
+            return Ok(true);
+        }
+        if !self.budgets.contains_key(database.name) {
+            let Some(budget) = self.database_budget(database.name)? else {
+                return Ok(true);
+            };
+            if self.budgets.len() >= self.limits.index.databases {
+                self.budgets.pop_first();
+            }
+            self.budgets.insert(Arc::from(database.name), budget);
+        }
+        match self.budgets[database.name].charge(bytes as u64).await {
+            Ok(()) => Ok(true),
+            Err(e)
+                if e.downcast_ref::<crate::upload_budget::Exhausted>()
+                    .is_some_and(|e| e.database) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
     pub fn usage(&self) -> recovery::Usage {
         self.projection.usage()
@@ -317,6 +357,39 @@ impl<C: Clock> Owner<C> {
                     .await?,
             );
         }
+        // Charge the stable name before reserving shared journal order. A
+        // refusal must not create a hole that prevents other tenants committing.
+        // Identical retries in this batch reuse admission; later validation
+        // failures may strand credit but can never create new rights.
+        let mut admissions = BTreeMap::new();
+        let mut admitted = Vec::with_capacity(requests.len());
+        for ((request, fingerprint), resolution) in
+            requests.iter().zip(&fingerprints).zip(&resolved)
+        {
+            let key = (
+                request.snapshot.name.clone(),
+                request.snapshot.generation,
+                Arc::from(request.id),
+            );
+            let allowed = if self.pending.contains_key(&key) || *resolution != Resolution::Missing {
+                true
+            } else if let Some(allowed) = admissions.get(&(key.clone(), *fingerprint)) {
+                *allowed
+            } else {
+                let bytes = 120
+                    + Commit::encoded_len(
+                        request.snapshot.database(),
+                        request.id,
+                        request.mutations,
+                    )?;
+                let allowed = self
+                    .charge_database(request.snapshot.database(), bytes)
+                    .await?;
+                admissions.insert((key, *fingerprint), allowed);
+                allowed
+            };
+            admitted.push(allowed);
+        }
         self.check()?;
         let mut fence = self.writer.planned_position();
         let reservation = self.writer.reserve(length)?;
@@ -324,17 +397,25 @@ impl<C: Clock> Owner<C> {
         self.failed = true; // any unexpected error after admission retires the view
         let mut records = Vec::new();
         let mut tickets = Vec::with_capacity(requests.len());
-        for ((request, fingerprint), resolved) in requests
+        for (((request, fingerprint), resolved), admitted) in requests
             .iter()
             .zip(fingerprints.iter().copied())
             .zip(resolved)
+            .zip(admitted)
         {
             let key = (
                 request.snapshot.name.clone(),
                 request.snapshot.generation,
                 Arc::from(request.id),
             );
-            let ticket = if let Some(pending) = self.pending.get(&key) {
+            let ticket = if !admitted {
+                Ticket {
+                    owner: self.identity,
+                    replayed: false,
+                    position: 0,
+                    result: Outcome::Rejected(Rejection::PhysicalBudget),
+                }
+            } else if let Some(pending) = self.pending.get(&key) {
                 if pending.fingerprint == fingerprint {
                     Ticket {
                         replayed: true,

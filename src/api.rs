@@ -93,6 +93,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/databases/{db}/access", post(access))
         .route("/v1/tokens", post(token))
         .route(
+            "/v1/databases/{db}/upload-budget",
+            get(database_upload_budget).post(replenish_database_upload_budget),
+        )
+        .route(
             "/v1/storage/upload-budget",
             get(upload_budget).post(replenish_upload_budget),
         )
@@ -242,6 +246,33 @@ async fn create(
         return Err(Error::Unauthorized);
     }
     Ok(Json(app.backend.create(&db, limits).await?))
+}
+async fn database_upload_budget(
+    State(app): State<Arc<App>>,
+    Path(db): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<crate::upload_budget::UploadStatus>> {
+    if !app.auth.is_admin(bearer(&headers)?) {
+        return Err(Error::Unauthorized);
+    }
+    crate::engine::validate_db(&db)?;
+    Ok(Json(app.backend.database_upload_budget(&db).await?))
+}
+async fn replenish_database_upload_budget(
+    State(app): State<Arc<App>>,
+    Path(db): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<crate::upload_budget::UploadRequest>,
+) -> Result<Json<crate::upload_budget::UploadResult>> {
+    if !app.auth.is_admin(bearer(&headers)?) {
+        return Err(Error::Unauthorized);
+    }
+    crate::engine::validate_db(&db)?;
+    Ok(Json(
+        app.backend
+            .replenish_database_upload_budget(&db, &request)
+            .await?,
+    ))
 }
 async fn upload_budget(
     State(app): State<Arc<App>>,

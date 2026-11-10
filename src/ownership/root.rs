@@ -121,6 +121,22 @@ pub struct Root<C> {
 }
 
 impl<C: Clock> Root<C> {
+    pub(crate) fn database_budget(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<Arc<crate::upload_budget::Allocator>>> {
+        self.budgeted
+            .then(|| {
+                crate::upload_budget::Allocator::database(
+                    self.session.authority(),
+                    self.files.clone(),
+                    name,
+                )
+                .map(Arc::new)
+            })
+            .transpose()
+    }
+
     pub(crate) fn new(
         files: Arc<dyn Storage>,
         session: control::Session,
