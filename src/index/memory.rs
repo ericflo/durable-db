@@ -30,6 +30,35 @@ pub struct Memory {
     usage: Usage,
 }
 impl Memory {
+    pub(crate) fn from_checkpoint(revision: u64, limits: Limits) -> anyhow::Result<Self> {
+        let mut memory = Self::new(limits)?;
+        memory.revision = revision;
+        Ok(memory)
+    }
+    pub(crate) fn load_row(&mut self, row: Entry) -> anyhow::Result<()> {
+        ensure!(
+            row.revision > 0
+                && row.revision <= self.revision
+                && (1..=1024).contains(&row.key.len())
+                && std::str::from_utf8(&row.key).is_ok(),
+            "invalid checkpoint value row"
+        );
+        let bytes = row.key.len() + row.value.as_ref().map_or(0, Bytes::len);
+        ensure!(
+            self.usage.versions < self.limits.versions
+                && bytes <= self.limits.bytes - self.usage.bytes,
+            "checkpoint memory capacity exhausted"
+        );
+        self.usage.versions += 1;
+        self.usage.bytes += bytes;
+        ensure!(
+            self.rows
+                .insert((row.key, Reverse(row.revision)), row.value)
+                .is_none(),
+            "duplicate checkpoint row"
+        );
+        Ok(())
+    }
     pub fn new(limits: Limits) -> anyhow::Result<Self> {
         ensure!(
             limits.versions > 0 && limits.bytes > 0,

@@ -136,7 +136,7 @@ impl InputContent<'_> {
     fn owned(self) -> Content {
         match self {
             Self::Inline(bytes) => Content::Inline(Bytes::copy_from_slice(bytes)),
-            Self::External(blob) => Content::External(blob.clone()),
+            Self::External(blob) => Content::External(*blob),
         }
     }
 }

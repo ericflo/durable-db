@@ -40,6 +40,75 @@ pub enum Resolution {
 }
 
 impl State {
+    pub(crate) fn checkpoint_floor(&self) -> u64 {
+        self.receipt_floor
+    }
+    pub(crate) fn checkpoint_receipts(&self) -> impl Iterator<Item = (u64, &str, [u8; 32])> {
+        self.by_request
+            .iter()
+            .map(|(request, receipt)| (receipt.revision, request.as_ref(), receipt.fingerprint))
+    }
+    pub(crate) fn from_checkpoint(
+        database: Database<'_>,
+        revision: u64,
+        floor: u64,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            revision > 0 && floor < revision && revision - floor <= super::record::MAX_RECEIPTS,
+            "invalid checkpoint receipt window"
+        );
+        let mut state = Self::empty(database)?;
+        state.revision = revision;
+        state.receipt_floor = floor;
+        Ok(state)
+    }
+    pub(crate) fn load_receipt(
+        &mut self,
+        revision: u64,
+        request: &str,
+        fingerprint: [u8; 32],
+    ) -> anyhow::Result<()> {
+        ensure!(
+            (1..=128).contains(&request.len()) && !self.by_request.contains_key(request),
+            "invalid checkpoint receipt identity"
+        );
+        ensure!(
+            revision > self.receipt_floor
+                && revision <= self.revision
+                && (self.receipts.len() as u64) < self.revision - self.receipt_floor,
+            "checkpoint receipt gap or repetition"
+        );
+        let request: Arc<str> = request.into();
+        self.receipt_bytes += request.len() + 40;
+        self.receipts.push_back((revision, request.clone()));
+        self.by_request.insert(
+            request,
+            Receipt {
+                fingerprint,
+                revision,
+            },
+        );
+        Ok(())
+    }
+    pub(crate) fn seal_checkpoint(&mut self) -> anyhow::Result<()> {
+        self.receipts
+            .make_contiguous()
+            .sort_by_key(|(revision, _)| *revision);
+        self.checkpoint_complete()
+    }
+    pub(crate) fn checkpoint_complete(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.receipts.len() as u64 == self.revision - self.receipt_floor
+                && self
+                    .receipts
+                    .iter()
+                    .enumerate()
+                    .all(|(i, (revision, _))| *revision == self.receipt_floor + i as u64 + 1),
+            "checkpoint receipt history incomplete"
+        );
+        Ok(())
+    }
+
     /// An empty projection for an independently established database generation.
     /// This does not create or authorize a database, or recover its policy.
     pub fn empty(database: Database<'_>) -> anyhow::Result<Self> {
@@ -103,7 +172,7 @@ impl State {
         })
     }
 
-    fn advance(mut self, commit: &Commit<'_>) -> anyhow::Result<Self> {
+    pub(crate) fn advance(mut self, commit: &Commit<'_>) -> anyhow::Result<Self> {
         ensure!(
             commit.database()
                 == Database {
@@ -171,11 +240,12 @@ pub trait Target: Send + Sized {
 
 /// Consumes both cursor and unpublished target, preventing a partial cursor
 /// from being resumed against another target after an error. The input target
-/// must be empty: checkpoint-based starting positions are not supported yet.
+/// must be empty. Native `index::recovery::Recovering` handles checkpoints;
+/// this generic helper refuses a checkpoint-backed cursor.
 pub async fn restore<T: Target>(mut replay: Replay, mut target: T) -> anyhow::Result<T> {
     ensure!(
-        replay.at_start(),
-        "transaction recovery requires an unread catalog cursor"
+        replay.at_start() && replay.origin().checkpoint.is_none(),
+        "transaction recovery requires an unread catalog without a checkpoint; use native recovery for checkpoints"
     );
     while let Some(batch) = replay.read_next().await? {
         for bytes in batch.records() {

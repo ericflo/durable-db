@@ -6,22 +6,23 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-const VERSION: &str = "owned-candidate-3";
+const VERSION: &str = "owned-candidate-4";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum Phase {
+pub(crate) enum Phase {
     Fenced,
     Open,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct Record {
+pub(crate) struct Record {
     pub identity: Identity,
     pub phase: Phase,
     pub catalog: Option<Uuid>,
+    pub checkpoint: Option<crate::index::recovery::checkpoint::Reference>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,6 +34,7 @@ struct Wire {
     lifetime_ns: u64,
     error_ns: u64,
     catalog: Option<String>,
+    checkpoint: Option<String>,
 }
 
 pub(super) fn decode(
@@ -89,6 +91,13 @@ pub(super) fn decode(
         },
         phase: wire.phase,
         catalog,
+        checkpoint: wire
+            .checkpoint
+            .map(|s| {
+                crate::index::recovery::checkpoint::Reference::decode(&s)
+                    .map_err(|_| Error::Incompatible)
+            })
+            .transpose()?,
     }))
 }
 
@@ -113,6 +122,7 @@ pub(super) fn encode(
             lifetime_ns: profile.bounds.root_lifetime().as_nanos() as u64,
             error_ns: profile.error.as_nanos() as u64,
             catalog: record.catalog.map(|id| id.to_string()),
+            checkpoint: record.checkpoint.map(|r| r.encode()),
         })
         .map_err(|_| Error::Incompatible)?,
     );

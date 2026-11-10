@@ -101,6 +101,7 @@ for (const file of [
   'native-tables-2026-11-09.json',
   'table-merge-2026-11-09.json',
   'native-recovery-2026-11-09.json',
+  'native-checkpoints-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',

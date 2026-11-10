@@ -159,6 +159,16 @@ struct Inner {
 #[derive(Clone)]
 pub struct Table(Arc<Inner>);
 impl Table {
+    pub(crate) fn last_key(&self) -> &[u8] {
+        &self.0.blocks.last().expect("nonempty table index").last.key
+    }
+    pub(crate) fn row_count(&self) -> u64 {
+        self.0
+            .blocks
+            .iter()
+            .map(|block| u64::from(block.rows))
+            .sum()
+    }
     pub async fn open(
         storage: Arc<dyn Storage>,
         cache: Arc<Cache>,

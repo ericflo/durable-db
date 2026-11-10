@@ -100,7 +100,7 @@ impl Prefix {
         self.position
     }
 
-    /// Fixed-size, checksummed encoding for a future conditional control record.
+    /// Fixed-size, checksummed encoding for durable control records and checkpoints.
     pub fn encode(self) -> Bytes {
         let mut bytes = Vec::with_capacity(PREFIX_BYTES);
         bytes.extend_from_slice(PREFIX_MAGIC);

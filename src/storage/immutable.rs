@@ -12,7 +12,7 @@ pub(crate) const REFERENCE_BYTES: usize = 56;
 /// history. Fields cannot be supplied by an application. This is not ownership
 /// or permission to publish. Physical admission and orphan collection belong to
 /// the controller; an uncertain upload returns no reference and is never retried.
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Blob {
     id: Uuid,
     size: u64,

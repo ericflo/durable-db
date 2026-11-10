@@ -1,5 +1,5 @@
 //! Persisted prefix decisions using the existing bounded-page immutable B+tree.
-use super::{Identity, Record, Registration, Registrations};
+use super::{Cut, Identity, Record, Registration, Registrations};
 use crate::{
     directory::{self, Directory, Pointer},
     journal::{Batch, Prefix, Reader},
@@ -92,6 +92,8 @@ pub struct Recovery {
     index: Option<directory::Root>,
     loaded: bool,
     current: Option<Registration>,
+    cutoff: Option<Cut>,
+    finished: bool,
 }
 impl Recovery {
     pub(super) fn new(files: Arc<dyn Storage>, record: Record, chain: Registrations) -> Self {
@@ -102,6 +104,8 @@ impl Recovery {
             index: None,
             loaded: false,
             current: None,
+            cutoff: None,
+            finished: false,
         }
     }
 
@@ -109,8 +113,25 @@ impl Recovery {
     /// exact prefix; only previously unselected journals use discovery.
     /// Calling this does not establish transaction or serving readiness.
     pub async fn next(&mut self) -> anyhow::Result<Option<JournalRecovery>> {
+        if self.finished {
+            return Ok(None);
+        }
         if !self.loaded {
             self.index = load(&self.files, self.record.catalog).await?;
+            if let Some(reference) = self.record.checkpoint {
+                let header =
+                    crate::index::recovery::checkpoint::Header::load(self.files.clone(), reference)
+                        .await?;
+                ensure!(
+                    header.cut.identity.epoch < self.record.identity.epoch,
+                    "checkpoint is not from prior history"
+                );
+                let selected = selected(&self.files, self.index.as_ref(), header.cut.identity)
+                    .await?
+                    .context("checkpoint journal is not selected")?;
+                Reader::resume(self.files.clone(), header.cut.prefix, selected)?;
+                self.cutoff = Some(header.cut);
+            }
             self.loaded = true;
         }
         loop {
@@ -118,6 +139,8 @@ impl Recovery {
                 self.current = self.chain.next().await?;
             }
             let Some(registration) = self.current else {
+                ensure!(self.cutoff.is_none(), "checkpoint ancestry is incomplete");
+                self.finished = true;
                 return Ok(None);
             };
             if registration.identity() == self.record.identity {
@@ -128,6 +151,16 @@ impl Recovery {
                 registration.identity().epoch < self.record.identity.epoch,
                 "invalid recovery ancestry"
             );
+            if let Some(cutoff) = self.cutoff
+                && registration.identity().epoch <= cutoff.identity.epoch
+            {
+                ensure!(
+                    registration.identity() == cutoff.identity,
+                    "checkpoint ancestry differs from selected history"
+                );
+                self.finished = true;
+                return Ok(None);
+            }
             let prefix =
                 selected(&self.files, self.index.as_ref(), registration.identity()).await?;
             let reader = match prefix {

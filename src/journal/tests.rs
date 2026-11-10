@@ -519,3 +519,46 @@ proptest::proptest! {
         proptest::prop_assert!(Batch::decode(corrupted.into(), log, 1).is_err());
     }
 }
+
+#[tokio::test]
+async fn checkpoint_resume_verifies_the_exact_selected_chain_without_reading_covered_frames() {
+    let files = Arc::new(Files::default());
+    let mut writer = Writer::new(files.clone(), Uuid::new_v4(), QueueLimits::default()).unwrap();
+    let mut prefixes = Vec::new();
+    for value in [b"one", b"two"] {
+        let upload = writer.prepare(&[Bytes::copy_from_slice(value)]).unwrap();
+        writer.complete(upload.send().await).unwrap();
+        prefixes.push(writer.pop_durable().unwrap().unwrap().prefix());
+    }
+    let (cut, end) = (prefixes[0], prefixes[1]);
+    files.objects.lock().unwrap().remove(&cut.log.key(1));
+    let mut reader = Reader::resume(files.clone(), cut, end).unwrap();
+    let frame = reader.read_next().await.unwrap().unwrap();
+    assert_eq!(frame.records().collect::<Vec<_>>(), [b"two".as_slice()]);
+    drop(frame);
+    assert!(reader.read_next().await.unwrap().is_none());
+    assert_eq!(reader.finished_prefix(), Some(end));
+    assert!(Reader::resume(files.clone(), end, cut).is_err());
+    let foreign = Prefix::empty(LogId::fresh(Uuid::new_v4()).unwrap());
+    assert!(Reader::resume(files.clone(), foreign, end).is_err());
+    let mut bad = cut.encode().to_vec();
+    bad[48] ^= 1;
+    rehash(&mut bad);
+    let bad = Prefix::decode(&bad).unwrap();
+    assert!(Reader::resume(files.clone(), bad, cut).is_err());
+    assert!(
+        Reader::resume(files.clone(), bad, end)
+            .unwrap()
+            .read_next()
+            .await
+            .is_err()
+    );
+    files.objects.lock().unwrap().remove(&end.log.key(2));
+    assert!(
+        Reader::resume(files, cut, end)
+            .unwrap()
+            .read_next()
+            .await
+            .is_err()
+    );
+}

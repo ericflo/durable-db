@@ -15,13 +15,15 @@ use crate::{
     journal::{QueueLimits, Writer},
     storage::Storage,
 };
-use metadata::{Phase, Record};
+use metadata::Phase;
+pub(crate) use metadata::Record;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 pub use catalog::{JournalRecovery, Recovery};
 pub use control::Outcome;
 pub use registration::{Registration, Registrations};
+pub(crate) use replay::Cut;
 pub use replay::{Replay, ReplayBatch};
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +90,7 @@ enum Kind {
     Validate,
     Activate,
     Select,
+    Checkpoint,
 }
 
 struct Pending {
@@ -182,6 +185,7 @@ impl<C: Clock> Root<C> {
             },
             phase: Phase::Fenced,
             catalog: observed.record.and_then(|r| r.catalog),
+            checkpoint: observed.record.and_then(|r| r.checkpoint),
         };
         let registration = Registration::new(record.identity, observed.record.map(|r| r.identity));
         let mut prepared = self.begin(observed.raw, record, Kind::Claim)?;
@@ -391,6 +395,31 @@ impl<C: Clock> Root<C> {
     pub fn replay(&mut self) -> Result<Replay, Error> {
         let record = self.recovery_record()?;
         Ok(Replay::new(self.files.clone(), record))
+    }
+
+    /// Atomically publish a fully uploaded native checkpoint built from this
+    /// exact recovery snapshot. Unknown results require exact revalidation; a
+    /// late request cannot overwrite a successor's claim or newer checkpoint.
+    pub fn publish_checkpoint(
+        &mut self,
+        staged: crate::index::recovery::checkpoint::Staged,
+    ) -> Result<Prepared, Error> {
+        let record = self.recovery_record()?;
+        if record.identity != staged.origin.identity {
+            return Err(Error::NotOwner);
+        }
+        if record != staged.origin {
+            return Err(Error::StaleRecovery);
+        }
+        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
+        self.begin(
+            raw,
+            Record {
+                checkpoint: Some(staged.reference),
+                ..record
+            },
+            Kind::Checkpoint,
+        )
     }
 
     fn recovery_record(&mut self) -> Result<Record, Error> {

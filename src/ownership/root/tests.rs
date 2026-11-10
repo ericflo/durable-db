@@ -1,5 +1,6 @@
 use super::*;
 mod catalog;
+mod checkpoint;
 mod owned_files;
 mod registration;
 mod replay;

@@ -253,7 +253,7 @@ async fn failed_or_corrupt_block_never_becomes_absence_and_cursor_retries_the_sa
     let cold = Table(Arc::new(Inner {
         storage: files,
         cache: cache(),
-        data: table.0.data.clone(),
+        data: table.0.data,
         blocks: codec::decode_index(&codec::index(&table.0.blocks), table.0.data.size()).unwrap(),
     }));
     assert!(cold.get(b"a", 3).await.is_err());

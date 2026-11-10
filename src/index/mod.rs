@@ -1,5 +1,5 @@
 //! Native value-index components. These do not grant serving authority or
-//! implement a transaction engine, compactor or collector.
+//! implement the live transaction engine or a physical collector.
 pub mod memory;
 pub mod merge;
 pub mod recovery;

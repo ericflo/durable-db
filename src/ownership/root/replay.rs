@@ -2,7 +2,7 @@
 use super::{Identity, Record, catalog};
 use crate::{
     directory::{self, Directory},
-    journal::{Batch, Reader},
+    journal::{Batch, Prefix, Reader},
     storage::Storage,
 };
 use anyhow::{Context, ensure};
@@ -11,7 +11,15 @@ use uuid::Uuid;
 
 const PAGE_ENTRIES: usize = 64;
 
-/// Replays the complete prior history oldest first. This does not itself apply
+/// A complete frame boundary in a selected journal, not a serving capability.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cut {
+    pub identity: Identity,
+    pub prefix: Prefix,
+}
+
+/// Streams selected history oldest first; native recovery can resume from an
+/// authenticated checkpoint cut. This does not itself apply
 /// transactions or authorize a reply. Build a private view, finish replay, then
 /// check current ownership before exposing it. Discard an invalid private view.
 pub struct Replay {
@@ -26,6 +34,7 @@ pub struct Replay {
     reader: Option<Reader>,
     batch: Option<Batch>,
     completed: bool,
+    cut: Option<Cut>,
 }
 impl Replay {
     pub(super) fn new(files: Arc<dyn Storage>, record: Record) -> Self {
@@ -41,6 +50,7 @@ impl Replay {
             reader: None,
             batch: None,
             completed: false,
+            cut: None,
         }
     }
 
@@ -54,6 +64,54 @@ impl Replay {
         !self.loaded
     }
 
+    pub(crate) fn origin(&self) -> Record {
+        self.record
+    }
+    pub(crate) fn files(&self) -> Arc<dyn Storage> {
+        self.files.clone()
+    }
+    pub(crate) fn cut(&self) -> Option<Cut> {
+        self.cut
+    }
+
+    async fn load(&mut self) -> anyhow::Result<()> {
+        let index = catalog::load(&self.files, self.record.catalog).await?;
+        ensure!(
+            index.as_ref().map_or(0, |r| r.count) == self.record.identity.epoch - 1,
+            "recovery catalog is incomplete"
+        );
+        self.index = index;
+        self.loaded = true;
+        Ok(())
+    }
+
+    pub(crate) async fn resume(&mut self, cut: Cut) -> anyhow::Result<()> {
+        ensure!(
+            self.at_start()
+                && cut.identity.epoch > 0
+                && cut.identity.epoch < self.record.identity.epoch,
+            "invalid checkpoint replay epoch"
+        );
+        ensure!(
+            cut.prefix.log() == crate::journal::LogId::root(cut.identity.incarnation),
+            "checkpoint journal identity mismatch"
+        );
+        self.load().await?;
+        let selected = catalog::selected(&self.files, self.index.as_ref(), cut.identity)
+            .await?
+            .context("checkpoint journal is not selected")?;
+        self.reader = Some(Reader::resume(self.files.clone(), cut.prefix, selected)?);
+        self.current = Some(cut.identity);
+        self.next_epoch = cut.identity.epoch;
+        self.after = Some(format!(
+            "{:016x}-{}.json",
+            cut.identity.epoch,
+            cut.identity.incarnation.simple()
+        ));
+        self.cut = Some(cut);
+        Ok(())
+    }
+
     /// At most one borrowed frame and 64 queued catalog keys. The borrow forces
     /// the caller to release each frame before requesting one from another log.
     pub async fn read_next(&mut self) -> anyhow::Result<Option<ReplayBatch<'_>>> {
@@ -62,13 +120,7 @@ impl Replay {
             return Ok(None);
         }
         if !self.loaded {
-            let index = catalog::load(&self.files, self.record.catalog).await?;
-            ensure!(
-                index.as_ref().map_or(0, |r| r.count) == self.record.identity.epoch - 1,
-                "recovery catalog is incomplete"
-            );
-            self.index = index;
-            self.loaded = true;
+            self.load().await?;
         }
         loop {
             if self.current.is_some() {
@@ -77,12 +129,22 @@ impl Replay {
                     .as_mut()
                     .expect("selected identity has a reader");
                 if let Some(batch) = reader.read_next().await? {
+                    self.cut = Some(Cut {
+                        identity: self.current.unwrap(),
+                        prefix: batch.prefix(),
+                    });
                     self.batch = Some(batch);
                     return Ok(Some(ReplayBatch {
                         identity: self.current.expect("reader has a selected identity"),
                         batch: self.batch.as_ref().expect("stored replay frame"),
                     }));
                 }
+                self.cut = Some(Cut {
+                    identity: self.current.unwrap(),
+                    prefix: reader
+                        .finished_prefix()
+                        .context("journal replay is incomplete")?,
+                });
                 self.current = None;
                 self.next_epoch = self
                     .next_epoch

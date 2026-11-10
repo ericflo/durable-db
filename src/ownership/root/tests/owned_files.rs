@@ -135,7 +135,7 @@ async fn selected_external_files_restore_without_resident_payloads_and_deletion_
     let file = view.get("compacted/one").unwrap();
     assert_eq!(file.size(), payload.len() as u64);
     assert_eq!(file.version(), version);
-    let retained = file.blob().unwrap().clone();
+    let retained = *file.blob().unwrap();
     assert_eq!(
         retained
             .read_range(provider.files.as_ref(), 0..retained.size())

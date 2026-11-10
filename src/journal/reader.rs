@@ -37,6 +37,26 @@ impl Reader {
         }
     }
 
+    /// Resume only from a checkpoint authenticated by the controller. Prefix
+    /// equality or the remaining hash chain binds the cut to selected history.
+    pub(crate) fn resume(
+        storage: Arc<dyn Storage>,
+        cut: Prefix,
+        selected: Prefix,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            cut.log == selected.log && cut.position <= selected.position,
+            "checkpoint exceeds selected journal"
+        );
+        ensure!(
+            cut.position != selected.position || cut == selected,
+            "checkpoint differs from selected journal"
+        );
+        let mut reader = Self::replay(storage, selected);
+        reader.prefix = cut;
+        Ok(reader)
+    }
+
     /// Reuse this reader's frame budget across selected journals. A retained
     /// frame (even one whose Rust borrow ended) must not free its allocation slot.
     pub(crate) fn reset(&mut self, selected: Prefix) -> anyhow::Result<()> {
