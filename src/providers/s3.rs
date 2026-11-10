@@ -593,62 +593,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn logical_files_resolve_lost_http_replies_without_conditional_file_writes() {
+    async fn live_transactions_resolve_lost_http_replies_without_control_updates() {
         use crate::{
-            journal::{QueueLimits, Writer},
-            owned_files::{Change, Condition, Limits, Namespace, View},
+            cache::Cache,
+            ownership::root::{Outcome, Profile},
+            transactions::{
+                live::{self, Opening, Request},
+                record::{Database, Mutation},
+            },
         };
-        let (connection, state, task) = fixture(503, true).await;
-        let mut files = Namespace::new(
-            View::empty(Limits::default()),
-            Writer::new(
-                connection.objects(),
-                uuid::Uuid::new_v4(),
-                QueueLimits::default(),
+        use std::{
+            sync::atomic::{AtomicU64, Ordering},
+            time::Duration,
+        };
+        #[derive(Clone)]
+        struct Clock(Arc<AtomicU64>);
+        impl crate::ownership::timing::Clock for Clock {
+            fn read(&self) -> Option<Duration> {
+                Some(Duration::from_secs(self.0.load(Ordering::SeqCst)))
+            }
+        }
+        let (connection, state, task) = fixture(200, true).await;
+        let clock = Clock(Arc::new(AtomicU64::new(0)));
+        let mut root = connection
+            .root(
+                clock.clone(),
+                Profile::new(Duration::from_secs(10), Duration::from_secs(1)).unwrap(),
             )
-            .unwrap(),
+            .unwrap();
+        let observed = root.observe().await.unwrap();
+        let prepared = root.claim(observed).unwrap();
+        assert!(matches!(
+            root.finish(prepared.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        clock.0.store(23, Ordering::SeqCst);
+        let observed = root.observe().await.unwrap();
+        let prepared = root.validate(observed).unwrap();
+        assert!(matches!(
+            root.finish(prepared.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        let prepared = root.activate().unwrap();
+        assert!(matches!(
+            root.finish(prepared.execute().await).unwrap(),
+            Outcome::Confirmed
+        ));
+        let mut owner = Opening::new(
+            root,
+            live::Limits::default(),
+            Arc::new(Cache::new(0, None).unwrap()),
         )
+        .unwrap()
+        .recover()
+        .await
         .unwrap();
-        let first = files
-            .prepare(&[Change {
-                name: "manifest/1",
-                value: Some(b"one"),
-                condition: Condition::Absent,
+        let controls = state.lock().unwrap().puts;
+        let database = Database {
+            name: "app",
+            generation: uuid::Uuid::new_v4(),
+        };
+        let snapshot = owner.snapshot(database).await.unwrap();
+        state.lock().unwrap().acknowledgement = 503;
+        let first = owner
+            .prepare(&[Request {
+                snapshot: &snapshot,
+                id: "first",
+                reads: &[],
+                mutations: &[Mutation {
+                    key: "note",
+                    value: Some(b"one"),
+                }],
             }])
+            .await
             .unwrap();
-        let version = first.versions()[0];
-        files.complete(first.send().await).unwrap();
-        assert!(files.view().unwrap().is_empty());
-        state.lock().unwrap().acknowledgement = 200;
-        let next = files
-            .prepare(&[Change {
-                name: "manifest/1",
-                value: Some(b"two"),
-                condition: Condition::Matches(version),
-            }])
-            .unwrap();
-        files.complete(next.send().await).unwrap();
-        assert!(files.view().unwrap().is_empty());
+        let upload = first.upload.unwrap();
+        let position = upload.position();
+        owner.complete(upload.send().await).await.unwrap();
         assert_eq!(
-            files.resolve(1).await.unwrap(),
+            owner.outcome(first.tickets[0]).unwrap(),
+            live::Outcome::Pending
+        );
+        state.lock().unwrap().acknowledgement = 200;
+        let next = owner
+            .prepare(&[Request {
+                snapshot: &snapshot,
+                id: "next",
+                reads: &[],
+                mutations: &[Mutation {
+                    key: "note",
+                    value: Some(b"two"),
+                }],
+            }])
+            .await
+            .unwrap();
+        owner
+            .complete(next.upload.unwrap().send().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner.outcome(next.tickets[0]).unwrap(),
+            live::Outcome::Pending
+        );
+        assert!(owner.get(&snapshot, "note").await.unwrap().is_none());
+        assert_eq!(
+            owner.resolve_upload(position).await.unwrap(),
             crate::journal::Resolution::Durable
         );
+        assert_eq!(
+            owner.outcome(first.tickets[0]).unwrap(),
+            live::Outcome::Committed(1)
+        );
+        assert_eq!(
+            owner.outcome(next.tickets[0]).unwrap(),
+            live::Outcome::Committed(2)
+        );
+        let current = owner.snapshot(database).await.unwrap();
+        assert_eq!(
+            owner
+                .get(&current, "note")
+                .await
+                .unwrap()
+                .unwrap()
+                .value
+                .as_deref(),
+            Some(b"two".as_slice())
+        );
+        // The captured revision-zero snapshot stays valid after publication.
         for _ in 0..1000 {
-            assert_eq!(
-                files
-                    .view()
-                    .unwrap()
-                    .get("manifest/1")
-                    .unwrap()
-                    .bytes()
-                    .unwrap(),
-                b"two"
-            );
+            assert!(owner.get(&snapshot, "note").await.unwrap().is_none());
         }
-        assert_eq!(state.lock().unwrap().immutable.len(), 2);
-        assert_eq!(state.lock().unwrap().puts, 0);
-        assert_eq!(files.durable_prefix().position(), 2);
+        assert_eq!(state.lock().unwrap().puts, controls);
         task.abort();
+        task.await.unwrap_err();
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 use super::*;
 mod catalog;
 mod checkpoint;
-mod owned_files;
+mod live;
 mod registration;
 mod replay;
 mod transactions;

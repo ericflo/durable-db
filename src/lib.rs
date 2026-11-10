@@ -9,7 +9,6 @@ pub mod journal;
 mod measured;
 pub mod metrics;
 mod observation;
-pub mod owned_files;
 pub mod ownership;
 pub mod providers;
 pub mod publication;

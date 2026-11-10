@@ -28,6 +28,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Change | Focused checks |
 | --- | --- |
 | HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
+| Live native transactions | `cargo test --locked --lib live_` and `scripts/check-model.sh LiveTransactions` |
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
 | Native checkpoints | `cargo test --locked --lib checkpoint` and `scripts/check-model.sh Checkpoint` |
 | Lazy checkpoint reads | `cargo test --locked --lib index::recovery::checkpoint::snapshot` and `scripts/check-model.sh CheckpointRead` |

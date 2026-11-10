@@ -67,6 +67,9 @@ impl Snapshot {
     pub fn revision(self) -> u64 {
         self.revision
     }
+    pub(crate) fn incarnation(self) -> Uuid {
+        self.incarnation
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +100,32 @@ pub struct Validator {
     bytes: usize,
     changes: VecDeque<Changes>,
     latest: BTreeMap<Arc<str>, u64>,
+}
+
+/// Prepared under exclusive controller access; no revision is accepted until
+/// the controller has reserved the journal and resident index capacity.
+pub(crate) struct Plan {
+    expected: (u64, u64),
+    revision: u64,
+    keys: Vec<Arc<str>>,
+    bytes: usize,
+    evictions: usize,
+    floor: u64,
+    usage: Usage,
+}
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Usage {
+    pub transactions: usize,
+    pub keys: usize,
+    pub bytes: usize,
+}
+impl Plan {
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(crate) fn usage(&self) -> Usage {
+        self.usage
+    }
 }
 
 impl Validator {
@@ -155,6 +184,24 @@ impl Validator {
         reads: &[Read<'_>],
         writes: &[&str],
     ) -> Result<u64, Error> {
+        let plan = self.plan(snapshot, reads, writes)?;
+        Ok(self.install(plan))
+    }
+
+    pub(crate) fn usage(&self) -> Usage {
+        Usage {
+            transactions: self.changes.len(),
+            keys: self.keys,
+            bytes: self.bytes,
+        }
+    }
+
+    pub(crate) fn plan(
+        &self,
+        snapshot: Snapshot,
+        reads: &[Read<'_>],
+        writes: &[&str],
+    ) -> Result<Plan, Error> {
         validate_inputs(reads, writes)?;
         if snapshot.incarnation != self.incarnation || snapshot.revision < self.floor {
             return Err(Error::SnapshotExpired);
@@ -221,7 +268,38 @@ impl Validator {
                 return Err(Error::Conflict);
             }
         }
-        for _ in 0..evictions {
+        let usage = Usage {
+            transactions: self.changes.len() - evictions + 1,
+            keys: retained_keys + keys.len(),
+            bytes: retained_bytes + bytes,
+        };
+        let keys = keys
+            .into_iter()
+            .map(|key| {
+                self.latest
+                    .get_key_value(key)
+                    .map(|(key, _)| key.clone())
+                    .unwrap_or_else(|| Arc::from(key))
+            })
+            .collect();
+        Ok(Plan {
+            expected: (self.accepted, self.durable),
+            revision,
+            keys,
+            bytes,
+            evictions,
+            floor,
+            usage,
+        })
+    }
+
+    pub(crate) fn install(&mut self, plan: Plan) -> u64 {
+        assert_eq!(
+            plan.expected,
+            (self.accepted, self.durable),
+            "stale validation plan"
+        );
+        for _ in 0..plan.evictions {
             let change = self.changes.pop_front().expect("planned eviction");
             for key in change.keys {
                 if self.latest.get(&key) == Some(&change.revision) {
@@ -229,28 +307,19 @@ impl Validator {
                 }
             }
         }
-        let keys: Vec<Arc<str>> = keys
-            .into_iter()
-            .map(|key| {
-                let key = self
-                    .latest
-                    .get_key_value(key)
-                    .map(|(key, _)| key.clone())
-                    .unwrap_or_else(|| Arc::from(key));
-                self.latest.insert(key.clone(), revision);
-                key
-            })
-            .collect();
-        self.keys = retained_keys + keys.len();
-        self.bytes = retained_bytes + bytes;
-        self.floor = floor;
-        self.accepted = revision;
+        for key in &plan.keys {
+            self.latest.insert(key.clone(), plan.revision);
+        }
+        self.keys = plan.usage.keys;
+        self.bytes = plan.usage.bytes;
+        self.floor = plan.floor;
+        self.accepted = plan.revision;
         self.changes.push_back(Changes {
-            revision,
-            keys,
-            bytes,
+            revision: plan.revision,
+            keys: plan.keys,
+            bytes: plan.bytes,
         });
-        Ok(revision)
+        plan.revision
     }
 }
 
@@ -276,7 +345,7 @@ fn empty_range(start: Bound<&str>, end: Bound<&str>) -> bool {
     })
 }
 
-fn validate_inputs(reads: &[Read<'_>], writes: &[&str]) -> Result<(), Error> {
+pub(crate) fn validate_inputs(reads: &[Read<'_>], writes: &[&str]) -> Result<(), Error> {
     if reads.len() > MAX_TERMS || writes.len() > MAX_TERMS {
         return Err(Error::TooLarge);
     }

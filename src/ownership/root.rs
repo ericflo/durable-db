@@ -430,7 +430,7 @@ impl<C: Clock> Root<C> {
         )
     }
 
-    fn recovery_record(&mut self) -> Result<Record, Error> {
+    pub(crate) fn recovery_record(&mut self) -> Result<Record, Error> {
         let identity = self.permission()?.ok_or(Error::NotReady)?;
         let raw = self.session.confirmed().ok_or(Error::NotReady)?;
         let record =

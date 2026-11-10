@@ -141,10 +141,10 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh TransactionRecovery && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
-FROM model-tools AS model-ownedfiles
-COPY spec/OwnedFiles.tla spec/OwnedFiles.checks spec/OwnedFiles*.cfg spec/
+FROM model-tools AS model-livetransactions
+COPY spec/LiveTransactions.tla spec/LiveTransactions.checks spec/LiveTransactions*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh OwnedFiles && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    scripts/check-model.sh LiveTransactions && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-externalfiles
@@ -358,7 +358,7 @@ COPY --from=model-candidate-placementtakeover /checks/ /checks/
 COPY --from=model-candidate-placementrequests /checks/ /checks/
 COPY --from=model-transactionvalidation /checks/ /checks/
 COPY --from=model-transactionrecovery /checks/ /checks/
-COPY --from=model-ownedfiles /checks/ /checks/
+COPY --from=model-livetransactions /checks/ /checks/
 COPY --from=model-externalfiles /checks/ /checks/
 COPY --from=model-sortedtable /checks/ /checks/
 COPY --from=model-tablemerge /checks/ /checks/

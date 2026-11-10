@@ -111,11 +111,20 @@ impl Writer {
     }
 
     pub fn prepare(&mut self, records: &[Bytes]) -> anyhow::Result<PreparedUpload> {
+        self.reserve(frame::encoded_len(records)?)?.finish(records)
+    }
+
+    /// Reserve before accepting transactions. Dropping this value without
+    /// finishing releases capacity and does not consume a journal position.
+    pub(crate) fn reserve(&mut self, length: usize) -> anyhow::Result<Reserved<'_>> {
+        ensure!(
+            (120..=super::MAX_BATCH_BYTES).contains(&length),
+            "invalid journal reservation"
+        );
         ensure!(
             self.pending.len() < self.limits.batches,
             "journal queue is full"
         );
-        let length = frame::encoded_len(records)?;
         ensure!(
             length <= self.limits.bytes - self.pending_bytes,
             "journal byte budget exhausted"
@@ -125,31 +134,62 @@ impl Writer {
             .planned
             .checked_add(1)
             .context("journal epoch exhausted")?;
-        let (bytes, digest) = frame::encode(self.log(), position, self.previous, records)?;
-        self.pending.insert(
+        Ok(Reserved {
+            writer: self,
+            reservation,
             position,
+            length,
+        })
+    }
+
+    pub(crate) fn planned_position(&self) -> u64 {
+        self.planned
+    }
+}
+
+pub(crate) struct Reserved<'a> {
+    writer: &'a mut Writer,
+    reservation: Arc<Reservation>,
+    position: u64,
+    length: usize,
+}
+impl Reserved<'_> {
+    pub(crate) fn position(&self) -> u64 {
+        self.position
+    }
+    pub(crate) fn finish(self, records: &[Bytes]) -> anyhow::Result<PreparedUpload> {
+        ensure!(
+            frame::encoded_len(records)? <= self.length,
+            "journal reservation exceeded"
+        );
+        let writer = self.writer;
+        let (bytes, digest) = frame::encode(writer.log(), self.position, writer.previous, records)?;
+        writer.pending.insert(
+            self.position,
             Pending {
                 bytes: bytes.clone(),
                 digest,
                 durable: false,
-                reservation: reservation.clone(),
+                reservation: self.reservation.clone(),
             },
         );
-        self.pending_bytes += bytes.len();
-        self.previous = digest;
-        self.planned = position;
+        writer.pending_bytes += bytes.len();
+        writer.previous = digest;
+        writer.planned = self.position;
         Ok(PreparedUpload {
-            storage: self.storage.clone(),
+            storage: writer.storage.clone(),
             prefix: Prefix {
-                log: self.log(),
-                position,
+                log: writer.log(),
+                position: self.position,
                 digest,
             },
             bytes,
-            reservation,
+            reservation: self.reservation,
         })
     }
+}
 
+impl Writer {
     pub fn complete(&mut self, completion: Completion) -> anyhow::Result<()> {
         ensure!(
             completion.prefix.log == self.log(),

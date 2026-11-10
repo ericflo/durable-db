@@ -62,19 +62,7 @@ impl<'a> Commit<'a> {
             receipt_floor,
             request_id,
         )?;
-        validate_mutations(mutations)?;
-        let length = HEADER
-            + database.name.len()
-            + request_id.len()
-            + mutations
-                .iter()
-                .map(|m| 6 + m.key.len() + m.value.map_or(0, <[u8]>::len))
-                .sum::<usize>()
-            + CHECKSUM;
-        ensure!(
-            length <= crate::journal::MAX_RECORD_BYTES,
-            "transaction record exceeds journal bound"
-        );
+        let length = Self::encoded_len(database, request_id, mutations)?;
         let mut bytes = Vec::with_capacity(length);
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(database.generation.as_bytes());
@@ -104,6 +92,28 @@ impl<'a> Commit<'a> {
         bytes.extend_from_slice(&digest);
         debug_assert_eq!(bytes.len(), length);
         Ok(bytes.into())
+    }
+
+    pub(crate) fn encoded_len(
+        database: Database<'_>,
+        request_id: &str,
+        mutations: &[Mutation<'_>],
+    ) -> anyhow::Result<usize> {
+        validate_header(database, 1, 0, 0, request_id)?;
+        validate_mutations(mutations)?;
+        let length = HEADER
+            + database.name.len()
+            + request_id.len()
+            + mutations
+                .iter()
+                .map(|m| 6 + m.key.len() + m.value.map_or(0, <[u8]>::len))
+                .sum::<usize>()
+            + CHECKSUM;
+        ensure!(
+            length <= crate::journal::MAX_RECORD_BYTES,
+            "transaction record exceeds journal bound"
+        );
+        Ok(length)
     }
 
     pub fn decode(bytes: &'a [u8]) -> anyhow::Result<Self> {

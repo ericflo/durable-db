@@ -82,6 +82,83 @@ impl Projection {
     pub fn usage(&self) -> Usage {
         self.usage
     }
+    /// Warm only receipt metadata, retaining a complete committed projection
+    /// even if the caller is cancelled during the preceding immutable reads.
+    pub(crate) async fn warm(
+        &mut self,
+        database: Database<'_>,
+        reserved_receipts: usize,
+        reserved_bytes: usize,
+    ) -> anyhow::Result<(u64, u64)> {
+        let state = self
+            .take_state_reserved(database, reserved_receipts, reserved_bytes)
+            .await?;
+        let metadata = (state.revision(), state.checkpoint_floor());
+        self.databases
+            .get_mut(&(database.name.into(), database.generation))
+            .expect("warmed database")
+            .state = Some(state);
+        Ok(metadata)
+    }
+    async fn take_state_reserved(
+        &mut self,
+        database: Database<'_>,
+        reserved_receipts: usize,
+        reserved_bytes: usize,
+    ) -> anyhow::Result<State> {
+        validate_database(database)?;
+        let key = (database.name.to_owned(), database.generation);
+        if let Some(resident) = self.databases.get_mut(&key) {
+            return resident
+                .state
+                .take()
+                .context("native recovery state already taken");
+        }
+        ensure!(
+            self.usage.databases < self.limits.databases,
+            "native recovery database capacity exhausted"
+        );
+        let base = match &self.base {
+            Some(base) => base.database(database).await?,
+            None => None,
+        };
+        let state = if let Some(base) = &base {
+            base.restore_state(
+                self.limits
+                    .receipts
+                    .saturating_sub(self.usage.receipts + reserved_receipts),
+                self.limits
+                    .receipt_bytes
+                    .saturating_sub(self.usage.receipt_bytes + reserved_bytes),
+            )
+            .await?
+        } else {
+            State::empty(database)?
+        };
+        let (receipts, receipt_bytes) = state.receipt_usage();
+        let floor = state.revision();
+        self.databases.insert(
+            key,
+            Resident {
+                memory: Memory::from_checkpoint(
+                    floor,
+                    memory::Limits {
+                        versions: self.limits.versions,
+                        bytes: self.limits.value_bytes,
+                    },
+                )?,
+                state: None,
+                receipts,
+                receipt_bytes,
+                floor,
+                base,
+            },
+        );
+        self.usage.databases += 1;
+        self.usage.receipts += receipts;
+        self.usage.receipt_bytes += receipt_bytes;
+        Ok(state)
+    }
     pub async fn view(&self, database: Database<'_>) -> anyhow::Result<Option<View<'_>>> {
         validate_database(database)?;
         let resident = self
@@ -191,54 +268,7 @@ impl<'a> View<'a> {
 #[async_trait]
 impl Target for Projection {
     async fn take_state(&mut self, database: Database<'_>) -> anyhow::Result<State> {
-        validate_database(database)?;
-        let key = (database.name.to_owned(), database.generation);
-        if let Some(resident) = self.databases.get_mut(&key) {
-            return resident
-                .state
-                .take()
-                .context("native recovery state already taken");
-        }
-        ensure!(
-            self.usage.databases < self.limits.databases,
-            "native recovery database capacity exhausted"
-        );
-        let base = match &self.base {
-            Some(base) => base.database(database).await?,
-            None => None,
-        };
-        let state = if let Some(base) = &base {
-            base.restore_state(
-                self.limits.receipts - self.usage.receipts,
-                self.limits.receipt_bytes - self.usage.receipt_bytes,
-            )
-            .await?
-        } else {
-            State::empty(database)?
-        };
-        let (receipts, receipt_bytes) = state.receipt_usage();
-        let floor = state.revision();
-        self.databases.insert(
-            key,
-            Resident {
-                memory: Memory::from_checkpoint(
-                    floor,
-                    memory::Limits {
-                        versions: self.limits.versions,
-                        bytes: self.limits.value_bytes,
-                    },
-                )?,
-                state: None,
-                receipts,
-                receipt_bytes,
-                floor,
-                base,
-            },
-        );
-        self.usage.databases += 1;
-        self.usage.receipts += receipts;
-        self.usage.receipt_bytes += receipt_bytes;
-        Ok(state)
+        self.take_state_reserved(database, 0, 0).await
     }
     async fn apply(&mut self, commit: &Commit<'_>, state: State) -> anyhow::Result<()> {
         ensure!(
@@ -357,6 +387,12 @@ impl Recovering {
     pub fn finish(self) -> anyhow::Result<Projection> {
         ensure!(self.is_complete(), "native recovery is incomplete");
         Ok(self.projection)
+    }
+    pub(crate) fn finish_bound(
+        self,
+    ) -> anyhow::Result<(crate::ownership::root::Record, Projection)> {
+        ensure!(self.is_complete(), "native recovery is incomplete");
+        Ok((self.replay.origin(), self.projection))
     }
     pub async fn checkpoint(&self) -> anyhow::Result<checkpoint::Staged> {
         checkpoint::write(self).await
