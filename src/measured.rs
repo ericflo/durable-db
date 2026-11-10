@@ -11,6 +11,19 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) struct Files(pub Arc<dyn Storage>);
 #[async_trait]
 impl Storage for Files {
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        object_size: u64,
+    ) -> anyhow::Result<Bytes> {
+        metrics::measure(
+            Operation::ObjectGet,
+            self.0.get_range(key, range, object_size),
+        )
+        .await
+    }
+
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
         metrics::measure(Operation::ObjectGet, self.0.get(key, max)).await
     }

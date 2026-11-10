@@ -1,4 +1,7 @@
 //! The only authority boundary: fresh reads, immutable uploads, and conditional replacement.
+mod ranges;
+pub use ranges::MAX_RANGE_BYTES;
+
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -33,6 +36,19 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
     async fn get(&self, key: &str, max_bytes: usize) -> anyhow::Result<Option<Object>>;
+    /// Read exactly a bounded nonempty range of an existing immutable object.
+    /// The durable reference supplies the full object size. Missing/truncated
+    /// bytes, size changes and ignored Range headers are errors. There is no
+    /// fallback to downloading the whole object. Identity immutability and
+    /// payload integrity remain the caller/provider's contract.
+    async fn get_range(
+        &self,
+        _key: &str,
+        _range: std::ops::Range<u64>,
+        _object_size: u64,
+    ) -> anyhow::Result<Bytes> {
+        bail!("bounded range reads are unsupported by this storage binding")
+    }
     /// None means create-if-absent. False is a definite conflict, Err is possibly ambiguous.
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool>;
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()>;
@@ -115,6 +131,15 @@ impl Remote {
 }
 #[async_trait]
 impl Storage for Remote {
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        object_size: u64,
+    ) -> anyhow::Result<Bytes> {
+        self.read_range(key, range, object_size).await
+    }
+
     async fn get(&self, key: &str, max_bytes: usize) -> anyhow::Result<Option<Object>> {
         let result = match self.inner.get(&self.path(key)).await {
             Ok(r) => r,
@@ -295,6 +320,15 @@ impl Local {
 }
 #[async_trait]
 impl Storage for Local {
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        object_size: u64,
+    ) -> anyhow::Result<Bytes> {
+        self.read_range(key, range, object_size).await
+    }
+
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
         self.read(key, max).await
     }

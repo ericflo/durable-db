@@ -96,6 +96,7 @@ for (const file of [
   'slatedb-contract-2026-11-09.json',
   'owned-files-2026-11-09.json',
   'owned-index-2026-11-09.json',
+  'storage-ranges-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',
   'partition-control-candidate-2026-11-09.json',
   'provider-register-2026-11-09.json',
