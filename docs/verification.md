@@ -393,6 +393,22 @@ Its test-only clock reads `CLOCK_BOOTTIME` and multiplies ticks by 3/2 to center
 
 Run `cargo test --locked --lib physical_owner_pause`. Woodpecker's Linux Rust suite includes it. This establishes the process-pause scenario only. [Linux documents that boottime includes suspend](https://docs.kernel.org/core-api/timekeeping.html); [KVM timekeeping](https://docs.kernel.org/virt/kvm/x86/timekeeping.html) does not establish our full platform bounds. Hardware/VM suspension, migration or memory restoration, clock-source/frequency changes, independent-host rate/error bounds and production profiles remain unqualified. The adapter stays test-only; no production runtime clock is selected.
 
+The opt-in VM experiment now supplies a concrete counterexample to using unqualified `CLOCK_BOOTTIME` for leases. With QEMU 10.1.5/KVM and Linux 6.18.60, the `kvm-clock` source advanced only **7.3 ms during a 3-second QMP pause**. Selecting `tsc` passed that pause, but restoring saved memory still left only **8.0 ms of guest elapsed time after roughly 3.2 seconds on the host**. The earlier process-pause passes do not cover these cases.
+
+A test-only guard reads `/dev/vmclock0` before and after sampling time and refuses a timestamp if the hypervisor's disruption marker differs from its original value. Snapshot load changed that marker from 1 to 2 and the guard refused the restored timestamp. Results for the finite scenarios:
+
+| Scenario | `kvm-clock` with marker guard | `tsc` with marker guard |
+| --- | --- | --- |
+| Ordinary three-second interval | Passed comparison | Passed comparison |
+| QMP pause/resume | **Failed: accepted clock missed the gap** | Passed comparison |
+| Freeze the QEMU container | Passed comparison | Passed comparison |
+| Restore saved VM memory | Refused timestamp | Refused timestamp |
+
+Run `scripts/check-vm-clock.py --output /tmp/vm-clock.json` on a Linux development host with Docker and `/dev/kvm`. Its expected exit status for this configuration is **1**, preserving the unsafe clocksource result. `--clocksource tsc` restricts it to the guarded candidate. The guest has one vCPU, 128 MiB, no network and a disposable snapshot disk. No host is paused. The tool removes its VMs and temporary files; its image may stay cached for repeat runs. [Exact samples, source hashes, configuration and limits](evidence/vm-clock-2026-11-10.json).
+
+The marker behavior is consistent with the [QEMU device's post-load update](https://github.com/qemu/qemu/blob/master/hw/acpi/vmclock.c) and the [VMClock specification](https://uapi-group.org/specifications/specs/vmclock/). This is evidence for a candidate restore guard, not production qualification: inter-host rate/error bounds, live migration, clocksource changes, hardware suspend, Rust integration and complete takeover still need validation. The CLI remains on its existing engine.
+
+
 ## Candidate root controller
 
 `src/ownership/root.rs` composes the existing request session and interval arithmetic in Rust. `Connection::root` supplies the same controller for B2 and S3; there is no provider-specific ownership implementation. It creates a fresh incarnation, binds a claim once, confirms only the current invocation, starts the first drain after confirmation and preserves request-anchored expiry. Renewal attempts do not discard existing permission. Activation never extends it. Unknown activation outcomes require exact validation and reuse their completed drain.
@@ -401,7 +417,7 @@ Its current `owned-candidate-3` metadata records the namespace, full timing prof
 
 Ten component tests cover bootstrap, competing candidates, claims applied after abandonment, lost claim/activation replies, late writes/replies across takeover, expiry, foreign invocations, permanent retirement, namespace/profile refusal and bounded metadata. Two loopback HTTP tests exercise the actual B2 and S3 bindings. The B2 provider continues processing a cancelled claim on both sides of a successor fence and loses an applied renewal response. S3 begins with an absent authority object, loses the successful creation response, then rejects a late old-owner update after takeover. Assertions check single physical attempts, retained foreign metadata and expiry. All clocks are controlled fixtures; this does not qualify platform timing or AWS/B2 cloud behavior. [Evidence](evidence/root-controller-2026-11-09.json).
 
-The controller grants no data-history guarantee by itself. A caller must recover the selected journal/catalog, match placement, prepare a consistent view and check permission before acknowledging or serving. No system clock adapter, automatic election/renewal driver, placement protocol, tenant admission or serving API is implemented here. The separate acquisition checks, request proofs and interval proof do not establish a complete composition theorem or Rust refinement. The current HTTP engine still uses conditional read barriers.
+The controller grants no data-history guarantee by itself. A caller must recover the selected journal/catalog, match placement, prepare a consistent view and check permission before acknowledging or serving. The native serving integration and bounded renewal scheduler are described below; a qualified system clock, automatic election and placement remain open. The separate acquisition checks, request proofs and interval proof do not establish a complete composition theorem or Rust refinement. The CLI still selects the earlier engine with conditional read barriers.
 
 ## Durable root registrations
 
@@ -411,7 +427,7 @@ The registration qualification used `owned-candidate-2`; the current format adds
 
 Four additional tests cover positive resolution versus an upload that arrives after a different candidate wins; dropping all controller/writer/read state and retaining only the provider's current register and objects; every-byte corruption plus checksum-valid semantic mutations; and both namespace-size boundaries. Cold discovery finds three earlier journals and their immutable frames without listing, using a fresh clock origin. It does not claim that their provisional prefixes were durably selected. The S3 HTTP fixture now loses an applied registration PUT response, checks exactly one PUT per registration and traverses the chain through the real binding. B2 retains both cancellation-order cases with registration preceding publication. [Evidence](evidence/root-registration-2026-11-09.json).
 
-The model assumes unique immutable identities and exact register comparisons. Its acknowledgement markers overapproximate eligibility and only assert discoverability. It does not prove data-byte durability, selected-prefix preservation, permission/clock composition, implementation refinement or liveness. Runtime clocks remain unqualified. Checkpoint/recovery integration is described below; registration collection and physical upload admission remain open; the current serving API does not use this controller.
+The model assumes unique immutable identities and exact register comparisons. Its acknowledgement markers overapproximate eligibility and only assert discoverability. It does not prove data-byte durability, selected-prefix preservation, permission/clock composition, implementation refinement or liveness. Runtime clocks remain unqualified. Checkpoint/recovery and native HTTP integration are described below; registration collection and physical upload admission remain open.
 
 ## Durable prefix catalog
 
@@ -423,7 +439,7 @@ The Rust `owned-candidate-3` record carries an immutable catalog identity and re
 
 Eight additional tests cover lost replies and complete reopening, both selection/claim orders, stale parallel scans, activation/identity/expiry checks, missing/corrupt/oversized catalog objects, failures at all three upload stages, a split index with 130 selected journals, and renewals during a long scan. B2's real HTTP control fixture loses an applied selection reply; S3's HTTP fixture also uploads and reads the journal, index, prefix and catalog and excludes a late second frame after recovery. These are loopback fixtures with controlled clocks, not cloud qualification. [Evidence](evidence/root-catalog-2026-11-09.json).
 
-The model assumes ordered winning epochs, durable immutable bytes and exact register comparisons. Drain completion abstracts the ending of every earlier acknowledgement interval. The separate acquisition, registration, timing and journal results are not a complete composition or Rust-refinement theorem. This catalog does not implement transaction/receipt recovery, checkpoint truncation, collection, physical upload admission, automatic driving or routing. History traversal still grows with ownership changes. The current HTTP engine retains conditional read barriers.
+The model assumes ordered winning epochs, durable immutable bytes and exact register comparisons. Drain completion abstracts the ending of every earlier acknowledgement interval. The separate acquisition, registration, timing and journal results are not a complete composition or Rust-refinement theorem. Later sections describe transaction/receipt recovery, checkpoints and native HTTP integration. Collection, physical upload admission, election and placement remain open. History traversal still grows with ownership changes. The CLI's earlier engine retains conditional read barriers.
 
 The same change raises only the disposable JavaScript test server's request budget. An isolated receipt-eviction test fell from **37.35 s to 2.44 s** locally; the full JavaScript suite passed 98 tests with one opt-in process-control case skipped, plus four web-app storage tests. No assertions or failure scenarios were removed. These single-run development timings measure avoided admission waits, not database throughput.
 
