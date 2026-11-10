@@ -48,7 +48,45 @@ pub struct Usage {
     pub receipts: usize,
     pub receipt_bytes: usize,
 }
+/// Live user keys and their key/value bytes at the current committed revision.
+/// Retained versions, receipts and physical storage are accounted separately.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Statistics {
+    pub keys: u64,
+    pub bytes: u64,
+}
+impl Statistics {
+    pub(crate) fn replace(
+        &mut self,
+        key: usize,
+        old: Option<usize>,
+        new: Option<usize>,
+    ) -> anyhow::Result<()> {
+        if let Some(old) = old {
+            self.keys = self
+                .keys
+                .checked_sub(1)
+                .context("live key accounting underflow")?;
+            self.bytes = self
+                .bytes
+                .checked_sub((key + old) as u64)
+                .context("live byte accounting underflow")?;
+        }
+        if let Some(new) = new {
+            self.keys = self
+                .keys
+                .checked_add(1)
+                .context("live key accounting overflow")?;
+            self.bytes = self
+                .bytes
+                .checked_add((key + new) as u64)
+                .context("live byte accounting overflow")?;
+        }
+        Ok(())
+    }
+}
 struct Resident {
+    statistics: Statistics,
     memory: Memory,
     state: Option<State>,
     receipts: usize,
@@ -145,6 +183,10 @@ impl Projection {
         self.databases.insert(
             key,
             Resident {
+                statistics: base.as_ref().map_or(
+                    Statistics::default(),
+                    checkpoint::DatabaseSnapshot::statistics,
+                ),
                 memory: Memory::from_checkpoint(
                     floor,
                     memory::Limits {
@@ -187,6 +229,8 @@ impl Projection {
             })
             .transpose()?;
         Ok(Some(View {
+            statistics: resident
+                .map_or_else(|| base.as_ref().unwrap().statistics(), |r| r.statistics),
             floor: resident.map_or_else(|| base.as_ref().unwrap().revision(), |r| r.floor),
             memory: resident.map(|r| &r.memory),
             state,
@@ -197,12 +241,16 @@ impl Projection {
 /// A coherent immutable checkpoint plus the selected suffix at one generation.
 /// The projection is private until recovery completes; authority is external.
 pub struct View<'a> {
+    statistics: Statistics,
     memory: Option<&'a Memory>,
     state: Option<&'a State>,
     base: Option<checkpoint::DatabaseSnapshot>,
     floor: u64,
 }
 impl<'a> View<'a> {
+    pub fn statistics(&self) -> Statistics {
+        self.statistics
+    }
     /// Only resident suffix versions, for a future incremental flush. These
     /// rows exclude checkpoint values and are not a complete database image.
     pub fn recent_rows(&self) -> impl Iterator<Item = table::Row<'_>> {
@@ -329,7 +377,26 @@ impl Target for Projection {
                 self.limits.receipt_bytes,
             )?,
         };
+        let mut statistics = resident.statistics;
+        for mutation in commit.mutations() {
+            let old = match resident
+                .memory
+                .get(mutation.key.as_bytes(), commit.revision() - 1)?
+            {
+                Some(row) => Some(row),
+                None => match &resident.base {
+                    Some(base) => base.get(mutation.key).await?,
+                    None => None,
+                },
+            };
+            statistics.replace(
+                mutation.key.len(),
+                old.and_then(|r| r.value).map(|v| v.len()),
+                mutation.value.map(<[u8]>::len),
+            )?;
+        }
         resident.memory.append(commit)?;
+        resident.statistics = statistics;
         resident.state = Some(state);
         resident.receipts = receipts;
         resident.receipt_bytes = receipt_bytes;

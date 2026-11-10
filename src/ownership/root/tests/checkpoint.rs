@@ -202,6 +202,8 @@ async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generatio
     assert_eq!(original.usage().receipts, 3);
     assert!(original.usage().value_bytes <= 32);
     let view = original.view(db()).await.unwrap().unwrap();
+    let stats = view.statistics();
+    assert_eq!((stats.keys, stats.bytes), (66, 64 * (8 + 4096) + 9));
     for revision in 1..=3 {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert(
@@ -271,6 +273,10 @@ async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generatio
         .unwrap(),
     )
     .await;
+    assert_eq!(
+        replacement.view(db()).await.unwrap().unwrap().statistics(),
+        stats
+    );
     assert_eq!(
         replacement.usage(),
         crate::index::recovery::Usage::default()

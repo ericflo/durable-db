@@ -89,6 +89,7 @@ pub enum Rejection {
     ReceiptExpired,
     IdentityReused,
     Capacity,
+    Quota,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {

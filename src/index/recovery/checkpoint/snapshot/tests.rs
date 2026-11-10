@@ -90,6 +90,11 @@ async fn fixture(files: Arc<dyn Storage>) -> Reference {
         prefix.extend_from_slice(database.generation.as_bytes());
         let mut meta = 3u64.to_be_bytes().to_vec();
         meta.extend_from_slice(&1u64.to_be_bytes());
+        let values: Vec<_> = (0..180).filter_map(|n| value(generation, n)).collect();
+        meta.extend_from_slice(&(values.len() as u64).to_be_bytes());
+        meta.extend_from_slice(
+            &(values.iter().map(|v| 6 + v.len() as u64).sum::<u64>()).to_be_bytes(),
+        );
         builder
             .push(&prefix, 0, b"", 3, Some(meta.into()))
             .await

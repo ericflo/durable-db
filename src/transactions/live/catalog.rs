@@ -288,6 +288,7 @@ impl<C: Clock> Owner<C> {
             return Err(Error::Invalid("batch needs 1..128 transactions".into()));
         }
         let mut bindings = Vec::with_capacity(requests.len());
+        let mut limits = Vec::with_capacity(requests.len());
         for (db, _, caller) in requests {
             caller.check_scope(db, true)?;
             let entry = self.catalog_entry(db).await?.ok_or(Error::NotFound)?;
@@ -295,6 +296,7 @@ impl<C: Clock> Owner<C> {
             if self.catalog_pending.contains_key(*db) {
                 return Err(Error::Busy);
             }
+            limits.push(entry.creation.limits().clone());
             bindings.push(Database {
                 name: db,
                 generation: entry.generation()?,
@@ -305,7 +307,7 @@ impl<C: Clock> Owner<C> {
             .copied()
             .zip(requests.iter().map(|(_, r, _)| *r))
             .collect();
-        let prepared = self.prepare_requests(&inputs).await?;
+        let prepared = self.prepare_limited(&inputs, Some(&limits)).await?;
         let tickets = prepared
             .tickets
             .into_iter()

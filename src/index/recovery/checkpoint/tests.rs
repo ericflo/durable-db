@@ -77,6 +77,8 @@ fn prefix() -> Vec<u8> {
 fn meta(revision: u64, floor: u64) -> Bytes {
     let mut out = revision.to_be_bytes().to_vec();
     out.extend_from_slice(&floor.to_be_bytes());
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&0u64.to_be_bytes());
     out.into()
 }
 fn receipt(fingerprint: u8) -> Bytes {
@@ -85,7 +87,15 @@ fn receipt(fingerprint: u8) -> Bytes {
 async fn image(files: Arc<dyn Storage>, bad: u8) -> anyhow::Result<Reference> {
     let mut builder = Builder::new(files.clone());
     let prefix = prefix();
-    builder.push(&prefix, 0, b"", 2, Some(meta(2, 0))).await?;
+    let mut metadata = meta(2, 0).to_vec();
+    if bad == 5 {
+        // Structurally valid but incorrect counts must fail a full-image audit.
+        metadata[16..24].copy_from_slice(&1u64.to_be_bytes());
+        metadata[24..32].copy_from_slice(&2u64.to_be_bytes());
+    }
+    builder
+        .push(&prefix, 0, b"", 2, Some(metadata.into()))
+        .await?;
     if bad != 1 {
         builder
             .push(&prefix, 1, b"first", 1, Some(receipt(1)))
@@ -130,7 +140,7 @@ async fn unknown_upload_at_every_stage_never_returns_a_checkpoint_reference() {
 }
 #[tokio::test]
 async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
-    for bad in 1..=4 {
+    for bad in 1..=5 {
         let files = Files::new(0);
         let reference = image(files.clone(), bad).await.unwrap();
         let snapshot = Snapshot::open(
@@ -152,7 +162,7 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
             assert!(database.restore_state(2, 1000).await.is_err());
         } else if bad == 3 {
             assert!(database.get("x").await.is_err());
-        } else {
+        } else if bad == 4 {
             let mut rows = snapshot.rows().unwrap();
             loop {
                 match rows.next().await {

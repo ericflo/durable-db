@@ -26,6 +26,9 @@ pub(crate) fn digest(request: &CreateRequest) -> anyhow::Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 impl CreationReceipt {
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.initial.limits
+    }
     pub(crate) fn validate(&self, policy: &access::Policy) -> anyhow::Result<()> {
         ensure!(
             !self.id.is_empty() && self.id.len() <= 128 && valid_digest(&self.digest),

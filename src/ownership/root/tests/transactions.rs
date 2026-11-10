@@ -125,6 +125,8 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
     assert_eq!(view.usage().receipts, 4);
     let a = view.view(database("a")).await.unwrap().unwrap();
     let b = view.view(database("b")).await.unwrap().unwrap();
+    assert_eq!((a.statistics().keys, a.statistics().bytes), (1, 6));
+    assert_eq!((b.statistics().keys, b.statistics().bytes), (1, 1));
     assert!(a.get(b"x", 2).await.unwrap().unwrap().value.is_none());
     assert_eq!(
         a.get(b"x", 1).await.unwrap().unwrap().value.as_deref(),

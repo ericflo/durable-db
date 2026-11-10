@@ -89,7 +89,7 @@ impl Header {
             hex::encode(out)
         });
         let bytes = serde_json::to_vec(&Wire {
-            format: 1,
+            format: 2,
             epoch: self.cut.identity.epoch,
             incarnation: self.cut.identity.incarnation.to_string(),
             cut: hex::encode(self.cut.prefix.encode()),
@@ -121,7 +121,7 @@ impl Header {
         let incarnation = Uuid::parse_str(&wire.incarnation)?;
         let prefix = Prefix::decode(&hex::decode(&wire.cut)?)?;
         ensure!(
-            wire.format == 1
+            wire.format == 2
                 && wire.epoch > 0
                 && !incarnation.is_nil()
                 && incarnation.to_string() == wire.incarnation
@@ -357,6 +357,8 @@ fn changed_rows(projection: &Projection) -> impl Iterator<Item = Entry> + '_ {
             prefix.extend_from_slice(generation.as_bytes());
             let mut meta = state.revision().to_be_bytes().to_vec();
             meta.extend_from_slice(&state.checkpoint_floor().to_be_bytes());
+            meta.extend_from_slice(&resident.statistics.keys.to_be_bytes());
+            meta.extend_from_slice(&resident.statistics.bytes.to_be_bytes());
             let metadata = std::iter::once(checkpoint_row(
                 &prefix,
                 0,
@@ -447,14 +449,20 @@ fn finish_database(
     current: Option<&(String, Uuid)>,
 ) -> anyhow::Result<()> {
     if let Some(key) = current {
-        projection
-            .databases
-            .get_mut(key)
-            .unwrap()
+        let resident = projection.databases.get_mut(key).unwrap();
+        let state = resident
             .state
             .as_mut()
-            .context("checkpoint state missing")?
-            .seal_checkpoint()?;
+            .context("checkpoint state missing")?;
+        state.seal_checkpoint()?;
+        let mut actual = super::Statistics::default();
+        for row in resident.memory.scan(b"", None, state.revision())? {
+            actual.replace(row.key.len(), None, row.value.as_ref().map(Bytes::len))?;
+        }
+        ensure!(
+            actual == resident.statistics,
+            "checkpoint live statistics mismatch"
+        );
     }
     Ok(())
 }
@@ -476,11 +484,12 @@ fn load_row(
             projection.usage.databases < projection.limits.databases,
             "checkpoint database capacity exhausted"
         );
-        let state = metadata(&row, db)?;
+        let (state, statistics) = metadata(&row, db)?;
         let revision = state.revision();
         projection.databases.insert(
             key.clone(),
             Resident {
+                statistics,
                 memory: Memory::from_checkpoint(
                     revision,
                     memory::Limits {
@@ -565,16 +574,27 @@ fn split_key(key: &[u8]) -> anyhow::Result<(Database<'_>, u8, &[u8])> {
     ensure!(kind <= 2, "invalid checkpoint row kind");
     Ok((database, kind, &key[zero + 18..]))
 }
-fn metadata(row: &Entry, database: Database<'_>) -> anyhow::Result<State> {
+fn metadata(row: &Entry, database: Database<'_>) -> anyhow::Result<(State, super::Statistics)> {
     let bytes = row.value.as_ref().context("checkpoint metadata deleted")?;
-    ensure!(bytes.len() == 16, "invalid checkpoint metadata length");
+    ensure!(bytes.len() == 32, "invalid checkpoint metadata length");
     let revision = u64::from_be_bytes(bytes[..8].try_into()?);
-    let floor = u64::from_be_bytes(bytes[8..].try_into()?);
+    let floor = u64::from_be_bytes(bytes[8..16].try_into()?);
     ensure!(
         row.revision == revision,
         "checkpoint metadata revision mismatch"
     );
-    State::from_checkpoint(database, revision, floor)
+    let statistics = super::Statistics {
+        keys: u64::from_be_bytes(bytes[16..24].try_into()?),
+        bytes: u64::from_be_bytes(bytes[24..32].try_into()?),
+    };
+    ensure!(
+        statistics.keys <= statistics.bytes && (statistics.keys != 0 || statistics.bytes == 0),
+        "invalid checkpoint live statistics"
+    );
+    Ok((
+        State::from_checkpoint(database, revision, floor)?,
+        statistics,
+    ))
 }
 #[cfg(test)]
 mod tests;

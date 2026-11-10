@@ -834,7 +834,10 @@ mod tests {
         let admin = Access::Administrator;
         let request = CreateRequest {
             request_id: "create-tenant".into(),
-            limits: Default::default(),
+            limits: crate::engine::Limits {
+                max_keys: 1,
+                max_bytes: 7,
+            },
         };
         let mut creation = owner
             .prepare_creation("tenant", &request, &admin)
@@ -877,6 +880,31 @@ mod tests {
             .complete(protected.upload.unwrap().send().await)
             .await
             .unwrap();
+        let objects = state.lock().unwrap().object_puts;
+        let too_large = serde_json::from_str(r#"{"expected_revision":1,"request_id":"quota","writes":[{"key":"note","value":"b25lIQ=="}]}"#).unwrap();
+        let rejected = owner
+            .prepare_authorized(&[("tenant", &too_large, &caller)])
+            .await
+            .unwrap();
+        assert!(rejected.upload.is_none());
+        assert!(matches!(
+            owner.authorized_result(&rejected.tickets[0], &caller).await,
+            Err(Error::Limit(_))
+        ));
+        let retry = owner
+            .prepare_authorized(&[("tenant", &wire_request, &caller)])
+            .await
+            .unwrap();
+        assert!(retry.upload.is_none());
+        assert!(
+            owner
+                .authorized_result(&retry.tickets[0], &caller)
+                .await
+                .unwrap()
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(state.lock().unwrap().object_puts, objects);
         let mut revoke = owner
             .prepare_policy(
                 "tenant",

@@ -367,3 +367,188 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         1
     );
 }
+
+fn quota_write(revision: u64, id: &str, writes: &[(&str, Option<&[u8]>)]) -> CommitRequest {
+    use base64::Engine as _;
+    serde_json::from_value(serde_json::json!({
+        "expected_revision": revision, "request_id": id,
+        "writes": writes.iter().map(|(key, value)| serde_json::json!({
+            "key": key, "value": value.map(|v| base64::engine::general_purpose::STANDARD.encode(v))
+        })).collect::<Vec<_>>()
+    }))
+    .unwrap()
+}
+async fn apply_quota_write(
+    owner: &mut Owner<ManualClock>,
+    request: &CommitRequest,
+) -> crate::Result<crate::engine::CommitResult> {
+    let prepared = owner
+        .prepare_authorized(&[("app", request, &Access::Administrator)])
+        .await?;
+    if let Some(upload) = prepared.upload {
+        owner.complete(upload.send().await).await?;
+    }
+    Ok(owner
+        .authorized_result(&prepared.tickets[0], &Access::Administrator)
+        .await?
+        .unwrap())
+}
+
+#[tokio::test]
+async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_takeover() {
+    for checkpoint_frames in [1, 256] {
+        let provider = Provider::new();
+        let clock = ManualClock::default();
+        let limits = live::Limits {
+            checkpoint_frames,
+            ..Default::default()
+        };
+        let mut owner = open(active(&provider, &clock).await, limits).await;
+        let admin = Access::Administrator;
+        for db in ["app", "neighbor"] {
+            let mut request = create(db);
+            request.limits = crate::engine::Limits {
+                max_keys: 1,
+                max_bytes: 4,
+            };
+            let mut prepared = owner.prepare_creation(db, &request, &admin).await.unwrap();
+            owner
+                .complete(prepared.upload.take().unwrap().send().await)
+                .await
+                .unwrap();
+        }
+        let first = quota_write(0, "first", &[("x", Some(b"abc"))]);
+        let competing = quota_write(0, "competing", &[("y", Some(b"abc"))]);
+        let too_large = quota_write(0, "too-large", &[("x", Some(b"abcd"))]);
+        let group = owner
+            .prepare_authorized(&[
+                ("app", &first, &admin),
+                ("app", &first, &admin),
+                ("app", &competing, &admin),
+                ("neighbor", &too_large, &admin),
+                ("neighbor", &first, &admin),
+            ])
+            .await
+            .unwrap();
+        assert!(
+            owner
+                .authorized_result(&group.tickets[0], &admin)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        owner
+            .complete(group.upload.unwrap().send().await)
+            .await
+            .unwrap();
+        for i in [0, 1, 4] {
+            let result = owner
+                .authorized_result(&group.tickets[i], &admin)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.revision, 1);
+            assert_eq!(result.replayed, i == 1);
+        }
+        assert!(matches!(
+            owner.authorized_result(&group.tickets[2], &admin).await,
+            Err(Error::Conflict)
+        ));
+        assert!(matches!(
+            owner.authorized_result(&group.tickets[3], &admin).await,
+            Err(Error::Limit(_))
+        ));
+        let controls = provider.calls.load(Ordering::SeqCst);
+        for request in [
+            quota_write(1, "keys", &[("y", Some(b""))]),
+            quota_write(1, "bytes", &[("x", Some(b"abcd"))]),
+        ] {
+            let rejected = owner
+                .prepare_authorized(&[("app", &request, &admin)])
+                .await
+                .unwrap();
+            assert!(rejected.upload.is_none());
+            assert!(matches!(
+                owner.authorized_result(&rejected.tickets[0], &admin).await,
+                Err(Error::Limit(_))
+            ));
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
+        // Missing deletes, empty values and replacements count the final map,
+        // even when sorted mutation order temporarily exceeds the key limit.
+        let edits = [
+            quota_write(1, "missing", &[("missing", None)]),
+            quota_write(2, "empty", &[("x", Some(b""))]),
+            quota_write(3, "replace", &[("aa", Some(b"zz")), ("x", None)]),
+            quota_write(
+                4,
+                "duplicate",
+                &[("aa", Some(b"oversized")), ("aa", Some(b"zz"))],
+            ),
+        ];
+        for (i, request) in edits.iter().enumerate() {
+            assert_eq!(
+                apply_quota_write(&mut owner, request)
+                    .await
+                    .unwrap()
+                    .revision,
+                i as u64 + 2
+            );
+        }
+        let mut root = successor(&provider, &clock).await;
+        let journal = scan(&mut root).await;
+        seal(&mut root, journal).await;
+        let mut owner = open(root, limits).await;
+        // Resolve the original receipt before comparing its stale expected
+        // revision or charging its now-over-quota hypothetical writes again.
+        let retry = apply_quota_write(&mut owner, &first).await.unwrap();
+        assert_eq!(retry.revision, 1);
+        assert!(retry.replayed);
+        assert!(matches!(
+            apply_quota_write(
+                &mut owner,
+                &quota_write(5, "after-recovery", &[("x", Some(b""))])
+            )
+            .await,
+            Err(Error::Limit(_))
+        ));
+        let deleted = quota_write(5, "delete", &[("aa", None)]);
+        assert_eq!(
+            apply_quota_write(&mut owner, &deleted)
+                .await
+                .unwrap()
+                .revision,
+            6
+        );
+        assert_eq!(
+            apply_quota_write(
+                &mut owner,
+                &quota_write(6, "refill", &[("x", Some(b"abc"))])
+            )
+            .await
+            .unwrap()
+            .revision,
+            7
+        );
+        let read = ReadRequest {
+            keys: vec!["x".into(), "aa".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            owner
+                .read_authorized("app", &read, &admin)
+                .await
+                .unwrap()
+                .values,
+            vec![Some("YWJj".into()), None]
+        );
+        assert_eq!(
+            owner
+                .read_authorized("neighbor", &read, &admin)
+                .await
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+}

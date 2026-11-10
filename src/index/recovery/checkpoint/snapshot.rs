@@ -105,8 +105,9 @@ impl Snapshot {
         let Some(row) = self.lookup(key).await? else {
             return Ok(None);
         };
-        let state = super::metadata(&row, database)?;
+        let (state, statistics) = super::metadata(&row, database)?;
         Ok(Some(DatabaseSnapshot {
+            statistics,
             snapshot: self.clone(),
             prefix: prefix.into(),
             revision: state.revision(),
@@ -144,12 +145,16 @@ impl Snapshot {
 /// resolution and value reads do not consult a mutable root or write storage.
 #[derive(Clone)]
 pub struct DatabaseSnapshot {
+    statistics: crate::index::recovery::Statistics,
     snapshot: Snapshot,
     prefix: Bytes,
     revision: u64,
     receipt_floor: u64,
 }
 impl DatabaseSnapshot {
+    pub fn statistics(&self) -> crate::index::recovery::Statistics {
+        self.statistics
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }

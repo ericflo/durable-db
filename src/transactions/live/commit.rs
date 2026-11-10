@@ -26,6 +26,13 @@ impl<C: Clock> Owner<C> {
         &mut self,
         requests: &[(Database<'_>, &CommitRequest)],
     ) -> Result<Prepared> {
+        self.prepare_limited(requests, None).await
+    }
+    pub(super) async fn prepare_limited(
+        &mut self,
+        requests: &[(Database<'_>, &CommitRequest)],
+        limits: Option<&[crate::engine::Limits]>,
+    ) -> Result<Prepared> {
         if !(1..=128).contains(&requests.len()) {
             return Err(Error::Invalid("batch needs 1..128 transactions".into()));
         }
@@ -62,12 +69,18 @@ impl<C: Clock> Owner<C> {
         self.maintain().await?;
         let blocked = self.checkpoint_due();
         let mut evaluations = Vec::with_capacity(requests.len());
-        for (((database, request), decoded), fingerprint) in
-            requests.iter().zip(&decoded).zip(&identities)
+        for (i, (((database, request), decoded), fingerprint)) in
+            requests.iter().zip(&decoded).zip(&identities).enumerate()
         {
             evaluations.push(
-                self.evaluate_request(*database, request, decoded, *fingerprint)
-                    .await?,
+                self.evaluate_request(
+                    *database,
+                    request,
+                    decoded,
+                    *fingerprint,
+                    limits.map(|limits| &limits[i]),
+                )
+                .await?,
             );
         }
         let mutations: Vec<Vec<_>> = decoded
@@ -126,6 +139,7 @@ impl<C: Clock> Owner<C> {
         request: &CommitRequest,
         decoded: &DecodedCommit,
         fingerprint: [u8; 32],
+        limits: Option<&crate::engine::Limits>,
     ) -> Result<Evaluation> {
         self.warm(database).await?;
         let key = (
@@ -180,6 +194,25 @@ impl<C: Clock> Owner<C> {
                 return self.request_answer(conflict, false);
             }
         }
+        if let Some(limits) = limits {
+            let mut statistics = view.statistics();
+            for (key, value) in &decoded.writes {
+                let old = view
+                    .get(key.as_bytes(), view.revision())
+                    .await?
+                    .and_then(|r| r.value);
+                statistics.replace(
+                    key.len(),
+                    old.map(|v| v.len()),
+                    value.as_ref().map(Vec::len),
+                )?;
+            }
+            // Admission validates Read::Database against accepted predecessors.
+            // Two writes evaluated from this revision cannot both consume quota.
+            if statistics.keys > limits.max_keys || statistics.bytes > limits.max_bytes {
+                return self.request_answer(Outcome::Rejected(Rejection::Quota), false);
+            }
+        }
         let name: Arc<str> = database.name.into();
         let snapshot = Snapshot {
             token: self.active[&(name.clone(), database.generation)]
@@ -218,6 +251,7 @@ impl<C: Clock> Owner<C> {
                 }
                 Rejection::ReceiptExpired => Error::ReceiptExpired,
                 Rejection::Capacity => Error::Busy,
+                Rejection::Quota => Error::Limit("database quota exceeded".into()),
                 Rejection::Validation(error) => match error {
                     validation::Error::Conflict | validation::Error::SnapshotExpired => {
                         Error::Conflict
