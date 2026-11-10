@@ -635,7 +635,13 @@ mod tests {
         );
         for _ in 0..1000 {
             assert_eq!(
-                files.view().unwrap().get("manifest/1").unwrap().bytes(),
+                files
+                    .view()
+                    .unwrap()
+                    .get("manifest/1")
+                    .unwrap()
+                    .bytes()
+                    .unwrap(),
                 b"two"
             );
         }

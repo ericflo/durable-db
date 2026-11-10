@@ -72,10 +72,18 @@ async fn conditions_include_pending_predecessors_and_visibility_waits_for_every_
     assert_eq!(ns.view().unwrap().revision(), 0);
     ns.complete(first.send().await).unwrap();
     assert_eq!(
-        ns.view().unwrap().get("manifest/1").unwrap().bytes(),
+        ns.view()
+            .unwrap()
+            .get("manifest/1")
+            .unwrap()
+            .bytes()
+            .unwrap(),
         b"two"
     );
-    assert_eq!(ns.view().unwrap().get("wal/2").unwrap().bytes(), b"");
+    assert_eq!(
+        ns.view().unwrap().get("wal/2").unwrap().bytes().unwrap(),
+        b""
+    );
     assert_eq!(ns.view().unwrap().revision(), 3);
     assert_eq!(ns.pending_batches(), 0);
     assert_eq!(ns.durable_prefix().position(), 2);
@@ -185,7 +193,7 @@ async fn cancelled_upload_stays_pending_until_recovery_and_queue_limits_are_enfo
 fn codec_rejects_corruption_truncation_and_checksum_valid_invalid_fields() {
     let record = record::Record {
         name: "table/é".into(),
-        value: Some(Bytes::from_static(b"")),
+        value: Some(Content::Inline(Bytes::from_static(b""))),
         expected: None,
         version: Version {
             epoch: Uuid::new_v4(),
@@ -194,8 +202,13 @@ fn codec_rejects_corruption_truncation_and_checksum_valid_invalid_fields() {
     };
     let wire = record.encode().unwrap();
     assert_eq!(
-        record::Record::decode(&wire).unwrap().value.unwrap(),
-        b""[..]
+        record::Record::decode(&wire)
+            .unwrap()
+            .value
+            .unwrap()
+            .inline()
+            .unwrap(),
+        &b""[..]
     );
     for end in 0..wire.len() {
         assert!(record::Record::decode(&wire[..end]).is_err());

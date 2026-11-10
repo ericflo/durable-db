@@ -31,6 +31,15 @@ struct Files {
 }
 #[async_trait]
 impl Storage for Files {
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        size: u64,
+    ) -> anyhow::Result<Bytes> {
+        self.inner.get_range(key, range, size).await
+    }
+
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
         if (key.starts_with("manifests/") && self.hide_manifests.load(Ordering::SeqCst))
             || (key.starts_with("indexes/") && self.hide_indexes.load(Ordering::SeqCst))
@@ -175,7 +184,7 @@ async fn paused(notify: &Notify) {
 }
 
 #[tokio::test]
-async fn existing_page_collection_never_reclaims_the_new_journal_namespace() {
+async fn existing_page_collection_never_reclaims_candidate_journals_or_tables() {
     use durable_db::journal::{QueueLimits, Reader, Writer};
     let metadata = fixture();
     let storage = open(
@@ -205,8 +214,21 @@ async fn existing_page_collection_never_reclaims_the_new_journal_namespace() {
     writer.complete(upload.send().await).unwrap();
     drop(writer.pop_durable().unwrap().unwrap());
     let prefix = writer.durable_prefix();
+    let table = durable_db::owned_files::Blob::upload(
+        metadata.files.clone(),
+        Bytes::from_static(b"candidate table"),
+    )
+    .await
+    .unwrap();
     assert_eq!(storage.collect_data().await.unwrap().deleted, 2);
     storage.maintenance().await.unwrap();
+    assert_eq!(
+        table
+            .read_range(metadata.files.as_ref(), 0..table.size())
+            .await
+            .unwrap(),
+        b"candidate table"[..]
+    );
     let mut replay = Reader::replay(metadata.files.clone(), prefix);
     assert_eq!(
         replay

@@ -33,16 +33,18 @@ For S3 use `DURABLE_DB_TEST_PROVIDER=s3`; a local fixture also needs `AWS_ENDPOI
 
 The bounded fixture:
 
-- Writes 1,024 keys under 16 ordered prefixes in eight batches; checks stable snapshots, ordered scans and 2,000 warm reads.
+- Writes 1,024 keys with 1 KiB values under 16 ordered prefixes in eight batches; checks stable snapshots, ordered scans and 2,000 warm reads. A table larger than 512 KiB is stored externally.
 - Admits 32 independent updates with concurrency 16, then makes the group durable with one logical WAL upload. Earlier snapshots retain their original values.
 - Discards every fifth accepted mutation's upload completion and resolves the uncertain outcome with an exact provider GET.
 - Selects the old journal prefix, then uploads an old writer's malformed replacement manifest. Reopening must exclude it.
-- Discards each old index and namespace, rebuilds from selected remote journals twice, and verifies original values, updates and deletion.
+- Discards each old index, namespace and block cache, rebuilds from selected remote journals twice, and verifies original values, updates and deletion. After cold table reads populate the cache, another 2,000 reads must make no index-store calls.
 - Checks that the application phase issues zero shared-register calls. Admission has a 512-mutation/32-MiB fixture ceiling, plus one explicitly prepared late record and bounded controller metadata. A 300-second timeout bounds execution.
 
 Its JSON output includes all eight batch latency samples, the grouped-write duration, warm-read total and logical operation counts. These are **debug-build integration timings**, not a sustained-throughput or p99 qualification. MinIO is an S3-compatible fixture, not AWS evidence.
 
-The adapter is intentionally limited: inline files up to 512 KiB, a bounded resident namespace, no multipart/copy/delimited listing, no persisted modification times, and explicitly disabled compaction and garbage collection. Unsupported semantics return errors. It stops writers before handoff and uses deterministic injected clocks; it does not qualify live stale-owner fencing, physical timing, Kubernetes, tenant isolation, request receipts or a serving API. Large out-of-line tables, bounded range reads, checkpoints, admission and safe collection remain production requirements. See the [design and evidence](../../docs/design-owned-partitions.md#reusing-an-existing-value-index).
+The adapter keeps files up to 256 KiB inline and uploads larger files as immutable objects, up to the core 64 MiB limit and the fixture's smaller aggregate upload budget. Successful uploads produce 56-byte references published through the journal. Range responses are capped at 8 MiB; larger individual read requests fail. An 8 MiB weighted Moka block cache is recreated on each reopen. These settings do not establish whole-process RSS bounds. The `DDBFILE2` record rejects the earlier inline-only encoding; use fresh buckets.
+
+The adapter has no multipart/copy/delimited listing or persisted modification times, and explicitly disables compaction and garbage collection. Unsupported semantics return errors. It stops writers before handoff and uses deterministic injected clocks; it does not qualify live stale-owner fencing, physical timing, Kubernetes, tenant isolation, request receipts or a serving API. Checkpoints, aggregate admission, the complete serving path and safe collection remain production requirements. See the [design and evidence](../../docs/design-owned-partitions.md#reusing-an-existing-value-index).
 
 The adapter regression test cancels an accepted create's caller while its upload is paused. A conflicting create must wait for durability before returning `AlreadyExists`; a range read and ETag check then verify the committed bytes.
 

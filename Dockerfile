@@ -147,6 +147,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh OwnedFiles && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-externalfiles
+COPY spec/ExternalFiles.tla spec/ExternalFiles.checks spec/ExternalFiles*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh ExternalFiles && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-ownershipclaim
 COPY spec/OwnershipClaim.tla spec/OwnershipClaim.checks spec/OwnershipClaim.cfg spec/UnsafeClaimRetarget.cfg spec/UnsafeClaimComparison.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -317,6 +323,7 @@ COPY --from=model-candidate-placementrequests /checks/ /checks/
 COPY --from=model-transactionvalidation /checks/ /checks/
 COPY --from=model-transactionrecovery /checks/ /checks/
 COPY --from=model-ownedfiles /checks/ /checks/
+COPY --from=model-externalfiles /checks/ /checks/
 COPY --from=model-candidate-latecontrol /checks/ /checks/
 COPY --from=proof-partition-journal /checks/ /checks/
 COPY --from=proof-partition-control /checks/ /checks/

@@ -26,13 +26,16 @@ pub struct Budget {
     gets: AtomicUsize,
     lists: AtomicUsize,
     lost_replies: AtomicUsize,
+    external_uploads: AtomicUsize,
+    external_reads: AtomicUsize,
 }
 impl Budget {
     pub fn stats(&self) -> serde_json::Value {
-        serde_json::json!({"mutation_attempts":self.puts.load(Ordering::SeqCst),"injected_lost_replies":self.lost_replies.load(Ordering::SeqCst),"put_payload_bytes":self.bytes.load(Ordering::SeqCst),"get_calls":self.gets.load(Ordering::SeqCst),"list_calls":self.lists.load(Ordering::SeqCst)})
+        serde_json::json!({"external_uploads":self.external_uploads.load(Ordering::SeqCst),"external_reads":self.external_reads.load(Ordering::SeqCst),"mutation_attempts":self.puts.load(Ordering::SeqCst),"injected_lost_replies":self.lost_replies.load(Ordering::SeqCst),"put_payload_bytes":self.bytes.load(Ordering::SeqCst),"get_calls":self.gets.load(Ordering::SeqCst),"list_calls":self.lists.load(Ordering::SeqCst)})
     }
 }
 struct State {
+    objects: Arc<dyn durable_db::storage::Storage>,
     files: Mutex<Namespace>,
     changed: Notify,
     failed: AtomicBool,
@@ -65,7 +68,7 @@ fn unsupported() -> Error {
 fn meta(path: &Path, file: &owned_files::File) -> ObjectMeta {
     ObjectMeta {
         location: path.clone(),
-        size: file.bytes().len() as u64,
+        size: file.size(),
         e_tag: Some(file.version().to_string()),
         version: None,
         // No time-based GC is enabled in this fixture. A production adapter
@@ -74,9 +77,14 @@ fn meta(path: &Path, file: &owned_files::File) -> ObjectMeta {
     }
 }
 impl Store {
-    pub fn new(files: Namespace, budget: Arc<Budget>) -> Self {
+    pub fn new(
+        files: Namespace,
+        budget: Arc<Budget>,
+        objects: Arc<dyn durable_db::storage::Storage>,
+    ) -> Self {
         Self(Arc::new(State {
             files: Mutex::new(files),
+            objects,
             changed: Notify::new(),
             failed: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -88,6 +96,22 @@ impl Store {
             return Err(error("fixture retired"));
         }
         Ok(())
+    }
+    pub async fn usage(&self) -> anyhow::Result<serde_json::Value> {
+        let files = self.0.files.lock().await;
+        let view = files.view()?;
+        let external_bytes: u64 = view
+            .list("")
+            .filter_map(|(_, file)| file.blob())
+            .map(|blob| blob.size())
+            .sum();
+        let external_files = view
+            .list("")
+            .filter(|(_, file)| file.blob().is_some())
+            .count();
+        Ok(
+            serde_json::json!({"resident_name_payload_bytes":view.resident_bytes(),"logical_files":view.len(),"external_files":external_files,"external_bytes":external_bytes}),
+        )
     }
     pub async fn retire(&self) -> anyhow::Result<journal::Prefix> {
         let files = self.0.files.lock().await;
@@ -136,10 +160,10 @@ impl Store {
             changed.await;
         }
     }
-    async fn mutate(&self, path: &Path, bytes: Option<&[u8]>, mode: PutMode) -> Result<PutResult> {
+    async fn mutate(&self, path: &Path, bytes: Option<Bytes>, mode: PutMode) -> Result<PutResult> {
         self.ready()?;
         let attempt = self.0.budget.puts.fetch_add(1, Ordering::SeqCst);
-        let size = bytes.map_or(0, <[u8]>::len);
+        let size = bytes.as_ref().map_or(0, Bytes::len);
         let charged = self.0.budget.bytes.fetch_add(size, Ordering::SeqCst);
         if attempt >= 512 || charged.saturating_add(size) > 32 * 1024 * 1024 {
             return Err(error("fixture upload budget exhausted"));
@@ -161,14 +185,34 @@ impl Store {
                 })?)
             }
         };
+        let external = if size > 256 * 1024 {
+            self.0
+                .budget
+                .external_uploads
+                .fetch_add(1, Ordering::SeqCst);
+            Some(
+                owned_files::Blob::upload(
+                    self.0.objects.clone(),
+                    bytes.clone().expect("nonempty payload"),
+                )
+                .await
+                .map_err(|_| error("external file upload failed; outcome may be unknown"))?,
+            )
+        } else {
+            None
+        };
         let prepared = {
             let mut files = self.0.files.lock().await;
             self.ready()?;
-            files.prepare(&[Change {
-                name: path.as_ref(),
-                value: bytes,
-                condition,
-            }])
+            if let Some(blob) = &external {
+                files.prepare_reference(path.as_ref(), blob, condition)
+            } else {
+                files.prepare(&[Change {
+                    name: path.as_ref(),
+                    value: bytes.as_deref(),
+                    condition,
+                }])
+            }
         };
         let prepared = match prepared {
             Ok(p) => p,
@@ -238,11 +282,11 @@ impl ObjectStore for Store {
         if !options.attributes.is_empty() {
             return Err(unsupported());
         }
-        if payload.content_length() > owned_files::MAX_INLINE_BYTES {
-            return Err(error("inline index file exceeds fixture bound"));
+        if payload.content_length() > owned_files::MAX_BLOB_BYTES {
+            return Err(error("index file exceeds fixture bound"));
         }
         let payload: Bytes = payload.into();
-        self.mutate(path, Some(&payload), options.mode).await
+        self.mutate(path, Some(payload), options.mode).await
     }
     async fn put_multipart_opts(
         &self,
@@ -277,10 +321,24 @@ impl ObjectStore for Store {
             .transpose()
             .map_err(|_| error("invalid logical file range"))?
             .unwrap_or(0..meta.size);
-        let bytes = if options.head {
-            Bytes::new()
+        let external = file.blob().cloned();
+        let inline = if options.head {
+            Some(Bytes::new())
         } else {
-            Bytes::copy_from_slice(&file.bytes()[range.start as usize..range.end as usize])
+            file.bytes().map(|bytes| {
+                Bytes::copy_from_slice(&bytes[range.start as usize..range.end as usize])
+            })
+        };
+        drop(files);
+        let bytes = if let Some(bytes) = inline {
+            bytes
+        } else {
+            self.0.budget.external_reads.fetch_add(1, Ordering::SeqCst);
+            external
+                .expect("file content")
+                .read_range(self.0.objects.as_ref(), range.clone())
+                .await
+                .map_err(|_| error("external file range read failed"))?
         };
         Ok(GetResult {
             meta,
@@ -357,6 +415,15 @@ mod tests {
     }
     #[async_trait]
     impl Storage for Paused {
+        async fn get_range(
+            &self,
+            name: &str,
+            range: std::ops::Range<u64>,
+            size: u64,
+        ) -> anyhow::Result<Bytes> {
+            self.inner.get_range(name, range, size).await
+        }
+
         async fn get(&self, name: &str, max: usize) -> anyhow::Result<Option<Object>> {
             self.inner.get(name, max).await
         }
@@ -392,7 +459,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let store = Store::new(namespace, Arc::new(Budget::default()));
+        let store = Store::new(namespace, Arc::new(Budget::default()), backend.clone());
         let first_store = store.clone();
         let first = tokio::spawn(async move {
             first_store

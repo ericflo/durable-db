@@ -1,16 +1,16 @@
-use super::{MAX_INLINE_BYTES, MAX_NAME_BYTES, Version};
+use super::{Blob, Content, MAX_INLINE_BYTES, MAX_NAME_BYTES, Version, blob::REFERENCE_BYTES};
 use anyhow::{Context, ensure};
 use bytes::{Buf, Bytes};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-const MAGIC: &[u8; 8] = b"DDBFILE1";
+const MAGIC: &[u8; 8] = b"DDBFILE2";
 const HEADER: usize = 62;
 const CHECKSUM: usize = 32;
 
 pub(super) struct Record {
     pub name: String,
-    pub value: Option<Bytes>,
+    pub value: Option<Content>,
     pub expected: Option<Version>,
     pub version: Version,
 }
@@ -32,7 +32,7 @@ pub(super) fn validate(name: &str, value: Option<&[u8]>) -> anyhow::Result<()> {
 }
 impl Record {
     pub fn encode(&self) -> anyhow::Result<Bytes> {
-        validate(&self.name, self.value.as_deref())?;
+        validate(&self.name, self.value.as_ref().and_then(Content::inline))?;
         ensure!(
             !self.version.epoch.is_nil() && self.version.revision > 0,
             "invalid logical file version"
@@ -44,7 +44,10 @@ impl Record {
             "invalid logical predecessor version"
         );
         let mut out = Vec::with_capacity(
-            HEADER + self.name.len() + self.value.as_ref().map_or(0, Bytes::len) + CHECKSUM,
+            HEADER
+                + self.name.len()
+                + self.value.as_ref().map_or(0, Content::resident_bytes)
+                + CHECKSUM,
         );
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(self.version.epoch.as_bytes());
@@ -56,12 +59,18 @@ impl Record {
             &self
                 .value
                 .as_ref()
-                .map_or(u32::MAX, |v| v.len() as u32)
+                .map_or(u32::MAX, |v| match v {
+                    Content::Inline(bytes) => bytes.len() as u32,
+                    Content::External(_) => u32::MAX - 1,
+                })
                 .to_be_bytes(),
         );
         out.extend_from_slice(self.name.as_bytes());
         if let Some(value) = &self.value {
-            out.extend_from_slice(value);
+            match value {
+                Content::Inline(bytes) => out.extend_from_slice(bytes),
+                Content::External(blob) => blob.encode(&mut out),
+            }
         }
         out.extend_from_slice(&Sha256::digest(&out));
         Ok(out.into())
@@ -90,6 +99,8 @@ impl Record {
         let value_len = input.get_u32();
         let payload_len = if value_len == u32::MAX {
             0
+        } else if value_len == u32::MAX - 1 {
+            REFERENCE_BYTES
         } else {
             value_len as usize
         };
@@ -99,8 +110,15 @@ impl Record {
         );
         let name = std::str::from_utf8(input.get(..name_len).context("logical name missing")?)?;
         input.advance(name_len);
-        let value = (value_len != u32::MAX).then_some(input);
-        validate(name, value)?;
+        let value = match value_len {
+            u32::MAX => None,
+            n if n == u32::MAX - 1 => Some(Content::External(Blob::decode(input)?)),
+            _ => {
+                validate(name, Some(input))?;
+                Some(Content::Inline(Bytes::copy_from_slice(input)))
+            }
+        };
+        validate(name, value.as_ref().and_then(Content::inline))?;
         ensure!(
             !epoch.is_nil() && revision > 0,
             "invalid logical file version"
@@ -120,7 +138,7 @@ impl Record {
         };
         Ok(Self {
             name: name.into(),
-            value: value.map(Bytes::copy_from_slice),
+            value,
             expected,
             version: Version { epoch, revision },
         })

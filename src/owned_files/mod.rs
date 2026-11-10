@@ -1,10 +1,12 @@
 //! Conditional logical files over immutable journal uploads.
 //!
-//! This bounded, inline-only namespace is an integration component, not a
+//! This bounded namespace is an integration component, not a
 //! serving owner. Its caller must establish ownership before admission and
 //! recheck it before returning reads or acknowledgements. Recovery consumes a
 //! complete selected catalog; no bucket-register operation occurs here.
+mod blob;
 mod record;
+pub use blob::{Blob, MAX_BLOB_BYTES};
 
 use crate::{journal, ownership::root::Replay};
 use anyhow::{Context, ensure};
@@ -67,7 +69,8 @@ pub struct Change<'a> {
 
 /// Resident logical names and inline payload, not database-count limits. The
 /// serving controller must also bound aggregate namespaces, caller-held copies,
-/// and physical uploads. Out-of-line tables/checkpoints are not implemented yet.
+/// and physical uploads. Blob references charge their fixed metadata, not their
+/// remote payload. Checkpoints and collection are not implemented yet.
 #[derive(Clone, Copy)]
 pub struct Limits {
     files: usize,
@@ -95,16 +98,74 @@ impl Default for Limits {
     }
 }
 
+enum Content {
+    Inline(Bytes),
+    External(Blob),
+}
+impl Content {
+    fn resident_bytes(&self) -> usize {
+        match self {
+            Self::Inline(bytes) => bytes.len(),
+            Self::External(_) => blob::REFERENCE_BYTES,
+        }
+    }
+    fn size(&self) -> u64 {
+        match self {
+            Self::Inline(bytes) => bytes.len() as u64,
+            Self::External(blob) => blob.size(),
+        }
+    }
+    fn inline(&self) -> Option<&[u8]> {
+        match self {
+            Self::Inline(bytes) => Some(bytes),
+            Self::External(_) => None,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum InputContent<'a> {
+    Inline(&'a [u8]),
+    External(&'a Blob),
+}
+impl InputContent<'_> {
+    fn resident_bytes(self) -> usize {
+        match self {
+            Self::Inline(bytes) => bytes.len(),
+            Self::External(_) => blob::REFERENCE_BYTES,
+        }
+    }
+    fn owned(self) -> Content {
+        match self {
+            Self::Inline(bytes) => Content::Inline(Bytes::copy_from_slice(bytes)),
+            Self::External(blob) => Content::External(blob.clone()),
+        }
+    }
+}
+struct Input<'a> {
+    name: &'a str,
+    value: Option<InputContent<'a>>,
+    condition: Condition,
+}
+
 pub struct File {
     version: Version,
-    bytes: Bytes,
+    content: Content,
 }
 impl File {
     pub fn version(&self) -> Version {
         self.version
     }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+    pub fn size(&self) -> u64 {
+        self.content.size()
+    }
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.content.inline()
+    }
+    pub fn blob(&self) -> Option<&Blob> {
+        match &self.content {
+            Content::External(blob) => Some(blob),
+            Content::Inline(_) => None,
+        }
     }
 }
 
@@ -165,19 +226,19 @@ impl View {
             self.files.len(),
             self.bytes,
             &record.name,
-            old.map(|f| f.bytes.len()),
-            record.value.as_ref().map(Bytes::len),
+            old.map(|f| f.content.resident_bytes()),
+            record.value.as_ref().map(Content::resident_bytes),
         )?;
         check_usage(self.limits, files, bytes)?;
         self.revision = record.version.revision;
         self.bytes = bytes;
-        if let Some(bytes) = record.value {
+        if let Some(content) = record.value {
             // Record buffers never stay pinned by a tiny surviving value.
             self.files.insert(
                 record.name,
                 File {
                     version: record.version,
-                    bytes,
+                    content,
                 },
             );
         } else {
@@ -256,10 +317,15 @@ impl Namespace {
     fn accepted(&self, name: &str) -> Option<(Version, usize)> {
         for pending in self.pending.iter().rev() {
             if let Some(record) = pending.records.iter().find(|r| r.name == name) {
-                return record.value.as_ref().map(|v| (record.version, v.len()));
+                return record
+                    .value
+                    .as_ref()
+                    .map(|v| (record.version, v.resident_bytes()));
             }
         }
-        self.view.get(name).map(|f| (f.version, f.bytes.len()))
+        self.view
+            .get(name)
+            .map(|f| (f.version, f.content.resident_bytes()))
     }
 
     /// Atomically admit distinct names against *all accepted predecessors*.
@@ -269,9 +335,36 @@ impl Namespace {
     /// The returned versions are provisional until the entire batch is durable
     /// and the caller has checked its current serving permission.
     pub fn prepare(&mut self, changes: &[Change<'_>]) -> anyhow::Result<Prepared> {
+        self.prepare_inputs(changes.iter().map(|change| Input {
+            name: change.name,
+            value: change.value.map(InputContent::Inline),
+            condition: change.condition,
+        }))
+    }
+
+    /// Publish one known-successful immutable upload through the same ordered
+    /// journal. The upload may become an orphan if admission fails; never refund
+    /// its physical allocation merely because the logical condition failed.
+    pub fn prepare_reference(
+        &mut self,
+        name: &str,
+        blob: &Blob,
+        condition: Condition,
+    ) -> anyhow::Result<Prepared> {
+        self.prepare_inputs(std::iter::once(Input {
+            name,
+            value: Some(InputContent::External(blob)),
+            condition,
+        }))
+    }
+
+    fn prepare_inputs<'a>(
+        &mut self,
+        changes: impl ExactSizeIterator<Item = Input<'a>>,
+    ) -> anyhow::Result<Prepared> {
         ensure!(!self.failed, "logical namespace is retired");
         ensure!(
-            !changes.is_empty() && changes.len() <= journal::MAX_RECORDS,
+            changes.len() > 0 && changes.len() <= journal::MAX_RECORDS,
             "invalid logical batch size"
         );
         let mut names = BTreeSet::new();
@@ -282,7 +375,13 @@ impl Namespace {
         let mut revision = self.accepted_revision;
         let mut encoded_bytes = 0usize;
         for change in changes {
-            record::validate(change.name, change.value)?;
+            record::validate(
+                change.name,
+                match change.value {
+                    Some(InputContent::Inline(bytes)) => Some(bytes),
+                    _ => None,
+                },
+            )?;
             ensure!(names.insert(change.name), "duplicate logical name in batch");
             let old = self.accepted(change.name);
             let expected = old.map(|(version, _)| version);
@@ -305,7 +404,7 @@ impl Namespace {
                 bytes,
                 change.name,
                 old.map(|(_, len)| len),
-                change.value.map(<[u8]>::len),
+                change.value.map(InputContent::resident_bytes),
             )?;
             check_usage(self.view.limits, files, bytes)?;
             revision = revision
@@ -313,7 +412,7 @@ impl Namespace {
                 .context("logical revision exhausted")?;
             let record = record::Record {
                 name: change.name.into(),
-                value: change.value.map(Bytes::copy_from_slice),
+                value: change.value.map(InputContent::owned),
                 expected,
                 version: Version {
                     epoch: self.writer.log().epoch(),

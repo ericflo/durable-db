@@ -79,20 +79,28 @@ async fn activate(
 async fn index(
     root: &mut Root<FixtureClock>,
     budget: Arc<Budget>,
+    objects: Arc<dyn durable_db::storage::Storage>,
 ) -> anyhow::Result<(Db, Arc<Store>)> {
     let view = owned_files::restore(root.replay()?, Limits::default()).await?;
     let files = Namespace::new(view, root.take_journal(QueueLimits::default())?)?;
-    let store = Arc::new(Store::new(files, budget));
+    let store = Arc::new(Store::new(files, budget, objects));
     let settings = Settings {
         flush_interval: None,
         compactor_options: None,
         garbage_collector_options: None,
-        l0_sst_size_bytes: 256 * 1024,
-        max_unflushed_bytes: 1024 * 1024,
+        l0_sst_size_bytes: 4 * 1024 * 1024,
+        max_unflushed_bytes: 8 * 1024 * 1024,
         manifest_poll_interval: Duration::from_secs(3600),
         ..Default::default()
     };
+    let cache = Arc::new(slatedb::db_cache::moka::MokaCache::new_with_opts(
+        slatedb::db_cache::moka::MokaCacheOptions {
+            max_capacity: 8 * 1024 * 1024,
+            ..Default::default()
+        },
+    ));
     let db = Db::builder("index", store.clone())
+        .with_db_cache(cache, 0)
         .with_settings(settings)
         .build()
         .await?;
@@ -138,7 +146,7 @@ async fn run() -> anyhow::Result<()> {
     let clock = FixtureClock::default();
     let budget = Arc::new(Budget::default());
     let mut root = activate(&connection, &clock).await?;
-    let (db, store) = index(&mut root, budget.clone()).await?;
+    let (db, store) = index(&mut root, budget.clone(), connection.objects()).await?;
     eprintln!("phase: initial index open");
     let control_before = control_counts();
     let empty = db.snapshot()?;
@@ -146,7 +154,7 @@ async fn run() -> anyhow::Result<()> {
     for group in 0..8 {
         let mut batch = WriteBatch::new();
         for n in group * 128..(group + 1) * 128 {
-            batch.put(key(n), [42; 64]);
+            batch.put(key(n), [42; 1024]);
         }
         let start = Instant::now();
         let handle = db.write(batch).await?;
@@ -157,7 +165,7 @@ async fn run() -> anyhow::Result<()> {
         samples.push(start.elapsed().as_secs_f64() * 1000.0);
         assert_eq!(
             snapshot.get(key(group * 128)).await?.as_deref(),
-            Some([42; 64].as_slice())
+            Some([42; 1024].as_slice())
         );
     }
     assert_eq!(empty.get(key(0)).await?, None);
@@ -167,7 +175,7 @@ async fn run() -> anyhow::Result<()> {
     for n in 0..2000 {
         assert_eq!(
             snapshot.get(key(n % 1024)).await?.as_deref(),
-            Some([42; 64].as_slice())
+            Some([42; 1024].as_slice())
         );
     }
     let read_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -186,7 +194,7 @@ async fn run() -> anyhow::Result<()> {
     let handles = stream::iter(0..32)
         .map(|n| {
             let db = &db;
-            async move { db.put(key(n), [43; 64]).await }
+            async move { db.put(key(n), [43; 1024]).await }
         })
         .buffer_unordered(16)
         .try_collect::<Vec<_>>()
@@ -202,9 +210,12 @@ async fn run() -> anyhow::Result<()> {
     for n in 0..32 {
         assert_eq!(
             snapshot.get(key(n)).await?.as_deref(),
-            Some([42; 64].as_slice())
+            Some([42; 1024].as_slice())
         );
-        assert_eq!(db.get(key(n)).await?.as_deref(), Some([43; 64].as_slice()));
+        assert_eq!(
+            db.get(key(n)).await?.as_deref(),
+            Some([43; 1024].as_slice())
+        );
     }
     drop((empty, snapshot, scan));
     db.flush_with_options(FlushOptions {
@@ -215,20 +226,34 @@ async fn run() -> anyhow::Result<()> {
     drop(db);
     eprintln!("phase: initial data and table flush complete");
     assert_eq!(control_before, control_counts());
+    let first_usage = store.usage().await?;
+    assert!(first_usage["external_bytes"].as_u64().unwrap() > 512 * 1024);
     let late = store.prepare_late_manifest().await?;
     let first_frames = late.position() - 1;
     drop(store);
     drop(root);
     let mut root = activate(&connection, &clock).await?;
     let _late_completion = late.send().await;
-    let (db, store) = index(&mut root, budget.clone()).await?;
+    let (db, store) = index(&mut root, budget.clone(), connection.objects()).await?;
     eprintln!("phase: first cold reopen complete");
     for n in 0..1024 {
         assert_eq!(
             db.get(key(n)).await?.as_deref(),
-            Some([if n < 32 { 43 } else { 42 }; 64].as_slice())
+            Some([if n < 32 { 43 } else { 42 }; 1024].as_slice())
         );
     }
+    let table_warm_before = budget.stats();
+    assert!(table_warm_before["external_reads"].as_u64().unwrap() > 0);
+    let table_warm_start = Instant::now();
+    for n in 0..2000 {
+        let n = n % 1024;
+        assert_eq!(
+            db.get(key(n)).await?.as_deref(),
+            Some([if n < 32 { 43 } else { 42 }; 1024].as_slice())
+        );
+    }
+    let table_warm_ms = table_warm_start.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(table_warm_before, budget.stats());
     let mut batch = WriteBatch::new();
     batch.put(key(0), b"replacement");
     batch.delete(key(1));
@@ -245,7 +270,7 @@ async fn run() -> anyhow::Result<()> {
     drop(store);
     drop(root);
     let mut root = activate(&connection, &clock).await?;
-    let (db, store) = index(&mut root, budget.clone()).await?;
+    let (db, store) = index(&mut root, budget.clone(), connection.objects()).await?;
     eprintln!("phase: second cold reopen complete");
     assert_eq!(
         db.get(key(0)).await?.as_deref(),
@@ -255,14 +280,14 @@ async fn run() -> anyhow::Result<()> {
     for n in 2..1024 {
         assert_eq!(
             db.get(key(n)).await?.as_deref(),
-            Some([if n < 32 { 43 } else { 42 }; 64].as_slice())
+            Some([if n < 32 { 43 } else { 42 }; 1024].as_slice())
         );
     }
     db.close().await?;
     store.retire().await?;
     println!(
         "{}",
-        serde_json::json!({"provider":provider,"namespace":namespace,"rust":env!("PROBE_RUSTC"),"build":"debug","slatedb":"0.18.1","keys":1024,"key_prefixes":16,"batch_records":128,"durable_batch_latency_ms_samples":samples,"warm_reads":2000,"warm_read_total_ms":read_ms,"warm_reads_additional_index_store_calls":0,"ordered_scan_rows":rows,"cold_reopens":2,"overwrite_and_delete_recovered":true,"late_manifest_upload_excluded":true,"application_phase_control_calls":0,"grouped_writes":32,"grouped_admission_concurrency":16,"grouped_durable_ms":grouped_ms,"grouped_logical_puts":grouped_puts,"first_journal_frames":first_frames,"logical_store_operations":budget.stats(),"scope":"Inline index integration with actual provider bytes and selected root catalogs; stopped writers and deterministic clocks, no concurrent ownership or serving qualification"})
+        serde_json::json!({"provider":provider,"namespace":namespace,"rust":env!("PROBE_RUSTC"),"build":"debug","slatedb":"0.18.1","keys":1024,"key_prefixes":16,"batch_records":128,"durable_batch_latency_ms_samples":samples,"warm_reads":2000,"warm_read_total_ms":read_ms,"warm_reads_additional_index_store_calls":0,"ordered_scan_rows":rows,"cold_reopens":2,"overwrite_and_delete_recovered":true,"late_manifest_upload_excluded":true,"application_phase_control_calls":0,"grouped_writes":32,"grouped_admission_concurrency":16,"grouped_durable_ms":grouped_ms,"grouped_logical_puts":grouped_puts,"first_journal_frames":first_frames,"logical_store_operations":budget.stats(),"block_cache_capacity_bytes":8388608,"external_file_threshold_bytes":262144,"value_bytes":1024,"first_namespace_usage":first_usage,"warm_table_reads":2000,"warm_table_read_total_ms":table_warm_ms,"warm_table_reads_additional_store_calls":0,"scope":"External-file index integration with actual provider bytes and selected root catalogs; stopped writers and deterministic clocks, no concurrent ownership or serving qualification"})
     );
     Ok(())
 }
