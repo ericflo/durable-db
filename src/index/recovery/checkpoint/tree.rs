@@ -1,5 +1,5 @@
-//! Bulk-built, range-routed manifest. Nodes contain at most 64 references and
-//! their upper key bounds. Both construction and traversal use bounded stacks.
+//! Range-routed manifest with bounded construction/traversal stacks. Rebuilds
+//! retain identical nodes observed by the existing forward base traversal.
 use crate::{
     cache::Cache,
     index::table,
@@ -27,6 +27,7 @@ pub(super) struct Builder {
     leaf: Vec<RoutedTable>,
     levels: Vec<Vec<Child>>,
     last: Option<Bytes>,
+    reuse: [Option<Blob>; MAX_HEIGHT + 1],
     pub tables: u64,
 }
 impl Builder {
@@ -36,8 +37,18 @@ impl Builder {
             leaf: Vec::new(),
             levels: Vec::new(),
             last: None,
+            reuse: [None; MAX_HEIGHT + 1],
             tables: 0,
         }
+    }
+    pub fn reuse_from(&mut self, reader: &Reader) {
+        self.reuse = reader.reuse;
+    }
+    async fn upload(&self, height: usize, bytes: Vec<u8>) -> anyhow::Result<Blob> {
+        if let Some(blob) = self.reuse[height].filter(|blob| blob.matches(&bytes)) {
+            return Ok(blob);
+        }
+        Blob::upload(self.files.clone(), bytes.into()).await
     }
     pub async fn push(&mut self, reference: table::Reference, last: Bytes) -> anyhow::Result<()> {
         ensure!(
@@ -65,7 +76,7 @@ impl Builder {
             boundary(&mut bytes, &routed.last);
             bytes.extend_from_slice(&routed.reference.encode());
         }
-        let blob = Blob::upload(self.files.clone(), bytes.into()).await?;
+        let blob = self.upload(0, bytes).await?;
         self.carry(0, Child { last, blob }).await
     }
     async fn carry(&mut self, mut level: usize, mut child: Child) -> anyhow::Result<()> {
@@ -79,7 +90,7 @@ impl Builder {
                 return Ok(());
             }
             let children = std::mem::take(&mut self.levels[level]);
-            child = branch(&self.files, level + 1, &children).await?;
+            child = self.branch(level + 1, &children).await?;
             level += 1;
         }
     }
@@ -94,9 +105,24 @@ impl Builder {
             if !higher && children.len() == 1 {
                 return Ok(Some((level as u8, children[0].blob)));
             }
-            let child = branch(&self.files, level + 1, &children).await?;
+            let child = self.branch(level + 1, &children).await?;
             self.carry(level + 1, child).await?;
         }
+    }
+    async fn branch(&self, height: usize, children: &[Child]) -> anyhow::Result<Child> {
+        ensure!(
+            height <= MAX_HEIGHT && (1..=FANOUT).contains(&children.len()),
+            "invalid checkpoint manifest branch"
+        );
+        let mut bytes = header(height as u8, children.len());
+        for child in children {
+            boundary(&mut bytes, &child.last);
+            child.blob.encode(&mut bytes);
+        }
+        Ok(Child {
+            last: children.last().unwrap().last.clone(),
+            blob: self.upload(height, bytes).await?,
+        })
     }
 }
 fn header(height: u8, count: usize) -> Vec<u8> {
@@ -108,25 +134,6 @@ fn header(height: u8, count: usize) -> Vec<u8> {
 fn boundary(out: &mut Vec<u8>, key: &[u8]) {
     out.extend_from_slice(&(key.len() as u16).to_be_bytes());
     out.extend_from_slice(key);
-}
-async fn branch(
-    files: &Arc<dyn Storage>,
-    height: usize,
-    children: &[Child],
-) -> anyhow::Result<Child> {
-    ensure!(
-        height <= MAX_HEIGHT && (1..=FANOUT).contains(&children.len()),
-        "invalid checkpoint manifest branch"
-    );
-    let mut bytes = header(height as u8, children.len());
-    for child in children {
-        boundary(&mut bytes, &child.last);
-        child.blob.encode(&mut bytes);
-    }
-    Ok(Child {
-        last: children.last().unwrap().last.clone(),
-        blob: Blob::upload(files.clone(), bytes.into()).await?,
-    })
 }
 struct Pending {
     height: u8,
@@ -142,6 +149,9 @@ pub(super) struct Reader {
     failed: bool,
     reverse: bool,
     end: Option<Bytes>,
+    // Most recently validated node at each height: nine references, no map,
+    // value reads or extra provider requests. A missed candidate only costs a PUT.
+    reuse: [Option<Blob>; MAX_HEIGHT + 1],
 }
 impl Reader {
     pub fn new(files: Arc<dyn Storage>, root: Option<(u8, Blob)>) -> anyhow::Result<Self> {
@@ -165,6 +175,7 @@ impl Reader {
             failed: false,
             reverse: false,
             end: None,
+            reuse: [None; MAX_HEIGHT + 1],
         })
     }
     pub fn seek(
@@ -277,6 +288,7 @@ impl Reader {
                         .is_none_or(|last| Some(last) == previous.as_ref()),
                 "checkpoint manifest boundary or length mismatch"
             );
+            self.reuse[pending.height as usize] = Some(pending.blob);
             if self.reverse {
                 self.stack.extend(children);
             } else {

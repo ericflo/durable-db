@@ -293,6 +293,7 @@ async fn build_projection(
         let mut rows = 0u64;
         let mut boundary: Option<Bytes> = None;
         while let Some(routed) = tables.next().await? {
+            builder.tree.reuse_from(&tables);
             let table = base.table(&routed).await?;
             ensure!(
                 boundary

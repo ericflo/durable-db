@@ -1,6 +1,6 @@
 -------------------------- MODULE CheckpointOverlay -------------------------
 EXTENDS Integers, Sequences, FiniteSets, TLC
-CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse
+CONSTANTS UnsafeDeletion, UnsafeReceipt, UnsafeEarly, UnsafeRewrite, UnsafeReuse, UnsafeManifestReuse
 Databases == 1..2
 Keys == 1..2
 Pairs == Databases \X Keys
@@ -47,8 +47,12 @@ Position(p) == 2*(p[1]-1)+p[2]
 SameTable(p,q) == (Position(p) <= 3) = (Position(q) <= 3)
 Reuse(p) == UnsafeReuse \/ \A q \in Pairs: SameTable(p,q) => recent[q] = -1
 Merged == [p \in Pairs |-> IF Reuse(p) THEN Base[p] ELSE Visible[p]]
+\* An authenticated manifest reference can also be retained when its complete
+\* immutable subtree is unchanged. Rust compares length and digest of the
+\* encoded node, including every child identity, boundary and digest.
+Manifest == IF UnsafeManifestReuse \/ Merged = Base THEN Base ELSE Merged
 Rewrite == /\ phase = "ready" /\ rewritten = {}
-           /\ rewritten' = {IF UnsafeRewrite THEN recent ELSE Merged}
+           /\ rewritten' = {IF UnsafeRewrite THEN recent ELSE Manifest}
            /\ UNCHANGED <<history, cut, applied, recent, touched, receipts, phase>>
 Next == Advance \/ Finish \/ Fail \/ Rewrite
 Spec == Init /\ [][Next]_vars

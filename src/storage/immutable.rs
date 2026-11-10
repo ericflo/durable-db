@@ -59,6 +59,11 @@ impl Blob {
     pub fn size(&self) -> u64 {
         self.size
     }
+    /// Content equality does not grant retention or publication permission.
+    /// Reuse requires a reference from the caller's authenticated, retained base.
+    pub(crate) fn matches(&self, bytes: &[u8]) -> bool {
+        self.size == bytes.len() as u64 && Sha256::digest(bytes).as_slice() == self.digest
+    }
     fn key(&self) -> String {
         format!("tables/{}", self.id.simple())
     }

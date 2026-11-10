@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct Files {
     inner: Remote,
     puts: AtomicUsize,
+    range_reads: AtomicUsize,
     ranges: std::sync::Mutex<std::collections::BTreeSet<String>>,
     lose: AtomicUsize,
     pause: AtomicUsize,
@@ -20,6 +21,7 @@ impl Files {
             )
             .unwrap(),
             puts: AtomicUsize::new(0),
+            range_reads: AtomicUsize::new(0),
             ranges: Default::default(),
             lose: AtomicUsize::new(lose),
             pause: AtomicUsize::new(0),
@@ -33,6 +35,7 @@ impl Storage for Files {
         self.inner.get(k, m).await
     }
     async fn get_range(&self, k: &str, r: std::ops::Range<u64>, s: u64) -> anyhow::Result<Bytes> {
+        self.range_reads.fetch_add(1, Ordering::SeqCst);
         self.ranges.lock().unwrap().insert(k.into());
         self.inner.get_range(k, r, s).await
     }
@@ -253,7 +256,16 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
     );
 }
 #[tokio::test]
-async fn manifest_bulk_tree_preserves_order_across_full_and_partial_levels() {
+async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
+    fn descriptor(template: &[u8], identity: u128) -> table::Reference {
+        // Distinct valid descriptors; this test traverses the manifest only.
+        let mut bytes = template.to_vec();
+        bytes[8..24].copy_from_slice(Uuid::from_u128(identity).as_bytes());
+        let end = bytes.len() - 32;
+        let checksum = Sha256::digest(&bytes[..end]);
+        bytes[end..].copy_from_slice(&checksum);
+        table::Reference::decode(&bytes).unwrap()
+    }
     let files = Files::new(0);
     let template = table::build(
         files.clone(),
@@ -270,30 +282,73 @@ async fn manifest_bulk_tree_preserves_order_across_full_and_partial_levels() {
         let mut builder = tree::Builder::new(files.clone());
         let mut expected = Vec::new();
         for n in 0..count {
-            // Distinct valid descriptors; this test traverses the manifest only.
-            let mut bytes = template.to_vec();
-            bytes[8..24].copy_from_slice(Uuid::from_u128(n + 1).as_bytes());
-            let end = bytes.len() - 32;
-            let checksum = Sha256::digest(&bytes[..end]);
-            bytes[end..].copy_from_slice(&checksum);
-            expected.push(Bytes::from(bytes.clone()));
+            let reference = descriptor(&template, n + 1);
+            expected.push(reference.encode());
             builder
-                .push(
-                    table::Reference::decode(&bytes).unwrap(),
-                    Bytes::from(format!("key-{n:08}")),
-                )
+                .push(reference, Bytes::from(format!("key-{n:08}")))
                 .await
                 .unwrap();
         }
         let root = builder.finish().await.unwrap();
+        let reads = files.range_reads.load(Ordering::SeqCst);
         let mut reader = tree::Reader::new(files.clone(), root).unwrap();
-        for expected in expected {
+        for expected in &expected {
             assert_eq!(
                 reader.next().await.unwrap().unwrap().reference.encode(),
-                expected
+                *expected
             );
         }
         assert!(reader.next().await.unwrap().is_none());
+        let traversal_reads = files.range_reads.load(Ordering::SeqCst) - reads;
+        if count == 8193 {
+            assert_eq!(traversal_reads, 133);
+        }
+        for changed in [false, true] {
+            let reads = files.range_reads.load(Ordering::SeqCst);
+            let puts = files.puts.load(Ordering::SeqCst);
+            let mut reader = tree::Reader::new(files.clone(), root).unwrap();
+            let mut builder = tree::Builder::new(files.clone());
+            let mut rewritten = expected.clone();
+            let mut n = 0;
+            while let Some(mut routed) = reader.next().await.unwrap() {
+                builder.reuse_from(&reader);
+                if changed && n == count as usize / 2 {
+                    routed.reference = descriptor(&template, count + 1);
+                    rewritten[n] = routed.reference.encode();
+                }
+                builder.push(routed.reference, routed.last).await.unwrap();
+                n += 1;
+            }
+            let next = builder.finish().await.unwrap();
+            assert_eq!(
+                files.range_reads.load(Ordering::SeqCst) - reads,
+                traversal_reads,
+                "reuse adds no provider reads to the existing traversal"
+            );
+            assert_eq!(
+                files.puts.load(Ordering::SeqCst) - puts,
+                if changed {
+                    root.map_or(0, |(height, _)| height as usize + 1)
+                } else {
+                    0
+                },
+                "only the changed leaf and its ancestors are uploaded"
+            );
+            if !changed {
+                assert!(
+                    next == root,
+                    "unchanged manifests retain their exact identity"
+                );
+            }
+            let mut reader = tree::Reader::new(files.clone(), next).unwrap();
+            for expected in rewritten {
+                assert_eq!(
+                    reader.next().await.unwrap().unwrap().reference.encode(),
+                    expected
+                );
+            }
+            assert!(reader.next().await.unwrap().is_none());
+        }
     }
 }
 
@@ -483,8 +538,8 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
         .unwrap();
     assert_eq!(
         files.puts.load(Ordering::SeqCst) - puts,
-        2,
-        "only manifest and header uploads"
+        1,
+        "only the new cut header is uploaded; the manifest is reused"
     );
     for reference in &old {
         let key = format!(
