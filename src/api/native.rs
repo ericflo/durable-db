@@ -15,7 +15,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -255,6 +255,9 @@ async fn run<C: Clock + Send>(
     let mut uploads = JoinSet::new();
     let mut pending: Vec<Pending> = Vec::new();
     let mut unknown = BTreeSet::new();
+    let mut unsent = BTreeMap::new();
+    let mut admission = tokio::time::interval(Duration::from_secs(1));
+    admission.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut retry = tokio::time::interval(Duration::from_millis(100));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -280,10 +283,19 @@ async fn run<C: Clock + Send>(
                 }
             }
             completed = uploads.join_next(), if !uploads.is_empty() => {
-                let Some(Ok((position, completion))) = completed else { return };
-                if completion.resolution() == Resolution::Unknown { unknown.insert(position); }
+                let Some(Ok((position, mut completion))) = completed else { return };
+                if let Some(upload) = completion.take_unsent() {
+                    unsent.insert(position, upload);
+                } else if completion.resolution() == Resolution::Unknown { unknown.insert(position); }
                 if owner.write().await.complete(completion).await.is_err() {
                     tracing::warn!("native completion deferred; checking authority before retry");
+                }
+            }
+            _ = admission.tick() => {
+                // At most one admission retry per second, earliest gap first.
+                // No resolving GET or repeated data PUT for an unsent frame.
+                if let Some((position, upload)) = unsent.pop_first() {
+                    uploads.spawn(async move { (position, upload.send().await) });
                 }
             }
             _ = retry.tick() => {

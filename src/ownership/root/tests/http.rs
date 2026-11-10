@@ -76,16 +76,29 @@ impl Storage for Files {
         panic!("serving never deletes physical history")
     }
 }
-async fn fixture(
-    capacity: usize,
-    checkpoints: u64,
-) -> (
+type Fixture = (
     axum::Router,
     Arc<Provider>,
     ManualClock,
     Arc<Faults>,
     String,
-) {
+);
+async fn fixture(capacity: usize, checkpoints: u64) -> Fixture {
+    fixture_budget(
+        capacity,
+        checkpoints,
+        crate::upload_budget::UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        },
+    )
+    .await
+}
+async fn fixture_budget(
+    capacity: usize,
+    checkpoints: u64,
+    limits: crate::upload_budget::UploadLimits,
+) -> Fixture {
     let provider = Provider::new();
     let clock = ManualClock::default();
     let faults = Arc::new(Faults::default());
@@ -94,10 +107,7 @@ async fn fixture(
         faults: faults.clone(),
     });
     let connection = Connection::new(files, provider.clone(), "test")
-        .with_upload_budget(crate::upload_budget::UploadLimits {
-            bytes: 64 * 1024 * 1024,
-            attempts: 10_000,
-        })
+        .with_upload_budget(limits)
         .await
         .unwrap();
     // The first credit grant changes the captured comparison. Its registration
@@ -673,4 +683,54 @@ async fn native_http_stops_renewal_when_the_serving_worker_retires() {
         reads,
         "a retired serving worker must not keep its renewal task running"
     );
+}
+
+#[tokio::test]
+async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner() {
+    let (router, _, _, faults, token) = fixture_budget(
+        8,
+        64,
+        crate::upload_budget::UploadLimits {
+            bytes: 4096,
+            attempts: 2,
+        },
+    )
+    .await;
+    let create = request(
+        "PUT",
+        "/v1/databases/app",
+        &token,
+        json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+    );
+    let service = router.clone();
+    let waiting = tokio::spawn(async move { service.oneshot(create).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiting.is_finished());
+    assert_eq!(
+        faults.puts.load(Ordering::SeqCst),
+        2,
+        "only bootstrap registrations reached storage"
+    );
+    let (status, body) = call(
+        &router,
+        "POST",
+        "/v1/storage/upload-budget",
+        &token,
+        json!({"request_id":"fund", "expected_configuration_revision":0,
+            "limits":{"bytes":8192,"attempts":6}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response = tokio::time::timeout(Duration::from_secs(3), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        faults.puts.load(Ordering::SeqCst),
+        3,
+        "the admitted journal frame is uploaded once"
+    );
+    let (status, _) = call(&router, "GET", "/v1/databases/app", &token, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
 }

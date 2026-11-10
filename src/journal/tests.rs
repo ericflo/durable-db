@@ -189,8 +189,12 @@ async fn uncertain_upload_is_resolved_by_exact_bytes_without_a_second_put() {
     let mut writer = writer(files.clone());
     let upload = writer.prepare(&[Bytes::from_static(b"one")]).unwrap();
     files.fault.store(2, Ordering::SeqCst);
-    let result = upload.send().await;
+    let mut result = upload.send().await;
     assert_eq!(result.resolution(), Resolution::Unknown);
+    assert!(
+        result.take_unsent().is_none(),
+        "an uncertain PUT cannot be sent again"
+    );
     writer.complete(result).unwrap();
     assert!(writer.pop_durable().unwrap().is_none());
     assert_eq!(writer.resolve(1).await.unwrap(), Resolution::Durable);
@@ -214,7 +218,12 @@ async fn missing_resolution_remains_unknown_and_a_late_upload_can_resolve_it() {
     let mut writer = writer(files.clone());
     let upload = writer.prepare(&[Bytes::from_static(b"one")]).unwrap();
     files.fault.store(1, Ordering::SeqCst);
-    writer.complete(upload.send().await).unwrap();
+    let mut result = upload.send().await;
+    assert!(
+        result.take_unsent().is_none(),
+        "missing bytes do not establish no request"
+    );
+    writer.complete(result).unwrap();
     assert_eq!(writer.resolve(1).await.unwrap(), Resolution::Unknown);
     assert!(writer.pop_durable().unwrap().is_none());
     assert!(writer.pending_bytes() > 0);

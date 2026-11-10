@@ -184,7 +184,7 @@ impl Reserved<'_> {
                 digest,
             },
             bytes,
-            reservation: self.reservation,
+            _reservation: self.reservation,
         })
     }
 }
@@ -270,14 +270,14 @@ impl Writer {
     }
 }
 
-/// Consumed by `send`: one physical PUT attempt, with no retry or clone operation.
-/// Dropping/cancelling it leaves the writer's position unresolved until a point read
-/// resolves it or a future handoff selects the old prefix.
+/// At most one physical PUT. Only proven admission refusal can return this owned
+/// handle for a first send. Cancellation gives no such proof: the position stays
+/// unresolved until an exact read or a future handoff selects the old prefix.
 pub struct PreparedUpload {
     storage: Arc<dyn Storage>,
     prefix: Prefix,
     bytes: Bytes,
-    reservation: Arc<Reservation>,
+    _reservation: Arc<Reservation>,
 }
 
 impl PreparedUpload {
@@ -288,16 +288,21 @@ impl PreparedUpload {
     pub async fn send(self) -> Completion {
         // Keep the reservation through the await, including cancellation. Do not
         // let a successful resolving GET free memory still held by this upload.
-        let reservation = self.reservation;
-        let durable = self
+        let result = self
             .storage
-            .put(&self.prefix.log.key(self.prefix.position), self.bytes)
-            .await
-            .is_ok();
-        drop(reservation);
+            .put(
+                &self.prefix.log.key(self.prefix.position),
+                self.bytes.clone(),
+            )
+            .await;
+        let unsent = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.is::<crate::upload_budget::NotSent>());
         Completion {
             prefix: self.prefix,
-            durable,
+            durable: result.is_ok(),
+            unsent: unsent.then_some(self),
         }
     }
 }
@@ -306,9 +311,16 @@ impl PreparedUpload {
 pub struct Completion {
     prefix: Prefix,
     durable: bool,
+    unsent: Option<PreparedUpload>,
 }
 
 impl Completion {
+    /// Recover the owned upload only when admission proved no data request was
+    /// sent. The same identity/buffers remain reserved. Unknown provider replies
+    /// and cancellation never produce this witness and never permit another PUT.
+    pub fn take_unsent(&mut self) -> Option<PreparedUpload> {
+        self.unsent.take()
+    }
     pub fn resolution(&self) -> Resolution {
         if self.durable {
             Resolution::Durable

@@ -12,6 +12,9 @@ Init == /\ writer = [planned |-> 0, known |-> {}, durable |-> 0,
 
 \* Fresh sequence identities contain one immutable value. Late uploads can
 \* finish after the old process disappears or a successor seals its prefix.
+\* Upload admission refusal occurs before any data request and stutters here.
+\* Retrying admission retains the same identity; it permits only the first PUT.
+\* After an attempted/cancelled PUT, absence still never authorizes a retry.
 Prepare == /\ writer.online
            /\ writer' = [writer EXCEPT !.planned = @ + 1]
            /\ UNCHANGED <<objects, control, scan>>

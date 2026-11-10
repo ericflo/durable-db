@@ -19,6 +19,12 @@ const GRANT_BYTES: u64 = 8 * 1024 * 1024;
 const GRANT_ATTEMPTS: u64 = 32;
 const RECEIPTS: usize = 8;
 
+/// Only the admission boundary may issue this witness: no object PUT was called.
+/// A grant request may have committed, so its credit is still never refunded.
+#[derive(Debug, thiserror::Error)]
+#[error("immutable upload admission failed before sending the object")]
+pub(crate) struct NotSent;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UploadLimits {
@@ -358,7 +364,10 @@ impl Storage for Files {
         self.inner.get(key, max).await
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
-        self.allocator.charge(bytes.len() as u64).await?;
+        self.allocator
+            .charge(bytes.len() as u64)
+            .await
+            .map_err(|e| e.context(NotSent))?;
         // All cloud bindings perform at most one PUT attempt here. A caller
         // retry invokes this boundary again, spending a fresh charge.
         self.inner.put(key, bytes).await
