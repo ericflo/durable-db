@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,11 +8,15 @@ import test from 'node:test';
 // Exercise the actual shell script with isolated transport/clock doubles.
 // No credentials, network, repository mutation or real waiting are involved.
 const commit = 'a'.repeat(40);
-for (const [name, mode, source, status] of [
-  ['confirms the public source marker', 'match', commit, 0],
-  ['rejects stale Pages after a successful push', 'stale', commit, 1],
-  ['rejects an HTTP failure even with a matching body', 'error', commit, 1],
-  ['rejects an invalid source identity before publishing', 'match', 'invalid', 2],
+for (const [name, mode, source, status, retries] of [
+  ['confirms the public source marker', 'match', commit, 0, 0],
+  ['rejects stale Pages after a successful push', 'stale', commit, 1, 0],
+  ['rejects an HTTP failure even with a matching body', 'error', commit, 1, 0],
+  ['rejects an invalid source identity before publishing', 'match', 'invalid', 2, 0],
+  ['retries an explicitly failed deployment once', 'retry', commit, 0, 1],
+  ['does not retry pending or unknown deployment state', 'pending', commit, 1, 0],
+  ['refuses to overwrite a newer publication', 'changed', commit, 1, 0],
+  ['bounds repeated deployment failure to one retry', 'retry-fails', commit, 1, 1],
 ]) {
   test(name, () => {
     const scratch = mkdtempSync(join(tmpdir(), 'durable-db-publish-test-'));
@@ -23,6 +27,7 @@ for (const [name, mode, source, status] of [
       mkdirSync(site);
       writeFileSync(join(site, 'index.html'), '<p>Checked documentation</p>');
       const clock = join(scratch, 'clock');
+      const retried = join(scratch, 'retried');
       writeFileSync(clock, '0\n');
       const shims = {
         git: `
@@ -32,17 +37,27 @@ if [ "$1" = clone ]; then
 fi
 if [ "$1" = -C ]; then shift 2; fi
 if [ "$1" = diff ]; then exit 1; fi
+if [ "$1" = rev-parse ]; then
+  if [ "$2" = origin/main ] && [ "$MOCK_MODE" = changed ]; then
+    echo another-publisher
+  else
+    echo current-head
+  fi
+fi
+case " $* " in *" --allow-empty "*) echo retry >> "$MOCK_RETRIED" ;; esac
 exit 0`,
         curl: `
 for output do :; done
-if [ "$MOCK_MODE" = stale ]; then
-  printf '{"source_commit":"stale"}\\n' > "$output"
-else
+if [ "$MOCK_MODE" = match ] || [ "$MOCK_MODE" = error ] ||
+   { [ "$MOCK_MODE" = retry ] && [ -f "$MOCK_RETRIED" ]; }; then
   printf '{"source_commit":"%s"}\\n' "$CI_COMMIT_SHA" > "$output"
+else
+  printf '{"source_commit":"stale"}\\n' > "$output"
 fi
 if [ "$MOCK_MODE" = error ]; then exit 22; fi`,
         date: 'cat "$MOCK_CLOCK"',
-        sleep: 'printf "700\\n" > "$MOCK_CLOCK"',
+        sleep: 'now=$(cat "$MOCK_CLOCK"); echo "$((now + 60))" > "$MOCK_CLOCK"',
+        python3: 'case "$MOCK_MODE" in retry|retry-fails|changed) exit 0 ;; *) exit 1 ;; esac',
       };
       for (const [command, body] of Object.entries(shims)) {
         writeFileSync(join(bin, command), `#!/bin/sh\nset -eu\n${body}\n`, { mode: 0o755 });
@@ -57,11 +72,13 @@ if [ "$MOCK_MODE" = error ]; then exit 22; fi`,
           CI_COMMIT_SHA: source,
           MOCK_MODE: mode,
           MOCK_CLOCK: clock,
+          MOCK_RETRIED: retried,
         },
       });
       assert.ifError(result.error);
       assert.equal(result.status, status, result.stderr);
       assert.equal(result.stdout.includes('Public Pages deployment verified'), status === 0);
+      assert.equal(existsSync(retried) ? readFileSync(retried, 'utf8').trim().split('\n').length : 0, retries);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

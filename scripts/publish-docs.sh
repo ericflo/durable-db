@@ -28,6 +28,28 @@ if ! git -C "$tmp/site" diff --cached --quiet; then
   git -C "$tmp/site" push origin main
 fi
 deadline=$(($(date +%s) + 600))
+inspect_after=$(($(date +%s) + 60))
+retried=false
+pages_failed() {
+  # Public, read-only API calls: no personal or repository API token in CI.
+  # Inspect at most once per minute, and only when the marker is still stale.
+  python3 - "$1" <<'PY'
+import json, sys, urllib.error, urllib.request
+base = 'https://api.github.com/repos/ericflo/durable-db-site/'
+def get(path):
+    request = urllib.request.Request(base + path, headers={
+        'Accept': 'application/vnd.github+json', 'User-Agent': 'durable-db-docs'})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read(65536))
+try:
+    deployments = get('deployments?environment=github-pages&per_page=1&sha=' + sys.argv[1])
+    statuses = get('deployments/' + str(int(deployments[0]['id'])) + '/statuses?per_page=1') if deployments else []
+    failed = bool(statuses and statuses[0].get('state') in ('failure', 'error'))
+except (OSError, ValueError, KeyError, IndexError, TypeError):
+    failed = False  # Rate limits, unavailable API or unknown state cannot authorize a retry.
+sys.exit(0 if failed else 1)
+PY
+}
 while [ "$(date +%s)" -lt "$deadline" ]; do
   if curl --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 20 \
       --silent --fail -H 'Cache-Control: no-cache' \
@@ -36,6 +58,24 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
       && cmp -s "$tmp/site/deployment.json" "$tmp/published.json"; then
     echo "Public Pages deployment verified for $CI_COMMIT_SHA"
     exit 0
+  fi
+  if [ "$retried" = false ] && [ "$(date +%s)" -ge "$inspect_after" ]; then
+    inspect_after=$(($(date +%s) + 60))
+    head=$(git -C "$tmp/site" rev-parse HEAD)
+    if pages_failed "$head"; then
+      # Retry the exact tree once, without overwriting another publisher. An
+      # empty commit also avoids rebuilding or bypassing the checked artifact.
+      git -C "$tmp/site" fetch origin main
+      [ "$(git -C "$tmp/site" rev-parse origin/main)" = "$head" ] || {
+        echo 'Pages source changed during publication; refusing to replace it.' >&2
+        exit 1
+      }
+      git -C "$tmp/site" -c user.name=durable-db-ci -c user.email=durable-db-ci@users.noreply.github.com \
+        commit --allow-empty -m "Retry Pages delivery for $CI_COMMIT_SHA"
+      git -C "$tmp/site" push origin main
+      retried=true
+      echo 'Retrying failed Pages deployment once with the identical site tree.'
+    fi
   fi
   echo 'Waiting for Pages to serve the verified source commit...'
   sleep 10

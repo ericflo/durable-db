@@ -8,7 +8,7 @@ Each site may provision multiple databases. The bucket directory must support a 
 
 **Rollout is blocked.** The first real-B2 test with four concurrent database writers exhausted retries under maintenance; delaying maintenance still left heavy publication contention. The 100,005-entry directory test does not establish capacity for that many active sites. Resolve the [production gates](production-readiness.md), including the measured throughput failure, before onboarding production sites.
 
-The shared serving path is being replaced. The candidate now has a bounded journal, conflict validator, ownership controller, durable journal registrations, selected-prefix catalog and ordered history replay. These components do not yet serve application transactions. Existing cloud, Harness and autoscaling results qualify the current engine only. Platform rollout must repeat those workloads against the completed replacement, including its routing, transaction/receipt recovery, clock contract and per-site physical admission.
+The shared serving path is being replaced. The candidate now has a bounded journal, conflict validator, ownership controller, durable journal registrations, selected-prefix catalog, ordered history replay and typed transaction projection with retry receipts. These components do not yet serve application transactions. Existing cloud, Harness and autoscaling results qualify the current engine only. Platform rollout must repeat those workloads against the completed replacement, including its production index, lifecycle/placement recovery, routing, clock contract and per-site physical admission.
 
 ## Acceptance scenario
 
