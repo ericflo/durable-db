@@ -176,7 +176,7 @@ fn physical_clock_refuses_forked_state() {
 #[test]
 #[ignore = "VM serial probe driven by scripts/check-vm-clock.py"]
 fn physical_clock_probe() {
-    let clock = BootClock::guarded();
+    let mut clock = BootClock::guarded();
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap();
     let source = std::fs::read_to_string(SOURCE).unwrap();
     println!("\nREADY {} {}", kernel.trim(), source.trim());
@@ -184,9 +184,18 @@ fn physical_clock_probe() {
     loop {
         let mut line = String::new();
         assert_ne!(std::io::stdin().read_line(&mut line).unwrap(), 0);
-        if let Some(source) = line.trim().strip_prefix("source ") {
+        if line.trim() == "reset" {
+            // Each experiment starts a fresh unowned clock. This cannot revive
+            // a retired Timeline or grant permission to an existing owner.
+            clock = BootClock::guarded();
+        } else if let Some(source) = line.trim().strip_prefix("source ") {
             std::fs::write(SOURCE, source).unwrap();
             assert_eq!(std::fs::read_to_string(SOURCE).unwrap().trim(), source);
+        } else if line.trim() == "suspend" {
+            // Suspend only the disposable guest. The host driver wakes it with
+            // QMP; wall time continues outside this process and guest kernel.
+            std::fs::write("/sys/power/mem_sleep", "deep").unwrap();
+            std::fs::write("/sys/power/state", "mem").unwrap();
         }
         let boot = nanos(ClockId::Boottime).unwrap();
         let mono = nanos(ClockId::Monotonic).unwrap();

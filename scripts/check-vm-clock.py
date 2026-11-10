@@ -25,6 +25,8 @@ DOCKERFILE = '''FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be
 RUN apk add --no-cache qemu-system-x86_64 qemu-img linux-virt cpio
 '''
 TEST_PREFIX = 'providers::s3::tests::timing::'
+SCENARIOS = ('baseline', 'qmp-stop', 'cgroup-freeze', 'guest-suspend',
+             'guest-suspend-short', 'clocksource-fallback', 'snapshot-restore')
 
 
 def run(*args, **kwargs):
@@ -121,7 +123,7 @@ def read_until(stream, prefix):
             raise RuntimeError('\n'.join(lines[-15:]))
 
 
-def exercise(work, source):
+def exercise(work, source, scenario=None, repeat=1):
     with guest(work, source) as (stream, command, version, name):
         guest_info = read_until(stream, 'READY ')
         if not guest_info.endswith(' ' + source):
@@ -132,8 +134,10 @@ def exercise(work, source):
             return list(map(int, read_until(stream, 'SAMPLE ').split()[1:]))
 
         rows = []
-        for mode in ['baseline', 'qmp-stop', 'cgroup-freeze', 'clocksource-fallback', 'snapshot-restore']:
-            before = sample()
+        cases = [(mode, iteration) for mode in ([scenario] if scenario else SCENARIOS)
+                 for iteration in range(1, repeat + 1)]
+        for mode, iteration in cases:
+            before = sample('reset')
             started = time.monotonic_ns()
             if mode == 'qmp-stop':
                 command('stop')
@@ -143,7 +147,14 @@ def exercise(work, source):
                 error = command('human-monitor-command', {'command-line': 'savevm lease'})
                 if error:
                     raise RuntimeError(error)
-            time.sleep(.05 if mode == 'clocksource-fallback' else 3)
+            elif mode.startswith('guest-suspend'):
+                stream.write(b'suspend\n')
+                deadline = time.monotonic() + 10
+                while command('query-status')['status'] != 'suspended':
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('guest did not enter ACPI suspend')
+                    time.sleep(.05)
+            time.sleep(.05 if mode in ('clocksource-fallback', 'guest-suspend-short') else 3)
             if mode == 'qmp-stop':
                 command('cont')
             elif mode == 'cgroup-freeze':
@@ -152,12 +163,15 @@ def exercise(work, source):
                 error = command('human-monitor-command', {'command-line': 'loadvm lease'})
                 if error:
                     raise RuntimeError(error)
-            after = sample('source kvm-clock' if mode == 'clocksource-fallback' else 'sample')
+            elif mode.startswith('guest-suspend'):
+                command('system_wakeup')
+            after = (list(map(int, read_until(stream, 'SAMPLE ').split()[1:])) if mode.startswith('guest-suspend')
+                     else sample('source kvm-clock' if mode == 'clocksource-fallback' else 'sample'))
             elapsed = time.monotonic_ns() - started
             delta = [b - a for a, b in zip(before, after)]
             normalized = delta[0] * 3 // 2
             within = elapsed - 1_000_000 <= normalized <= 2 * elapsed + 1_000_000
-            rows.append({'mode': mode, 'host_ns': elapsed, 'guest_boottime_ns': delta[0],
+            rows.append({'mode': mode, 'iteration': iteration, 'host_ns': elapsed, 'guest_boottime_ns': delta[0],
                          'guest_monotonic_ns': delta[1], 'guest_realtime_ns': delta[2],
                          'marker_before': before[3], 'marker_after': after[3],
                          'guard_accepts_timestamp': bool(after[4]),
@@ -246,9 +260,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--clocksource', choices=['kvm-clock', 'tsc'])
+    parser.add_argument('--scenario', choices=SCENARIOS, help='run one clock fault for a focused check')
+    parser.add_argument('--repeat', type=int, choices=range(1, 17), default=1, metavar='1..16')
     parser.add_argument('--owner', action='store_true', help='exercise native takeover across memory restore, including the unsafe control')
     parser.add_argument('--test-binary', type=Path, help='reuse a cargo test --lib --no-run artifact; otherwise build with the repository kache configuration')
     args = parser.parse_args()
+    if args.owner and (args.scenario or args.clocksource or args.repeat != 1):
+        parser.error('--owner has its own fixed takeover scenarios')
     if args.test_binary:
         binary = args.test_binary.resolve()
     else:
@@ -271,7 +289,7 @@ def main():
             print(output)
         else:
             pack(work, {'DURABLE_DB_VM_TEST': TEST_PREFIX + 'clock::physical_clock_probe'})
-            runs = [exercise(work, source) for source in ([args.clocksource] if args.clocksource else ['kvm-clock', 'tsc'])]
+            runs = [exercise(work, source, args.scenario, args.repeat) for source in ([args.clocksource] if args.clocksource else ['kvm-clock', 'tsc'])]
         report = {'kind': 'finite VM clock boundary experiment; not production qualification',
                   'host': run('uname', '-srmo'),
                   'image_id': run('docker', 'image', 'inspect', '--format', '{{.Id}}', IMAGE),

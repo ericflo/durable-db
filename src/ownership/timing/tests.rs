@@ -241,3 +241,22 @@ fn independently_delayed_child_never_outlives_its_fast_parent() {
         }
     }
 }
+
+#[test]
+fn measured_guest_suspend_can_finish_a_drain_while_the_old_owner_is_live() {
+    // Required unsafe-platform witness from the QEMU short-suspend experiment:
+    // 120.2445 ms host elapsed, but guest boottime advanced 335.391747 ms.
+    // No timing arithmetic can grant the platform assumption from this sample.
+    let old_clock = Manual::at(0);
+    let new_clock = Manual::at(0);
+    let profile = bounds(200_000_000, 1_000_000);
+    let mut old = Timeline::new(old_clock.clone(), profile).unwrap();
+    let mut new = Timeline::new(new_clock.clone(), profile).unwrap();
+    let request = old.begin().unwrap();
+    let deadline = old.root_deadline(&request).unwrap();
+    let drain = new.begin_drain().unwrap();
+    old_clock.set(120_244_500 * 3 / 2); // Nominal valid independent host clock.
+    new_clock.set(335_391_747 * 3 / 2); // Measured invalid guest reading.
+    assert!(new.drain_complete(&drain).unwrap());
+    assert!(!old.remaining(&deadline).unwrap().is_zero());
+}
