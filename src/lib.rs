@@ -40,6 +40,8 @@ pub enum Error {
     #[error("server is at capacity; retry with backoff")]
     Busy,
     #[error("{0}")]
+    Unsupported(&'static str),
+    #[error("{0}")]
     Storage(#[from] anyhow::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
@@ -59,6 +61,7 @@ impl IntoResponse for Error {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Limit(_) => (StatusCode::PAYLOAD_TOO_LARGE, "limit_exceeded"),
             Self::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
+            Self::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported_operation"),
             Self::Storage(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
         };
         let message = if matches!(self, Self::Storage(_)) {

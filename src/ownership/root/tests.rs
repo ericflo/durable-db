@@ -1,6 +1,7 @@
 use super::*;
 mod catalog;
 mod checkpoint;
+mod http;
 mod lifecycle;
 mod live;
 mod registration;

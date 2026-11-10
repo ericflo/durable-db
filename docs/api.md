@@ -6,6 +6,10 @@ Administrator tokens from current `token --admin` are expiring `ddb_control_` ca
 
 Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. Keys are ordered by their UTF-8 bytes, independent of locale. Values are standard base64. `null` means absent in a read/check and delete in a write; an empty string is a present zero-byte value.
 
+The shared router can also serve a recovered native owner through `api::Native::new(owner, capacity)` and `App::new`. This library path supports protected creation, info, reads, commits, tokens, and access-policy changes with the same authentication and request budgets. Its bounded server-owned worker continues accepted writes after a caller disconnects, pipelines immutable uploads outside the owner lock, resolves unknown PUT outcomes by exact GET, and retries checkpoint maintenance. Capacity bounds queued, executing and pending replies, including duplicate requests. Each HTTP commit currently occupies one journal frame; cross-request batching remains open.
+
+Native readiness also checks current ownership permission. The runtime must independently renew the supplied ownership contract. No production physical clock or placement runtime is selected, and the CLI still uses the existing engine. Native legacy POST creation, `/gc`, and upload-budget endpoints return `501 unsupported_operation`; native physical budgets and collection are not implemented. Do not use the native adapter as a public multitenant service yet.
+
 ## Endpoints
 
 | Method and path | Meaning |
@@ -28,7 +32,7 @@ Database info reports logical usage. The experimental `pages` field has been rem
 
 Readiness does not continuously probe the object provider; provider outages return 503 from data requests. Liveness never depends on storage availability, avoiding restart storms.
 
-Authenticated requests share a weighted [request budget](deployment.md#request-budgets) per principal and pod. Commits cost five units; other requests cost one. Default refill is 20 units/second with a burst of 40. HTTP 429 means admission rejected the request before its handler ran; back off before retrying. These configurable policy limits are separate from database quotas and measured engine capacity.
+Authenticated requests share a weighted [request budget](deployment.md#request-budgets) per principal and pod. Commits cost five units; other requests cost one. Default refill is 20 units/second with a burst of 40. HTTP 429 means a request or engine capacity limit was reached; back off and retry the identical request. An earlier attempt with that identity may still be pending. These configurable policy limits are separate from database quotas and measured engine capacity.
 
 ## Create a protected database
 
@@ -41,7 +45,7 @@ Use `PUT /v1/databases/{db}` with an administrator credential:
 }
 ```
 
-The operation atomically creates a format-2 database with revocable tokens enabled from the start. The response is `{info, replayed}`; initial `info.policy` has a fresh incarnation, generation zero, policy revision one, and no revocations. Legacy application tokens cannot access it. Mint scoped tokens through `POST /v1/tokens` after creation.
+The operation atomically creates a protected database with revocable tokens enabled from the start (format 2 in the existing engine; a durable catalog row in native serving). The response is `{info, replayed}`; initial `info.policy` has a fresh incarnation, generation zero, policy revision one, and no revocations. Legacy application tokens cannot access it. Mint scoped tokens through `POST /v1/tokens` after creation.
 
 Persist the exact creation request in your provisioning system before sending it. A retry with the same ID and limits returns the original initial info even after later data writes, policy changes, and collection. Its receipt lasts for the database lifetime, independently of the bounded transaction/policy receipt windows. A different creation ID returns 409; reusing the original ID with different limits returns 400. An existing legacy database cannot be claimed by this operation. PUT never replaces an existing database. On a transport failure or 503, retry the identical creation request; observing only that the name exists is insufficient evidence that your creation succeeded.
 
@@ -64,7 +68,7 @@ Persist the exact creation request in your provisioning system before sending it
 }
 ```
 
-`expected_revision` is optional for the first read. All keys and scans in one request observe the same manifest. Subsequent requests in the same transaction must send the returned revision. A revision change is a 409; restart the whole transaction. This is optimistic snapshot validation, not a pinned long-running historical snapshot.
+`expected_revision` is optional for the first read. All keys and scans in one request observe one committed snapshot. Subsequent requests in the same transaction must send the returned revision. A revision change is a 409; restart the whole transaction. This is optimistic snapshot validation, not a pinned long-running historical snapshot.
 
 `start` is inclusive, `end` exclusive. `after` is exclusive in the chosen direction. Prefix and bounds are conjunctive. A scan returns `{items: [{key, value}], next}`; `next` is the last returned key when another matching item exists. Repeat the query with that cursor and revision. Zero-length prefixes are allowed.
 

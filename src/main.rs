@@ -320,14 +320,14 @@ async fn main() -> anyhow::Result<()> {
             };
             let engine = Arc::new(Engine::new(storage, cache));
             let app = Arc::new(App::with_rate_limits(
-                engine,
+                engine.clone(),
                 auth,
                 concurrency,
                 rate_limits,
             ));
             let listener = tokio::net::TcpListener::bind(listen).await?;
             tracing::info!(address = %listener.local_addr()?, cluster, "durable-db ready");
-            let maintenance = tokio::spawn(maintain(app.clone(), maintenance_seconds));
+            let maintenance = tokio::spawn(maintain(app.clone(), engine, maintenance_seconds));
             let shutdown_app = app.clone();
             axum::serve(listener, router(app))
                 .with_graceful_shutdown(async move {
@@ -369,7 +369,7 @@ fn write_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     file.sync_all()?;
     Ok(())
 }
-async fn maintain(app: Arc<App>, seconds: u64) {
+async fn maintain(app: Arc<App>, engine: Arc<Engine>, seconds: u64) {
     let mut after = None;
     loop {
         // Jitter prevents every replica from fencing the same database simultaneously.
@@ -385,14 +385,14 @@ async fn maintain(app: Arc<App>, seconds: u64) {
         };
         if durable_db::metrics::measure(
             durable_db::metrics::Operation::StorageMaintenance,
-            app.engine.maintain_storage(),
+            engine.maintain_storage(),
         )
         .await
         .is_err()
         {
             tracing::warn!("provider maintenance deferred; will retry on a later sweep");
         }
-        match app.engine.databases(after.as_deref()).await {
+        match engine.databases(after.as_deref()).await {
             Ok(dbs) => {
                 after = if dbs.len() == 64 {
                     dbs.last().map(|d| format!("heads/{d}.json"))
@@ -402,7 +402,7 @@ async fn maintain(app: Arc<App>, seconds: u64) {
                 for db in dbs {
                     if durable_db::metrics::measure(
                         durable_db::metrics::Operation::DatabaseMaintenance,
-                        app.engine.maintain_database(&db),
+                        engine.maintain_database(&db),
                     )
                     .await
                     .is_err()

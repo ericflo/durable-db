@@ -10,7 +10,9 @@ Init == /\ history = <<>> /\ stored = {} /\ visible = 0 /\ live = TRUE
 (* A serial database condition represents validation against accepted history.
    A retry resolves its existing pending/committed identity before validation.
    Ownership supplies live; its clock, drain and registration contracts are
-   modeled separately. Each response records permission at its final check. *)
+   modeled separately. Each response records permission at its final check.
+   HTTP disconnects are stuttering steps: they may suppress Answer, but cannot
+   roll back Accept or cancel its Upload/Publish. The server owns that work. *)
 Authorized(n) == \A i \in 1..n: history[i].kind # "policy"
 Accept(request, snapshot, condition) ==
     /\ live /\ Len(history) < MaxWrites /\ snapshot = Len(history)

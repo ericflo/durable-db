@@ -30,6 +30,10 @@ impl Maintenance {
     }
 }
 impl<C: Clock> Owner<C> {
+    pub(crate) fn cache(&self) -> Arc<Cache> {
+        self.maintenance.cache.clone()
+    }
+
     /// Quiesce admission before resident capacity is exhausted. Outstanding
     /// immutable uploads keep their positions/charges until resolved; writes
     /// cannot indefinitely postpone a checkpoint by keeping the queue nonempty.

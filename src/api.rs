@@ -1,10 +1,14 @@
+mod backend;
+mod native;
+pub use backend::Backend;
+pub use native::Native;
 mod rate;
 pub use rate::RateLimits;
 
 use crate::{
     Error, Result,
-    auth::Auth,
-    engine::{CommitRequest, Engine, Limits, MAX_BODY, PolicyRequest, PolicyResult, ReadRequest},
+    auth::{Access, Auth},
+    engine::{CommitRequest, Limits, MAX_BODY, PolicyRequest, PolicyResult, ReadRequest},
     metrics::{self as telemetry, Operation},
 };
 use axum::{
@@ -38,7 +42,7 @@ enum Principal {
     Database(String),
 }
 pub struct App {
-    pub engine: Arc<Engine>,
+    pub backend: Arc<dyn Backend>,
     pub auth: Auth,
     pub ready: AtomicBool,
     pub permits: Arc<Semaphore>,
@@ -49,20 +53,20 @@ pub struct App {
     pub rejected: AtomicU64,
 }
 impl App {
-    pub fn new(engine: Arc<Engine>, auth: Auth, concurrency: usize) -> Self {
-        Self::with_rate_limits(engine, auth, concurrency, RateLimits::default())
+    pub fn new(backend: Arc<dyn Backend>, auth: Auth, concurrency: usize) -> Self {
+        Self::with_rate_limits(backend, auth, concurrency, RateLimits::default())
     }
 
     /// Construct a server with an explicit per-principal request budget.
     /// Concurrency limits and database quotas remain independent of this budget.
     pub fn with_rate_limits(
-        engine: Arc<Engine>,
+        backend: Arc<dyn Backend>,
         auth: Auth,
         concurrency: usize,
         rate_limits: RateLimits,
     ) -> Self {
         Self {
-            engine,
+            backend,
             auth,
             ready: AtomicBool::new(true),
             permits: Arc::new(Semaphore::new(concurrency)),
@@ -210,7 +214,7 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
     }
 }
 async fn ready(State(app): State<Arc<App>>) -> StatusCode {
-    if app.ready.load(Ordering::Relaxed) {
+    if app.ready.load(Ordering::Relaxed) && app.backend.ready().await {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -225,7 +229,7 @@ async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Stri
         "# HELP durable_db_requests_total Requests admitted to handlers.\n# TYPE durable_db_requests_total counter\ndurable_db_requests_total {}\n# HELP durable_db_rejected_total Legacy rate and concurrency rejection count.\n# TYPE durable_db_rejected_total counter\ndurable_db_rejected_total {}\n# HELP durable_db_cache_bytes Accounted memory cache bytes including estimated entry overhead.\n# TYPE durable_db_cache_bytes gauge\ndurable_db_cache_bytes {}\n",
         app.requests.load(Ordering::Relaxed),
         app.rejected.load(Ordering::Relaxed),
-        app.engine.cache().memory_bytes().await
+        app.backend.memory_bytes().await
     ) + &telemetry::REGISTRY.render())
 }
 async fn create(
@@ -237,7 +241,7 @@ async fn create(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.engine.create(&db, limits).await?))
+    Ok(Json(app.backend.create(&db, limits).await?))
 }
 async fn upload_budget(
     State(app): State<Arc<App>>,
@@ -246,7 +250,7 @@ async fn upload_budget(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.engine.upload_budget().await?))
+    Ok(Json(app.backend.upload_budget().await?))
 }
 async fn replenish_upload_budget(
     State(app): State<Arc<App>>,
@@ -256,7 +260,7 @@ async fn replenish_upload_budget(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.engine.replenish_upload_budget(&request).await?))
+    Ok(Json(app.backend.replenish_upload_budget(&request).await?))
 }
 async fn create_protected(
     State(app): State<Arc<App>>,
@@ -267,7 +271,7 @@ async fn create_protected(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.engine.create_protected(&db, &request).await?))
+    Ok(Json(app.backend.create_protected(db, request).await?))
 }
 async fn info(
     State(app): State<Arc<App>>,
@@ -275,7 +279,7 @@ async fn info(
     headers: HeaderMap,
 ) -> Result<Json<crate::engine::Info>> {
     let access = app.auth.access(bearer(&headers)?, &db, false)?;
-    Ok(Json(app.engine.info_with_access(&db, &access).await?))
+    Ok(Json(app.backend.info(&db, &access).await?))
 }
 async fn read(
     State(app): State<Arc<App>>,
@@ -284,9 +288,7 @@ async fn read(
     Json(request): Json<ReadRequest>,
 ) -> Result<Json<crate::engine::ReadResult>> {
     let access = app.auth.access(bearer(&headers)?, &db, false)?;
-    Ok(Json(
-        app.engine.read_with_access(&db, &request, &access).await?,
-    ))
+    Ok(Json(app.backend.read(&db, &request, &access).await?))
 }
 async fn commit(
     State(app): State<Arc<App>>,
@@ -295,11 +297,7 @@ async fn commit(
     Json(request): Json<CommitRequest>,
 ) -> Result<Json<crate::engine::CommitResult>> {
     let access = app.auth.access(bearer(&headers)?, &db, true)?;
-    Ok(Json(
-        app.engine
-            .commit_with_access(&db, &request, &access)
-            .await?,
-    ))
+    Ok(Json(app.backend.commit(db, request, access).await?))
 }
 async fn access(
     State(app): State<Arc<App>>,
@@ -310,7 +308,7 @@ async fn access(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.engine.change_policy(&db, &request).await?))
+    Ok(Json(app.backend.change_policy(db, request).await?))
 }
 async fn gc(
     State(app): State<Arc<App>>,
@@ -320,7 +318,7 @@ async fn gc(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.engine.gc(&db).await?))
+    Ok(Json(app.backend.gc(&db).await?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -343,7 +341,10 @@ async fn token(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    let info = app.engine.info(&request.database).await?;
+    let info = app
+        .backend
+        .info(&request.database, &Access::Administrator)
+        .await?;
     let (token, token_id) = if let Some(policy) = info.policy {
         let (token, id) = app.auth.issue_for_policy(
             request.database,

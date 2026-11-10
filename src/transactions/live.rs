@@ -1,8 +1,8 @@
 //! Native serving under an injected ownership contract. The owner is exclusively
 //! borrowed for admission/publication; immutable reads can run concurrently.
 //! Uploads and control renewal own their I/O and do not hold that borrow.
-//! Database generations must already be authorized by the caller. This is not
-//! a public HTTP router or a qualified physical clock/placement implementation.
+//! The HTTP adapter uses catalog-authorized methods. Low-level generation APIs
+//! require caller authorization. Physical timing/placement remains external.
 mod catalog;
 mod checkpoint;
 pub use catalog::{AuthorizedBatch, AuthorizedTicket, CatalogChange, CatalogResult};
@@ -241,7 +241,7 @@ impl<C: Clock> Owner<C> {
     pub fn usage(&self) -> recovery::Usage {
         self.projection.usage()
     }
-    fn check(&self) -> anyhow::Result<()> {
+    pub(crate) fn check(&self) -> anyhow::Result<()> {
         ensure!(!self.failed, "owner retired after incomplete publication");
         self.control.check(self.identity)
     }

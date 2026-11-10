@@ -1,0 +1,435 @@
+use super::*;
+use crate::{
+    api::{self, App, Native},
+    auth::Auth,
+    cache::Cache,
+    storage::{Object, Storage, Version},
+    transactions::live::{self, Opening},
+};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tokio::sync::Notify;
+use tower::ServiceExt;
+
+#[derive(Default)]
+struct Faults {
+    pause: AtomicBool,
+    entered: Notify,
+    release: Notify,
+    puts: AtomicU64,
+}
+struct Files {
+    inner: Arc<Remote>,
+    faults: Arc<Faults>,
+}
+#[async_trait]
+impl Storage for Files {
+    async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
+        self.inner.get(key, max).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        size: u64,
+    ) -> anyhow::Result<Bytes> {
+        self.inner.get_range(key, range, size).await
+    }
+    async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
+        panic!("native data path cannot use object CAS")
+    }
+    async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
+        self.faults.puts.fetch_add(1, Ordering::SeqCst);
+        if self.faults.pause.swap(false, Ordering::SeqCst) {
+            self.faults.entered.notify_one();
+            self.faults.release.notified().await;
+            self.inner.put(key, bytes).await?;
+            anyhow::bail!("applied PUT lost its reply");
+        }
+        self.inner.put(key, bytes).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        self.inner.list(prefix, after, limit).await
+    }
+    async fn delete(&self, _: &str) -> anyhow::Result<()> {
+        panic!("serving never deletes physical history")
+    }
+}
+async fn fixture(
+    capacity: usize,
+    checkpoints: u64,
+) -> (
+    axum::Router,
+    Arc<Provider>,
+    ManualClock,
+    Arc<Faults>,
+    String,
+) {
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let faults = Arc::new(Faults::default());
+    let files = Arc::new(Files {
+        inner: provider.files.clone(),
+        faults: faults.clone(),
+    });
+    let mut root = Connection::new(files, provider.clone(), "test")
+        .root(clock.clone(), profile())
+        .unwrap();
+    claim(&mut root).await;
+    clock.set(23);
+    validate(&mut root).await;
+    activate(&mut root).await;
+    let owner = Opening::new(
+        root,
+        live::Limits {
+            checkpoint_frames: checkpoints,
+            ..Default::default()
+        },
+        Arc::new(Cache::new(0, None).unwrap()),
+    )
+    .unwrap()
+    .recover()
+    .await
+    .unwrap();
+    let auth = Auth::new(&"31".repeat(32)).unwrap();
+    let token = auth.admin_token();
+    let app = App::new(Arc::new(Native::new(owner, capacity).unwrap()), auth, 64);
+    (api::router(Arc::new(app)), provider, clock, faults, token)
+}
+fn request(method: &str, path: &str, token: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+async fn call(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        router.clone().oneshot(request(method, path, token, body)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+fn commit() -> Value {
+    json!({"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":"eA=="}]})
+}
+async fn create(router: &axum::Router, token: &str, db: &str) {
+    assert_eq!(
+        call(
+            router,
+            "PUT",
+            &format!("/v1/databases/{db}"),
+            token,
+            json!({"request_id":"create","limits":{"max_keys":1000,"max_bytes":1048576}})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp() {
+    let (router, provider, clock, _, token) = fixture(8, 2).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let url = format!("{base}/v1/databases/app");
+    let creation = json!({"request_id":"create","limits":{"max_keys":1,"max_bytes":1048576}});
+    let response = client
+        .put(&url)
+        .bearer_auth(&token)
+        .json(&creation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: Value = response.json().await.unwrap();
+    let retry: Value = client
+        .put(&url)
+        .bearer_auth(&token)
+        .json(&creation)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retry["info"], first["info"]);
+    assert_eq!(retry["replayed"], true);
+    let mut credentials = Vec::new();
+    for write in [false, true] {
+        let result: Value = client
+            .post(format!("{base}/v1/tokens"))
+            .bearer_auth(&token)
+            .json(&json!({"database":"app","write":write,"ttl_seconds":3600}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        credentials.push(result);
+    }
+    let reader = credentials[0]["token"].as_str().unwrap();
+    let writer = credentials[1]["token"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{url}/commit"))
+            .bearer_auth(reader)
+            .json(&commit())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let written: Value = client
+        .post(format!("{url}/commit"))
+        .bearer_auth(writer)
+        .json(&commit())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(written["revision"], 1);
+    // A creation plus commit checkpoint is now durable; reads use range I/O
+    // with zero cache and do not mutate the ownership register.
+    let controls = provider.calls.load(Ordering::SeqCst);
+    for _ in 0..2 {
+        let read: Value = client
+            .post(format!("{url}/read"))
+            .bearer_auth(reader)
+            .json(&json!({"keys":["x"],"scans":[{"prefix":"","reverse":true,"limit":1}]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(read["values"][0], "eA==");
+        assert_eq!(read["revision"], 1);
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
+    let info: Value = client
+        .get(&url)
+        .bearer_auth(reader)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (info["keys"].as_u64(), info["bytes"].as_u64()),
+        (Some(1), Some(2))
+    );
+    assert!(info.get("pages").is_none());
+    let mut over = commit();
+    over["expected_revision"] = json!(1);
+    over["request_id"] = json!("over");
+    over["writes"][0]["key"] = json!("y");
+    assert_eq!(
+        client
+            .post(format!("{url}/commit"))
+            .bearer_auth(writer)
+            .json(&over)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/v1/databases/other"))
+            .bearer_auth(writer)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let revoked = client.post(format!("{url}/access")).bearer_auth(&token).json(&json!({
+        "request_id":"revoke","expected_policy_revision":1,"change":{"action":"revoke","token_id":credentials[1]["token_id"]}
+    })).send().await.unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+    assert_eq!(
+        client
+            .post(format!("{url}/commit"))
+            .bearer_auth(writer)
+            .json(&commit())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(format!("{url}/gc"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_IMPLEMENTED
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/v1/storage/upload-budget"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_IMPLEMENTED
+    );
+    clock.set(100);
+    assert_eq!(
+        client
+            .get(format!("{base}/health/ready"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(reader)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/health/live"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during_uploads() {
+    let (router, provider, _, faults, token) = fixture(2, 256).await;
+    create(&router, &token, "a").await;
+    create(&router, &token, "b").await;
+    let calls = provider.calls.load(Ordering::SeqCst);
+    let puts = faults.puts.load(Ordering::SeqCst);
+    faults.pause.store(true, Ordering::SeqCst);
+    let a = tokio::spawn(router.clone().oneshot(request(
+        "POST",
+        "/v1/databases/a/commit",
+        &token,
+        commit(),
+    )));
+    tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/databases/a/read",
+            &token,
+            json!({"keys":["x"]})
+        )
+        .await
+        .1["revision"],
+        0
+    );
+    let b = tokio::spawn(router.clone().oneshot(request(
+        "POST",
+        "/v1/databases/b/commit",
+        &token,
+        commit(),
+    )));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while faults.puts.load(Ordering::SeqCst) != puts + 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Both pending tickets hold capacity, including an identical retry. The
+    // second upload can finish but cannot expose a value across the first gap.
+    assert_eq!(
+        call(&router, "POST", "/v1/databases/a/commit", &token, commit())
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/databases/b/read",
+            &token,
+            json!({"keys":["x"]})
+        )
+        .await
+        .1["revision"],
+        0
+    );
+    a.abort();
+    let _ = a.await;
+    faults.release.notify_one();
+    let reply = tokio::time::timeout(Duration::from_secs(2), b)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let retried = call(&router, "POST", "/v1/databases/a/commit", &token, commit()).await;
+    assert_eq!(retried.0, StatusCode::OK);
+    assert_eq!(retried.1["replayed"], true);
+    assert_eq!(retried.1["revision"], 1);
+    assert_eq!(
+        faults.puts.load(Ordering::SeqCst),
+        puts + 2,
+        "lost replies never repeat PUT"
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        calls,
+        "ordinary reads and writes never renew control"
+    );
+}
