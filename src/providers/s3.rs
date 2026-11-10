@@ -306,8 +306,11 @@ mod tests {
     async fn write_immutable(
         State(state): State<Arc<Mutex<Wire>>>,
         axum::extract::Path(id): axum::extract::Path<String>,
+        headers: HeaderMap,
         bytes: Bytes,
     ) -> Response {
+        assert!(headers.get("if-match").is_none());
+        assert!(headers.get("if-none-match").is_none());
         let mut state = state.lock().unwrap();
         if id.starts_with("ownership/") {
             state.registration_puts += 1;
@@ -587,6 +590,59 @@ mod tests {
 
         task.abort();
         task.await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn logical_files_resolve_lost_http_replies_without_conditional_file_writes() {
+        use crate::{
+            journal::{QueueLimits, Writer},
+            owned_files::{Change, Condition, Limits, Namespace, View},
+        };
+        let (connection, state, task) = fixture(503, true).await;
+        let mut files = Namespace::new(
+            View::empty(Limits::default()),
+            Writer::new(
+                connection.objects(),
+                uuid::Uuid::new_v4(),
+                QueueLimits::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let first = files
+            .prepare(&[Change {
+                name: "manifest/1",
+                value: Some(b"one"),
+                condition: Condition::Absent,
+            }])
+            .unwrap();
+        let version = first.versions()[0];
+        files.complete(first.send().await).unwrap();
+        assert!(files.view().unwrap().is_empty());
+        state.lock().unwrap().acknowledgement = 200;
+        let next = files
+            .prepare(&[Change {
+                name: "manifest/1",
+                value: Some(b"two"),
+                condition: Condition::Matches(version),
+            }])
+            .unwrap();
+        files.complete(next.send().await).unwrap();
+        assert!(files.view().unwrap().is_empty());
+        assert_eq!(
+            files.resolve(1).await.unwrap(),
+            crate::journal::Resolution::Durable
+        );
+        for _ in 0..1000 {
+            assert_eq!(
+                files.view().unwrap().get("manifest/1").unwrap().bytes(),
+                b"two"
+            );
+        }
+        assert_eq!(state.lock().unwrap().immutable.len(), 2);
+        assert_eq!(state.lock().unwrap().puts, 0);
+        assert_eq!(files.durable_prefix().position(), 2);
+        task.abort();
     }
 
     #[tokio::test]

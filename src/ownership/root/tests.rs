@@ -1,5 +1,6 @@
 use super::*;
 mod catalog;
+mod owned_files;
 mod registration;
 mod replay;
 mod transactions;

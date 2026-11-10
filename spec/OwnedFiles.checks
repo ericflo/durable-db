@@ -1,0 +1,6 @@
+safe OwnedFiles.cfg owned-files 512m -
+unsafe OwnedFilesUnsafePending.cfg owned-files-pending 512m ConditionalOrder
+unsafe OwnedFilesUnsafeGap.cfg owned-files-gap 512m DurableView
+unsafe OwnedFilesUnsafeVersion.cfg owned-files-version 512m FreshVersions
+unsafe OwnedFilesLate.cfg owned-files-late 512m NotRecoveredLate
+unsafe OwnedFilesUnsafeReject.cfg owned-files-reject 512m DefiniteConflict
