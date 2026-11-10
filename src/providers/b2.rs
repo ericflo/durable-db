@@ -679,7 +679,7 @@ mod tests {
             assert!(connection.into_published(None).await.is_err());
             assert_eq!(
                 state.bucket.lock().unwrap().info["durable-db-format"],
-                crate::ownership::root::VERSION
+                "owned-candidate-15"
             );
         })
         .await;

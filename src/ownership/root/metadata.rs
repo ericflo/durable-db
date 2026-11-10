@@ -6,9 +6,19 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-pub(crate) const VERSION: &str = "owned-candidate-15";
+pub(crate) const VERSION: &str = "owned-candidate-16";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
+
+// Admission-policy changes must exclude older budgeted writers without
+// invalidating unbudgeted storage, including directories shipped in v0.9.0.
+pub(super) fn version(budgeted: bool) -> &'static str {
+    if budgeted {
+        VERSION
+    } else {
+        "owned-candidate-15"
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,7 +64,7 @@ pub(super) fn decode(
         }
         return Ok(None);
     }
-    if info.get(FORMAT).map(String::as_str) != Some(VERSION)
+    if info.get(FORMAT).map(String::as_str) != Some(version(budgeted))
         || info.get(PREFIX).map(String::as_str) != Some(prefix)
         || info.contains_key(crate::upload_budget::FIELD) != budgeted
         || info.keys().any(|k| {
@@ -135,7 +145,7 @@ pub(super) fn encode(
     // namespaces belonging to the existing publication engine.
     decode(observed, prefix, profile, budgeted)?;
     let mut info = observed.clone();
-    info.insert(FORMAT.into(), VERSION.into());
+    info.insert(FORMAT.into(), version(budgeted).into());
     info.insert(PREFIX.into(), prefix.into());
     info.insert(
         ROOT.into(),

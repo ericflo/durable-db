@@ -136,9 +136,11 @@ impl Snapshot {
                     .as_ref()
                     .is_none_or(|last| last < &routed.last)
                 {
-                    bytes = bytes
-                        .checked_add(routed.reference.blobs()[0].size())
-                        .context("checkpoint copy admission overflow")?;
+                    for blob in routed.reference.blobs() {
+                        bytes = bytes
+                            .checked_add(blob.size())
+                            .context("checkpoint copy admission overflow")?;
+                    }
                     charged_through = Some(routed.last.clone());
                 }
                 if routed.last >= end {

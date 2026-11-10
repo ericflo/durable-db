@@ -171,10 +171,11 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
     let snapshot = Snapshot::new(files.clone(), cache(0), reference);
     let mut manifest = snapshot.seek(Bytes::new()).unwrap();
     let mut idle = std::collections::BTreeSet::new();
-    let mut data_sizes = std::collections::BTreeMap::new();
+    let mut table_sizes = std::collections::BTreeMap::new();
     while let Some(table) = manifest.next().await.unwrap() {
-        let data = table.reference.blobs()[0];
-        data_sizes.insert(data.key(), data.size());
+        for blob in table.reference.blobs() {
+            table_sizes.insert(blob.key(), blob.size());
+        }
         if super::super::split_key(&table.last).unwrap().0 != db(7) {
             idle.extend(table.reference.blobs().map(|b| b.key()));
         }
@@ -227,7 +228,7 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
             .lock()
             .unwrap()
             .iter()
-            .all(|key| !data_sizes.contains_key(key) && !idle.contains(key))
+            .all(|key| !table_sizes.contains_key(key) && !idle.contains(key))
     );
     let state = projection
         .take_state(db(7))
@@ -252,7 +253,7 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
         .lock()
         .unwrap()
         .iter()
-        .filter_map(|key| data_sizes.get(key))
+        .filter_map(|key| table_sizes.get(key))
         .sum();
     assert_eq!(
         copies, copied,

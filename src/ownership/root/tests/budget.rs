@@ -12,6 +12,53 @@ fn limits(attempts: u64) -> UploadLimits {
     }
 }
 
+#[tokio::test]
+async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted_writers() {
+    let local = Provider::new();
+    claim(&mut local.root(&ManualClock::default())).await;
+    assert_eq!(
+        local.read().await.unwrap().info["durable-db-format"],
+        "owned-candidate-15",
+        "v0.9.0 local directories remain compatible"
+    );
+    local.root(&ManualClock::default()).observe().await.unwrap();
+
+    let cloud = Provider::new();
+    let connection = cloud
+        .connection("test")
+        .with_upload_budget(limits(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        cloud.read().await.unwrap().info["durable-db-format"],
+        "owned-candidate-16"
+    );
+    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    root.observe().await.unwrap();
+    cloud
+        .history
+        .lock()
+        .unwrap()
+        .last_mut()
+        .unwrap()
+        .info
+        .insert("durable-db-format".into(), "owned-candidate-15".into());
+    let before = cloud.calls.load(Ordering::SeqCst);
+    assert!(matches!(root.observe().await, Err(Error::Incompatible)));
+    assert!(
+        cloud
+            .connection("test")
+            .with_upload_budget(limits(2))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        cloud.calls.load(Ordering::SeqCst),
+        before,
+        "refuse before mutation"
+    );
+}
+
 pub(super) async fn attempt(
     connection: &Connection,
     clock: &ManualClock,

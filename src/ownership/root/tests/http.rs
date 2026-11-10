@@ -768,12 +768,12 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(status, StatusCode::OK);
 }
 
-// Inspect actual fixture data objects independently of the admission calculator.
-async fn checkpoint_data(files: &dyn Storage) -> std::collections::BTreeMap<String, u64> {
+// Inspect actual encoded data and index objects independently of admission.
+async fn checkpoint_table_objects(files: &dyn Storage) -> std::collections::BTreeMap<String, u64> {
     let mut data = std::collections::BTreeMap::new();
     for key in files.list("tables/", None, 128).await.unwrap() {
         let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
-        if object.bytes.starts_with(b"DDBBLK01") {
+        if object.bytes.starts_with(b"DDBBLK01") || object.bytes.starts_with(b"DDBIDX01") {
             data.insert(key, object.bytes.len() as u64);
         }
     }
@@ -843,9 +843,9 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         );
     }
     let a = format!("{base}/v1/databases/a/commit");
-    let initial_data = checkpoint_data(provider.files.as_ref()).await;
-    assert_eq!(initial_data.len(), 1);
-    let first_admission = 420 + initial_data.values().sum::<u64>();
+    let initial_tables = checkpoint_table_objects(provider.files.as_ref()).await;
+    assert_eq!(initial_tables.len(), 2, "one data/index pair");
+    let first_admission = 420 + initial_tables.values().sum::<u64>();
     // This request needs 250 journal bytes and 170 checkpoint row bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
@@ -905,13 +905,17 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         before, after,
         "checkpointing and neighboring admission preserve the ledger"
     );
-    let current_data = checkpoint_data(provider.files.as_ref()).await;
-    let replaced: Vec<_> = current_data
+    let current_tables = checkpoint_table_objects(provider.files.as_ref()).await;
+    let replaced: Vec<_> = current_tables
         .iter()
-        .filter(|(key, _)| !initial_data.contains_key(*key))
+        .filter(|(key, _)| !initial_tables.contains_key(*key))
         .collect();
-    assert_eq!(replaced.len(), 1, "one new shared table after checkpoint");
-    let copies = *replaced[0].1;
+    assert_eq!(
+        replaced.len(),
+        2,
+        "one new data/index pair after checkpoint"
+    );
+    let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
     let second_total = first_admission + 418 + copies;
     let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":2}});
     assert_eq!(

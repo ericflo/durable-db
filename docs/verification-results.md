@@ -1,5 +1,15 @@
 # Verification results
 
+## Shared-table index admission (2026-11-10)
+
+Native write admission now charges both data and index objects for every base table a change can replace. Pricing uses existing authenticated manifest descriptors and adds no provider calls. The 183-table fixture checks three rewritten pairs with four manifest reads and no table reads; the TCP regression rejects one byte short before allocation/PUT and admits the exact boundary. Restoring data-only pricing wrongly admits the write and fails that regression.
+
+The change adds 13 net runtime Rust lines. All 288 local Rust tests pass; the focused admission group takes 0.27 seconds, TCP refusal 0.10 seconds, and the larger checkpoint check 0.69 seconds. The existing 5,776-state model and three negative controls pass without expanding its state space.
+
+Budgeted format `owned-candidate-16` excludes older accounting policies. Unbudgeted storage stays at `owned-candidate-15`: a published v0.9.0 binary creates a checkpoint and suffix, the new binary reopens that same directory and writes, then v0.9.0 reopens again. Values, revisions and exact retry receipts survive both forced-stop transitions without export. The data-only shortcut and forced format changes for unbudgeted storage are removed.
+
+[Complete evidence](evidence/index-copy-admission-2026-11-10.json) records the corrected fixture expectation and compatibility drill. This accounts for existing table/index copies; growth in new encoding, manifests, retries and recovery remain outside full tenant attribution. Cluster timing/placement, durable retention and production qualification remain open.
+
 ## v0.9.0 native local CLI (2026-11-10)
 
 [v0.9.0](https://github.com/ericflo/durable-db/releases/tag/v0.9.0) packages `cf1a2bf`, verified by [Woodpecker #136](https://ci.eflorenzano.com/repos/18/pipeline/136/1). The downloaded static Linux x86_64 binary passes standalone checks without a toolchain, and the public default installer installs that exact binary after checksum verification. The musl 10,005-database regression passes in 198.29 seconds. All 99 enabled client tests pass against the new local CLI in 11.33 seconds; the separate native library fixture also passes all 99 in 64.87 seconds.

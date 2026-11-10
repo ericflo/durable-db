@@ -158,13 +158,13 @@ async fn collected(connection: &Connection, expected: [usize; 3]) -> (f64, usize
     (start.elapsed().as_secs_f64() * 1000.0, remaining[3])
 }
 
-async fn checkpoint_data(
+async fn checkpoint_table_objects(
     files: &dyn durable_db::storage::Storage,
 ) -> std::collections::BTreeMap<String, u64> {
     let mut data = std::collections::BTreeMap::new();
     for key in files.list("tables/", None, 128).await.unwrap() {
         let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
-        if object.bytes.starts_with(b"DDBBLK01") {
+        if object.bytes.starts_with(b"DDBBLK01") || object.bytes.starts_with(b"DDBIDX01") {
             data.insert(key, object.bytes.len() as u64);
         }
     }
@@ -206,9 +206,9 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             .await;
     }
     let commit = "/v1/databases/a/commit";
-    let initial_data = checkpoint_data(connection.objects().as_ref()).await;
-    assert_eq!(initial_data.len(), 1);
-    let initial_copies = initial_data.values().sum::<u64>();
+    let initial_tables = checkpoint_table_objects(connection.objects().as_ref()).await;
+    assert_eq!(initial_tables.len(), 2, "one data/index pair");
+    let initial_copies = initial_tables.values().sum::<u64>();
     let first_admission = 428 + initial_copies;
     // 254 journal bytes + 174 checkpoint-row bytes. The old journal-only
     // rule would admit this underfunded write; no PUT may precede refusal.
@@ -244,13 +244,13 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         server.ok("POST", "/v1/databases/b/commit", &write(0)).await["revision"],
         1
     );
-    let current_data = checkpoint_data(connection.objects().as_ref()).await;
-    let replaced: Vec<_> = current_data
+    let current_tables = checkpoint_table_objects(connection.objects().as_ref()).await;
+    let replaced: Vec<_> = current_tables
         .iter()
-        .filter(|(key, _)| !initial_data.contains_key(*key))
+        .filter(|(key, _)| !initial_tables.contains_key(*key))
         .collect();
-    assert_eq!(replaced.len(), 1);
-    let copies = *replaced[0].1;
+    assert_eq!(replaced.len(), 2, "one data/index pair");
+    let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
     let second_admission = 428 + copies;
     server
         .ok(

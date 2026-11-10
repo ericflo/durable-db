@@ -1,12 +1,14 @@
 # Logical backup and restore
 
-v0.9.0 includes `durable-db backup export`, `inspect`, and `restore`. An export contains the keys and values of one database revision, its original logical quotas, and source identity. Restore creates a new protected database with a fresh authorization incarnation and verifies every value. It does not restore credentials, policy history, transaction receipts, or the original revision number.
+The binary provides `durable-db backup export`, `inspect`, and `restore`. An export contains the keys and values of one database revision, its original logical quotas, and source identity. Restore creates a new protected database with a fresh authorization incarnation and verifies every value. It does not restore credentials, policy history, transaction receipts, or the original revision number.
 
 This is an operator-driven recovery tool. Scheduled retained snapshots, point-in-time recovery, independent backup storage, and recurring restore drills remain production gates.
 
 ## Local format upgrades
 
-v0.9.0 switches local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
+v0.10.0 reopens v0.9.0 local directories directly, preserving values, revisions and receipts. No export is required between these versions.
+
+v0.9.0 switched local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
 
 1. Keep the previous binary and directory. Pause application writes and use that binary to serve the old directory and export each database using the commands below.
 2. Stop the old server. Start v0.9.0 with a **new** `--data` directory and restore each archive. Keep the old directory and exports until verification completes.

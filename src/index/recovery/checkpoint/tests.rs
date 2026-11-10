@@ -209,7 +209,12 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             .await
             .unwrap()
             .unwrap();
-        let data_bytes = routed.reference.blobs()[0].size();
+        let table_bytes = routed
+            .reference
+            .blobs()
+            .iter()
+            .map(|b| b.size())
+            .sum::<u64>();
         projection.rebase(snapshot);
         let mutations = [
             Mutation {
@@ -227,7 +232,7 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             .await
             .unwrap();
         assert_eq!(
-            copies, data_bytes,
+            copies, table_bytes,
             "deduplicate receipt/value routes to the same table"
         );
         assert_eq!(

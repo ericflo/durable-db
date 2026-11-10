@@ -84,7 +84,8 @@ impl Collection {
             return database_root(before);
         }
         ensure!(
-            before.info.get("durable-db-format").map(String::as_str) == Some(metadata::VERSION)
+            before.info.get("durable-db-format").map(String::as_str)
+                == Some(metadata::version(false))
                 && !before.info.contains_key(crate::upload_budget::FIELD)
                 && !before
                     .info
