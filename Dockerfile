@@ -422,7 +422,7 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT; \
     cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings \
     && cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect \
-    && cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect \
+    && cargo test --locked --release --target x86_64-unknown-linux-musl --test publication ten_thousand_databases_split_page_recover_and_collect \
     && cargo build --locked --release --target x86_64-unknown-linux-musl \
     && mkdir -p /out /test-tools && cp /cache/target/debug/durable-db /test-tools/durable-db \
     && cargo test --locked --lib --no-run --message-format=json > /tmp/native-tests.json \
