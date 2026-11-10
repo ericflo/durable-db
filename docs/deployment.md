@@ -2,7 +2,7 @@
 
 The service is experimental. Initial real-B2, S3-compatible, and Kubernetes replica-transition tests pass; they are not a production readiness certification.
 
-The [v0.7.0 release](https://github.com/ericflo/durable-db/releases/tag/v0.7.0) provides a static Linux x86_64 binary. While the repository is private, `gh` must be authenticated with repository access. Install without root or a Rust toolchain:
+The [v0.9.0 release](https://github.com/ericflo/durable-db/releases/tag/v0.9.0) provides a static Linux x86_64 binary. While the repository is private, `gh` must be authenticated with repository access. Install without root or a Rust toolchain:
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -10,11 +10,11 @@ export PATH="$HOME/.local/bin:$PATH"
 durable-db serve --data ./data
 ```
 
-For laptop use, run `durable-db serve --data ./data`. The process exclusively locks its store directory. Stop it before opening the same directory elsewhere. Local mode must not be shared across pods or placed on a network filesystem.
+For laptop use, run `durable-db serve --data ./data`. This selects native serving with automatic checkpoints and collection. The process exclusively locks its store directory, including while stopped or suspended; no physical ownership clock is required. Stop it before opening the same directory elsewhere. Local mode must not be shared across pods, placed on a network filesystem, or cloned from live process memory. Older directories require [export and restore](recovery.md#local-format-upgrades).
 
 For S3, every pod receives the same bucket, prefix, and administrator signing key file. Supply AWS credentials through the provider's environment or workload identity. Run `durable-db serve --listen 0.0.0.0:7654 --bucket BUCKET --admin-key-file /run/secrets/admin.key`. A startup probe rejects providers that fail conditional object writes. B2 uses the same publication implementation through its native revision binding; see [B2 configuration](b2.md).
 
-Use `/health/live` for liveness and `/health/ready` for readiness. On SIGTERM the server drops readiness and drains requests. Completed writes survive pod removal because their authority is object storage; clients retry ambiguous writes with identical request bodies and IDs. Readiness currently indicates server startup/drain state, not a continuous provider health check.
+Use `/health/live` for liveness and `/health/ready` for readiness. On SIGTERM the server drops readiness and drains requests. Completed cloud writes survive pod removal because their authority is object storage; clients retry ambiguous writes with identical request bodies and IDs. Native local readiness also checks its worker and recovered ownership; cloud CLI readiness indicates startup/drain state, not a continuous provider health check. The cloud CLI retains the shared publication engine until native physical timing and placement are qualified.
 
 Set pod CPU/memory limits and concurrency/cache limits together. Memory cache bytes are a payload budget, not a process RSS ceiling. Bound ingress body size, authenticate at the service, terminate TLS at trusted ingress, and retain provider credentials only on the service side. See [security](security.md) for the remaining cluster-wide abuse protection work.
 
@@ -39,7 +39,7 @@ Use a registry address reachable by the **nodes' container runtime**, not just b
 
 ## Request budgets
 
-v0.7.0 exposes two per-principal, per-pod overload settings:
+v0.9.0 exposes two per-principal, per-pod overload settings:
 
 | Flag | Environment variable | Default | Accepted range |
 | --- | --- | --- | --- |
@@ -54,7 +54,7 @@ Choose these settings alongside concurrency, memory and measured provider capaci
 
 ## Signing-key changes
 
-v0.7.0 reads either the original hex key file or a bounded JSON keyring through the same `--admin-key-file` setting. Follow the [expansion, promotion, and retirement procedure](design-signing-rotation.md). Key files are loaded at startup: update the Secret and complete the corresponding rolling restart, including the template used by new autoscaled pods. A still-serving process outside the current control-plane view must be fenced from clients or included in the completion check. Keep the old key trusted during an availability rollback; a compromised or deliberately retired key must not be reintroduced by restoring an old Secret.
+v0.9.0 reads either the original hex key file or a bounded JSON keyring through the same `--admin-key-file` setting. Follow the [expansion, promotion, and retirement procedure](design-signing-rotation.md). Key files are loaded at startup: update the Secret and complete the corresponding rolling restart, including the template used by new autoscaled pods. A still-serving process outside the current control-plane view must be fenced from clients or included in the completion check. Keep the old key trusted during an availability rollback; a compromised or deliberately retired key must not be reintroduced by restoring an old Secret.
 
 For isolated qualification on an existing cluster, `scripts/qualify-multinode.py` creates a fresh namespace with explicit CPU/memory/pod quotas, private fixture Secrets, an authenticated control channel, and only namespace-scoped faults. It never drains or reboots nodes. Supply a dedicated disposable provider configuration and an image reference supported by the nodes' container runtime, pinned by digest; a registry address usable inside pods may not be a valid host pull address. The script deletes its own namespace on exit; its caller must remove the disposable provider bucket and key. `scripts/check-autoscaling-history.py` checks its resulting append history.
 

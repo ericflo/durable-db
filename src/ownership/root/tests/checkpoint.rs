@@ -766,8 +766,7 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
     let collector = exhausted
         .root(clock.clone(), profile())
         .unwrap()
-        .collection()
-        .unwrap();
+        .collection();
     let allowance = exhausted.objects().upload_budget().await.unwrap().unwrap();
     let request = root.publish_checkpoint(staged).unwrap();
     provider.pause.store(true, Ordering::SeqCst);
@@ -945,8 +944,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
         let collector = connection
             .root(clock.clone(), profile())
             .unwrap()
-            .collection()
-            .unwrap();
+            .collection();
         collector.collect().await.unwrap();
         assert_eq!(
             provider
@@ -1000,7 +998,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
         foreign.pop_durable().unwrap().unwrap();
     }
     let _late_completion = late.send().await;
-    let collector = third.collection().unwrap();
+    let collector = third.collection();
     let registration_key = format!("ownership/{}", writer.log().epoch().simple());
     let saved = provider
         .files

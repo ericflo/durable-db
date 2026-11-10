@@ -1,0 +1,3 @@
+safe LocalExclusive.cfg local-exclusive 256m -
+unsafe LocalExclusiveUnsafeDrop.cfg local-exclusive-drop 256m Exclusive
+unsafe LocalExclusiveUnsafeRecovery.cfg local-exclusive-recovery 256m Exclusive

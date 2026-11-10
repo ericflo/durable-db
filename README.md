@@ -4,27 +4,29 @@
 
 durable-db is an ordered key-value database written in Rust. Keep authoritative data in object storage, run interchangeable API servers, and use bounded memory and optional local disk to make immutable reads cheaper. On a laptop, a local directory replaces the object store.
 
-**Status: experimental, v0.8.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
+**Status: experimental, v0.9.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
 
 | What you get | How it works |
 | --- | --- |
-| Atomic transactions | Immutable sorted pages and manifests, published through one conditional directory update |
+| Atomic transactions | Revision checks and exact retries; native local journal and index, shared cloud publication |
 | Ordered scans | UTF-8 byte ordering, prefix/range filters, forward/reverse cursors |
-| Disposable servers | Every request reads the authoritative manifest; caches never decide ownership |
+| Disposable cloud servers | B2/S3 remains authoritative; caches never decide ownership |
 | Local development | One executable, one directory, no additional service |
 | Tenant boundaries | Database-scoped signed tokens, exact logical quotas, bounded requests and concurrency |
-| Automatic maintenance | Cooperative fenced garbage collection and incremental page compaction |
+| Automatic maintenance | Checkpoints and fenced collection; cloud page compaction |
 | A checkable design | TLA+ specification, intentional broken-model counterexample, failure-injection tests |
 
-The current shared read/publication path does not meet the performance brief and will be replaced before production. The [owned-partition design](docs/design-owned-partitions.md) uses locally served reads, independent durable log batches and a native Rust index. The native owner now evaluates the public read/commit contract, including forward/reverse pages and group commit. Durable creation, access policies and exact logical quotas share that journal and index. Checkpoints reuse unchanged tables and manifest nodes; automatic native maintenance reclaims covered journal history across ownership changes. The shared HTTP router now accepts a recovered native owner with bounded, cancellation-independent write admission. The CLI cutover, physical timing qualification and durable snapshot retention remain open.
+Local `serve --data` now uses the native Rust journal and index, including protected creation, access policies, ordered reads, exact retries, automatic checkpoints and collection. Its lifetime directory lock excludes other processes even while paused; it needs no physical ownership clock. Warm reads avoid storage calls and conditional publication. [Upgrade existing local directories by export and restore](docs/recovery.md#local-format-upgrades).
+
+The cloud CLI still uses shared read/publication barriers. That path does not meet the performance brief. The [owned-partition design](docs/design-owned-partitions.md) replaces it with locally served reads and independent durable log batches, using the same native components now shipped locally. Physical ownership timing, placement and durable snapshot retention still gate clustered native serving.
 
 The replacement index now recovers an immutable checkpoint plus a bounded recent journal layer. Values stay in shared sorted tables, reads fetch the relevant blocks, and bounded memory/disk caches are disposable. Checkpoints bind values and retry receipts to an exact journal cut, reusing unchanged tables without reading their indexes. Their descriptors live directly in the authority record, eliminating header uploads and orphan header objects. Automatic maintenance also reclaims obsolete table data, indexes and manifest nodes; checkpoint staging cannot adopt a later collection generation. Native HTTP tests on real B2 and versioned MinIO preserve tenant budgets, values and retry receipts across cold recovery; 100 warmed point reads and scans make zero provider calls. These [component results](docs/verification-results.md#native-http-budgets-and-recovery-2026-11-10) use an injected clock and do not qualify production timing or sustained performance.
 
-Native write admission charges each database for its journal record, new checkpoint rows and the base tables its changes can force maintenance to copy—including neighbors’ unchanged rows—before assigning shared journal order. An underfunded write is refused without a PUT; funded neighbors and exact retries continue. Pricing uses authenticated manifest sizes and the bounded cache, without reading table indexes or values. [Accounting scope](docs/design-upload-admission.md#native-serving) still excludes complete maintenance overhead and retries. Native format `owned-candidate-15` requires a fresh namespace; the CLI format is unchanged.
+Budgeted native cloud serving charges each database for its journal record, new checkpoint rows and the base tables its changes can force maintenance to copy—including neighbors’ unchanged rows—before assigning shared journal order. An underfunded write is refused without a PUT; funded neighbors and exact retries continue. Pricing uses authenticated manifest sizes and the bounded cache, without reading table indexes or values. [Accounting scope](docs/design-upload-admission.md#native-serving) still excludes complete maintenance overhead and retries. Native format `owned-candidate-15` requires a fresh namespace. Local mode enforces logical quotas and request bounds; physical upload budgets apply to cloud namespaces.
 
 ## Start locally
 
-[v0.8.0](https://github.com/ericflo/durable-db/releases/tag/v0.8.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
+[v0.9.0](https://github.com/ericflo/durable-db/releases/tag/v0.9.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -73,7 +75,7 @@ await db.transaction(async (tx) => {
 });
 ```
 
-The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Use the matching v0.8.0 client checkout.
+The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Use the matching v0.9.0 client checkout.
 
 ## Scale without moving the database
 

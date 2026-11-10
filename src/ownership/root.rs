@@ -123,15 +123,14 @@ pub struct Root<C> {
 }
 
 impl<C: Clock> Root<C> {
-    pub(crate) fn collection(&self) -> Option<Collection> {
-        self.budgeted.then(|| {
-            Collection::new(
-                self.session.authority(),
-                self.files.clone(),
-                self.prefix.clone(),
-                self.profile,
-            )
-        })
+    pub(crate) fn collection(&self) -> Collection {
+        Collection::new(
+            self.session.authority(),
+            self.files.clone(),
+            self.prefix.clone(),
+            self.profile,
+            self.budgeted,
+        )
     }
 
     pub(crate) fn database_budget(

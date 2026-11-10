@@ -394,7 +394,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
     // Every sweep is bounded; a replacement resumes the durable cursors. More
     // than one page of LIVE manifests must not hide obsolete objects forever.
     for _ in 0..8 {
-        root.collection().unwrap().collect().await.unwrap();
+        root.collection().collect().await.unwrap();
     }
     assert_eq!(
         provider
@@ -632,7 +632,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
                 provider.pause.store(true, Ordering::SeqCst);
                 let task = tokio::spawn(request.execute());
                 provider.entered.notified().await;
-                assert!(root.collection().unwrap().collect().await.unwrap() > 0);
+                assert!(root.collection().collect().await.unwrap() > 0);
                 provider.release.notify_one();
                 assert!(matches!(
                     root.finish(task.await.unwrap()).unwrap(),
@@ -647,7 +647,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
         }
         // The first sweep after takeover has a catalog and no tenant ledger.
         // Later sweeps must protect both trees even when their key names match.
-        root.collection().unwrap().collect().await.unwrap();
+        root.collection().collect().await.unwrap();
         let mut replay = root.replay().unwrap();
         for expected in 1..epoch {
             let batch = replay.read_next().await.unwrap().unwrap();
@@ -662,7 +662,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
             ledger.initialize_database().await.unwrap();
             ledger.charge(1).await.unwrap();
             let spent = ledger.status().await.unwrap();
-            root.collection().unwrap().collect().await.unwrap();
+            root.collection().collect().await.unwrap();
             assert_eq!(ledger.status().await.unwrap(), spent);
             let mut replay = root.replay().unwrap();
             assert!(replay.read_next().await.unwrap().is_some());
@@ -672,11 +672,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
         writer.complete(upload.send().await).unwrap();
         writer.pop_durable().unwrap().unwrap();
     }
-    let collector = connection
-        .root(clock, profile())
-        .unwrap()
-        .collection()
-        .unwrap();
+    let collector = connection.root(clock, profile()).unwrap().collection();
     // A missing/corrupt catalog is an error, not an empty protected tree.
     let header = format!("catalogs/{}", provider.record().catalog.unwrap().simple());
     let orphan = format!("manifests/orphan.{}", Uuid::new_v4());
@@ -707,7 +703,7 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
     let root = connection.root(ManualClock::default(), profile()).unwrap();
     let ledger = root.database_budget("app").unwrap().unwrap();
     ledger.initialize_database().await.unwrap();
-    let collector = root.collection().unwrap();
+    let collector = root.collection();
     // Metadata is uploaded, but its captured directory comparison is delayed.
     provider.pause.store(true, Ordering::SeqCst);
     let task = {

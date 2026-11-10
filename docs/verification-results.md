@@ -1,5 +1,14 @@
 # Verification results
 
+## Native local CLI (2026-11-10)
+
+Local `serve --data` now selects the native journal, index, recovered HTTP worker, checkpoints and automatic collection. A lifetime directory lock supplies single-host exclusion; no physical ownership clock is required. Shared/network filesystems and cloned live process memory remain unsupported. The cloud CLI stays on the shared publication engine while physical timing and placement are qualified.
+
+All 287 local Rust tests, 99 enabled client/Pi tests and four web-app tests pass. Real process tests cover pause, duplicate-server refusal, resume, kill, two cold reopens, exact receipts, automatic collection and missing-authority refusal. Removing the blocking mutation guard fails the cancellation regression. The new ownership model checks 57 states with two negative controls; the existing checkpoint model and nine controls also pass. The published v0.8.0 binary exports three values; the new binary refuses its directory, restores into a fresh native directory, and verifies values and quotas after SIGKILL/reopen.
+
+[Complete evidence](evidence/native-local-cli-2026-11-10.json) records the checks and two corrected harness errors. This removes legacy local CLI selection, its separate maintenance task, the optional native-collection branch and obsolete benchmark provisioning. It does not qualify clustered timing or production operation. [Existing local directories require export and restore](recovery.md#local-format-upgrades).
+
+
 ## v0.8.0 shared-table copy admission (2026-11-10)
 
 [v0.8.0](https://github.com/ericflo/durable-db/releases/tag/v0.8.0) packages `346f57c`, verified by [Woodpecker #133](https://ci.eflorenzano.com/repos/18/pipeline/133/1). The downloaded static Linux x86_64 archive passes standalone transactions, ordered reads, backup/restore and SIGKILL/reopen with no toolchain. The public default installer verifies the GitHub asset checksum and installs the same binary. The musl 10,005-database regression passes in 199.04 seconds; all 99 enabled native client tests pass in CI in 67.97 seconds, within the unchanged 90-second deadline.

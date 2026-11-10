@@ -1170,7 +1170,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         .await
         .unwrap();
     let root = super::checkpoint::budgeted_active(&connection, &clock).await;
-    let collector = root.collection().unwrap();
+    let collector = root.collection();
     let mut owner = open(
         root,
         live::Limits {
@@ -1250,7 +1250,6 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
             .root(clock.clone(), profile())
             .unwrap()
             .collection()
-            .unwrap()
             .collect()
             .await
             .unwrap();

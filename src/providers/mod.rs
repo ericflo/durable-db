@@ -18,7 +18,7 @@ mod transport;
 
 // Deletion is restricted to the namespaces with implemented collectors. Native
 // journal names additionally bind a canonical incarnation and frame position.
-fn collection_key(key: &str) -> anyhow::Result<()> {
+pub(crate) fn collection_key(key: &str) -> anyhow::Result<()> {
     if key.starts_with("journal/") {
         crate::journal::LogId::parse_key(key)?;
     } else if key.starts_with("tables/") {
@@ -196,7 +196,7 @@ async fn check_native_budget(connection: Connection) {
         ledger.charge(100).await.unwrap();
         assert!(ledger.charge(1).await.is_err());
     }
-    assert!(root.collection().unwrap().collect().await.unwrap() > 0);
+    assert!(root.collection().collect().await.unwrap() > 0);
     for name in ["a", "b"] {
         assert_eq!(
             root.database_budget(name)

@@ -97,7 +97,8 @@ try {
   const prefix = 'bench-'+randomUUID();
   for (let n=0;n<count;n++) {
     const db={name:`${prefix}-${String(n).padStart(6,'0')}`,revision:0,value:payload(n,0)};
-    await request(urls[0],'/v1/databases/'+db.name,admin,{max_bytes:1048576,max_keys:1000},report.setup.attempt_statuses);
+    await request(urls[0],'/v1/databases/'+db.name,admin,
+      {request_id:randomUUID(),limits:{max_bytes:1048576,max_keys:1000}},report.setup.attempt_statuses,'PUT');
     const {token}=await request(urls[0],'/v1/tokens',admin,{database:db.name,write:true,ttl_seconds:86400},report.setup.attempt_statuses);
     db.token=token;
     const seed=await request(urls[0],`/v1/databases/${db.name}/commit`,token,

@@ -65,7 +65,9 @@ impl Bounds {
     }
 }
 
-/// A continuously advancing elapsed clock, with the contract above.
+/// Cluster intervals require the continuously advancing clock contract above.
+/// The private exclusive-local adapter instead relies on its retained OS lock
+/// and uses logical startup progression; it cannot supply cluster permission.
 /// No system clock implementation is provided until a platform is qualified.
 pub trait Clock {
     /// None means the clock could not be read. Values share one local origin.

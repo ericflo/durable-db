@@ -1,5 +1,7 @@
 # Architecture
 
+Local serving uses the native journal, sorted-table index, checkpoints and collection described in the [owned-partition design](design-owned-partitions.md#exclusive-local-serving). A lifetime OS lock supplies single-host exclusion, so reads need no conditional publication or physical clock. The remaining sections describe the shared cloud engine; its replacement still requires qualified cluster ownership timing and placement.
+
 ## Authority and transaction boundary
 
 One database is one transaction boundary. Each database has a logical head named `heads/<database>.json`. In cluster mode, a shared immutable B+tree directory maps that head to an immutable `manifests/<database>.<uuid>` file. It lists immutable sorted pages, logical usage, quotas, recent request receipts, a collection cursor, a user revision, and a fresh fence identifier. Pages live under `blocks/<database>.<uuid>`; the delimiter cannot occur in a database identifier.
@@ -75,7 +77,7 @@ Object lock and external retention rules can prevent reclamation. No external li
 
 ## Local mode
 
-A lifetime OS lock admits one process per directory. Writes use a temporary file, file fsync, atomic rename, and directory fsync. The compare-and-replace lock remains held inside the blocking filesystem task even if its async waiter is cancelled. Crash-left temporary files are removed after acquiring the lifetime lock on reopen. Local mode is not supported on shared/network filesystems or across multiple servers.
+A lifetime OS lock admits one process per directory. The native owner recovers its checkpoint and selected journal suffix before readiness, then serves through the same HTTP backend used in native cloud fixtures. Writes use a temporary file, file fsync, atomic rename, and directory fsync. Every blocking mutation retains the lifetime lock even if its async waiter is cancelled. Crash-left temporary files are removed under that lock on reopen. Checkpoints and fenced collection run automatically. Local mode is not supported on shared/network filesystems, across multiple servers, or with cloned live process memory. See [local format upgrades](recovery.md#local-format-upgrades).
 
 
 ## Provider retry boundaries

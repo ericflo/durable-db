@@ -245,7 +245,16 @@ impl Local {
         lock.try_lock_exclusive()
             .context("local directory already owned; multi-node mode requires object storage")?;
         // Fixed directory structure: no per-tenant mkdir durability ambiguity during writes.
-        for dir in ["heads", "blocks", "journal", "tables"] {
+        for dir in [
+            "heads",
+            "blocks",
+            "journal",
+            "tables",
+            "ownership",
+            "catalogs",
+            "manifests",
+            "indexes",
+        ] {
             std::fs::create_dir_all(root.join(dir))?;
         }
         std::fs::File::open(&root)?.sync_all()?;
@@ -386,11 +395,17 @@ impl Storage for Local {
         Ok(found.into_iter().collect())
     }
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
-        match tokio::fs::remove_file(self.path(key)?).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        let path = self.path(key)?;
+        let lock = self._lock.clone();
+        tokio::task::spawn_blocking(move || {
+            let _keep_owner = lock;
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await?
     }
 }
 
@@ -413,4 +428,58 @@ fn write_local(root: &std::path::Path, path: &std::path::Path, bytes: &[u8]) -> 
     })();
     let _ = std::fs::remove_file(temp);
     result
+}
+
+#[cfg(test)]
+mod local_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancelled_local_cas_retains_exclusion_until_blocking_write_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(Local::open(temp.path().into()).unwrap());
+        let guard = Arc::downgrade(&local._lock);
+        let serial = local.serial.clone();
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let _lock = serial.lock().unwrap();
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        blocked.recv().unwrap();
+        let writer = local.clone();
+        let request = tokio::spawn(async move {
+            writer
+                .cas("authority.json", None, Bytes::from_static(b"committed"))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while guard.strong_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        drop(local);
+        assert!(
+            Local::open(temp.path().into()).is_err(),
+            "cancelled waiter released a live filesystem mutation"
+        );
+        release.send(()).unwrap();
+        blocker.join().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while guard.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let next = Local::open(temp.path().into()).unwrap();
+        assert_eq!(
+            next.get("authority.json", 32).await.unwrap().unwrap().bytes,
+            b"committed"[..]
+        );
+    }
 }

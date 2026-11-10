@@ -1,4 +1,6 @@
 mod backend;
+mod local;
+pub use local::open as open_local;
 mod native;
 pub use backend::Backend;
 pub use native::Native;

@@ -207,6 +207,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh TenantAdmission && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-localexclusive
+COPY spec/LocalExclusive.tla spec/LocalExclusive.checks spec/LocalExclusive*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh LocalExclusive && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-requestbudget
 COPY spec/RequestBudget.tla spec/RequestBudget.checks spec/RequestBudget*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -408,6 +414,7 @@ COPY --from=model-signingrotation /checks/ /checks/
 COPY --from=model-uploadcredits /checks/ /checks/
 COPY --from=model-tenantadmission /checks/ /checks/
 COPY --from=model-requestbudget /checks/ /checks/
+COPY --from=model-localexclusive /checks/ /checks/
 
 FROM tools AS build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./

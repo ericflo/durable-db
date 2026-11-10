@@ -88,6 +88,7 @@ for (const file of [
   'tenant-checkpoint-admission-2026-11-10.json',
   'retained-receipt-admission-2026-11-10.json',
   'shared-table-admission-2026-11-10.json',
+  'native-local-cli-2026-11-10.json',
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
   'placement-requests-candidate-2026-11-09.json',

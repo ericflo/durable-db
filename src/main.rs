@@ -6,7 +6,7 @@ use durable_db::{
     cache::Cache,
     engine::Engine,
     providers::b2::Native,
-    storage::{Local, Storage},
+    storage::Storage,
 };
 use std::{
     net::SocketAddr,
@@ -296,15 +296,15 @@ async fn main() -> anyhow::Result<()> {
                 memory_cache_mib * 1024 * 1024,
                 disk_cache.map(|p| (p, disk_cache_mib * 1024 * 1024)),
             )?);
-            let storage: Arc<dyn Storage> = if let Some(bucket) = b2_bucket {
-                Arc::new(
+            let storage: Option<Arc<dyn Storage>> = if let Some(bucket) = b2_bucket {
+                Some(Arc::new(
                     Native::connect_with_budget(&bucket, &prefix, upload_limits)
                         .await
                         .context("initialize B2 authority")?
                         .with_cache(cache.clone()),
-                )
+                ))
             } else if let Some(bucket) = bucket {
-                Arc::new(
+                Some(Arc::new(
                     durable_db::providers::s3::S3::connect_with_budget(
                         &bucket,
                         &prefix,
@@ -312,22 +312,34 @@ async fn main() -> anyhow::Result<()> {
                     )
                     .await?
                     .with_cache(cache.clone()),
-                )
+                ))
             } else {
-                let local = Local::open(data.join("store"))?;
-                local.cleanup_temps()?;
-                Arc::new(local)
+                None
             };
-            let engine = Arc::new(Engine::new(storage, cache));
+            let engine = storage.map(|storage| Arc::new(Engine::new(storage, cache.clone())));
+            let backend: Arc<dyn durable_db::api::Backend> = if let Some(engine) = &engine {
+                engine.clone()
+            } else {
+                Arc::new(
+                    durable_db::api::open_local(
+                        data.join("store"),
+                        cache,
+                        concurrency,
+                        Duration::from_secs(maintenance_seconds),
+                    )
+                    .await?,
+                )
+            };
             let app = Arc::new(App::with_rate_limits(
-                engine.clone(),
+                backend,
                 auth,
                 concurrency,
                 rate_limits,
             ));
             let listener = tokio::net::TcpListener::bind(listen).await?;
             tracing::info!(address = %listener.local_addr()?, cluster, "durable-db ready");
-            let maintenance = tokio::spawn(maintain(app.clone(), engine, maintenance_seconds));
+            let maintenance = engine
+                .map(|engine| tokio::spawn(maintain(app.clone(), engine, maintenance_seconds)));
             let shutdown_app = app.clone();
             axum::serve(listener, router(app))
                 .with_graceful_shutdown(async move {
@@ -336,7 +348,9 @@ async fn main() -> anyhow::Result<()> {
                     tracing::info!("draining requests");
                 })
                 .await?;
-            maintenance.abort();
+            if let Some(maintenance) = maintenance {
+                maintenance.abort();
+            }
         }
     }
     Ok(())

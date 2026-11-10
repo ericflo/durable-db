@@ -5,7 +5,7 @@ use crate::{
     directory::{Directory, witness},
     journal::LogId,
     metrics::{Event, REGISTRY},
-    publication::Authority,
+    publication::{Authority, Bucket},
     storage::Storage,
     storage::immutable::Blob,
     upload_budget::database_root,
@@ -61,6 +61,7 @@ pub(crate) struct Collection {
     files: Arc<dyn Storage>,
     prefix: String,
     profile: Profile,
+    budgeted: bool,
 }
 impl Collection {
     pub(crate) fn new(
@@ -68,17 +69,33 @@ impl Collection {
         files: Arc<dyn Storage>,
         prefix: String,
         profile: Profile,
+        budgeted: bool,
     ) -> Self {
         Self {
             authority,
             files,
             prefix,
             profile,
+            budgeted,
         }
+    }
+    fn database_root(&self, before: &Bucket) -> anyhow::Result<Option<crate::directory::Root>> {
+        if self.budgeted {
+            return database_root(before);
+        }
+        ensure!(
+            before.info.get("durable-db-format").map(String::as_str) == Some(metadata::VERSION)
+                && !before.info.contains_key(crate::upload_budget::FIELD)
+                && !before
+                    .info
+                    .contains_key(crate::upload_budget::DATABASE_FIELD),
+            "unexpected unbudgeted metadata"
+        );
+        Ok(None)
     }
     pub(crate) async fn collect(&self) -> anyhow::Result<usize> {
         let before = self.authority.read().await?;
-        database_root(&before)?;
+        self.database_root(&before)?;
         // The S3 register also retains immutable historical versions. Reuse
         // its list-before-barrier cleanup even before any tenant exists; B2
         // has no corresponding object history. This never spends immutable PUT credit.
@@ -122,9 +139,9 @@ impl Collection {
             return Ok(0);
         }
         let observed = self.authority.read().await?;
-        let record = metadata::decode(&observed.info, &self.prefix, self.profile, true)?;
+        let record = metadata::decode(&observed.info, &self.prefix, self.profile, self.budgeted)?;
         let protected = [
-            database_root(&observed)?,
+            self.database_root(&observed)?,
             catalog::load(&self.files, record.and_then(|r| r.catalog)).await?,
         ];
         let cut = if !journal.is_empty() {

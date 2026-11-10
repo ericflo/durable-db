@@ -18,7 +18,12 @@ const server=createServer(async (req,res)=>{
   res.setHeader('content-type','application/json');
   if (req.url==='/v1/tokens') return res.end(JSON.stringify({token:'fixture-only'}));
   const [,name,action]=req.url.match(/^\/v1\/databases\/([^/]+)(?:\/(.+))?$/);
-  if (!action) { databases.set(name,{revision:0,value:null}); return res.end('{}'); }
+  if (!action) {
+    if (req.method!=='PUT' || !body.request_id || !body.limits) {
+      res.statusCode=400; return res.end('{}');
+    }
+    databases.set(name,{revision:0,value:null}); return res.end('{}');
+  }
   const db=databases.get(name);
   if (action==='read') return res.end(JSON.stringify({revision:db.revision,values:[db.value]}));
   if (name.endsWith('000001') && body.expected_revision===1) {

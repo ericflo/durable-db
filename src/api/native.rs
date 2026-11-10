@@ -80,7 +80,7 @@ impl<C: Clock + Send + 'static> Native<C> {
     /// Requests also obey the public wire bounds; journal/cache limits remain
     /// independent. Capacity is 1..128; saturation refuses before admission.
     pub fn new(owner: Owner<C>, capacity: usize) -> Result<Self> {
-        Self::start(owner, capacity, None)
+        Self::start(owner, capacity, None, Duration::from_secs(60))
     }
     /// Own bounded renewal scheduling alongside serving. The injected clock and
     /// profile must already be qualified. Worker failure/drop also stops renewal.
@@ -91,9 +91,19 @@ impl<C: Clock + Send + 'static> Native<C> {
         timeout: Duration,
     ) -> Result<Self> {
         let renewal = owner.control().keep_alive(period, timeout)?;
-        Self::start(owner, capacity, Some(renewal))
+        Self::start(owner, capacity, Some(renewal), Duration::from_secs(60))
     }
-    fn start(owner: Owner<C>, capacity: usize, renewal: Option<Renewal>) -> Result<Self> {
+    pub(super) fn start(
+        owner: Owner<C>,
+        capacity: usize,
+        renewal: Option<Renewal>,
+        maintenance: Duration,
+    ) -> Result<Self> {
+        if !(Duration::from_secs(1)..=Duration::from_secs(86400)).contains(&maintenance) {
+            return Err(Error::Invalid(
+                "maintenance interval must be 1 second..1 day".into(),
+            ));
+        }
         if !(1..=128).contains(&capacity) {
             return Err(Error::Invalid(
                 "native request capacity must be 1..128".into(),
@@ -111,6 +121,7 @@ impl<C: Clock + Send + 'static> Native<C> {
             Running(running.clone()),
             renewal,
             collection,
+            maintenance,
         ));
         Ok(Self {
             owner,
@@ -275,17 +286,16 @@ async fn run<C: Clock + Send>(
     mut queue: mpsc::Receiver<Command>,
     _running: Running,
     _renewal: Option<Renewal>,
-    collection: Option<crate::ownership::root::Collection>,
+    collection: crate::ownership::root::Collection,
+    maintenance: Duration,
 ) {
     let mut uploads = JoinSet::new();
     // At most one bounded sweep per serving worker, outside every owner lock.
     // Dropping the JoinSet on retirement cancels it; no unique collector lease
     // or in-memory cursor is needed for safety or restart.
     let mut collections = JoinSet::new();
-    let mut sweep = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(60),
-        Duration::from_secs(60),
-    );
+    let mut sweep =
+        tokio::time::interval_at(tokio::time::Instant::now() + maintenance, maintenance);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending: Vec<Pending> = Vec::new();
     let mut unknown = BTreeSet::new();
@@ -296,8 +306,8 @@ async fn run<C: Clock + Send>(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = sweep.tick(), if collection.is_some() && collections.is_empty() => {
-                let collection = collection.clone().unwrap();
+            _ = sweep.tick(), if collections.is_empty() => {
+                let collection = collection.clone();
                 collections.spawn(async move { tokio::time::timeout(Duration::from_secs(30), collection.collect()).await });
             }
             result = collections.join_next(), if !collections.is_empty() => {

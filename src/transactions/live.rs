@@ -201,7 +201,7 @@ impl<C: Clock> Owner<C> {
     pub fn control(&self) -> Control<C> {
         self.control.clone()
     }
-    pub(crate) fn collection(&self) -> anyhow::Result<Option<crate::ownership::root::Collection>> {
+    pub(crate) fn collection(&self) -> anyhow::Result<crate::ownership::root::Collection> {
         Ok(self.control.lock()?.collection())
     }
     pub(crate) fn database_budget(
