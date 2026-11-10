@@ -1,7 +1,7 @@
 //! Lazy reads of one immutable checkpoint. No database registry, values or
 //! receipt window is materialized. Callers must separately retain the objects,
 //! merge the selected/live suffix, authorize tenants and check serving authority.
-use super::{Header, MAX_HEADER, Reference, tree};
+use super::{Reference, tree};
 use crate::{
     cache::Cache,
     index::table::{self, Entry, Table},
@@ -15,7 +15,7 @@ use std::sync::Arc;
 struct Inner {
     files: Arc<dyn Storage>,
     cache: Arc<Cache>,
-    header: Header,
+    header: Reference,
 }
 
 /// Data at an exact checkpoint, not a current database snapshot. Loading this
@@ -23,7 +23,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct Snapshot(Arc<Inner>);
 impl Snapshot {
-    pub(super) fn header(&self) -> &Header {
+    pub(super) fn header(&self) -> &Reference {
         &self.0.header
     }
     pub(crate) fn cut(&self) -> crate::ownership::root::Cut {
@@ -71,21 +71,12 @@ impl Snapshot {
         })
     }
 
-    pub async fn open(
-        files: Arc<dyn Storage>,
-        cache: Arc<Cache>,
-        reference: Reference,
-    ) -> anyhow::Result<Self> {
-        ensure!(
-            reference.0.size() <= MAX_HEADER as u64,
-            "checkpoint header exceeds bound"
-        );
-        let bytes = reference.0.read_cached(files.as_ref(), &cache).await?;
-        Ok(Self(Arc::new(Inner {
+    pub fn new(files: Arc<dyn Storage>, cache: Arc<Cache>, reference: Reference) -> Self {
+        Self(Arc::new(Inner {
             files,
             cache,
-            header: Header::decode(&bytes)?,
-        })))
+            header: reference,
+        }))
     }
 
     pub async fn database(

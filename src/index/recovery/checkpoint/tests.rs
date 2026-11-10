@@ -122,19 +122,17 @@ async fn image(files: Arc<dyn Storage>, bad: u8) -> anyhow::Result<Reference> {
     builder.flush().await?;
     let tables = builder.tree.tables;
     let tree = builder.tree.finish().await?;
-    Header {
+    Ok(Reference {
         cut: cut(),
         tree,
         tables,
         rows: builder.rows + u64::from(bad == 4),
         databases: 1,
-    }
-    .upload(files)
-    .await
+    })
 }
 #[tokio::test]
 async fn unknown_upload_at_every_stage_never_returns_a_checkpoint_reference() {
-    for lose in 1..=4 {
+    for lose in 1..=3 {
         let files = Files::new(lose);
         assert!(image(files.clone(), 0).await.is_err());
         assert_eq!(files.puts.load(Ordering::SeqCst), lose);
@@ -149,13 +147,11 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
     for bad in 1..=5 {
         let files = Files::new(0);
         let reference = image(files.clone(), bad).await.unwrap();
-        let snapshot = Snapshot::open(
+        let snapshot = Snapshot::new(
             files.clone(),
             Arc::new(Cache::new(0, None).unwrap()),
             reference,
-        )
-        .await
-        .unwrap();
+        );
         let database = snapshot
             .database(Database {
                 name: "app",
@@ -169,8 +165,7 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
         } else if bad == 3 {
             assert!(database.get("x").await.is_err());
         }
-        let header = Header::load(files.clone(), reference).await.unwrap();
-        assert!(load(files, header, Limits::default()).await.is_err());
+        assert!(load(files, reference, Limits::default()).await.is_err());
     }
     let files = Files::new(0);
     let reference = image(files.clone(), 0).await.unwrap();
@@ -188,13 +183,11 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
             ..Limits::default()
         },
     ] {
-        let header = Header::load(files.clone(), reference).await.unwrap();
-        let result = load(files.clone(), header, limits).await;
+        let result = load(files.clone(), reference, limits).await;
         // One tombstone key fits exactly one value byte.
         assert_eq!(result.is_ok(), limits.value_bytes == 1);
     }
-    let header = Header::load(files.clone(), reference).await.unwrap();
-    let root = header.tree.unwrap().1;
+    let root = reference.tree.unwrap().1;
     let mut encoded = Vec::new();
     root.encode(&mut encoded);
     let key = format!(
@@ -214,32 +207,20 @@ async fn receipts_counts_bounds_and_missing_or_corrupt_objects_fail_closed() {
         .await
         .unwrap();
     assert!(
-        load(
-            files.clone(),
-            Header::load(files.clone(), reference).await.unwrap(),
-            Limits::default()
-        )
-        .await
-        .is_err()
+        load(files.clone(), reference, Limits::default())
+            .await
+            .is_err()
     );
     files.inner.delete(&key).await.unwrap();
     assert!(
-        load(
-            files.clone(),
-            Header::load(files.clone(), reference).await.unwrap(),
-            Limits::default()
-        )
-        .await
-        .is_err()
+        load(files.clone(), reference, Limits::default())
+            .await
+            .is_err()
     );
     files.inner.put(&key, original).await.unwrap();
-    let projection = load(
-        files.clone(),
-        Header::load(files.clone(), reference).await.unwrap(),
-        Limits::default(),
-    )
-    .await
-    .unwrap();
+    let projection = load(files.clone(), reference, Limits::default())
+        .await
+        .unwrap();
     let view = projection
         .view(Database {
             name: "app",
@@ -353,31 +334,27 @@ async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
 }
 
 #[tokio::test]
-async fn cancelling_a_completed_header_upload_does_not_return_a_publishable_handle() {
+async fn cancelling_a_completed_manifest_upload_does_not_return_a_publishable_handle() {
     let files = Files::new(0);
-    files.pause.store(4, Ordering::SeqCst);
+    files.pause.store(3, Ordering::SeqCst);
     tokio::select! {
         result=image(files.clone(),0)=>panic!("paused upload completed: {}",result.is_ok()),
         permit=files.entered.acquire()=>permit.unwrap().forget(),
     }
     assert_eq!(
         files.inner.list("tables/", None, 10).await.unwrap().len(),
-        4
+        3
     );
     files.pause.store(0, Ordering::SeqCst);
     let reference = image(files.clone(), 0).await.unwrap();
     assert_eq!(
         files.inner.list("tables/", None, 10).await.unwrap().len(),
-        8
+        6
     );
     assert!(
-        load(
-            files.clone(),
-            Header::load(files, reference).await.unwrap(),
-            Limits::default()
-        )
-        .await
-        .is_ok()
+        load(files.clone(), reference, Limits::default())
+            .await
+            .is_ok()
     );
 }
 
@@ -387,8 +364,7 @@ async fn local_checkpoint_reopens_without_process_memory_or_cache() {
     let files = Arc::new(crate::storage::Local::open(dir.path().to_owned()).unwrap());
     let reference = image(files, 0).await.unwrap();
     let files = Arc::new(crate::storage::Local::open(dir.path().to_owned()).unwrap());
-    let header = Header::load(files.clone(), reference).await.unwrap();
-    let projection = load(files, header, Limits::default()).await.unwrap();
+    let projection = load(files, reference, Limits::default()).await.unwrap();
     let view = projection
         .view(Database {
             name: "app",
@@ -509,23 +485,18 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
         }
     }
     let tables = builder.tree.tables;
-    let reference = Header {
+    let reference = Reference {
         cut: cut(),
         tables,
         tree: builder.tree.finish().await.unwrap(),
         rows: builder.rows,
         databases: 1,
-    }
-    .upload(files.clone())
-    .await
-    .unwrap();
-    let snapshot = Snapshot::open(
+    };
+    let snapshot = Snapshot::new(
         files.clone(),
         Arc::new(Cache::new(0, None).unwrap()),
         reference,
-    )
-    .await
-    .unwrap();
+    );
     snapshot.verify(Limits::default()).await.unwrap();
     let old = references(&snapshot).await;
     assert_eq!(old.len(), 7);
@@ -541,8 +512,8 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
         .unwrap();
     assert_eq!(
         files.puts.load(Ordering::SeqCst) - puts,
-        1,
-        "only the new cut header is uploaded; the manifest is reused"
+        0,
+        "unchanged tables and manifest need no uploads; the cut is inline"
     );
     for reference in &old {
         let key = format!(
@@ -554,23 +525,12 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
             "no reused data-block reads"
         );
     }
-    let unchanged = Snapshot::open(
+    let unchanged = Snapshot::new(
         files.clone(),
         Arc::new(Cache::new(0, None).unwrap()),
         unchanged,
-    )
-    .await
-    .unwrap();
-    assert_eq!(references(&unchanged).await, old);
-    files
-        .lose
-        .store(files.puts.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
-    assert!(
-        build_projection(&projection, files.clone(), cut())
-            .await
-            .is_err()
     );
-    files.lose.store(0, Ordering::SeqCst);
+    assert_eq!(references(&unchanged).await, old);
     snapshot.verify(Limits::default()).await.unwrap();
     let encoded = Commit::encode(
         db,
@@ -638,14 +598,12 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
     let reference = build_projection(&projection, files.clone(), cut())
         .await
         .unwrap();
-    assert_eq!(files.puts.load(Ordering::SeqCst) - puts, 6);
-    let rewritten = Snapshot::open(
+    assert_eq!(files.puts.load(Ordering::SeqCst) - puts, 5);
+    let rewritten = Snapshot::new(
         files.clone(),
         Arc::new(Cache::new(0, None).unwrap()),
         reference,
-    )
-    .await
-    .unwrap();
+    );
     assert_eq!(references(&rewritten).await.intersection(&old).count(), 3);
     // Cancelling after an upload can strand fresh bytes, but exposes no new
     // reference and cannot damage either the source or the completed image.
@@ -741,13 +699,11 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
     let reference = build_projection(&mixed, files.clone(), cut())
         .await
         .unwrap();
-    let mixed = Snapshot::open(
+    let mixed = Snapshot::new(
         files.clone(),
         Arc::new(Cache::new(0, None).unwrap()),
         reference,
-    )
-    .await
-    .unwrap();
+    );
     mixed.verify(Limits::default()).await.unwrap();
     assert_eq!(
         mixed

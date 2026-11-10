@@ -33,7 +33,7 @@ For provisioning with a current source build, persist a creation intent and call
 
 ## Pi 1.5.0 indexed adapter
 
-v0.3.0 includes `clients/javascript/pi-indexed.mjs` and its `indexed/` modules:
+v0.4.0 includes `clients/javascript/pi-indexed.mjs` and its `indexed/` modules:
 
 ```js
 import { DurableDb } from '@durable-db/client';

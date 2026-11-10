@@ -175,6 +175,11 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     );
     let journals_before = files.list("journal/", None, 128).await.unwrap().len();
     assert_eq!(journals_before, 5);
+    let checkpoint_objects = files.list("tables/", None, 128).await.unwrap().len();
+    assert_eq!(
+        checkpoint_objects, 6,
+        "two checkpoints each have data, index and manifest, with no header object"
+    );
     let cleanup = Instant::now();
     let mut remaining = [0; 3];
     tokio::time::timeout(Duration::from_secs(150), async {
@@ -315,6 +320,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
+        "inline_checkpoint_descriptors":true,"checkpoint_objects_before_first_sweep":checkpoint_objects,
         "journal_objects_before":journals_before,"journal_objects_after_first_sweep":1,
         "journal_objects_after_takeover_sweep":0,"closed_journal_epochs_reclaimed":true,
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},

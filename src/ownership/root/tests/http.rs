@@ -937,12 +937,7 @@ async fn native_http_collects_checkpointed_journals() {
     for _ in 0..100 {
         tokio::task::yield_now().await;
     }
-    let header = crate::index::recovery::checkpoint::Header::load(
-        provider.files.clone(),
-        provider.record().checkpoint.unwrap(),
-    )
-    .await
-    .unwrap();
+    let header = provider.record().checkpoint.unwrap();
     let journals = provider.files.list("journal/", None, 128).await.unwrap();
     assert_eq!(header.cut.prefix.position(), 4);
     assert_eq!(journals.len(), 1);

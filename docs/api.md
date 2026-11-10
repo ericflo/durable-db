@@ -1,6 +1,6 @@
 # HTTP API
 
-This page describes v0.3.0. Routes marked native backend require the experimental library serving path; the CLI cutover remains gated on physical timing qualification.
+This page describes v0.4.0. Routes marked native backend require the experimental library serving path; the CLI cutover remains gated on physical timing qualification.
 
 Administrator tokens from current `token --admin` are expiring `ddb_control_` capabilities. Token TTL defaults to one hour and is bounded to 30 days. See the [key rollout procedure](design-signing-rotation.md) before migrating control clients or rotating keys.
 
@@ -118,7 +118,7 @@ Info, reads, writes, and write-receipt replay authorize against the same validat
 
 ## Cumulative upload admission
 
-v0.3.0 supports [format-5 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
+v0.4.0 supports [format-5 upload admission](design-upload-admission.md) for fresh B2/S3 namespaces. Initialize with both `--upload-budget-bytes` and `--upload-budget-attempts`. These are cumulative ceilings for immutable payload bytes and PUT attempts, shared by every database and process using the authority. They do not measure logical live data or the complete provider bill. Existing format-3 storage cannot be activated in place; local storage is unbudgeted.
 
 The administrator GET returns `configuration_revision`, `limits: {bytes, attempts}`, and `allocated: {bytes, attempts}`. Allocation includes whole grants, uncertain allocations, and unused credit lost with a process. It is deliberately conservative. POST takes absolute replacement ceilings:
 

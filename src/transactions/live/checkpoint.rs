@@ -93,12 +93,11 @@ impl<C: Clock> Owner<C> {
                 cut,
             )
             .await?;
-            let snapshot = checkpoint::Snapshot::open(
+            let snapshot = checkpoint::Snapshot::new(
                 self.maintenance.files.clone(),
                 self.maintenance.cache.clone(),
                 staged.reference(),
-            )
-            .await?;
+            );
             self.maintenance.publishing = Some(Publishing {
                 staged,
                 snapshot,

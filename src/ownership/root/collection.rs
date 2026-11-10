@@ -3,7 +3,6 @@
 use super::{Profile, Registration, catalog, metadata};
 use crate::{
     directory::{Directory, witness},
-    index::recovery::checkpoint::Header,
     journal::LogId,
     metrics::{Event, REGISTRY},
     publication::{Authority, Bucket},
@@ -107,9 +106,7 @@ impl Collection {
         ];
         let cut = if !journal.is_empty() {
             if let Some(record) = record.filter(|r| r.checkpoint.is_some()) {
-                let cut = Header::load(self.files.clone(), record.checkpoint.unwrap())
-                    .await?
-                    .cut;
+                let cut = record.checkpoint.unwrap().cut;
                 ensure!(
                     cut.identity.epoch <= record.identity.epoch
                         && (cut.identity.epoch != record.identity.epoch

@@ -6,7 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-pub(crate) const VERSION: &str = "owned-candidate-10";
+pub(crate) const VERSION: &str = "owned-candidate-11";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
@@ -144,7 +144,11 @@ pub(super) fn encode(
             lifetime_ns: profile.bounds.root_lifetime().as_nanos() as u64,
             error_ns: profile.error.as_nanos() as u64,
             catalog: record.catalog.map(|id| id.to_string()),
-            checkpoint: record.checkpoint.map(|r| r.encode()),
+            checkpoint: record
+                .checkpoint
+                .map(|r| r.encode())
+                .transpose()
+                .map_err(|_| Error::Incompatible)?,
         })
         .map_err(|_| Error::Incompatible)?,
     );

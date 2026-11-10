@@ -118,10 +118,7 @@ impl Recovery {
         }
         if !self.loaded {
             self.index = load(&self.files, self.record.catalog).await?;
-            if let Some(reference) = self.record.checkpoint {
-                let header =
-                    crate::index::recovery::checkpoint::Header::load(self.files.clone(), reference)
-                        .await?;
+            if let Some(header) = self.record.checkpoint {
                 ensure!(
                     header.cut.identity.epoch < self.record.identity.epoch,
                     "checkpoint is not from prior history"

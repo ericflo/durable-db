@@ -1,5 +1,9 @@
 ------------------------------ MODULE Checkpoint ------------------------------
 EXTENDS Integers, Sequences, FiniteSets, TLC
+\* `published` is the checkpoint descriptor inside the atomic authority record.
+\* `bytes` abstracts its complete immutable table/manifest image, not a separate
+\* header object. Inlining the descriptor removes header uploads and garbage;
+\* data must still be uploaded before publication, including after a lost reply.
 CONSTANTS UnsafeEarly, UnsafeCut, UnsafeReceipt, UnsafeCompare, UnsafeExpose, UnsafeValue, UnsafeFloor
 Rows == {[key |-> k,value |-> v]:k \in {1,2},v \in {0,1,2}}
 VARIABLES History, owner, register, built, pending, bytes, published, start, cursor, view, done, selected, frames

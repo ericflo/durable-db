@@ -1,6 +1,6 @@
 //! Native checkpoints bind values, revisions and retry receipts to an exact
-//! selected-journal boundary. All objects are immutable; the root register is
-//! the sole publication point. Upload failure returns no publishable handle.
+//! selected-journal boundary. The descriptor lives in the root register; its
+//! tables and manifest are immutable. Upload failure returns no publishable handle.
 mod snapshot;
 mod tree;
 use super::{Limits, Memory, Projection, Recovering, Resident, State, add, memory};
@@ -19,34 +19,10 @@ pub use snapshot::{Cursor, DatabaseSnapshot, Snapshot};
 use std::sync::Arc;
 use uuid::Uuid;
 
-const MAX_HEADER: usize = 1024;
+const MAX_DESCRIPTOR_BYTES: usize = 1024;
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const CHUNK_ROWS: usize = 4096;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Reference(Blob);
-impl Reference {
-    pub(crate) fn encode(self) -> String {
-        let mut bytes = Vec::new();
-        self.0.encode(&mut bytes);
-        hex::encode(bytes)
-    }
-    pub(crate) fn decode(encoded: &str) -> anyhow::Result<Self> {
-        ensure!(
-            encoded.len() == 112
-                && encoded
-                    .bytes()
-                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
-            "invalid checkpoint reference"
-        );
-        let blob = Blob::decode(&hex::decode(encoded)?)?;
-        ensure!(
-            blob.size() <= MAX_HEADER as u64,
-            "checkpoint header exceeds bound"
-        );
-        Ok(Self(blob))
-    }
-}
 /// Can only be produced by staging a private native recovery at a complete
 /// frame boundary. It grants neither publication nor serving permission.
 pub struct Staged {
@@ -73,23 +49,26 @@ struct Wire {
     rows: u64,
     databases: u64,
 }
-#[derive(Clone, Copy)]
-pub(crate) struct Header {
-    pub cut: Cut,
+/// Complete checkpoint descriptor, stored inline in the authority record.
+/// It authenticates immutable tables and an exact journal cut; it is not a
+/// serving capability or a pin retaining old objects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Reference {
+    pub(crate) cut: Cut,
     tree: Option<(u8, Blob)>,
     tables: u64,
     rows: u64,
     databases: u64,
 }
-impl Header {
-    async fn upload(self, files: Arc<dyn Storage>) -> anyhow::Result<Reference> {
+impl Reference {
+    pub(crate) fn encode(self) -> anyhow::Result<String> {
         let tree = self.tree.map(|(_, b)| {
             let mut out = Vec::new();
             b.encode(&mut out);
             hex::encode(out)
         });
-        let bytes = serde_json::to_vec(&Wire {
-            format: 2,
+        let encoded = serde_json::to_string(&Wire {
+            format: 3,
             epoch: self.cut.identity.epoch,
             incarnation: self.cut.identity.incarnation.to_string(),
             cut: hex::encode(self.cut.prefix.encode()),
@@ -99,29 +78,22 @@ impl Header {
             rows: self.rows,
             databases: self.databases,
         })?;
-        ensure!(bytes.len() <= MAX_HEADER, "checkpoint header exceeds bound");
-        Ok(Reference(Blob::upload(files, bytes.into()).await?))
-    }
-    pub(crate) async fn load(
-        files: Arc<dyn Storage>,
-        reference: Reference,
-    ) -> anyhow::Result<Self> {
         ensure!(
-            reference.0.size() <= MAX_HEADER as u64,
-            "checkpoint header exceeds bound"
+            encoded.len() <= MAX_DESCRIPTOR_BYTES,
+            "checkpoint descriptor exceeds bound"
         );
-        let bytes = reference
-            .0
-            .read_range(files.as_ref(), 0..reference.0.size())
-            .await?;
-        Self::decode(&bytes)
+        Ok(encoded)
     }
-    fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
-        let wire: Wire = serde_json::from_slice(bytes)?;
+    pub(crate) fn decode(encoded: &str) -> anyhow::Result<Self> {
+        ensure!(
+            encoded.len() <= MAX_DESCRIPTOR_BYTES,
+            "checkpoint descriptor exceeds bound"
+        );
+        let wire: Wire = serde_json::from_str(encoded)?;
         let incarnation = Uuid::parse_str(&wire.incarnation)?;
         let prefix = Prefix::decode(&hex::decode(&wire.cut)?)?;
         ensure!(
-            wire.format == 2
+            wire.format == 3
                 && wire.epoch > 0
                 && !incarnation.is_nil()
                 && incarnation.to_string() == wire.incarnation
@@ -380,15 +352,13 @@ async fn build_projection(
     builder.flush().await?;
     let tables = builder.tree.tables;
     let tree = builder.tree.finish().await?;
-    Header {
+    Ok(Reference {
         cut,
         tree,
         tables,
         rows: builder.rows,
         databases,
-    }
-    .upload(files)
-    .await
+    })
 }
 
 fn checkpoint_row(
@@ -453,7 +423,7 @@ fn changed_rows(projection: &Projection) -> impl Iterator<Item = Entry> + '_ {
 
 pub(super) async fn load(
     files: Arc<dyn Storage>,
-    header: Header,
+    header: Reference,
     limits: Limits,
 ) -> anyhow::Result<Projection> {
     ensure!(

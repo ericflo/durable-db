@@ -559,7 +559,7 @@ async fn checkpoints_page_ten_thousand_generations_in_shared_tables() {
         Outcome::Confirmed
     ));
     let objects = provider.files.list("tables/", None, 100).await.unwrap();
-    assert_eq!(objects.len(), 18); // eight shared tables, one manifest node, one header
+    assert_eq!(objects.len(), 17); // eight data/index pairs and one manifest node
     for key in provider.files.list("journal/", None, 32).await.unwrap() {
         provider.files.delete(&key).await.unwrap();
     }
@@ -705,6 +705,47 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
         .unwrap();
     let staged = recovery.checkpoint().await.unwrap();
     let (origin, reference) = (staged.origin, staged.reference);
+    // Maximal descriptor counts and control integers fit the already-reserved
+    // 1 KiB owner field. No new B2 metadata slot or reserve is required.
+    let mut wire: serde_json::Value = serde_json::from_str(&reference.encode().unwrap()).unwrap();
+    for field in ["epoch", "tables", "rows"] {
+        wire[field] = serde_json::json!(u64::MAX);
+    }
+    wire["databases"] = serde_json::json!(u64::MAX / 2);
+    wire["height"] = serde_json::json!(8);
+    let maximum = crate::index::recovery::checkpoint::Reference::decode(&wire.to_string()).unwrap();
+    assert!(
+        crate::index::recovery::checkpoint::Reference::decode(&maximum.encode().unwrap()).unwrap()
+            == maximum
+    );
+    let mut record = provider.record();
+    record.identity.epoch = u64::MAX;
+    record.checkpoint = Some(maximum);
+    let mut info = metadata::encode(
+        &provider.history.lock().unwrap().last().unwrap().info,
+        "test",
+        profile(),
+        record,
+        true,
+    )
+    .unwrap();
+    let mut owner: serde_json::Value =
+        serde_json::from_str(&info["durable-db-owned-root"]).unwrap();
+    // Even unrepresentable timing combinations give a conservative size bound.
+    for field in ["lifetime_ns", "error_ns"] {
+        owner[field] = serde_json::json!(u64::MAX);
+    }
+    assert!(owner.to_string().len() <= 1024);
+    info.insert("durable-db-owned-root".into(), owner.to_string());
+    metadata::budget(&info).unwrap();
+    for (field, invalid) in [("format", 2), ("epoch", 0), ("height", 9), ("tables", 0)] {
+        let mut malformed = wire.clone();
+        malformed[field] = serde_json::json!(invalid);
+        assert!(
+            crate::index::recovery::checkpoint::Reference::decode(&malformed.to_string()).is_err()
+        );
+    }
+    assert!(crate::index::recovery::checkpoint::Reference::decode(&" ".repeat(1025)).is_err());
     // The collector has no local grant and no unallocated byte credit. It must
     // make progress without immutable PUTs or restoring abandoned allowance.
     let exhausted = provider
@@ -755,22 +796,34 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
         provider.files.list("journal/", None, 10).await.unwrap(),
         original
     );
-    // Corrupt/missing checkpoint headers cannot authorize any journal deletion.
-    let key = format!("tables/{}", &reference.encode()[..32]);
-    let header = provider.files.get(&key, 1024).await.unwrap().unwrap().bytes;
-    provider
-        .files
-        .put(&key, Bytes::from_static(b"corrupt"))
-        .await
-        .unwrap();
-    assert!(collector.collect().await.is_err());
-    provider.files.delete(&key).await.unwrap();
-    assert!(collector.collect().await.is_err());
-    assert_eq!(
-        provider.files.list("journal/", None, 10).await.unwrap(),
-        original
-    );
-    provider.files.put(&key, header).await.unwrap();
+    // Malformed inline descriptors cannot authorize journal deletion.
+    let info = provider
+        .history
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .info
+        .clone();
+    for malformed in ["not-json", &"0".repeat(112)] {
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&info["durable-db-owned-root"]).unwrap();
+        wire["checkpoint"] = serde_json::json!(malformed);
+        provider
+            .history
+            .lock()
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .info
+            .insert("durable-db-owned-root".into(), wire.to_string());
+        assert!(collector.collect().await.is_err());
+        assert_eq!(
+            provider.files.list("journal/", None, 10).await.unwrap(),
+            original
+        );
+    }
+    provider.history.lock().unwrap().last_mut().unwrap().info = info;
     assert_eq!(collector.collect().await.unwrap(), 2);
     assert_eq!(
         provider.files.list("journal/", None, 10).await.unwrap(),
@@ -889,13 +942,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
     let journal = scan(&mut third).await;
     seal(&mut third, journal).await;
     checkpoint(&mut third).await;
-    let cut = crate::index::recovery::checkpoint::Header::load(
-        connection.objects(),
-        third.checkpoint_reference().unwrap().unwrap(),
-    )
-    .await
-    .unwrap()
-    .cut;
+    let cut = third.checkpoint_reference().unwrap().unwrap().cut;
     let mut live = third.take_journal(QueueLimits::default()).unwrap();
     append(&mut live, 132, Some(b"live")).await;
     // Another incarnation with the cut's epoch is not that checkpoint's journal.

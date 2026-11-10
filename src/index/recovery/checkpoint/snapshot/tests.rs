@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    index::recovery::checkpoint::{Builder, Header},
+    index::recovery::checkpoint::Builder,
     journal::{QueueLimits, Writer},
     ownership::root::{Cut, Identity},
     storage::{Object, Remote, Version},
@@ -135,7 +135,7 @@ async fn fixture(files: Arc<dyn Storage>) -> Reference {
     let tree = builder.tree.finish().await.unwrap();
     assert_eq!(tree.unwrap().0, 1);
     let writer = Writer::for_root(files.clone(), Uuid::from_u128(42), QueueLimits::default());
-    Header {
+    Reference {
         cut: Cut {
             identity: Identity {
                 epoch: 1,
@@ -148,14 +148,9 @@ async fn fixture(files: Arc<dyn Storage>) -> Reference {
         rows: builder.rows,
         databases: 3,
     }
-    .upload(files)
-    .await
-    .unwrap()
 }
 async fn open(files: Arc<Files>, reference: Reference, memory: usize) -> DatabaseSnapshot {
-    Snapshot::open(files, cache(memory), reference)
-        .await
-        .unwrap()
+    Snapshot::new(files, cache(memory), reference)
         .database(db(7))
         .await
         .unwrap()
@@ -166,10 +161,8 @@ async fn open(files: Arc<Files>, reference: Reference, memory: usize) -> Databas
 async fn seeks_include_exact_table_and_manifest_bounds_and_isolate_generations() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;
-    let snapshot = Snapshot::open(files.clone(), cache(1024 * 1024), reference)
-        .await
-        .unwrap();
-    assert_eq!(files.reads.load(Ordering::SeqCst), 1);
+    let snapshot = Snapshot::new(files.clone(), cache(1024 * 1024), reference);
+    assert_eq!(files.reads.load(Ordering::SeqCst), 0);
     for generation in 7..=9 {
         let database = snapshot.database(db(generation)).await.unwrap().unwrap();
         assert_eq!(database.revision(), 3);
@@ -310,9 +303,7 @@ async fn cold_work_tracks_tree_height_and_warm_reads_need_no_provider_calls() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;
     let shared = cache(256 * 1024);
-    let snapshot = Snapshot::open(files.clone(), shared.clone(), reference)
-        .await
-        .unwrap();
+    let snapshot = Snapshot::new(files.clone(), shared.clone(), reference);
     let database = snapshot.database(db(8)).await.unwrap().unwrap();
     database.get("k/0178").await.unwrap().unwrap();
     database.resolve("r-2", [2; 32], 0).await.unwrap();
@@ -321,9 +312,7 @@ async fn cold_work_tracks_tree_height_and_warm_reads_need_no_provider_calls() {
     let reads = files.reads.load(Ordering::SeqCst);
     assert!(reads <= 12, "must not traverse 183 table indexes: {reads}");
     for _ in 0..8 {
-        let reopened = Snapshot::open(files.clone(), shared.clone(), reference)
-            .await
-            .unwrap();
+        let reopened = Snapshot::new(files.clone(), shared.clone(), reference);
         let database = reopened.database(db(8)).await.unwrap().unwrap();
         assert!(database.get("k/0178").await.unwrap().is_some());
         assert!(database.get("k/0178-gap").await.unwrap().is_none());
@@ -406,9 +395,7 @@ async fn corrupted_disk_cache_refetches_but_missing_authoritative_data_is_an_err
     let reference = fixture(files.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let shared = Arc::new(Cache::new(0, Some((dir.path().into(), 1024 * 1024))).unwrap());
-    let snapshot = Snapshot::open(files.clone(), shared.clone(), reference)
-        .await
-        .unwrap();
+    let snapshot = Snapshot::new(files.clone(), shared.clone(), reference);
     let view = snapshot.database(db(7)).await.unwrap().unwrap();
     view.get("k/0002").await.unwrap().unwrap();
     let reads = files.reads.load(Ordering::SeqCst);
@@ -421,9 +408,7 @@ async fn corrupted_disk_cache_refetches_but_missing_authoritative_data_is_an_err
         }
     }
     let shared = Arc::new(Cache::new(0, Some((dir.path().into(), 1024 * 1024))).unwrap());
-    let snapshot = Snapshot::open(files.clone(), shared, reference)
-        .await
-        .unwrap();
+    let snapshot = Snapshot::new(files.clone(), shared, reference);
     let view = snapshot.database(db(7)).await.unwrap().unwrap();
     assert_eq!(
         view.get("k/0002").await.unwrap().unwrap().value,
@@ -445,7 +430,7 @@ async fn missing_and_corrupt_referenced_pages_never_become_absent_keys() {
     let files = Files::new();
     let reference = fixture(files.clone()).await;
     async fn query(files: Arc<Files>, reference: Reference) -> anyhow::Result<Option<Entry>> {
-        let image = Snapshot::open(files, cache(0), reference).await?;
+        let image = Snapshot::new(files, cache(0), reference);
         image
             .database(db(7))
             .await?

@@ -1,6 +1,6 @@
 # Production readiness
 
-**Release decision: not ready for production.** v0.3.0 is an experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
+**Release decision: not ready for production.** v0.4.0 is an experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
 
 The production release must retain one installable executable, directory-backed laptop development, and Kubernetes deployments that scale down to one node. Cluster data stays authoritative in B2 or S3 through one common storage algorithm, with bounded disposable caches and automatic maintenance. Performance, tenant protection and correctness are joint acceptance criteria.
 
@@ -42,7 +42,7 @@ Backup retention and recovery objectives are not yet selected. A proposed starti
 1. The [native HTTP provider fixture](verification-results.md#native-http-budgets-and-recovery-2026-11-10) passes B2 and versioned MinIO with a logical clock. Qualify runtime timing and switch the CLI once its contract is established. Complete the supported timing contract: the test binding now enforces guest sleep exclusion and passes no-sleep VM takeover, but hypervisor-host sleep and cross-host bounds remain unqualified. Then qualify elapsed time and restore/fork detection, the implemented renewal scheduler, election and placement, including a paused old owner that resumes after takeover. Keep the common B2/S3 storage algorithm.
 2. Measure warm reads, group commit and independent active databases through that serving path, including total-compute-loss recovery. Compare with the [raw provider baseline](design-owned-partitions.md#what-the-provider-measurements-establish). The public whole-database revision condition still limits same-database concurrency; exposing the existing key/range validator requires an explicit API contract.
 3. Integrate per-tenant physical admission and fair request/egress budgets. Do not refund rights that could still produce delayed uploads.
-4. Add compaction to the checkpoint writer, which now reuses unchanged tables and manifest nodes. Extend automatic reclamation beyond budget metadata to journals, tables and checkpoints with reader/backup retention, surviving complete compute/cache loss.
+4. Add compaction to the checkpoint writer, which now reuses unchanged tables and manifest nodes. Journal reclamation is implemented and checkpoint header objects have been eliminated. Reclaim obsolete table/manifest objects with reader/backup retention, surviving complete compute/cache loss.
 5. Qualify Pi and general application workloads, mixed versions, provider failures, Kubernetes autoscaling, sustained load, disaster recovery and release artifacts. Resolve independent review findings before changing the production status.
 
 ## Reproducible load baseline

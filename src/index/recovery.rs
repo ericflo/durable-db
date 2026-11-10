@@ -465,7 +465,7 @@ impl Recovering {
         );
         let mut projection = Projection::new(limits)?;
         if let Some(reference) = replay.origin().checkpoint {
-            let base = checkpoint::Snapshot::open(replay.files(), cache, reference).await?;
+            let base = checkpoint::Snapshot::new(replay.files(), cache, reference);
             replay.resume(base.cut()).await?;
             projection.base = Some(base);
         }

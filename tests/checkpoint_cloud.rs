@@ -174,9 +174,7 @@ async fn lazy_reads(connection: &Connection, root: &mut Root<TestClock>) -> serd
     let cache = Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap());
     let reference = root.checkpoint_reference().unwrap().unwrap();
     let start = Instant::now();
-    let snapshot = Snapshot::open(connection.objects(), cache.clone(), reference)
-        .await
-        .unwrap_or_else(|_| panic!("lazy checkpoint open failed"));
+    let snapshot = Snapshot::new(connection.objects(), cache.clone(), reference);
     let view = snapshot
         .database(Database {
             name: "app-0512",
