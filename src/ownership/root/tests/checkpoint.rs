@@ -661,7 +661,10 @@ async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered
     );
 }
 
-async fn budgeted_active(connection: &Connection, clock: &ManualClock) -> Root<ManualClock> {
+pub(super) async fn budgeted_active(
+    connection: &Connection,
+    clock: &ManualClock,
+) -> Root<ManualClock> {
     for _ in 0..2 {
         let (mut root, outcome) = super::budget::attempt(connection, clock).await;
         if matches!(outcome, Outcome::Confirmed) {
@@ -775,14 +778,33 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
         provider.files.list("journal/", None, 10).await.unwrap(),
         original
     );
+    assert!(
+        provider
+            .files
+            .list("tables/", None, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an unpublished staged image is collectible"
+    );
     provider.release.notify_one();
     assert!(matches!(
         root.finish(task.await.unwrap()).unwrap(),
         Outcome::Conflict
     ));
     validate(&mut root).await;
+    assert!(matches!(
+        root.publish_checkpoint(Staged { origin, reference }),
+        Err(Error::StaleRecovery)
+    ));
+    let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
+        .await
+        .unwrap()
+        .advance(2)
+        .await
+        .unwrap();
     let request = root
-        .publish_checkpoint(Staged { origin, reference })
+        .publish_checkpoint(recovery.checkpoint().await.unwrap())
         .unwrap();
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(matches!(

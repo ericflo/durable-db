@@ -1154,3 +1154,149 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
         );
     }
 }
+
+#[tokio::test]
+async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery() {
+    use crate::{storage::Storage, upload_budget::UploadLimits};
+    let provider = Provider::new();
+    let files = provider.files.clone();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 16 * 1024 * 1024,
+            attempts: 256,
+        })
+        .await
+        .unwrap();
+    let root = super::checkpoint::budgeted_active(&connection, &clock).await;
+    let collector = root.collection().unwrap();
+    let mut owner = open(
+        root,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    owner
+        .database_budget("a")
+        .unwrap()
+        .unwrap()
+        .initialize_database()
+        .await
+        .unwrap();
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    let batch = owner
+        .prepare(&[request(
+            &snapshot,
+            "first",
+            &[],
+            &[Mutation {
+                key: "x",
+                value: Some(b"retained"),
+            }],
+        )])
+        .await
+        .unwrap();
+    let completion = batch.upload.unwrap().send().await;
+    provider.pause.store(true, Ordering::SeqCst);
+    tokio::select! {
+        result = owner.complete(completion) => panic!("publication did not pause: {result:?}"),
+        _ = provider.entered.notified() => (),
+    }
+    assert_eq!(files.list("tables/", None, 128).await.unwrap().len(), 3);
+    collector.collect().await.unwrap();
+    assert!(files.list("tables/", None, 128).await.unwrap().is_empty());
+    assert!(
+        !owner.maintain().await.unwrap(),
+        "discard collected staging after exact revalidation"
+    );
+    assert!(owner.maintain().await.unwrap());
+    let retained = files.list("tables/", None, 128).await.unwrap();
+    assert_eq!(retained.len(), 3);
+    assert_eq!(
+        owner.outcome(batch.tickets[0]).unwrap(),
+        Result::Committed(1)
+    );
+    // A corrupt/missing manifest must stop collection before any data deletion.
+    for key in &retained {
+        let bytes = files.get(key, 1024 * 1024).await.unwrap().unwrap().bytes;
+        if bytes.starts_with(b"DDBCPN01") {
+            files
+                .put(key, bytes::Bytes::from_static(b"corrupt"))
+                .await
+                .unwrap();
+            assert!(collector.collect().await.is_err());
+            assert_eq!(files.list("tables/", None, 128).await.unwrap(), retained);
+            files.delete(key).await.unwrap();
+            assert!(collector.collect().await.is_err());
+            files.put(key, bytes).await.unwrap();
+        }
+    }
+    // Multiple bounded pages, fresh collector instances and no credit refunds.
+    let allowance = connection.objects().upload_budget().await.unwrap();
+    for _ in 0..130 {
+        files
+            .put(
+                &format!("tables/{}", Uuid::new_v4().simple()),
+                bytes::Bytes::new(),
+            )
+            .await
+            .unwrap();
+    }
+    for _ in 0..3 {
+        connection
+            .root(clock.clone(), profile())
+            .unwrap()
+            .collection()
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+    }
+    assert_eq!(files.list("tables/", None, 128).await.unwrap(), retained);
+    assert_eq!(
+        connection.objects().upload_budget().await.unwrap(),
+        allowance
+    );
+    let generation = provider.record().collection;
+    collector.collect().await.unwrap();
+    assert_eq!(
+        provider.record().collection,
+        generation,
+        "a sweep with no obsolete table does not invalidate checkpoint staging"
+    );
+    let mut root = super::checkpoint::budgeted_active(&connection, &clock).await;
+    let journal = scan(&mut root).await;
+    seal(&mut root, journal).await;
+    let mut recovered = open(root, live::Limits::default()).await;
+    let current = recovered.snapshot(database("a")).await.unwrap();
+    assert_eq!(
+        recovered
+            .get(&current, "x")
+            .await
+            .unwrap()
+            .unwrap()
+            .value
+            .as_deref(),
+        Some(b"retained".as_slice())
+    );
+    let retry = recovered
+        .prepare(&[request(
+            &snapshot,
+            "first",
+            &[],
+            &[Mutation {
+                key: "x",
+                value: Some(b"retained"),
+            }],
+        )])
+        .await
+        .unwrap();
+    assert!(retry.upload.is_none());
+    assert_eq!(
+        recovered.outcome(retry.tickets[0]).unwrap(),
+        Result::Committed(1)
+    );
+}

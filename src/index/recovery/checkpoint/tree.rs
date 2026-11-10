@@ -305,3 +305,33 @@ fn take<'a>(input: &mut &'a [u8], length: usize) -> anyhow::Result<&'a [u8]> {
     input.advance(length);
     Ok(out)
 }
+
+impl super::Reference {
+    /// Remove reachable candidates using the existing bounded manifest walker.
+    /// No values/indexes are fetched and no object is deleted on a partial walk.
+    pub(crate) async fn protect(
+        &self,
+        files: Arc<dyn Storage>,
+        candidates: &mut std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        let mut reader = Reader::new(files, self.tree)?;
+        let mut tables = 0u64;
+        while let Some(table) = reader.next().await? {
+            tables += 1;
+            ensure!(tables <= self.tables, "checkpoint table count exceeded");
+            for blob in reader
+                .reuse
+                .iter_mut()
+                .filter_map(Option::take)
+                .chain(table.reference.blobs())
+            {
+                candidates.remove(&blob.key());
+            }
+            if candidates.is_empty() {
+                return Ok(());
+            }
+        }
+        ensure!(tables == self.tables, "checkpoint table count mismatch");
+        Ok(())
+    }
+}

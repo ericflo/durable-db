@@ -213,6 +213,8 @@ impl<C: Clock> Root<C> {
             .checked_add(1)
             .ok_or(Error::Exhausted)?;
         let record = Record {
+            collection: collection::generation(observed.raw.metadata())
+                .map_err(|_| Error::Incompatible)?,
             identity: Identity {
                 epoch,
                 incarnation: self.incarnation,

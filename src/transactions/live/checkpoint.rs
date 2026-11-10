@@ -105,6 +105,16 @@ impl<C: Clock> Owner<C> {
             });
         }
         let _request = self.control.request.lock().await;
+        let pending = self.maintenance.publishing.as_ref().unwrap();
+        if !pending.attempted
+            && self.control.lock()?.recovery_record()?.collection
+                != pending.staged.origin.collection
+        {
+            // A sweep may have deleted freshly staged objects. The published
+            // base is still retained; rebuild from it with fresh identities.
+            self.maintenance.publishing = None;
+            return Ok(false);
+        }
         let pending = self.maintenance.publishing.as_mut().unwrap();
         for attempt in 0..2 {
             if !pending.attempted {
@@ -128,6 +138,10 @@ impl<C: Clock> Owner<C> {
                 let _outcome = self.control.renew_locked().await?;
                 let record = self.control.lock()?.recovery_record()?;
                 if record.checkpoint != Some(pending.staged.reference) {
+                    if record.collection != pending.staged.origin.collection {
+                        self.maintenance.publishing = None;
+                        return Ok(false);
+                    }
                     ensure!(record == pending.staged.origin, "checkpoint origin changed");
                     // Exact validation changed the nonce: the old captured CAS
                     // cannot still apply. Reuse bytes and retry once in this call,

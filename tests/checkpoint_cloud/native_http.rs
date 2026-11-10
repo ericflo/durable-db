@@ -101,24 +101,31 @@ fn write(revision: u64) -> Value {
         "writes":[{"key":"x","value":if revision == 0 {"b25l"} else {"dHdv"}}]})
 }
 
-// Mark both metadata prefixes after setup: slow provider calls may let the
+// Mark metadata and table prefixes after setup: slow provider calls may let the
 // ordinary 60-second worker run before the fixture finishes writing its data.
-async fn collected(files: &Arc<dyn durable_db::storage::Storage>, expected: [usize; 3]) -> f64 {
-    let markers = ["manifests", "indexes"]
-        .map(|prefix| format!("{prefix}/zz-collection-check.{}", Uuid::new_v4()));
+async fn collected(files: &Arc<dyn durable_db::storage::Storage>, expected: [usize; 4]) -> f64 {
+    let markers = [
+        format!("manifests/zz-collection-check.{}", Uuid::new_v4()),
+        format!("indexes/zz-collection-check.{}", Uuid::new_v4()),
+        format!("tables/{}", Uuid::new_v4().simple()),
+    ];
     for marker in &markers {
         files.put(marker, Bytes::new()).await.unwrap();
     }
     let start = Instant::now();
-    let mut remaining = [0; 3];
+    let mut remaining = [0; 4];
     tokio::time::timeout(Duration::from_secs(150), async {
         loop {
-            for (i, prefix) in ["manifests/", "indexes/", "journal/"].iter().enumerate() {
+            for (i, prefix) in ["manifests/", "indexes/", "journal/", "tables/"]
+                .iter()
+                .enumerate()
+            {
                 remaining[i] = files.list(prefix, None, 128).await.unwrap().len();
             }
             if remaining == expected
                 && files.get(&markers[0], 1).await.unwrap().is_none()
                 && files.get(&markers[1], 1).await.unwrap().is_none()
+                && files.get(&markers[2], 1).await.unwrap().is_none()
             {
                 break;
             }
@@ -127,7 +134,7 @@ async fn collected(files: &Arc<dyn durable_db::storage::Storage>, expected: [usi
     })
     .await
     .unwrap_or_else(|_| {
-        panic!("automatic collection timed out: manifests/indexes/journals {remaining:?}")
+        panic!("automatic collection timed out: manifests/indexes/journals/tables {remaining:?}")
     });
     start.elapsed().as_secs_f64() * 1000.0
 }
@@ -207,12 +214,12 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "setup may overlap automatic collection, but the suffix must remain"
     );
     let checkpoint_objects = files.list("tables/", None, 128).await.unwrap().len();
-    assert_eq!(
-        checkpoint_objects, 6,
-        "two checkpoints each have data, index and manifest, with no header object"
+    assert!(
+        (3..=6).contains(&checkpoint_objects),
+        "setup may overlap collection of the earlier checkpoint"
     );
     let setup_seconds = started.elapsed().as_secs_f64();
-    let cleanup_ms = collected(&files, [2, 1, 1]).await;
+    let cleanup_ms = collected(&files, [2, 1, 1, 3]).await;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     server.stop().await;
     drop((connection, files));
@@ -283,7 +290,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     // Wait for both metadata loops and all covered journals after takeover.
     // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
-    collected(&files, [3, 2, 0]).await;
+    collected(&files, [3, 2, 0, 3]).await;
     server.stop().await;
     drop((connection, files));
     let connection = connect(&provider, &bucket, &namespace)
@@ -318,6 +325,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
+        "automatic_table_and_manifest_collection":true,"checkpoint_objects_after_first_sweep":3,"checkpoint_objects_after_takeover_sweep":3,
         "inline_checkpoint_descriptors":true,"checkpoint_objects_before_first_sweep":checkpoint_objects,
         "journal_objects_before":journals_before,"journal_objects_after_first_sweep":1,
         "journal_objects_after_takeover_sweep":0,"closed_journal_epochs_reclaimed":true,

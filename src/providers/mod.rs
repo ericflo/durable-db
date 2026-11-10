@@ -21,6 +21,8 @@ mod transport;
 fn collection_key(key: &str) -> anyhow::Result<()> {
     if key.starts_with("journal/") {
         crate::journal::LogId::parse_key(key)?;
+    } else if key.starts_with("tables/") {
+        crate::storage::immutable::Blob::validate_key(key)?;
     } else {
         anyhow::ensure!(
             ["blocks/", "manifests/", "indexes/", "proposals/"]

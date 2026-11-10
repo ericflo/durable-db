@@ -679,11 +679,11 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
         provider.files.get(&orphan, 1).await.unwrap().is_some(),
         "uncertain fences grant no delete permission"
     );
-    // Exhaust all remaining global attempts. The out-of-scope table identity
+    // Exhaust all remaining global attempts. The out-of-scope registration identity
     // survives collection; deleting metadata never restores either allowance.
     while connection
         .objects()
-        .put("tables/untouched", Bytes::new())
+        .put("ownership/untouched", Bytes::new())
         .await
         .is_ok()
     {}
@@ -694,7 +694,7 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
     assert!(
         provider
             .files
-            .get("tables/untouched", 1)
+            .get("ownership/untouched", 1)
             .await
             .unwrap()
             .is_some()

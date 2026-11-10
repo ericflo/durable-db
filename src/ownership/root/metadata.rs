@@ -6,7 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
-pub(crate) const VERSION: &str = "owned-candidate-11";
+pub(crate) const VERSION: &str = "owned-candidate-12";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
@@ -19,6 +19,7 @@ pub(crate) enum Phase {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Record {
+    pub collection: u64,
     pub identity: Identity,
     pub phase: Phase,
     pub catalog: Option<Uuid>,
@@ -106,6 +107,7 @@ pub(super) fn decode(
         return Err(Error::Incompatible);
     }
     Ok(Some(Record {
+        collection: super::collection::generation(info).map_err(|_| Error::Incompatible)?,
         identity: Identity {
             epoch: wire.epoch,
             incarnation,

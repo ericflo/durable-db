@@ -937,6 +937,15 @@ async fn native_http_collects_checkpointed_journals() {
     assert_eq!(header.cut.prefix.position(), 4);
     assert_eq!(journals.len(), 1);
     assert_eq!(
+        provider
+            .files
+            .list("tables/", None, 128)
+            .await
+            .unwrap()
+            .len(),
+        5 // two data/index pairs and one manifest
+    );
+    assert_eq!(
         crate::journal::LogId::parse_key(&journals[0]).unwrap(),
         (header.cut.prefix.log(), 5)
     );

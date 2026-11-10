@@ -3,6 +3,9 @@
 \* fresh objects after ANY failed exact comparison, and collection lists before
 \* a nonce-changing comparison. Directory membership supplies protected objects. `live` is the union of ALL
 \* roots in the captured authority, including budget and recovery directories.
+\* Native checkpoint tables use the same protocol. `fence` is the persisted
+\* collection generation captured BEFORE staging. Ordinary control renewal can
+\* change the provider nonce but cannot adopt a newer collection generation.
 EXTENDS Naturals, FiniteSets
 CONSTANTS Jobs, Collectors, Pages
 VARIABLES live, objects, used, fence, job, candidate, protected, gc
@@ -67,6 +70,12 @@ Next == Steps(TRUE, TRUE)
 Spec == Init /\ [][Next]_vars
 UnsafeOriginSpec == Init /\ [][Steps(FALSE, TRUE)]_vars
 UnsafeFenceSpec == Init /\ [][Steps(TRUE, FALSE)]_vars
+\* Refreshing a failed comparison must not bless previously staged objects:
+\* a collector may already have deleted them. Rebuild with fresh identities.
+AdoptCollection(j) == /\ job[j].phase = "ready"
+                      /\ job' = [job EXCEPT ![j].epoch = fence]
+                      /\ UNCHANGED <<live,objects,used,fence,candidate,protected,gc>>
+UnsafeAdoptCollectionSpec == Init /\ [][Next \/ (\E j \in Jobs: AdoptCollection(j))]_vars
 \* Omitting a root from protection is unsafe even with the correct fence.
 ForgetProtection(c) == /\ gc[c] = "fenced"
                        /\ protected' = [protected EXCEPT ![c] = {}]

@@ -1,31 +1,39 @@
-//! Upload-free collection of native metadata, covered journal frames and provider history.
+//! Upload-free collection of native metadata, checkpoints and covered journals.
 //! Uses PublicationSafety's list-before-fence protocol and Directory membership.
 use super::{Profile, Registration, catalog, metadata};
 use crate::{
     directory::{Directory, witness},
     journal::LogId,
     metrics::{Event, REGISTRY},
-    publication::{Authority, Bucket},
+    publication::Authority,
     storage::Storage,
+    storage::immutable::Blob,
     upload_budget::database_root,
 };
 use anyhow::ensure;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub(crate) const FIELD: &str = "durable-db-gc";
 const PAGE: usize = 128;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cursor {
+    generation: u64,
     manifests: Option<String>,
     indexes: Option<String>,
     journal: Option<String>,
+    tables: Option<String>,
+}
+pub(super) fn generation(info: &BTreeMap<String, String>) -> anyhow::Result<u64> {
+    Ok(Cursor::read(info)?.generation)
 }
 impl Cursor {
-    fn read(before: &Bucket) -> anyhow::Result<Self> {
-        let cursor: Self = before
-            .info
+    fn read(info: &BTreeMap<String, String>) -> anyhow::Result<Self> {
+        let cursor: Self = info
             .get(FIELD)
             .map(|s| serde_json::from_str(s))
             .transpose()?
@@ -40,6 +48,9 @@ impl Cursor {
         }
         if let Some(key) = &cursor.journal {
             LogId::parse_key(key)?;
+        }
+        if let Some(key) = &cursor.tables {
+            Blob::validate_key(key)?;
         }
         Ok(cursor)
     }
@@ -72,7 +83,7 @@ impl Collection {
         // its list-before-barrier cleanup even before any tenant exists; B2
         // has no corresponding object history. This never spends immutable PUT credit.
         self.authority.maintenance().await?;
-        let cursor = Cursor::read(&before)?;
+        let cursor = Cursor::read(&before.info)?;
         let manifests = self
             .files
             .list("manifests/", cursor.manifests.as_deref(), PAGE)
@@ -85,16 +96,28 @@ impl Collection {
             .files
             .list("journal/", cursor.journal.as_deref(), PAGE)
             .await?;
+        let tables = self
+            .files
+            .list("tables/", cursor.tables.as_deref(), PAGE)
+            .await?;
+        for key in &tables {
+            Blob::validate_key(key)?;
+        }
         ensure!(
-            manifests.len() <= PAGE && indexes.len() <= PAGE && journal.len() <= PAGE,
+            manifests.len() <= PAGE
+                && indexes.len() <= PAGE
+                && journal.len() <= PAGE
+                && tables.len() <= PAGE,
             "collection listing exceeds its bound"
         );
         if manifests.is_empty()
             && indexes.is_empty()
             && journal.is_empty()
+            && tables.is_empty()
             && cursor.manifests.is_none()
             && cursor.indexes.is_none()
             && cursor.journal.is_none()
+            && cursor.tables.is_none()
         {
             return Ok(0);
         }
@@ -120,10 +143,23 @@ impl Collection {
         } else {
             None
         };
+        let mut obsolete: BTreeSet<_> = tables.iter().cloned().collect();
+        if let Some(checkpoint) = record.and_then(|r| r.checkpoint)
+            && !obsolete.is_empty()
+        {
+            checkpoint
+                .protect(self.files.clone(), &mut obsolete)
+                .await?;
+        }
         let cursor = Cursor {
+            generation: generation(&observed.info)?
+                // Metadata/journal-only sweeps cannot invalidate staged tables.
+                .checked_add(u64::from(!obsolete.is_empty()))
+                .ok_or_else(|| anyhow::anyhow!("collection generation exhausted"))?,
             manifests: (manifests.len() == PAGE).then(|| manifests.last().unwrap().clone()),
             indexes: (indexes.len() == PAGE).then(|| indexes.last().unwrap().clone()),
             journal: (journal.len() == PAGE).then(|| journal.last().unwrap().clone()),
+            tables: (tables.len() == PAGE).then(|| tables.last().unwrap().clone()),
         };
         let mut info = observed.info.clone();
         info.insert(FIELD.into(), serde_json::to_string(&cursor)?);
@@ -137,6 +173,12 @@ impl Collection {
         let mut deleted = Directory::new(self.files.clone())
             .collect_unreachable(&protected, &manifests, &indexes, &*self.authority)
             .await?;
+        for key in obsolete {
+            REGISTRY.event(Event::DataCandidates, 1);
+            self.authority.delete_versions(&key).await?;
+            REGISTRY.event(Event::DataDeleteAck, 1);
+            deleted += 1;
+        }
         if let Some(cut) = cut {
             // Keys group frames by incarnation. Retain one validated registration,
             // not one provider GET per frame or an unbounded epoch cache.

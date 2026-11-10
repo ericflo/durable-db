@@ -461,3 +461,56 @@ async fn missing_and_corrupt_referenced_pages_never_become_absent_keys() {
     }
     assert!(query(files, reference).await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn collection_protects_every_manifest_and_table_without_reading_values() {
+    use std::collections::BTreeSet;
+    let files = Files::new();
+    let reference = fixture(files.clone()).await;
+    let keys = files.inner.list("tables/", None, 1000).await.unwrap();
+    assert!(keys.len() > 128);
+    let orphan = format!("tables/{}", Uuid::new_v4().simple());
+    for page in keys.chunks(128) {
+        let mut candidates: BTreeSet<_> = page.iter().cloned().collect();
+        candidates.insert(orphan.clone());
+        files.reads.store(0, Ordering::SeqCst);
+        reference
+            .protect(files.clone(), &mut candidates)
+            .await
+            .unwrap();
+        assert_eq!(candidates, BTreeSet::from([orphan.clone()]));
+        assert_eq!(
+            files.reads.load(Ordering::SeqCst),
+            4,
+            "only the four manifest nodes are read; never data or table indexes"
+        );
+    }
+    let root = reference.tree.unwrap().1.key();
+    let original = files
+        .inner
+        .get(&root, 144 * 1024)
+        .await
+        .unwrap()
+        .unwrap()
+        .bytes;
+    files
+        .inner
+        .put(&root, Bytes::from_static(b"corrupt"))
+        .await
+        .unwrap();
+    let mut candidates = BTreeSet::from([orphan]);
+    assert!(
+        reference
+            .protect(files.clone(), &mut candidates)
+            .await
+            .is_err()
+    );
+    files.inner.delete(&root).await.unwrap();
+    assert!(
+        reference
+            .protect(files.clone(), &mut candidates)
+            .await
+            .is_err()
+    );
+    files.inner.put(&root, original).await.unwrap();
+}

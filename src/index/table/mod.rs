@@ -71,6 +71,9 @@ pub struct Reference {
     index: Blob,
 }
 impl Reference {
+    pub(crate) fn blobs(&self) -> [Blob; 2] {
+        [self.data, self.index]
+    }
     pub fn encode(&self) -> Bytes {
         codec::reference(self)
     }

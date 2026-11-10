@@ -64,8 +64,19 @@ impl Blob {
     pub(crate) fn matches(&self, bytes: &[u8]) -> bool {
         self.size == bytes.len() as u64 && Sha256::digest(bytes).as_slice() == self.digest
     }
-    fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         format!("tables/{}", self.id.simple())
+    }
+    pub(crate) fn validate_key(key: &str) -> anyhow::Result<()> {
+        let name = key
+            .strip_prefix("tables/")
+            .ok_or_else(|| anyhow::anyhow!("invalid table key"))?;
+        let id = Uuid::parse_str(name)?;
+        ensure!(
+            !id.is_nil() && id.simple().to_string() == name,
+            "noncanonical table key"
+        );
+        Ok(())
     }
     /// Partial reads rely on the index's block-integrity checks. A complete
     /// bounded read also checks the digest recorded in the journal reference.
@@ -226,6 +237,21 @@ mod tests {
             let mut bad = encoded.clone();
             bad[start..end].fill(0);
             assert!(Blob::decode(&bad).is_err());
+        }
+    }
+    #[test]
+    fn collection_keys_are_canonical_immutable_identities() {
+        let id = Uuid::from_u128(0xabcdef);
+        assert!(Blob::validate_key(&format!("tables/{}", id.simple())).is_ok());
+        for key in [
+            "tables/",
+            "tables/00000000000000000000000000000000",
+            "tables/../x",
+            &format!("tables/{id}"),
+            &format!("tables/{}", id.simple().to_string().to_uppercase()),
+            &format!("other/{}", id.simple()),
+        ] {
+            assert!(Blob::validate_key(key).is_err());
         }
     }
 }
