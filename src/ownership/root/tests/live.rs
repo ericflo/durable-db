@@ -110,7 +110,14 @@ async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries
             .value
             .is_none()
     );
-    assert!(owner.scan(&current, "", None, 10).await.unwrap().is_empty());
+    let page = owner
+        .read_request(
+            database("a"),
+            &serde_json::from_value(serde_json::json!({"scans":[{"limit":10}]})).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(page.scans[0].items.is_empty());
     let retry = owner
         .prepare(&[request(&a, "first", &[Read::Key("x")], &writes)])
         .await
@@ -618,8 +625,130 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
     let snapshot = owner.snapshot(database("a")).await.unwrap();
     paused.expire.store(true, Ordering::SeqCst);
     assert!(
-        owner.get(&snapshot, "x").await.is_err(),
+        owner
+            .read_request(
+                database("a"),
+                &crate::engine::ReadRequest {
+                    expected_revision: Some(snapshot.revision()),
+                    keys: vec!["x".into()],
+                    scans: vec![],
+                }
+            )
+            .await
+            .is_err(),
         "authority expired during immutable value I/O"
     );
     assert!(!paused.expire.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn live_public_reads_match_the_existing_wire_contract_without_warming_receipts() {
+    use crate::engine::{CommitRequest, Engine, ReadRequest, Write};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let mut owner = open(
+        active(&provider, &clock).await,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let old = Engine::new(
+        Arc::new(
+            Remote::new(
+                Arc::new(object_store::memory::InMemory::new()),
+                "read-contract",
+            )
+            .unwrap(),
+        ),
+        Arc::new(Cache::new(0, None).unwrap()),
+    );
+    old.create("a", Default::default()).await.unwrap();
+    let mutations = [
+        Mutation {
+            key: "note/a",
+            value: Some(b"one"),
+        },
+        Mutation {
+            key: "note/aa",
+            value: Some(b""),
+        },
+        Mutation {
+            key: "note/ab",
+            value: None,
+        },
+        Mutation {
+            key: "note/b",
+            value: Some(b"two"),
+        },
+        Mutation {
+            key: "note/é",
+            value: Some(b"unicode"),
+        },
+        Mutation {
+            key: "other",
+            value: Some(b"neighbor"),
+        },
+    ];
+    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    let prepared = owner
+        .prepare(&[request(&snapshot, "write", &[], &mutations)])
+        .await
+        .unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    old.commit(
+        "a",
+        &CommitRequest {
+            expected_revision: 0,
+            request_id: "write".into(),
+            checks: vec![],
+            writes: mutations
+                .iter()
+                .map(|m| Write {
+                    key: m.key.into(),
+                    value: m.value.map(|v| STANDARD.encode(v)),
+                })
+                .collect(),
+        },
+    )
+    .await
+    .unwrap();
+    let controls = provider.calls.load(Ordering::SeqCst);
+    let bodies = [
+        r#"{}"#,
+        r#"{"keys":["note/a","note/aa","note/ab","absent","note/a"]}"#,
+        r#"{"expected_revision":1,"keys":["other"],"scans":[{"prefix":"note/","limit":2},{"prefix":"note/","after":"note/aa","limit":2}]}"#,
+        r#"{"scans":[{"prefix":"note/","start":"note/aa","end":"note/é","limit":1000},{"prefix":"note/é","limit":1}]}"#,
+        r#"{"scans":[{"prefix":"note/","after":"zzz","limit":1},{"start":"z","end":"a","limit":1}]}"#,
+    ];
+    for body in bodies {
+        let request: ReadRequest = serde_json::from_str(body).unwrap();
+        let actual = owner.read_request(database("a"), &request).await.unwrap();
+        let expected = old.read("a", &request).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    assert_eq!(
+        owner.usage(),
+        crate::index::recovery::Usage::default(),
+        "cold reads must not materialize receipt windows or validator state"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
+    for body in [
+        r#"{"expected_revision":0}"#,
+        r#"{"keys":[""]}"#,
+        r#"{"scans":[{"prefix":"\u0000","limit":1}]}"#,
+        r#"{"scans":[{"limit":1001}]}"#,
+    ] {
+        let request = serde_json::from_str(body).unwrap();
+        assert!(owner.read_request(database("a"), &request).await.is_err());
+        assert!(old.read("a", &request).await.is_err());
+    }
 }

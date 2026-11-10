@@ -199,6 +199,31 @@ pub struct ReadRequest {
     #[serde(default)]
     pub scans: Vec<Scan>,
 }
+impl ReadRequest {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.keys.len() + self.scans.len() > MAX_OPS {
+            return Err(Error::Limit("too many reads".into()));
+        }
+        for key in &self.keys {
+            validate_key(key)?;
+        }
+        for scan in &self.scans {
+            if scan.limit == 0
+                || scan.limit > 1000
+                || scan.prefix.len() > 1024
+                || scan.prefix.contains('\0')
+            {
+                return Err(Error::Invalid(
+                    "scan limit must be 1..1000 and prefix at most 1024 bytes without NUL".into(),
+                ));
+            }
+            for key in [&scan.start, &scan.end, &scan.after].into_iter().flatten() {
+                validate_key(key)?;
+            }
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scan {
@@ -226,6 +251,20 @@ pub struct ReadResult {
     pub revision: u64,
     pub values: Vec<Option<String>>,
     pub scans: Vec<ScanResult>,
+}
+impl ReadResult {
+    pub(crate) fn validate_size(&self) -> Result<()> {
+        if serde_json::to_vec(self)
+            .context("serialize read response")?
+            .len()
+            > MAX_RESULT
+        {
+            return Err(Error::Limit(
+                "encoded read result exceeds 1 MiB; reduce scan limit".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,22 +415,7 @@ impl Engine {
         access: &Access,
     ) -> Result<ReadResult> {
         validate_db(db)?;
-        if request.keys.len() + request.scans.len() > MAX_OPS {
-            return Err(Error::Limit("too many reads".into()));
-        }
-        for key in &request.keys {
-            validate_key(key)?;
-        }
-        for scan in &request.scans {
-            if scan.limit == 0 || scan.limit > 1000 || scan.prefix.len() > 1024 {
-                return Err(Error::Invalid(
-                    "scan limit must be 1..1000 and prefix at most 1024 bytes".into(),
-                ));
-            }
-            for key in [&scan.start, &scan.end, &scan.after].into_iter().flatten() {
-                validate_key(key)?;
-            }
-        }
+        request.validate()?;
         // A collector may remove a block from an old snapshot. Never return partial reads;
         // restart the ENTIRE read from a fresh manifest, or reject expected_revision.
         'retry: for _ in 0..4 {
@@ -472,15 +496,7 @@ impl Engine {
                 result.scans.push(ScanResult { items, next });
             }
             // Escaped JSON keys and framing also consume the response budget.
-            if serde_json::to_vec(&result)
-                .context("serialize read response")?
-                .len()
-                > MAX_RESULT
-            {
-                return Err(Error::Limit(
-                    "encoded read result exceeds 1 MiB; reduce scan limit".into(),
-                ));
-            }
+            result.validate_size()?;
             return Ok(result);
         }
         Err(Error::Storage(anyhow::anyhow!(

@@ -4,6 +4,7 @@
 //! Database generations must already be authorized by the caller. This is not
 //! a public wire API or a qualified physical clock/placement implementation.
 mod checkpoint;
+mod read;
 use super::{
     record::{Commit, Database, Mutation},
     recovery::{Resolution, Target},
@@ -294,46 +295,6 @@ impl<C: Clock> Owner<C> {
         let result = view.get(key.as_bytes(), snapshot.revision()).await?;
         self.check()?;
         Ok(result)
-    }
-    /// Bounded ordered page from the same snapshot as point reads. Tombstones
-    /// remain internal: limit counts returned live rows, with a separate work cap.
-    pub async fn scan(
-        &self,
-        snapshot: &Snapshot,
-        start: &str,
-        end: Option<&str>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<Entry>> {
-        ensure!((1..=128).contains(&limit), "invalid scan limit");
-        self.check_snapshot(snapshot)?;
-        let view = self
-            .projection
-            .view(snapshot.database())
-            .await?
-            .context("missing live view")?;
-        let mut cursor = view.scan(
-            start.as_bytes(),
-            end.map(str::as_bytes),
-            snapshot.revision(),
-        )?;
-        let mut rows = Vec::new();
-        let mut bytes = 0;
-        for _ in 0..4096 {
-            let Some(row) = cursor.next().await? else {
-                self.check()?;
-                return Ok(rows);
-            };
-            if row.value.is_some() {
-                bytes += row.key.len() + row.value.as_ref().map_or(0, bytes::Bytes::len);
-                ensure!(bytes <= 1024 * 1024, "scan result exceeds byte budget");
-                rows.push(row);
-                if rows.len() == limit {
-                    self.check()?;
-                    return Ok(rows);
-                }
-            }
-        }
-        anyhow::bail!("scan work budget exhausted")
     }
     /// Group up to 128 transactions into one immutable PUT. No await occurs
     /// between the first accepted revision and creation of its upload handle.
