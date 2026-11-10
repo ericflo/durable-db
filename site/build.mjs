@@ -104,6 +104,7 @@ for (const file of [
   'checkpoint-overlay-2026-11-09.json',
   'checkpoint-reuse-2026-11-10.json',
   'native-http-hosts-2026-11-10.json',
+  'native-http-budgets-2026-11-10.json',
   'vm-clock-2026-11-10.json',
   'index-read-cost-2026-11-09.json',
   'partition-journal-candidate-2026-11-09.json',

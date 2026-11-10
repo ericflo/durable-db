@@ -1,5 +1,13 @@
 # Verification results
 
+## Native HTTP budgets and recovery (2026-11-10)
+
+Commit `9e70d5a` passes the native HTTP budget, automatic cleanup and cold-recovery fixture on real B2 and versioned MinIO. An exhausted database is refused before an immutable PUT while its neighbor continues. The normal maintenance task reduces six ledger objects to the two live ledgers; limits, spent balances, values and exact retry receipts survive a full reopen. Each provider run then completes 100 warmed HTTP reads containing both a point lookup and ordered scan, alternating checkpoint-backed and recovered-suffix values, with **zero authority calls and zero object GETs**. The [complete evidence](evidence/native-http-budgets-2026-11-10.json) records configuration, checks and timings. Both dedicated buckets, every remaining physical version, the temporary B2 key and the MinIO container were removed.
+
+This is component qualification with a logical clock and the old server stopped before takeover. The samples use local loopback, a debug build and a 4 MiB cache; they are not a performance SLO. Host timing, sustained load, AWS S3, shared maintenance charging and journal/checkpoint reclamation remain open. Earlier results below describe the older serving path or the component and commit named in each section.
+
+## Initial release (2026-11-08)
+
 The v0.1.0 binary was built from `f431d88c072cc924634126e4b2ba8f1ec30697b0` by Woodpecker on 2026-11-08. The build gate passed Rust checks, all five bounded models and their negative controls, and Pi conformance. Commands and bounds are in [verification](verification.md).
 
 | Check | Result |
