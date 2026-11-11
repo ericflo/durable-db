@@ -1,37 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { createDatabase, url } from './database-fixture.mjs';
 import { Database, UncertainCommitError } from './dist/index.js';
 import { TransactionScope } from './dist/transaction.js';
-import { DurableDb, DbError, encode } from './client.mjs';
+import { encode } from './client.mjs';
 
-const url = process.env.DURABLE_DB_TEST_URL;
-const token = process.env.DURABLE_DB_TEST_TOKEN_FILE
-  ? readFileSync(process.env.DURABLE_DB_TEST_TOKEN_FILE, 'utf8').trim()
-  : '';
 const cleanups = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 const suite = url ? describe : describe.skip;
-async function admitted(call) {
-  for (let i = 0; ; i++) {
-    try {
-      return await call();
-    } catch (error) {
-      if (!(error instanceof DbError) || error.status !== 429 || i >= 30) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-}
 async function fixture(intercept) {
-  const database = `sdk-${crypto.randomUUID()}`;
-  const admin = new DurableDb({ url, database, token });
-  const intent = { request_id: crypto.randomUUID() };
-  await admitted(() => admin.createProtected(intent));
-  const issued = await admitted(() => admin.issueToken({ write: true }));
-  const raw = new DurableDb({ url, database, token: issued.token });
+  const { client: raw, config } = await createDatabase('sdk');
   let endpoint = url;
   if (intercept) {
     const server = createServer(async (request, response) => {
@@ -66,7 +47,10 @@ async function fixture(intercept) {
         }),
     );
   }
-  return { db: new Database({ url: endpoint, database, token: issued.token }), raw };
+  return {
+    db: new Database({ url: endpoint, database: config.database, token: config.token }),
+    raw,
+  };
 }
 
 suite('JSON SDK transactions', () => {

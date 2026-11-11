@@ -15,6 +15,8 @@ scripts/check-model.sh
 scripts/check-proof.sh
 ```
 
+Native client contract checks explicitly provision 512 MiB per database with `DURABLE_DB_TEST_ADMISSION_BYTES=536870912`; the long document-tail and receipt-eviction cases exceed the default 64 MiB under conservative shared-table pricing. The common JavaScript fixture uses the existing administrator budget endpoint. Runtime defaults and dedicated refusal tests are unchanged.
+
 The backup recovery fixture uses a larger bounded request budget so its 16,641-key interrupted restore tests recovery rather than waiting for the default four-commit-per-second allowance. Admission tests retain default-policy coverage and use a controlled clock for exact refill and eviction checks.
 
 The two Rust test commands run the complete required suite: use release mode for the capacity regression to avoid its large directory sweep in debug mode. The local command uses your host target. Woodpecker runs that same regression on musl, sharing the target used by the shipped static binary instead of building a separate optimized GNU target.

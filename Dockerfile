@@ -449,7 +449,7 @@ COPY scripts/test-client.sh scripts/test-client.sh
 COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
 COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
 RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
-    && /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
+    && DURABLE_DB_TEST_ADMISSION_BYTES=536870912 /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
     && mkdir -p /checks && touch /checks/javascript.passed
 
 FROM build AS assembled

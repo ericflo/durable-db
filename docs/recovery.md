@@ -12,7 +12,7 @@ Retain succeeds only after `Outcome::Confirmed`. On an uncertain reply, validate
 
 The collector protects both the current checkpoint and the retained checkpoint. Retention survives ownership takeover and cold reopening; publication preserves a concurrently changed slot without adopting a newer collection generation. Released objects become eligible for ordinary automatic collection. The slot uses at most 1 KiB of authority metadata and no immutable uploads, and cannot accumulate arbitrary historical images. It is a namespace backup primitive, not tenant-isolated snapshots, a backup archive, multiple restore points, scheduled retention or point-in-time recovery. Copies outside the namespace and recurring restore drills remain necessary production work.
 
-Older binaries reject the added authority field while a slot is occupied, preventing an older collector from deleting the image. Release it with the new runtime before downgrading. Namespaces without an occupied slot retain their existing format. [Verification](verification.md#native-checkpoint-retention) records the protocol mapping and tests.
+Binaries before v0.12.0 reject the added authority field while a slot is occupied, preventing an older collector from deleting the image. Release it with the new runtime before downgrading. Namespaces without an occupied slot retain their existing format. [Verification](verification.md#native-checkpoint-retention) records the protocol mapping and tests.
 
 ## Local format upgrades
 

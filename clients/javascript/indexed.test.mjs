@@ -1,22 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { DurableDb, DbError, encode } from './client.mjs';
+import { createDatabase, url } from './database-fixture.mjs';
+import { DbError, encode } from './client.mjs';
 import { openIndexedPiStorage } from './pi-indexed.mjs';
 import { numberKey, retry, unpack } from './indexed/kv.mjs';
 
-const url = process.env.DURABLE_DB_TEST_URL;
-const token = process.env.DURABLE_DB_TEST_TOKEN_FILE
-  ? readFileSync(process.env.DURABLE_DB_TEST_TOKEN_FILE, 'utf8').trim()
-  : '';
 const suite = url ? describe : describe.skip;
-async function fixture() {
-  const database = `indexed-${crypto.randomUUID()}`;
-  const admin = new DurableDb({ url, database, token });
-  const intent = { request_id: crypto.randomUUID() };
-  await retry(() => admin.createProtected(intent));
-  const issued = await retry(() => admin.issueToken({ write: true }));
-  return { admin, client: new DurableDb({ url, database, token: issued.token }) };
-}
+const fixture = () => createDatabase('indexed');
 function gate() {
   let resolve;
   const promise = new Promise((done) => {

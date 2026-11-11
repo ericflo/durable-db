@@ -6,8 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
-import { DurableDb } from './client.mjs';
-import { retry } from './indexed/kv.mjs';
+import { createDatabase, urls } from './database-fixture.mjs';
 import { openIndexedPiStorage } from './pi-indexed.mjs';
 import {
   context,
@@ -20,20 +19,9 @@ import {
   entries,
 } from './harness-fixture.mjs';
 
-const urls = (process.env.DURABLE_DB_TEST_URLS ?? process.env.DURABLE_DB_TEST_URL ?? '')
-  .split(',')
-  .filter(Boolean);
-const token = process.env.DURABLE_DB_TEST_TOKEN_FILE
-  ? readFileSync(process.env.DURABLE_DB_TEST_TOKEN_FILE, 'utf8').trim()
-  : '';
 const suite = urls.length ? describe : describe.skip;
 async function fixture() {
-  const database = `harness-${crypto.randomUUID()}`;
-  const admin = new DurableDb({ url: urls[0], database, token });
-  const creation = { request_id: crypto.randomUUID() };
-  await retry(() => admin.createProtected(creation));
-  const issued = await retry(() => admin.issueToken({ write: true }));
-  const config = { urls, database, token: issued.token };
+  const { config } = await createDatabase('harness');
   return { client: routedClient(config), config };
 }
 const input = (requestId) => ({ type: 'input', content: 'Run the deterministic tool', requestId });
