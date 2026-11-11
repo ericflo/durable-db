@@ -31,23 +31,17 @@ Run `scripts/check-candidate.sh RootRegistration`. Two and three candidates with
 Run a focused candidate and all its mandatory negative controls from the repository root:
 
 ```sh
-scripts/check-candidate.sh OwnedWal
+scripts/check-candidate.sh RevocableOwner
 scripts/check-candidate.sh DelegatedGrant
 ```
 
 The wrapper uses the existing checksum-pinned checker in a temporary directory and saves logs under `.tools/candidates/`. It does not rebuild Rust or rerun unrelated models. Java must be available on `PATH`, or set `JAVA` to its executable.
 
-## OwnedWal
+## RevocableOwner
 
-This candidate combines finite serving permission with immutable uploads and recovery for **one ownership transfer**. An old writer's acknowledgement does not atomically inspect the authoritative owner or epoch. It checks its local grant after upload and acknowledges only the contiguous durable prefix. Reads check the same grant. The successor fences further grants, waits for all old permission to expire, probes the log, durably seals its prefix and then activates. It can durably acknowledge one new batch. Read comparisons distinguish the actual old/new history, not just equal numeric sequence lengths.
+Timing-independent positive permits replace the standalone timed `OwnedWal` experiment. One permit, one selected successor, two old journal positions and one new write check **856 distinct states**, 1,690 generated, depth 15. The safe run takes under one second. Seven negative controls detect permit recreation, publication before upload, validation before durability, acknowledgement gaps, stale positive GETs, requests joining after validation, and scanning before revocation. Two coverage controls require an old read reply after the new write and an upload after successor activation.
 
-The instance uses two old log positions, two real-time transitions, one-unit grants, and independent clock advances of one or two units per transition. A successor waits two grant lengths on its own elapsed clock. Old-process pause/resume and permanent loss are included; successor crashes/restarts are included before activation. Both processes can be absent. A replacement can have a different clock origin: it restarts an unfinished drain interval on its own clock. Completed drain decisions and seals are abstract atomic durable control records. The final successor does not fail after activation, and a restarted old writer would be a new incarnation outside this instance.
-
-The positive run checks **570,280 distinct states**, 2,709,529 generated, depth 28, in three seconds of TLC execution. The standard checker completes it and seven negative controls in 15.753 seconds. The controls require stale reads for skipped drain, stopped paused clocks, expiry anchored at delayed grant delivery, and reuse of a previous process's drain timestamp; they require lost acknowledged history for permission checked only at upload start, acknowledgement across gaps, and stale negative recovery reads. The optimistic TLC fingerprint collision estimate is 6.6e-8.
-
-`OwnedWal.checks` records exact expectations and is run in a separate cached Woodpecker stage. Run `scripts/check-candidate.sh OwnedWal` for the positive instance and every unsafe variant. Source/configuration and checker-log hashes are in `docs/evidence/owned-wal-candidate-2026-11-09.json`.
-
-This closes a gap between the earlier serving and log models for this bounded instance. It does **not** establish arbitrary epochs, partition placement, delegated renewal, liveness, request receipts, KV/transaction semantics, index recovery, compaction, retention, collection, or admission. Bounded-rate clocks, fresh negative object reads, immutable identities, and atomic durable control records remain assumptions. The runtime clock rule is unchanged; no replacement runtime is adopted by this result.
+Run `scripts/check-candidate.sh RevocableOwner`. No clocks or timers occur in the model. It assumes fresh per-key observations, one physical permit PUT completed before publication, exact acquisition/fresh identities, immutable journals and durable selection. This is one bounded handoff, not proof of repeated root replacement, placement, KV semantics, admission, cleanup, liveness or Rust. [Scope and evidence](../../docs/verification.md#candidate-revocable-writer-permits).
 
 ## DelegatedGrant
 
@@ -77,7 +71,7 @@ Run `scripts/check-candidate.sh RootJournal`. The wrapper copies its `RootContro
 
 Run `scripts/check-proof.sh RootJournal` for the unbounded abstract composition theorem. All 1,061 obligations pass for arbitrary finite epoch counts and unbounded histories; removing acknowledgement permission fails the changed induction step. The checker verifies the imported 153-obligation root proof and its negative control first. Both finite positive instances also check the combined inductive strengthening.
 
-The abstract timing contract and atomic durable selection remain assumptions. The theorem does not establish delegated movement, transactions, admission, reclamation, liveness or clock/platform/Rust correctness. It does not replace `OwnedWal`, which checks independently advancing clocks for one handoff, or the isolated grant/clock proofs.
+The abstract timing contract and atomic durable selection remain assumptions. The theorem does not establish delegated movement, transactions, admission, reclamation, liveness or clock/platform/Rust correctness. It does not establish the revocable-permit mechanism or the isolated grant/clock proofs.
 
 ## GrantBounds
 
@@ -133,4 +127,4 @@ The theorem starts from an already-active first root and assumes ordered winning
 
 ## Retired experiments
 
-The initial `ServingLease` model used atomic authority-checked commits. Its pause, drain and delayed-grant controls now run in the maintained `OwnedWal` composition with immutable uploads. Its [historical evidence](../../docs/evidence/serving-authority-candidate-2026-11-09.json) identifies the source commit; the obsolete source and direct-run configurations are removed. The former `WalHandoff` model was similarly replaced by `Journal`; its [evidence](../../docs/evidence/wal-handoff-candidate-2026-11-09.json) remains available.
+The initial `ServingLease` model used atomic authority-checked commits. Its timed successor `OwnedWal` was also retired when revocable permits became the selected experiment. The [OwnedWal evidence](../../docs/evidence/owned-wal-candidate-2026-11-09.json) retains its exact source commit and bounds; the old standalone sources/configurations and CI stage are removed. Its [historical evidence](../../docs/evidence/serving-authority-candidate-2026-11-09.json) identifies the source commit; the obsolete source and direct-run configurations are removed. The former `WalHandoff` model was similarly replaced by `Journal`; its [evidence](../../docs/evidence/wal-handoff-candidate-2026-11-09.json) remains available.

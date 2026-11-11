@@ -105,10 +105,10 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh DelegatedGrant && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
-FROM model-tools AS model-candidate-ownedwal
-COPY spec/candidates/OwnedWal.tla spec/candidates/OwnedWal.checks spec/candidates/OwnedWal*.cfg spec/
+FROM model-tools AS model-candidate-revocableowner
+COPY spec/candidates/RevocableOwner.tla spec/candidates/RevocableOwner.checks spec/candidates/RevocableOwner*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh OwnedWal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    scripts/check-model.sh RevocableOwner && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-journal
@@ -393,7 +393,7 @@ COPY --from=proof-root-control /checks/ /checks/
 COPY --from=proof-grant-bounds /checks/ /checks/
 COPY --from=model-candidate-rootcontrol /checks/ /checks/
 COPY --from=model-candidate-delegatedgrant /checks/ /checks/
-COPY --from=model-candidate-ownedwal /checks/ /checks/
+COPY --from=model-candidate-revocableowner /checks/ /checks/
 COPY --from=model-journal /checks/ /checks/
 COPY --from=proof-journal /checks/ /checks/
 COPY --from=model-transactionclient /checks/ /checks/

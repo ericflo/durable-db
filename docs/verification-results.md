@@ -1,5 +1,11 @@
 # Verification results
 
+## Timing-independent ownership candidate (2026-11-11)
+
+The first production release must support the existing Kubernetes hosts. Revocable writer permits now replace restricted clock profiles as the selected ownership experiment: create a positive permit once, validate sealed response groups with fresh GETs, revoke before selecting the predecessor's durable journal prefix. No bucket-wide conditional update is required on that proposed ordinary path, but an object GET per group remains.
+
+The 856-state one-handoff model passes in under one second, along with seven required unsafe counterexamples and two delayed-event coverage traces. It does not yet prove repeated takeover/placement/collection or change runtime behavior. Provider consistency and latency remain decisive obligations. The old standalone timed model and its eight configurations were removed, its CI stage was replaced, and the design's duplicated clock exposition was shortened; historical clock/restricted-profile evidence remains. [Scope and reproduction](verification.md#candidate-revocable-writer-permits), [evidence](evidence/revocable-owner-2026-11-11.json).
+
 ## ClockBound VM boundary rejection (2026-11-11)
 
 The pinned upstream ClockBound V3 client does not qualify our stock QEMU/KVM guest. A short ACPI suspend leaves the disruption marker unchanged and the client reports synchronized time. Waiting until its next owner-visible timestamp is nondecreasing still produces an elapsed interval of −1.31 to 2.73 ms against an external interval of at least 61.15 ms. Thus a backwards-clock guard is insufficient. Ordinary pauses pass; snapshot restore is detected, and the deliberately unguarded client exposes the stale interval.

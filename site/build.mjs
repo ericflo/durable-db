@@ -189,6 +189,7 @@ for (const file of [
   'journal-2026-11-09.json',
   'delegated-grant-candidate-2026-11-09.json',
   'owned-wal-candidate-2026-11-09.json',
+  'revocable-owner-2026-11-11.json',
   'provider-floor-2026-11-09.json',
   'wal-handoff-candidate-2026-11-09.json',
   'physical-memory-hour-2026-11-09.json',

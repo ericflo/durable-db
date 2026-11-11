@@ -1,8 +1,0 @@
-safe OwnedWal.cfg candidate-owned-wal 2g -
-unsafe OwnedWalUnsafeSkipDrain.cfg candidate-owned-wal-drain 2g NoStaleRead
-unsafe OwnedWalUnsafePausedClock.cfg candidate-owned-wal-clock 2g NoStaleRead
-unsafe OwnedWalUnsafeLateGrant.cfg candidate-owned-wal-grant 2g NoStaleRead
-unsafe OwnedWalUnsafeAckFromStart.cfg candidate-owned-wal-late-ack 2g AcknowledgedPrefixPreserved
-unsafe OwnedWalUnsafeAckGap.cfg candidate-owned-wal-gap 2g AcknowledgedPrefixPreserved
-unsafe OwnedWalUnsafeStaleRead.cfg candidate-owned-wal-missing 2g AcknowledgedPrefixPreserved
-unsafe OwnedWalUnsafeRestartDrain.cfg candidate-owned-wal-restart 2g NoStaleRead
