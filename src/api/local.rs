@@ -102,23 +102,7 @@ pub async fn open(
         matches!(root.finish(activate.execute().await)?, Outcome::Confirmed),
         "local activation not confirmed"
     );
-    loop {
-        let mut recovery = root.recovery()?;
-        let mut pending = None;
-        while let Some(mut journal) = recovery.next().await? {
-            if !journal.is_selected() {
-                while journal.read_next().await?.is_some() {}
-                pending = Some(journal);
-                break;
-            }
-        }
-        let Some(journal) = pending else { break };
-        let select = root.select_prefix(journal)?;
-        ensure!(
-            matches!(root.finish(select.execute().await)?, Outcome::Confirmed),
-            "local journal selection not confirmed"
-        );
-    }
+    root.select_journals().await?;
     let owner = Opening::new(root, Limits::default(), cache)?
         .recover()
         .await?;

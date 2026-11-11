@@ -245,6 +245,12 @@ COPY spec/Journal.tla spec/JournalProof.tla spec/Journal.proof spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
+FROM model-tools AS model-owner-routing
+COPY spec/OwnerRouting.tla spec/OwnerRouting.checks spec/OwnerRouting.cfg spec/UnsafeRoute*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh OwnerRouting && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-candidate-rootacquisition
 COPY spec/candidates/RootAcquisition.tla spec/candidates/RootAcquisition.checks spec/candidates/RootAcquisition*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -270,6 +276,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM scratch AS model
+COPY --from=model-owner-routing /checks/ /checks/
 COPY --from=model-candidate-catalogreplay /checks/ /checks/
 COPY --from=model-candidate-rootcatalog /checks/ /checks/
 COPY --from=model-candidate-rootregistration /checks/ /checks/

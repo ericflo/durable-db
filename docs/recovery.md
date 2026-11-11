@@ -34,6 +34,9 @@ This produces the same bounded, checksummed archive as HTTP export below. Use th
 
 v0.20.0 adds format 6 for the native **partition directory library API**. It requires a fresh directory namespace and refuses legacy publication/native-root formats. It does not convert existing namespaces, change local format 15, or switch the cloud CLI. Each partition retains native format 23 inside its own control record and object scope. Partition IDs must stay stable; changing a database's mapping requires a transfer protocol, which is not yet implemented.
 
+Native owner advertisement adds an optional `address` field within format 23. Older binaries refuse records carrying it; address-free records, including exclusive local format 15, retain their existing encoding. Stop old native library owners before opting into advertisement. This does not migrate legacy cloud namespaces or enable automatic placement.
+
+
 v0.19.0 uses budgeted native `owned-candidate-23` for target-tenant creation admission and clock-independent ownership. It refuses older timed remote writers, including format 21 and requires a fresh experimental native namespace; this is not an in-place upgrade from v0.18.1. Unbudgeted remote native storage similarly requires `owned-candidate-23-unbudgeted`. Local `owned-candidate-15` and the released cloud CLI format are unchanged.
 
 v0.18.1 retains v0.18.0’s formats. Local `owned-candidate-15` is unchanged: local directories from v0.9.0 onward reopen directly, preserving values, revisions and receipts. No export is required between these local versions. Budgeted native serving retains `owned-candidate-21` for durable maintenance funding and remains compatible with v0.18.0. It refuses earlier accounting policies, including v0.17.0. Moving from those older policies requires a fresh namespace; there is no in-place budgeted-native migration. This does not change the cloud CLI publication format.

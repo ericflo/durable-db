@@ -11,6 +11,7 @@ mod permit;
 mod registration;
 mod replay;
 mod retention;
+mod routing;
 mod transactions;
 use crate::{
     providers::Connection,

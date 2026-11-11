@@ -31,6 +31,7 @@ use tokio::{
 /// guard. Election and routing are the caller's responsibility.
 /// Dropping it retires the worker; accepted writes can have unknown outcomes.
 pub struct Native {
+    incarnation: uuid::Uuid,
     owner: Arc<RwLock<Owner>>,
     cache: Arc<Cache>,
     queue: mpsc::Sender<Command>,
@@ -92,6 +93,7 @@ impl Native {
             ));
         }
         owner.check()?;
+        let incarnation = owner.identity().incarnation;
         let cache = owner.cache();
         let collection = owner.collection()?;
         let owner = Arc::new(RwLock::new(owner));
@@ -105,6 +107,7 @@ impl Native {
             maintenance,
         ));
         Ok(Self {
+            incarnation,
             owner,
             cache,
             queue,
@@ -151,6 +154,9 @@ impl Drop for Native {
 
 #[async_trait]
 impl Backend for Native {
+    fn owner_incarnation(&self) -> Option<uuid::Uuid> {
+        Some(self.incarnation)
+    }
     async fn database_upload_budget(&self, db: &str) -> Result<crate::upload_budget::UploadStatus> {
         let budget = self
             .owner

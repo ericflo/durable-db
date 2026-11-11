@@ -1,4 +1,6 @@
 mod backend;
+mod forward;
+pub use forward::Forward;
 mod local;
 pub use local::open as open_local;
 mod native;
@@ -212,6 +214,18 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
         app.rejected.fetch_add(1, Ordering::Relaxed);
         return Error::Busy.into_response();
     };
+    // A forwarded request may arrive after its address has been reused. This
+    // is a destination check only; all normal auth and permit checks still run.
+    if let Some(expected) = request.headers().get(forward::OWNER_HEADER)
+        && expected
+            .to_str()
+            .ok()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .filter(|id| !id.is_nil())
+            .is_none_or(|id| app.backend.owner_incarnation() != Some(id))
+    {
+        return Error::Storage(anyhow::anyhow!("owner route changed")).into_response();
+    }
     app.requests.fetch_add(1, Ordering::Relaxed);
     // Timeouts can have ambiguous write outcomes. Identical retries use receipts/revision guards.
     match tokio::time::timeout(Duration::from_secs(30), next.run(request)).await {

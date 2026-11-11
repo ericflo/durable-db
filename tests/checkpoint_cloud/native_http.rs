@@ -14,6 +14,15 @@ use tokio::{sync::oneshot, task::JoinHandle};
 
 struct Server {
     control: live::Control,
+    http: Http,
+}
+impl std::ops::Deref for Server {
+    type Target = Http;
+    fn deref(&self) -> &Http {
+        &self.http
+    }
+}
+struct Http {
     url: String,
     token: String,
     client: reqwest::Client,
@@ -22,7 +31,8 @@ struct Server {
 }
 impl Server {
     async fn start(connection: &Connection) -> Self {
-        let mut root = activate(connection).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut root = activate_at(connection, Some(listener.local_addr().unwrap())).await;
         select(&mut root).await;
         let owner = Opening::new(
             root,
@@ -36,16 +46,27 @@ impl Server {
         .recover()
         .await
         .unwrap_or_else(|_| panic!("HTTP owner recovery failed"));
-        let auth = Auth::new(&"42".repeat(32)).unwrap();
         let control = owner.control();
-        let token = auth.admin_token();
-        let app = App::with_rate_limits(
-            Arc::new(api::Native::new(owner, 16).unwrap()),
-            auth,
-            32,
-            RateLimits::new(1000, 1000).unwrap(),
-        );
+        let http = Http::start(listener, Arc::new(api::Native::new(owner, 16).unwrap())).await;
+        Self { control, http }
+    }
+    async fn stop(self) {
+        self.http.stop().await;
+    }
+}
+impl Http {
+    async fn forward(connection: &Connection) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        Self::start(
+            listener,
+            Arc::new(api::Forward::new(connection, auth(), 16).unwrap()),
+        )
+        .await
+    }
+    async fn start(listener: tokio::net::TcpListener, backend: Arc<dyn api::Backend>) -> Self {
+        let auth = auth();
+        let token = auth.administrator_token(600).unwrap();
+        let app = App::with_rate_limits(backend, auth, 32, RateLimits::new(1000, 1000).unwrap());
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (shutdown, stop) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -57,7 +78,6 @@ impl Server {
                 .unwrap();
         });
         Self {
-            control,
             url,
             token,
             client: reqwest::Client::builder()
@@ -105,6 +125,9 @@ impl Server {
             .unwrap();
         tokio::task::yield_now().await;
     }
+}
+fn auth() -> Auth {
+    Auth::new(&"42".repeat(32)).unwrap()
 }
 fn write(revision: u64) -> Value {
     json!({"request_id":format!("write-{revision}"),"expected_revision":revision,
@@ -683,22 +706,23 @@ async fn independent_partitions_serve_and_recover_over_http() {
         "virtual control read must count only its underlying read/barrier/replacement"
     );
     let first = Server::start(&a).await;
+    let gateway = Http::forward(&a).await;
     let other = Server::start(&b).await;
     let create = json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":10000}});
     let commit = "/v1/databases/a/commit";
     let read = "/v1/databases/a/read";
-    first.ok("PUT", "/v1/databases/a", &create).await;
+    gateway.ok("PUT", "/v1/databases/a", &create).await;
     other.ok("PUT", "/v1/databases/a", &create).await;
     let mut other_write = write(0);
     other_write["writes"][0]["value"] = json!("b3RoZXI=");
     let first_write = write(0);
     let writes = tokio::join!(
-        first.ok("POST", commit, &first_write),
+        gateway.ok("POST", commit, &first_write),
         other.ok("POST", commit, &other_write)
     );
     assert_eq!(writes.0["revision"], 1);
     assert_eq!(writes.1["revision"], 1);
-    let before = first.ok("POST", read, &json!({"keys":["x"]})).await;
+    let before = gateway.ok("POST", read, &json!({"keys":["x"]})).await;
     let independent = other.ok("POST", read, &json!({"keys":["x"]})).await;
     assert_ne!(
         before, independent,
@@ -722,6 +746,20 @@ async fn independent_partitions_serve_and_recover_over_http() {
         .await
         .unwrap();
     let second = Server::start(&next_a).await;
+    // A stale route fails exactly once. The caller's explicit retry discovers
+    // the successor; forwarding never silently replays a request.
+    assert_eq!(
+        gateway.call("POST", commit, &write(0)).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        gateway.ok("POST", commit, &write(0)).await["replayed"],
+        true
+    );
+    assert_eq!(
+        gateway.ok("POST", read, &json!({"keys":["x"]})).await,
+        before
+    );
     assert_eq!(
         first.call("POST", read, &json!({"keys":["x"]})).await.0,
         StatusCode::SERVICE_UNAVAILABLE
@@ -759,13 +797,15 @@ async fn independent_partitions_serve_and_recover_over_http() {
     );
     let evidence = json!({
         "seconds": started.elapsed().as_secs_f64(),
-        "partitions": [7, u32::MAX], "simultaneous_http_servers": 3,
+        "partitions": [7, u32::MAX], "simultaneous_http_servers": 4,
+        "cached_forwarding": true, "stale_route_refused": true, "explicit_retry_discovers_successor": true,
         "independent_values": true, "concurrent_writes": true,
         "checkpoint_recovery": true, "old_owner_read_and_retry_refused": true,
         "unmoved_partition_progress": true, "shared_metadata_collection": true,
         "ceilings_preserved_on_reopen": true, "provider_metrics_count_once": true,
-        "scope": "Explicit Rust placement; no automatic election, routing, Kubernetes scaling or performance SLO"
+        "scope": "Explicit Rust placement with owner discovery and one-hop HTTP forwarding; no automatic election, placement, Kubernetes scaling or performance SLO"
     });
+    gateway.stop().await;
     first.stop().await;
     second.stop().await;
     other.stop().await;

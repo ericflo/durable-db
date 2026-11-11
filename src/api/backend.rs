@@ -12,6 +12,12 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait Backend: Send + Sync {
+    /// An identity check prevents a stale route reaching a reused address. It
+    /// grants no serving permission; the backend must still validate responses.
+    fn owner_incarnation(&self) -> Option<uuid::Uuid> {
+        None
+    }
+
     async fn ready(&self) -> bool {
         true
     }

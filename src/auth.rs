@@ -266,8 +266,25 @@ impl Auth {
             expires: now().saturating_add(ttl),
             policy,
         };
+        self.sign_claims(&claims)
+    }
+    /// Peer forwarding preserves the exact tenant scope, expiry and revocation
+    /// identity. Administrator forwarding never exposes the signing key.
+    pub(crate) fn relay(&self, access: &Access) -> Result<String> {
+        match access {
+            Access::Administrator => self.administrator_token(60),
+            Access::Database(claims) => {
+                claims.check_scope(&claims.database, false)?;
+                self.sign_claims(claims)
+            }
+        }
+    }
+    fn sign_claims(&self, claims: &Claims) -> Result<String> {
         let payload =
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(anyhow::Error::from)?);
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).map_err(anyhow::Error::from)?);
+        if payload.len() + 44 > 2048 {
+            return Err(Error::Unauthorized);
+        }
         let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC key");
         mac.update(payload.as_bytes());
         Ok(format!(
@@ -417,6 +434,39 @@ mod tests {
         assert!(auth.administrator_token(86400 * 30 + 1).is_err());
         assert!(!Auth::new(&"38".repeat(32)).unwrap().is_admin(&token));
         assert!(!auth.is_admin(&(token + "x")));
+    }
+
+    #[test]
+    fn relayed_claims_preserve_expiry_and_revocation_across_key_rotation() {
+        let old = Auth::new(&"41".repeat(32)).unwrap();
+        let current = Auth::new(
+            &Auth::keyring_document(&"42".repeat(32), vec!["41".repeat(32)], false).unwrap(),
+        )
+        .unwrap();
+        let (token, _) = old
+            .issue_for_policy("a".into(), false, 600, uuid::Uuid::new_v4().to_string(), 7)
+            .unwrap();
+        let access = current.access(&token, "a", false).unwrap();
+        let relayed = current.relay(&access).unwrap();
+        assert_ne!(token, relayed);
+        let Access::Database(original) = access else {
+            panic!("tenant")
+        };
+        let Access::Database(received) = current.access(&relayed, "a", false).unwrap() else {
+            panic!("tenant")
+        };
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(received).unwrap()
+        );
+        assert!(old.access(&relayed, "a", false).is_err());
+        assert!(current.access(&relayed, "a", true).is_err());
+        let mut expired = original;
+        expired.expires = 1;
+        assert!(current.relay(&Access::Database(expired)).is_err());
+        let admin = current.relay(&Access::Administrator).unwrap();
+        assert!(current.is_admin(&admin));
+        assert!(admin.starts_with("ddb_control_"));
     }
 
     #[test]

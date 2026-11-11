@@ -18,7 +18,7 @@ use metadata::Phase;
 pub(crate) use metadata::Record;
 pub(crate) use metadata::{VERSION, budget as metadata_budget};
 pub(crate) use permit::validate_key as permit_key;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 use uuid::Uuid;
 
 pub use catalog::{JournalRecovery, Recovery};
@@ -76,6 +76,25 @@ pub struct Identity {
     pub incarnation: Uuid,
 }
 
+/// A routing hint, never a serving capability. The destination must check the
+/// incarnation, authorization and a fresh permit for every response group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub identity: Identity,
+    pub address: SocketAddr,
+}
+fn valid_address(address: SocketAddr) -> Result<(), Error> {
+    if address.port() == 0
+        || address.ip().is_unspecified()
+        || address.ip().is_multicast()
+        || matches!(address, SocketAddr::V6(a) if a.scope_id() != 0 || a.flowinfo() != 0)
+        || address.ip() == std::net::Ipv4Addr::BROADCAST
+    {
+        return Err(Error::Incompatible);
+    }
+    Ok(())
+}
+
 /// A namespace backup reference protected from collection until explicitly
 /// released. It includes only the exact checkpoint cut, not subsequent writes.
 /// This is an administrator-owned descriptor; never expose it to a tenant.
@@ -99,6 +118,18 @@ pub struct Observation {
     record: Option<Record>,
 }
 
+impl Observation {
+    /// May be stale, or precede journal recovery. Only the named native backend
+    /// can serve it, after its ordinary authorization and permission checks.
+    pub fn route(&self) -> Option<Route> {
+        let record = self.record?;
+        (record.phase == Phase::Open).then_some(Route {
+            identity: record.identity,
+            address: record.address?,
+        })
+    }
+}
+
 struct Pending {
     id: Arc<()>,
     record: Record,
@@ -112,6 +143,7 @@ pub struct Root {
     encoding: Encoding,
     prefix: String,
     incarnation: Uuid,
+    address: Option<SocketAddr>,
     epoch: Option<u64>,
     pending: Option<Pending>,
     local_guard: Option<Arc<crate::storage::Local>>,
@@ -183,6 +215,7 @@ impl Root {
             encoding,
             prefix: prefix.into(),
             incarnation: Uuid::new_v4(),
+            address: None,
             epoch: None,
             pending: None,
             local_guard,
@@ -192,6 +225,21 @@ impl Root {
             journal_opened: false,
             budgeted,
         })
+    }
+
+    /// Advertise a peer address atomically with this fresh claim. Configure it
+    /// before claiming; a successor never inherits a predecessor's address.
+    pub fn advertise(mut self, address: SocketAddr) -> Result<Self, Error> {
+        self.available()?;
+        valid_address(address)?;
+        if self.epoch.is_some() {
+            return Err(Error::Bound);
+        }
+        if self.encoding.local {
+            return Err(Error::Incompatible);
+        }
+        self.address = Some(address);
+        Ok(self)
     }
 
     /// The returned future owns its request state. Await it outside the root's
@@ -230,6 +278,7 @@ impl Root {
                 incarnation: self.incarnation,
             },
             phase: Phase::Fenced,
+            address: self.address,
             catalog: observed.record.and_then(|r| r.catalog),
             checkpoint: observed.record.and_then(|r| r.checkpoint),
             retained: observed.record.and_then(|r| r.retained),
@@ -314,6 +363,32 @@ impl Root {
             revoke: None,
             catalog: None,
         })
+    }
+
+    /// Discover and select ancestral journals after activation. An unconfirmed
+    /// publication is an error with a potentially committed outcome: revalidate
+    /// this exact incarnation before continuing recovery.
+    pub async fn select_journals(&mut self) -> Result<(), Error> {
+        loop {
+            let mut recovery = self.recovery()?;
+            let mut pending = None;
+            while let Some(mut journal) = recovery.next().await? {
+                if !journal.is_selected() {
+                    while journal.read_next().await?.is_some() {}
+                    pending = Some(journal);
+                    break;
+                }
+            }
+            let Some(journal) = pending else {
+                return Ok(());
+            };
+            let select = self.select_prefix(journal)?;
+            if !matches!(self.finish(select.execute().await)?, Outcome::Confirmed) {
+                return Err(Error::Provider(anyhow::anyhow!(
+                    "journal selection unconfirmed; revalidate before recovery"
+                )));
+            }
+        }
     }
 
     /// Abandon local interest; the remote operation may still apply. This grants

@@ -215,6 +215,9 @@ impl Owner {
         result
     }
 
+    pub(crate) fn identity(&self) -> root::Identity {
+        self.identity
+    }
     pub fn control(&self) -> Control {
         self.control.clone()
     }

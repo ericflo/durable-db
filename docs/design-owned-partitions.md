@@ -154,7 +154,7 @@ After a confirmed claim, activation follows the durable registration chain and p
 
 The native HTTP adapter prepares consistent reads and contiguous durable results before a fresh uncached permit GET. It releases a sealed group only on matching positive bytes. Root identity alone is a structural admission check, never serving permission. The controller retains the local OS guard instead of creating permits for local directories. PID changes refuse service in both modes.
 
-Remote formats `owned-candidate-23` (budgeted) and `owned-candidate-23-unbudgeted` reject older timed writers. Local format 15 remains compatible. Namespace, epoch, incarnation, phase, catalog and checkpoint remain bound in the same B2-bounded record; reserved former timing fields have fixed encoding values. The clock adapter, interval arithmetic, renewal worker and logical startup clock have been deleted. Election, routing, placement, sustained provider qualification and full composition remain open.
+Remote formats `owned-candidate-23` (budgeted) and `owned-candidate-23-unbudgeted` reject older timed writers. Local format 15 remains compatible. Namespace, epoch, incarnation, phase, catalog and checkpoint remain bound in the same B2-bounded record; reserved former timing fields have fixed encoding values. The clock adapter, interval arithmetic, renewal worker and logical startup clock have been deleted. Owner discovery and single-hop forwarding now reuse that record. Automatic election, database mapping, placement, sustained provider qualification and full composition remain open.
 
 ## Durable journal registration
 

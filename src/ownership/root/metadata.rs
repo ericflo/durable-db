@@ -1,6 +1,6 @@
 use super::{Encoding, Error, Identity};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::SocketAddr};
 use uuid::Uuid;
 
 const FORMAT: &str = "durable-db-format";
@@ -34,6 +34,7 @@ pub(crate) struct Record {
     pub collection: u64,
     pub identity: Identity,
     pub phase: Phase,
+    pub address: Option<SocketAddr>,
     pub catalog: Option<Uuid>,
     pub checkpoint: Option<crate::index::recovery::checkpoint::Reference>,
     pub retained: Option<super::RetainedCheckpoint>,
@@ -66,6 +67,8 @@ struct Wire {
     epoch: u64,
     incarnation: String,
     phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    address: Option<SocketAddr>,
     lifetime_ns: u64,
     error_ns: u64,
     catalog: Option<String>,
@@ -141,6 +144,12 @@ pub(super) fn decode(
     {
         return Err(Error::Incompatible);
     }
+    if let Some(address) = wire.address {
+        super::valid_address(address)?;
+        if encoding.local {
+            return Err(Error::Incompatible);
+        }
+    }
     Ok(Some(Record {
         collection: super::collection::generation(info).map_err(|_| Error::Incompatible)?,
         identity: Identity {
@@ -148,6 +157,7 @@ pub(super) fn decode(
             incarnation,
         },
         phase: wire.phase,
+        address: wire.address,
         catalog,
         checkpoint: wire
             .checkpoint
@@ -215,6 +225,7 @@ pub(super) fn encode(
             epoch: record.identity.epoch,
             incarnation: record.identity.incarnation.to_string(),
             phase: record.phase,
+            address: record.address,
             lifetime_ns: encoding.legacy_lifetime(),
             error_ns: 0,
             catalog: record.catalog.map(|id| id.to_string()),

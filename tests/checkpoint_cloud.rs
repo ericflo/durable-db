@@ -29,11 +29,17 @@ async fn connect(provider: &str, bucket: &str, namespace: &str) -> Connection {
     .unwrap_or_else(|_| panic!("checkpoint provider connection failed"))
 }
 async fn activate(connection: &Connection) -> Root {
+    activate_at(connection, None).await
+}
+async fn activate_at(connection: &Connection, address: Option<std::net::SocketAddr>) -> Root {
     // Budgeted bootstrap can consume a grant while uploading registration,
     // invalidating its captured comparison. A fresh candidate reuses the grant.
     let mut root = None;
     for _ in 0..2 {
         let mut candidate = connection.root().unwrap();
+        if let Some(address) = address {
+            candidate = candidate.advertise(address).unwrap();
+        }
         let observed = candidate
             .observe()
             .await
@@ -70,33 +76,7 @@ async fn validate(root: &mut Root) {
     ));
 }
 async fn select(root: &mut Root) {
-    loop {
-        let mut recovery = root.recovery().unwrap();
-        let mut chosen = None;
-        while let Some(mut journal) = recovery
-            .next()
-            .await
-            .unwrap_or_else(|_| panic!("recovery ancestry failed"))
-        {
-            if journal.is_selected() {
-                continue;
-            }
-            while journal
-                .read_next()
-                .await
-                .unwrap_or_else(|_| panic!("journal discovery failed"))
-                .is_some()
-            {}
-            chosen = Some(journal);
-            break;
-        }
-        let Some(chosen) = chosen else { break };
-        let request = root.select_prefix(chosen).unwrap();
-        assert!(matches!(
-            root.finish(request.execute().await).unwrap(),
-            Outcome::Confirmed
-        ));
-    }
+    root.select_journals().await.unwrap();
 }
 fn records(revision: u64, start: u128, end: u128, late: bool) -> Vec<Bytes> {
     (start..end)

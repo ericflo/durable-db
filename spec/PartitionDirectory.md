@@ -39,3 +39,32 @@ proof. Rust tests must cover independent concurrent ownership, one-partition
 takeover, uncertain publication, stale comparison, scoped listing/deletion,
 budget exhaustion and recovery. Membership, route selection, automatic election,
 placement policy and eventual progress are outside this adapter.
+
+## Owner addresses and forwarding
+
+An optional canonical socket address is published in the same native control
+record as the fresh incarnation. A new claim never inherits its predecessor's
+address. Discovery exposes open records only, as routing hints; it does not
+establish that recovery finished or that a permit remains live. No new mutable
+object or collector is added. Address-free local/remote records remain readable;
+old binaries reject the new optional wire field when it is present.
+
+A forwarder caches one route and includes the expected incarnation in every
+request. An HTTP backend refuses a mismatch before dispatch. The header grants
+no authority: normal authentication, tenant policy and fresh permit validation
+still apply. This also stops forwarding loops and cross-partition address reuse.
+The forwarder preserves tenant identity, policy generation/token ID and expiry
+when signing for the peer; it never converts tenant access to administrator
+access. Administrators use a short-lived signed token, never the signing key.
+
+There is one HTTP attempt, without redirects, transport retries or proxy
+inheritance. Failure/503 invalidates only that exact cached route instance; a
+late failure cannot clear a replacement. The original caller resolves uncertain
+writes with an identical request. Cache and connection pools have bounded
+lifetimes/counts, requests and responses have byte ceilings, and in-flight calls
+are bounded. Peer addresses and signing keys are trusted operator configuration;
+network confidentiality requires a trusted private network or transport mesh.
+
+`OwnerRouting` checks address reuse, stale hints, incarnation checks and the
+single-attempt contract. `RevocableOwner` supplies the serving-order argument.
+Neither proves membership, election, placement policy or eventual progress.
