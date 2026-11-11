@@ -333,7 +333,7 @@ async fn delayed_failure_does_not_clear_a_refreshed_route() {
                     0 => {
                         a.notify_one();
                         b.notified().await;
-                        crate::Error::Storage(anyhow::anyhow!("late failure")).into_response()
+                        crate::Error::Busy.into_response()
                     }
                     1 => {
                         crate::Error::Storage(anyhow::anyhow!("immediate failure")).into_response()
@@ -365,10 +365,7 @@ async fn delayed_failure_does_not_clear_a_refreshed_route() {
     ));
     let reads = provider.reads.load(Ordering::SeqCst);
     resume.notify_one();
-    assert!(matches!(
-        pending.await.unwrap(),
-        Err(crate::Error::Storage(_))
-    ));
+    assert!(matches!(pending.await.unwrap(), Err(crate::Error::Busy)));
     assert!(matches!(
         forward
             .info("app", &crate::auth::Access::Administrator)
@@ -388,4 +385,41 @@ async fn delayed_failure_does_not_clear_a_refreshed_route() {
         matches!(error, crate::Error::Storage(e) if e.to_string() == "owner response exceeds bound")
     );
     assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn admission_rejection_cannot_pin_a_stale_owner_route() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _old = advertised(&provider, listener.local_addr().unwrap()).await;
+    let calls = Arc::new(AtomicU64::new(0));
+    let count = calls.clone();
+    let _server = Server::serve(
+        listener,
+        Router::new().fallback(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { crate::Error::Busy.into_response() }
+        }),
+    );
+    let forward = Forward::new(&provider.connection("test"), auth(), 1).unwrap();
+    let access = crate::auth::Access::Administrator;
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::Busy)
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _new = advertised(&provider, listener.local_addr().unwrap()).await;
+    let _replacement = Server::serve(
+        listener,
+        Router::new().fallback(|| async { crate::Error::NotFound.into_response() }),
+    );
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::NotFound)
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no internal replay or repeated stale route"
+    );
 }

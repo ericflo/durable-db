@@ -117,7 +117,9 @@ impl Forward {
             Err(remote_error(status, &bytes))
         }
         .await;
-        if matches!(result, Err(Error::Storage(_))) {
+        // Overload can precede the destination identity check, so it cannot
+        // establish that this cached route is still current.
+        if matches!(result, Err(Error::Storage(_) | Error::Busy)) {
             let mut cached = self.peer.lock().await;
             if cached
                 .as_ref()
