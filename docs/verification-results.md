@@ -1,5 +1,45 @@
 # Verification results
 
+## v0.23.4 local health and complete B2 recovery (2026-11-11)
+
+[v0.23.4](https://github.com/ericflo/durable-db/releases/tag/v0.23.4) packages
+`2d62975`, verified by [Woodpecker #224](https://ci.eflorenzano.com/repos/18/pipeline/224/1).
+The independently downloaded static executable passes installation without a
+toolchain, transactions, ordered reads, export/restore and forced-stop recovery.
+
+Native health checks local retirement state without provider I/O or waiting
+behind an exclusive owner operation. Temporary permit-read errors therefore
+preserve idle owners instead of triggering unnecessary acquisition; actual data
+responses still require fresh permit validation. Unknown journal outcomes still
+retire and reacquire. This patch changes no wire or storage format.
+
+The outage regression failed against the previous probe and now passes with
+unchanged owner identity and no additional authority writes. Existing tests
+check responsiveness during paused admission, revoked-owner refusal and unknown
+journal recovery. All 324 enabled local Rust checks, strict clippy, the existing
+110-state routing model and five negative controls pass. The obsolete network
+health test was replaced, and outdated exhausted-credit deployment advice was
+removed. The harness also reads refusal categories from the actual `error` field.
+
+Separately, the **v0.23.3 static release binary**, before this patch, passes the
+first complete native B2/Kubernetes campaign with the stronger per-writer gate:
+1→3→6→1, forced pod loss, rolling replacement, provider interruption and total
+compute replacement. Every writer must complete two further verified readbacks
+before the next fault. **1,791 writes were acknowledged, read back and recovered**;
+the independent sequential-history checker passes all four histories.
+
+Rolling recovery takes about 165 seconds, scale-down 177 seconds and cold
+replacement 127 seconds between phase boundaries, including orchestration and
+the readback barrier. Those long pauses remain an availability concern. The
+180-second identical-request retry deadline and 240-second rollout/progress
+bounds were not relaxed. This single run does not isolate the earlier debug
+failure's cause, measure the health patch's cloud effect, establish an SLO, or
+qualify AWS, HPA, host loss, peak memory or a sustained workload.
+[Exact source, configuration, history hash and limitations](evidence/native-recovery-2026-11-11.json).
+
+The namespace, temporary image, scoped workload key, bucket and all 1,073 remaining
+physical versions were removed. Production gates remain open.
+
 ## v0.23.3 routing readiness during recovery (2026-11-11)
 
 [v0.23.3](https://github.com/ericflo/durable-db/releases/tag/v0.23.3) packages
@@ -27,8 +67,8 @@ or a production SLO. [Exact scope and evidence](evidence/native-recovery-2026-11
 The harness now requires two new verified readbacks from **every writer** before
 advancing to another fault. A focused regression detects the old aggregate-only
 check; timeout diagnostics identify read/commit and final HTTP status while
-redacting unknown response text. A fresh cloud run with that stronger barrier is
-still required. The unused rollout-headroom option was removed. Cleanup deleted
+redacting unknown response text. The subsequent static-release campaign above
+passes that stronger barrier. The unused rollout-headroom option was removed. Cleanup deleted
 the latest bucket/key/namespace and 1,211 B2 versions, plus the MinIO container,
 two buckets and 503 versions. The inconclusive prior headroom experiment removed
 its bucket/key/namespace and 481 versions before reaching rolling replacement.

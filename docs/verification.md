@@ -866,5 +866,20 @@ progress function against a ten-write single-writer advance: the previous functi
 accepts it, while the corrected function waits for the other writers' readbacks.
 Timeout diagnostics identify the operation and last HTTP/refusal category without
 recording arbitrary response text; both classification and redaction were checked.
-Existing campaigns retain their aggregate-only scope. The next cloud campaign must
-use this stronger per-writer barrier to isolate the stalled operation.
+Earlier campaigns retain their aggregate-only scope. The subsequent campaign
+uses the verified v0.23.3 static release binary and the stronger barrier at
+`5a143b5`. It completes 1→3→6→1, forced pod loss, rolling replacement, provider
+interruption and total compute replacement. All **1,791** acknowledgements,
+readbacks and recovered keys agree; the separate sequential-history checker
+validates unique request identities, invocation order, contiguous revisions and
+value hashes. Per-writer totals are 371, 452, 501 and 467.
+
+Rolling recovery takes approximately 165 seconds, scale-down 177 seconds and
+cold replacement 127 seconds between recorded phase boundaries, including
+orchestration and required readbacks. These are not request latency SLOs or a
+controlled comparison with debug builds. The original 180-second client retry
+and 240-second rollout/progress bounds remain. All task resources, credentials,
+the temporary image and 1,073 physical versions were removed. This is one short
+B2 run, before the local-health patch; AWS, HPA, host loss, peak memory and
+sustained-load qualification remain open. See the
+[completed campaign evidence](evidence/native-recovery-2026-11-11.json).
