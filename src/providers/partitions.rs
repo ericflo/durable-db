@@ -115,6 +115,12 @@ impl Partitions {
         self.directory.configure_layout(layout).await
     }
 
+    /// Collect shared control metadata once for the directory, not once per owner.
+    /// Concurrent collectors are safe; membership only schedules their cost.
+    pub async fn maintenance(&self) -> anyhow::Result<()> {
+        self.directory.maintenance().await
+    }
+
     pub async fn upload_budget(&self) -> anyhow::Result<UploadStatus> {
         self.directory
             .upload_budget()
@@ -253,8 +259,5 @@ impl Authority for Register {
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
         self.files.delete(key).await
-    }
-    async fn maintenance(&self) -> anyhow::Result<()> {
-        self.files.directory.maintenance().await
     }
 }

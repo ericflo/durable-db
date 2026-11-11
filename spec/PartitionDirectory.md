@@ -152,8 +152,12 @@ partition ceilings use the format maximum so they cannot become lower,
 unrefillable CLI limits; every physical upload still passes shared admission.
 Fresh native directories are required: prior publication-engine namespaces are
 refused, never implicitly rewritten. Export with the prior binary and restore
-into a new namespace. Maintenance uses native owner workers; the old cloud CLI
-serving/maintenance branch is removed. Shutdown closes discovery and drains HTTP;
+into a new namespace. Native owner workers collect their own partition objects. Shared directory
+collection runs once per maintenance interval on the peer preferred for partition
+zero, independently of owner readiness. This is a scheduling hint, not a collector
+lease: disagreement can run concurrent collectors, which remain safe under the
+existing list-before-fence protocol. Only one shared sweep may be in flight per
+process. The old cloud CLI serving/maintenance branch is removed. Shutdown closes discovery and drains HTTP;
 correctness does not depend on either action.
 
 Acquisition scheduling completes one new owner per pass and immediately continues after success. Existing-owner health checks remain bounded at eight per pass. Provider request timeouts bound individual I/O; there is no fixed deadline for a complete recovery, which can legitimately need many requests. A changed membership snapshot or a closed feed cancels reconciliation; an identical snapshot does not. This avoids repeatedly abandoning a progressing recovery and amplifying its registration history. Cancellation remains safe under the existing acquisition protocol and resident reservations.

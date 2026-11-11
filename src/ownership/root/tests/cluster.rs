@@ -710,7 +710,7 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change
     node.members(&[node.address]);
     provider.entered.notified().await;
     let calls = provider.calls.load(Ordering::SeqCst);
-    tokio::time::advance(Duration::from_secs(60)).await;
+    tokio::time::advance(Duration::from_secs(40)).await;
     // Repeated identical membership must not abort useful acquisition either.
     node.members(&[node.address]);
     for _ in 0..4 {
@@ -736,4 +736,42 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change
     // the controller to acquire for this new placement.
     node.members(&[node.address]);
     settled(&[&node], &[node.address]).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn shared_maintenance_runs_once_and_moves_with_membership() {
+    let provider = Provider::new();
+    let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peers = [first.local_addr().unwrap(), second.local_addr().unwrap()];
+    let a = Node::start(directory(&provider).await, first, peers.to_vec()).await;
+    let b = Node::start(directory(&provider).await, second, peers.to_vec()).await;
+    settled(&[&a, &b], &peers).await;
+    assert_eq!(provider.maintenance.load(Ordering::SeqCst), 0);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(provider.maintenance.load(Ordering::SeqCst), 1);
+    let survivor = if preferred(0, &peers) == a.address {
+        &b
+    } else {
+        &a
+    };
+    a.members(&[survivor.address]);
+    b.members(&[survivor.address]);
+    settled(&[&a, &b], &[survivor.address]).await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(provider.maintenance.load(Ordering::SeqCst), 2);
+    a.members(&[]);
+    b.members(&[]);
+    settled(&[&a, &b], &[]).await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(provider.maintenance.load(Ordering::SeqCst), 2);
 }

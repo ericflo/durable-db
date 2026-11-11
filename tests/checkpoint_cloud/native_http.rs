@@ -935,7 +935,7 @@ async fn membership_places_partitions_and_recovers_over_http() {
         );
     }
     assert_eq!(reopened.upload_budget().await.unwrap().limits, shared);
-    a.authority().maintenance().await.unwrap();
+    reopened.maintenance().await.unwrap();
     assert_eq!(
         a.objects().upload_budget().await.unwrap().unwrap().limits,
         limits

@@ -72,7 +72,7 @@ pub struct Cluster {
     limits: Limits,
     residents: Arc<Semaphore>,
     ready: AtomicBool,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 impl Cluster {
     pub async fn open(
@@ -105,7 +105,36 @@ impl Cluster {
             cache,
             partitions,
             ready: AtomicBool::new(false),
-            worker: Mutex::new(None),
+            workers: Mutex::new(Vec::new()),
+        });
+        let mut maintenance_members = members.clone();
+        let directory = cluster.directory.clone();
+        let address = cluster.config.address;
+        let interval = cluster.config.maintenance;
+        let maintenance = tokio::spawn(async move {
+            let mut sweep =
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = sweep.tick() => (),
+                    update = maintenance_members.changed() => {
+                        if update.is_err() { break; }
+                        continue;
+                    }
+                }
+                // Membership schedules cost only. Disagreement is safe under
+                // the collector's existing list-before-fence protocol.
+                if preferred(0, &maintenance_members.borrow()) == Some(address)
+                    && !matches!(
+                        tokio::time::timeout(Duration::from_secs(30), directory.maintenance())
+                            .await,
+                        Ok(Ok(()))
+                    )
+                {
+                    tracing::warn!("shared directory collection deferred");
+                }
+            }
         });
         let weak = Arc::downgrade(&cluster);
         let worker = tokio::spawn(async move {
@@ -155,7 +184,7 @@ impl Cluster {
                 cluster.retire().await;
             }
         });
-        *cluster.worker.lock().expect("cluster worker lock") = Some(worker);
+        *cluster.workers.lock().expect("cluster workers lock") = vec![worker, maintenance];
         Ok(cluster)
     }
     async fn retire(&self) {
@@ -243,14 +272,20 @@ impl Cluster {
                 match root.finish(claim.execute().await)? {
                     Outcome::Confirmed => (),
                     Outcome::Conflict => continue,
-                    _ => anyhow::bail!("ownership claim unconfirmed"),
+                    Outcome::Uncertain(error) => {
+                        return Err(error.context("ownership claim unconfirmed"));
+                    }
+                    _ => anyhow::bail!("ownership claim ignored"),
                 }
                 stage = "activate";
                 let activate = root.activate()?;
-                ensure!(
-                    matches!(root.finish(activate.execute().await)?, Outcome::Confirmed),
-                    "ownership activation unconfirmed"
-                );
+                match root.finish(activate.execute().await)? {
+                    Outcome::Confirmed => (),
+                    Outcome::Uncertain(error) => {
+                        return Err(error.context("ownership activation unconfirmed"));
+                    }
+                    _ => anyhow::bail!("ownership activation conflicted or ignored"),
+                }
                 stage = "select_journals";
                 root.select_journals().await?;
                 stage = "recover";
@@ -269,15 +304,33 @@ impl Cluster {
             anyhow::bail!("ownership claim remained contended")
         }
         .await;
-        if result.is_err() {
-            tracing::warn!(partition = id, stage, "native acquisition failed");
+        if let Err(error) = &result {
+            // Only known static diagnostics may leave the error chain. Provider
+            // messages can contain credentials, object names or request bodies.
+            let reason = [
+                "submitted publication changed or was fenced; outcome is uncertain",
+                "publication helping budget exhausted; outcome is uncertain",
+                "partition changed after publication; outcome uncertain",
+                "published manifest changed repeatedly or is unavailable",
+                "activation permit revoked",
+                "ownership activation conflicted or ignored",
+            ]
+            .into_iter()
+            .find(|message| error.chain().any(|cause| cause.to_string() == *message))
+            .unwrap_or("provider_or_validation");
+            tracing::warn!(partition = id, stage, reason, "native acquisition failed");
         }
         result
     }
 }
 impl Drop for Cluster {
     fn drop(&mut self) {
-        if let Some(worker) = self.worker.get_mut().expect("cluster worker lock").take() {
+        for worker in self
+            .workers
+            .get_mut()
+            .expect("cluster workers lock")
+            .drain(..)
+        {
             worker.abort();
         }
     }

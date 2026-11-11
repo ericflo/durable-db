@@ -238,7 +238,7 @@ async fn layout_is_immutable_survives_publication_and_refuses_populated_director
     assert!(layout.partition("../app").is_err());
     let connection = directory.partition(partition, limits()).await.unwrap();
     let _owner = acquire(&connection).await;
-    connection.authority().maintenance().await.unwrap();
+    directory.maintenance().await.unwrap();
     directory.configure(layout).await.unwrap();
     assert!(directory.configure(Layout::new(4).unwrap()).await.is_err());
     let fresh = Provider::new();
