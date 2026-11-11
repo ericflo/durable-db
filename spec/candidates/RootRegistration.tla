@@ -79,6 +79,9 @@ RevokeAncestor(c, d) ==
 \* A checkpoint may stop traversal only at a previously completed owner.
 \* Selecting its already-durable identity is abstract here; publication and
 \* data recovery are checked separately. The cut owner's permit is included.
+\* A recovered idle owner may publish a zero-frame checkpoint to advance this
+\* cut; serving no writes must not require traversing every earlier owner.
+\* Scheduling that checkpoint adds no authority and is not a liveness proof.
 FinishRevocation(c, stop) ==
     /\ confirmed[c] # 0 /\ c \in persisted /\ c \notin ready
     /\ stop \in Ancestors(c) \cup {None}

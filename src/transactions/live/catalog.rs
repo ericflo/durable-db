@@ -235,7 +235,7 @@ impl Owner {
         intent: [u8; 32],
         result: CatalogResult,
     ) -> Result<CatalogChange> {
-        self.maintain().await?;
+        self.maintain_required().await?;
         if self.checkpoint_due() {
             return Err(Error::Busy);
         }

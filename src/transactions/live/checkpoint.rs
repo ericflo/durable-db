@@ -18,14 +18,16 @@ pub(super) struct Maintenance {
     retry: Option<(Instant, Duration)>,
     covered: u64,
     recovered: u64,
+    handoff: bool,
     pub requested: bool,
 }
 impl Maintenance {
-    pub fn new(files: Arc<dyn Storage>, cache: Arc<Cache>, recovered: u64) -> Self {
+    pub fn new(files: Arc<dyn Storage>, cache: Arc<Cache>, recovered: u64, handoff: bool) -> Self {
         Self {
             files,
             cache,
             recovered,
+            handoff,
             publishing: None,
             retry: None,
             covered: 0,
@@ -34,6 +36,15 @@ impl Maintenance {
     }
 }
 impl Owner {
+    // Foreground operations only wait for capacity-required maintenance. An
+    // unfunded opportunistic handoff checkpoint must not deny ordinary reads.
+    pub(super) async fn maintain_required(&mut self) -> anyhow::Result<()> {
+        if self.checkpoint_due() {
+            self.maintain().await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn files(&self) -> Arc<dyn Storage> {
         self.maintenance.files.clone()
     }
@@ -66,12 +77,18 @@ impl Owner {
     /// control operations remain separate; immutable objects are never deleted here.
     pub async fn maintain(&mut self) -> anyhow::Result<bool> {
         self.check()?;
-        if !self.checkpoint_due() || self.writer.pending_batches() != 0 {
+        if (!self.checkpoint_due() && !self.maintenance.handoff)
+            || self.writer.pending_batches() != 0
+        {
             return Ok(false);
         }
+        // Even an idle, empty successor needs its own durable cut, otherwise
+        // every replacement revisits all earlier owners. This uses the normal
+        // checkpoint path and funding; it does not block admission by itself.
         // Retries/refusals can fill the receipt cache without advancing history.
         // Drop only that disposable state: no new checkpoint or authority CAS.
         if self.maintenance.publishing.is_none()
+            && !self.maintenance.handoff
             && self.maintenance.recovered == 0
             && self.writer.durable_prefix().position() == self.maintenance.covered
             && self.projection.discard_warmed()
@@ -224,6 +241,7 @@ impl Owner {
         self.validation = validation::Usage::default();
         self.maintenance.covered = self.writer.durable_prefix().position();
         self.maintenance.recovered = 0;
+        self.maintenance.handoff = false;
         self.maintenance.requested = false;
         self.maintenance.retry = None;
         Ok(true)

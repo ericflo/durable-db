@@ -1429,3 +1429,67 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         Result::Committed(1)
     );
 }
+
+#[tokio::test]
+async fn idle_handoffs_checkpoint_empty_history_and_bound_recovery_ancestry() {
+    let provider = Provider::new();
+    let mut owner = open(active(&provider).await, live::Limits::default()).await;
+    assert!(!owner.maintain().await.unwrap());
+    let snapshot = owner.snapshot(database("idle")).await.unwrap();
+    let mut late = owner
+        .prepare(&[request(
+            &snapshot,
+            "unacknowledged",
+            &[],
+            &[Mutation {
+                key: "late",
+                value: Some(b"excluded"),
+            }],
+        )])
+        .await
+        .unwrap()
+        .upload;
+    drop(owner);
+    for epoch in 2..=8 {
+        let mut root = successor(&provider).await;
+        root.select_journals().await.unwrap();
+        let identity = root.identity().unwrap().unwrap();
+        let mut recovery = root.recovery().unwrap();
+        let mut ancestors = 0;
+        while let Some(mut journal) = recovery.next().await.unwrap() {
+            assert!(journal.is_selected());
+            assert!(journal.read_next().await.unwrap().is_none());
+            ancestors += 1;
+        }
+        assert!(ancestors <= 1, "idle handoffs accumulated recovery work");
+        let mut owner = open(root, live::Limits::default()).await;
+        let calls = provider.calls.load(Ordering::SeqCst);
+        assert_eq!(
+            owner.snapshot(database("idle")).await.unwrap().revision(),
+            0
+        );
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            calls,
+            "foreground reads must not require the handoff checkpoint"
+        );
+        if epoch == 3 {
+            provider.lose_reply.store(true, Ordering::SeqCst);
+        }
+        assert!(
+            owner.maintain().await.unwrap(),
+            "idle handoff needs a checkpoint"
+        );
+        let reference = provider.record().checkpoint.unwrap();
+        assert_eq!(reference.cut.identity, identity);
+        assert_eq!(reference.cut.prefix.position(), 0);
+        let calls = provider.calls.load(Ordering::SeqCst);
+        assert!(!owner.maintain().await.unwrap());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+        if let Some(upload) = late.take() {
+            // A PUT from before the first handoff arrives after its zero-frame
+            // checkpoint. Later owners must still recover the selected emptiness.
+            drop(upload.send().await);
+        }
+    }
+}

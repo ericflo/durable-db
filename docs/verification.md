@@ -743,3 +743,25 @@ survives, then removes the local process and requires cancellation/reacquisition
 The original whole-membership cancellation and immediate journal-selection
 abandonment each fail their regression. This removes two restart paths without
 adding a new owner protocol, retrying uncertain writes or relaxing cloud deadlines.
+
+An idle recovered owner now schedules one checkpoint through the existing
+maintenance worker, even if its selected journals contain no frames. The durable
+cut advances to that owner, so later healthy handoffs stop at that checkpoint
+instead of rescanning every empty ancestor. Ordinary foreground reads do not
+require this opportunistic checkpoint; staged publication and capacity-required
+maintenance retain their existing admission rules. Publication still needs the
+normal exact comparison and funding. Repeated crashes, unavailable storage or
+exhausted credit can still postpone the cut; this is not an unconditional recovery
+bound. A seven-handoff regression checks zero-frame cuts, a lost publication reply,
+a late old upload and no repeated checkpoint when idle. The `RootRegistration`
+checks retain their completed-owner cutoff rule (34,061 and 281,563 states, six
+negative/coverage controls); zero-frame data recovery is checked in Rust.
+
+The first recovery-fix campaign (`b51c42a`, before idle checkpoints) passed one,
+three and six replicas, a 120-second requested steady phase and forced pod loss.
+It still exceeded the 240-second rollout deadline: 1,067 acknowledged writes,
+1,064 completed readbacks and no client failure in the captured snapshot. This
+was a temporary debug image and did not reach final recovered-history verification,
+provider interruption, scale-down or cold replacement. The namespace, bucket,
+scoped key, 875 physical versions and temporary image manifest were removed.
+[Configuration and exact scope](evidence/native-recovery-2026-11-11.json).
