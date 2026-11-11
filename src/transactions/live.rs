@@ -53,8 +53,8 @@ impl Default for Limits {
 
 impl Limits {
     /// Configure aggregate resident payload allowances (16 MiB..8 GiB).
-    /// Counts scale with the same budget. Journal bytes retain their 256 MiB
-    /// component ceiling. Cache, scratch, transport and allocator RSS are separate.
+    /// Counts scale with the same budget, capped at the validation and
+    /// journal component ceilings. Cache, scratch, transport and allocator RSS are separate.
     pub fn resident(bytes: usize) -> anyhow::Result<Self> {
         ensure!(
             (16 * 1024 * 1024..=8192usize * 1024 * 1024).contains(&bytes),
@@ -67,9 +67,9 @@ impl Limits {
         limits.index.value_bytes = scale(limits.index.value_bytes);
         limits.index.receipts = scale(limits.index.receipts);
         limits.index.receipt_bytes = scale(limits.index.receipt_bytes);
-        limits.validation.transactions = scale(limits.validation.transactions);
-        limits.validation.key_references = scale(limits.validation.key_references);
-        limits.validation.key_bytes = scale(limits.validation.key_bytes);
+        limits.validation.transactions = scale(limits.validation.transactions).min(4096);
+        limits.validation.key_references = scale(limits.validation.key_references).min(262_144);
+        limits.validation.key_bytes = scale(limits.validation.key_bytes).min(16 * 1024 * 1024);
         limits.journal =
             journal::QueueLimits::new(16, scale(16 * 1024 * 1024).min(256 * 1024 * 1024))?;
         limits.validate()?;

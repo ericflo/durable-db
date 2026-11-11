@@ -13,7 +13,7 @@ fn binary() -> &'static str {
 }
 
 #[test]
-fn invalid_cluster_cli_configuration_fails_before_provider_access() {
+fn cluster_cli_configuration_is_validated_before_provider_access() {
     let temp = tempfile::tempdir().unwrap();
     let key = temp.path().join("admin.key");
     std::fs::write(&key, "2a".repeat(32)).unwrap();
@@ -29,6 +29,8 @@ fn invalid_cluster_cli_configuration_fails_before_provider_access() {
         key.to_str().unwrap(),
     ];
     for (args, expected) in [
+        // Valid default resource settings must reach the missing-credential boundary.
+        (vec!["--listen", "127.0.0.1:0"], "initialize B2 transport"),
         (vec!["--listen", "0.0.0.0:0"], "require --advertise-ip"),
         (
             vec!["--listen", "127.0.0.1:0", "--advertise-ip", "127.0.0.2"],
