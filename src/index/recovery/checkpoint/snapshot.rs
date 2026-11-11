@@ -143,7 +143,7 @@ impl Snapshot {
                     // so this covers any repacking, including new boundaries.
                     bytes = bytes
                         .checked_add(
-                            5 * routed.reference.blobs()[0].size()
+                            super::copy_contribution(routed.reference.blobs()[0].size())
                                 + manifest.path_bytes(&mut paths),
                         )
                         .context("checkpoint copy admission overflow")?;
@@ -165,7 +165,10 @@ impl Snapshot {
                 )?;
                 if right.next().await?.is_some() {
                     bytes = bytes
-                        .checked_add(right.path_bytes(&mut paths))
+                        .checked_add(
+                            right.path_bytes(&mut paths)
+                                + tree::growth_bytes(crate::index::MAX_KEY_BYTES) as u64,
+                        )
                         .context("checkpoint manifest admission overflow")?;
                 }
                 break;

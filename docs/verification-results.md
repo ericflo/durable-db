@@ -1,5 +1,15 @@
 # Verification results
 
+## v0.16.0 manifest encoding and split admission (2026-11-10)
+
+Tenant admission now includes new manifest entries, node headers and split/root growth for one checkpoint construction attempt. The allowance uses the writer’s byte/row limits to fund new table boundaries without pricing a maximum-size path for every retained row. It uses the same authenticated descriptors and cached seeks, with no new value/index reads, persisted fields or dependencies. The change adds 33 net runtime Rust lines. Budgeted native format `owned-candidate-20` refuses older policies and requires a fresh namespace; local format `owned-candidate-15` remains compatible with v0.9.0 and later.
+
+The strengthened existing tests count all uploaded checkpoint bytes, including manifests, across minimum/maximum fields, tombstones, 4,097 short rows, byte-limited chunks, and manifest splits through 8,193 tables. A 65-table case uses maximum 2,048-byte boundaries. The adversarial retained-row rewrite uploads 533,873 bytes against a 2,819,918-byte allowance. Ordinary pricing retains its read counts; append pricing remains cached. Real TCP checks refuse one byte short before allocation or PUT, preserve neighboring writes and replay exact retries. Five Rust negative controls detect missing direct-row growth, inadequate split propagation, omitted retained-table growth, omitted byte/row split shares and missing append growth.
+
+All 299 local Rust tests, formatting, strict clippy and both 99-test client contracts pass with the existing test allowance unchanged. The unchanged 5,776-state tenant-admission model and its three negative controls pass; it abstracts byte amounts and does not prove the sizing argument or Rust refinement. The old table-only upload assertions and incomplete manifest allowance were replaced, and current accounting documentation was rewritten in place. [Milestone evidence](evidence/manifest-growth-admission-2026-11-10.json).
+
+These are conservative admission bounds, not provider billing or future upload rights. Maintenance retries/recovery and administrative work remain outside tenant attribution. Retained-image export/restore, scheduled backups, tighter admission bounds, physical timing and broader production qualification remain open.
+
 ## v0.15.0 existing manifest-path admission (2026-11-10)
 
 [v0.15.0](https://github.com/ericflo/durable-db/releases/tag/v0.15.0) packages `e817b95`, verified by [Woodpecker #156](https://ci.eflorenzano.com/repos/18/pipeline/156/1). The independently downloaded static binary passes transactions/retries, ordered reads, logical export/restore and forced-stop recovery. The public default installer downloads that exact binary. The optimized 10,005-database capacity check passes in 196.55 seconds.

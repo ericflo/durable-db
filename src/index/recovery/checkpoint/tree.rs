@@ -14,6 +14,13 @@ use std::sync::Arc;
 const FANOUT: usize = 64;
 const MAX_HEIGHT: usize = 8;
 const MAX_NODE: usize = 144 * 1024;
+
+/// Two singleton paths cover a new descriptor and split propagation/root growth.
+/// Existing entries copied from affected paths are charged separately. A leaf
+/// entry has a 152-byte table reference; branches have a 56-byte blob reference.
+pub(super) fn growth_bytes(key_bytes: usize) -> usize {
+    2 * (164 + key_bytes + MAX_HEIGHT * (12 + key_bytes + REFERENCE_BYTES))
+}
 struct Child {
     last: Bytes,
     blob: Blob,

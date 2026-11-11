@@ -783,7 +783,11 @@ async fn checkpoint_copy_allowances(
             data.insert(
                 key,
                 if object.bytes.starts_with(b"DDBBLK01") {
-                    5 * object.bytes.len() as u64
+                    let bytes = object.bytes.len() as u64;
+                    5 * bytes
+                        + 38_280
+                        + (bytes * 38_280).div_ceil(4_126_706)
+                        + (bytes / 33 * 38_280).div_ceil(4096)
                 } else if object.bytes.starts_with(b"DDBIDX01") {
                     0
                 } else {
@@ -860,8 +864,8 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let a = format!("{base}/v1/databases/a/commit");
     let initial_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
-    let first_admission = 822 + initial_tables.values().sum::<u64>();
-    // 250 journal + 170 row + 402 singleton block/index allowance bytes.
+    let first_admission = 6237 + initial_tables.values().sum::<u64>();
+    // 250 journal + 572 data/index + 5,415 manifest growth/split allowance bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
         tcp_call(&client, "POST", &a, writer, commit()).await.0,
@@ -931,7 +935,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         "one new data/index pair and manifest after checkpoint"
     );
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
-    let second_total = first_admission + 818 + copies;
+    let second_total = first_admission + 6215 + copies;
     let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
@@ -958,7 +962,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     // A dirty write conservatively pays the same base-copy contribution again.
     // This needs no persistent paid-table set or cross-transaction refund.
-    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 822 + copies,"attempts":3}});
+    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 6237 + copies,"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
@@ -977,7 +981,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 async fn native_http_collects_checkpointed_journals() {
     let (router, provider, _, _, token) = fixture(8, 2).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":32768,"attempts":1}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":65536,"attempts":1}});
     for _ in 0..2 {
         assert_eq!(
             call(&router, "POST", budget, &token, fund.clone()).await.0,
@@ -989,7 +993,7 @@ async fn native_http_collects_checkpointed_journals() {
     }
     for (name, revision) in [("a", 0), ("b", 0), ("a", 1)] {
         if revision == 1 {
-            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":65536,"attempts":2}});
+            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":131072,"attempts":2}});
             assert_eq!(
                 call(&router, "POST", budget, &token, refill).await.0,
                 StatusCode::OK

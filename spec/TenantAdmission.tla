@@ -4,7 +4,7 @@ CONSTANTS Tenants, Nodes, Grants, Operations, Capacity, InitialCapacity, MaxAtte
           UnsafeLateCheck, UnsafeCrossScope, UnsafeCopyOmission
 ASSUME Cardinality(Tenants) = 2
 \* Byte-dimension abstraction of one transaction: direct work (journal +
-\* new rows with their block/index encoding allowance) and base-table reblocking
+\* new rows with their table/manifest encoding allowance) and base-table reblocking
 \* plus copied manifest paths need same-name credit before assignment. For each checkpoint row with key
 \* length k >= 19 and value length v >= 0, the singleton data/index encoding
 \* 106 + 3*k + v <= 5*(14 + k + v). A table's authenticated data bytes include
@@ -13,8 +13,13 @@ ASSUME Cardinality(Tenants) = 2
 \* The writer pays even for a neighbor's rows and index in a shared table. Runtime
 \* charges the sum and ONE attempt. Range selection/byte sizing are checked
 \* separately against actual objects. Copies include authenticated manifest
-\* nodes on affected paths, including the rightmost path for appends. New
-\* manifest entries/split overhead and maintenance retries are not modeled.
+\* nodes on affected paths, including the rightmost path for appends. Manifest
+\* growth pays two singleton paths (at most nine levels) per output table;
+\* old-derived boundaries use the maximum key length. Byte/row-triggered table
+\* flushes are bounded by input bytes/(chunk bytes - maximum row bytes) and
+\* input rows/chunk rows. Boundary flushes pay once per touched base table or
+\* new terminal row; an append also funds splitting the old rightmost path.
+\* This sizing argument is tested separately; maintenance retries are omitted.
 Components == {"direct", "copies"}
 Required(o) == {<<o,c>>: c \in Components}
 A == CHOOSE t \in Tenants: TRUE

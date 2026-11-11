@@ -183,7 +183,11 @@ async fn checkpoint_copy_allowances(
             data.insert(
                 key,
                 if object.bytes.starts_with(b"DDBBLK01") {
-                    5 * object.bytes.len() as u64
+                    let bytes = object.bytes.len() as u64;
+                    5 * bytes
+                        + 38_280
+                        + (bytes * 38_280).div_ceil(4_126_706)
+                        + (bytes / 33 * 38_280).div_ceil(4096)
                 } else if object.bytes.starts_with(b"DDBIDX01") {
                     0
                 } else {
@@ -233,8 +237,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let initial_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
     let initial_copies = initial_tables.values().sum::<u64>();
-    let first_admission = 834 + initial_copies;
-    // 254 journal + 174 row + 406 singleton block/index allowance bytes.
+    let first_admission = 6285 + initial_copies;
+    // 254 journal + 580 data/index + 5,451 manifest growth/split allowance bytes.
     // Admission must precede every journal PUT.
     let puts = calls("object_put");
     assert_eq!(
@@ -275,13 +279,13 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .collect();
     assert_eq!(replaced.len(), 3, "one data/index pair and manifest");
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
-    let second_admission = 834 + copies;
+    let second_admission = 6285 + copies;
     server
         .ok(
             "POST",
             budget,
             &json!({"request_id":"more","expected_configuration_revision":2,
-        "limits":{"bytes":first_admission + 834,"attempts":2}}),
+        "limits":{"bytes":first_admission + 6285,"attempts":2}}),
         )
         .await;
     let puts = calls("object_put");

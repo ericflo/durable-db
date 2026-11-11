@@ -1,6 +1,6 @@
 # HTTP API
 
-This page describes v0.15.0. Local CLI serving uses the native backend. The cloud CLI retains the shared publication backend; clustered native serving remains an experimental library path gated on physical timing and placement qualification.
+This page describes v0.16.0. Local CLI serving uses the native backend. The cloud CLI retains the shared publication backend; clustered native serving remains an experimental library path gated on physical timing and placement qualification.
 
 Administrator tokens from current `token --admin` are expiring `ddb_control_` capabilities. Token TTL defaults to one hour and is bounded to 30 days. See the [key rollout procedure](design-signing-rotation.md) before migrating control clients or rotating keys.
 

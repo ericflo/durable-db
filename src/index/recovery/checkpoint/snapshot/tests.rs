@@ -199,7 +199,8 @@ async fn append_admission_prices_the_rightmost_path_and_fails_closed() {
         actual += bytes.len() as u64;
     }
     assert_eq!(
-        charged, actual,
+        charged,
+        actual + 38_280,
         "an append pays for the complete existing path once"
     );
     assert_eq!(
@@ -308,7 +309,14 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
     let mut table_sizes = std::collections::BTreeMap::new();
     while let Some(table) = manifest.next().await.unwrap() {
         for (i, blob) in table.reference.blobs().into_iter().enumerate() {
-            table_sizes.insert(blob.key(), if i == 0 { 5 * blob.size() } else { 0 });
+            table_sizes.insert(
+                blob.key(),
+                if i == 0 {
+                    super::super::copy_contribution(blob.size())
+                } else {
+                    0
+                },
+            );
         }
         if super::super::split_key(&table.last).unwrap().0 != db(7) {
             idle.extend(table.reference.blobs().map(|b| b.key()));

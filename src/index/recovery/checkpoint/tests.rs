@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 struct Files {
     inner: Remote,
     puts: AtomicUsize,
+    uploaded: AtomicUsize,
     range_reads: AtomicUsize,
     ranges: std::sync::Mutex<std::collections::BTreeSet<String>>,
     lose: AtomicUsize,
@@ -21,6 +22,7 @@ impl Files {
             )
             .unwrap(),
             puts: AtomicUsize::new(0),
+            uploaded: AtomicUsize::new(0),
             range_reads: AtomicUsize::new(0),
             ranges: Default::default(),
             lose: AtomicUsize::new(lose),
@@ -40,6 +42,7 @@ impl Storage for Files {
         self.inner.get_range(k, r, s).await
     }
     async fn put(&self, k: &str, b: Bytes) -> anyhow::Result<()> {
+        self.uploaded.fetch_add(b.len(), Ordering::SeqCst);
         self.inner.put(k, b).await?;
         let n = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.pause.load(Ordering::SeqCst) {
@@ -91,17 +94,24 @@ fn receipt(fingerprint: u8) -> Bytes {
     Bytes::from(vec![fingerprint; 32])
 }
 #[tokio::test]
-async fn contribution_covers_encoded_tables_including_tombstones_and_splits() {
+async fn contribution_covers_complete_checkpoints_including_tombstones_and_splits() {
     use crate::transactions::{record::Commit, recovery::Target};
     let name = "d".repeat(64);
     let value = vec![42; 64 * 1024];
-    let keys: Vec<_> = (0..128)
-        .map(|n| format!("{n:03}{}", "k".repeat(1021)))
-        .collect();
-    for (count, large) in [(0, false), (1, false), (128, false), (128, true)] {
+    for (count, large, long) in [
+        (0, false, false),
+        (0, false, true),
+        (1, false, true),
+        (128, false, true),
+        (128, true, true),
+        (4097, false, false),
+    ] {
+        let keys: Vec<_> = (0..count)
+            .map(|n| format!("{n:04}{}", "k".repeat(if long { 1020 } else { 0 })))
+            .collect();
         let files = Files::new(0);
         let db = Database {
-            name: &name,
+            name: if long { &name } else { "a" },
             generation: Uuid::from_u128(7),
         };
         let mutations: Vec<_> = keys[..count]
@@ -124,7 +134,7 @@ async fn contribution_covers_encoded_tables_including_tombstones_and_splits() {
         };
         let mut charged = 0;
         for (position, batch) in batches.into_iter().enumerate() {
-            let request = format!("{position:03}{}", "r".repeat(125));
+            let request = format!("{position:03}{}", "r".repeat(if long { 125 } else { 0 }));
             let revision = position as u64 + 1;
             let encoded =
                 Commit::encode(db, revision, revision - 1, 0, &request, [1; 32], batch).unwrap();
@@ -146,9 +156,11 @@ async fn contribution_covers_encoded_tables_including_tombstones_and_splits() {
             Arc::new(Cache::new(0, None).unwrap()),
             reference,
         );
-        let table_bytes = encoded_table_bytes(&snapshot).await;
-        assert!(table_bytes <= charged as u64);
-        if large {
+        assert!(
+            files.uploaded.load(Ordering::SeqCst) <= charged,
+            "complete image exceeds admission"
+        );
+        if large || count > CHUNK_ROWS {
             assert!(reference.tables > 1, "fixture exercises table splits");
         }
         snapshot.verify(Limits::default()).await.unwrap();
@@ -225,7 +237,7 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             .await
             .unwrap()
             .unwrap();
-        let table_bytes = 5 * routed.reference.blobs()[0].size();
+        let table_bytes = copy_contribution(routed.reference.blobs()[0].size());
         projection.rebase(snapshot);
         let mutations = [
             Mutation {
@@ -265,7 +277,8 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
                 .checkpoint_rewrite_bytes(Database { name: "zzz", ..db }, &[])
                 .await
                 .unwrap(),
-            reference.tree.unwrap().1.size(),
+            reference.tree.unwrap().1.size()
+                + tree::growth_bytes(crate::index::MAX_KEY_BYTES) as u64,
             "append copies no existing rows but rewrites the rightmost manifest path"
         );
         let bytes = Commit::encode(
@@ -511,12 +524,20 @@ async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
     .unwrap()
     .encode();
     // Inserts/deletions cover 63/65 and 4095/4097 without building redundant bases.
-    for count in [0, 1, 64, 65, 4096, 8193] {
+    for (count, suffix) in [
+        (0, 0),
+        (1, 0),
+        (64, 0),
+        (65, 0),
+        (4096, 0),
+        (8193, 0),
+        (65, 2036),
+    ] {
         let mut builder = tree::Builder::new(files.clone());
         let mut expected = Vec::new();
         for n in 0..count {
             let reference = descriptor(&template, n + 1);
-            let key = Bytes::from(format!("key-{:08}", 2 * n + 1));
+            let key = Bytes::from(format!("key-{:08}{}", 2 * n + 1, "x".repeat(suffix)));
             expected.push((reference.encode(), key.clone()));
             builder.push(reference, key).await.unwrap();
         }
@@ -538,11 +559,18 @@ async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
         ] {
             let reads = files.range_reads.load(Ordering::SeqCst);
             let puts = files.puts.load(Ordering::SeqCst);
+            let uploaded = files.uploaded.load(Ordering::SeqCst);
+            let mut priced = Default::default();
+            let mut allowance = if edit == "same" {
+                0
+            } else {
+                tree::growth_bytes(crate::index::MAX_KEY_BYTES) as u64
+            };
             let mut reader = tree::Reader::new(files.clone(), root).unwrap();
             let mut builder = tree::Builder::new(files.clone());
             let mut rewritten = expected.clone();
             let replacement = descriptor(&template, count + 1);
-            let key = Bytes::from(format!("key-{:08}", 2 * position));
+            let key = Bytes::from(format!("key-{:08}{}", 2 * position, "x".repeat(suffix)));
             match edit {
                 "replace" if count > 0 => rewritten[position as usize].0 = replacement.encode(),
                 "insert" => {
@@ -558,6 +586,9 @@ async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
             }
             let mut n = 0;
             while let Some(mut routed) = reader.next().await.unwrap() {
+                if edit != "same" && (n == position || edit == "remove-leaf" && n < 64) {
+                    allowance += reader.path_bytes(&mut priced);
+                }
                 builder.align_to(&reader).await.unwrap();
                 if edit == "insert" && n == position {
                     builder
@@ -583,6 +614,10 @@ async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
                 "alignment adds no provider reads"
             );
             let uploads = files.puts.load(Ordering::SeqCst) - puts;
+            assert!(
+                (files.uploaded.load(Ordering::SeqCst) - uploaded) as u64 <= allowance,
+                "{count} tables, {edit}: manifest encoding exceeds admission"
+            );
             let path = root.map_or(0, |(height, _)| height as usize + 1);
             let bound = match edit {
                 "same" => 0,
@@ -1263,6 +1298,7 @@ async fn reblocking_retained_rows_can_exceed_the_original_data_and_index_sizes()
         reference,
     );
     let old_bytes = encoded_table_bytes(&snapshot).await;
+    let uploaded = files.uploaded.load(Ordering::SeqCst);
     projection.rebase(snapshot);
     // The base blocks end on short keys. A small insertion shifts their
     // boundaries onto the unchanged 1 KiB keys, growing every block's index.
@@ -1287,6 +1323,11 @@ async fn reblocking_retained_rows_can_exceed_the_original_data_and_index_sizes()
     let reference = build_projection(&projection, files.clone(), cut())
         .await
         .unwrap();
+    let image_bytes = files.uploaded.load(Ordering::SeqCst) - uploaded;
+    assert!(
+        image_bytes as u64 <= direct + copies,
+        "complete rebuilt image exceeds admission"
+    );
     let snapshot = Snapshot::new(files, Arc::new(Cache::new(0, None).unwrap()), reference);
     let actual = encoded_table_bytes(&snapshot).await;
     assert!(
@@ -1299,6 +1340,9 @@ async fn reblocking_retained_rows_can_exceed_the_original_data_and_index_sizes()
         "reblocked tables exceed admission: {actual} > {}",
         direct + copies
     );
-    assert_eq!((actual, direct + copies), (533_678, 2_622_710));
+    assert_eq!(
+        (actual, image_bytes, direct + copies),
+        (533_678, 533_873, 2_819_918)
+    );
     snapshot.verify(Limits::default()).await.unwrap();
 }

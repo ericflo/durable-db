@@ -24,9 +24,9 @@ const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const CHUNK_ROWS: usize = 4096;
 
 /// Direct contribution of a validated transaction: metadata, its new receipt,
-/// and mutations (including tombstones), each priced as a singleton data/index
-/// pair. Base-table/path copying is charged separately; new manifest encoding
-/// and maintenance retries remain outside this allowance.
+/// and mutations (including tombstones), with table/manifest encoding and split
+/// allowance. Base-table/path copying is charged separately; maintenance retries
+/// remain outside this allowance.
 /// It is not a reservation authorizing any future physical upload.
 pub(crate) fn contribution_bytes(
     database: Database<'_>,
@@ -34,12 +34,35 @@ pub(crate) fn contribution_bytes(
     mutations: &[Mutation<'_>],
 ) -> usize {
     let prefix = database.name.len() + 18; // NUL, generation, row kind
-    table::row_upload_bound(prefix, 32)
-        + table::row_upload_bound(prefix + request_id.len(), 32)
+    row_contribution(prefix, 32)
+        + row_contribution(prefix + request_id.len(), 32)
         + mutations
             .iter()
-            .map(|m| table::row_upload_bound(prefix + m.key.len(), m.value.map_or(0, <[u8]>::len)))
+            .map(|m| row_contribution(prefix + m.key.len(), m.value.map_or(0, <[u8]>::len)))
             .sum::<usize>()
+}
+
+fn row_contribution(key: usize, value: usize) -> usize {
+    table::row_upload_bound(key, value)
+        + tree::growth_bytes(key)
+        + split_bytes(table::encoded_row_len(key, value) as u64, 1) as usize
+}
+
+/// A size-triggered flush closes more than CHUNK_BYTES - max_row bytes;
+/// a row-triggered flush closes CHUNK_ROWS rows. Summed fractional allowances
+/// cover these flushes without charging a full manifest path per retained row.
+fn split_bytes(bytes: u64, rows: u64) -> u64 {
+    let path = tree::growth_bytes(crate::index::MAX_KEY_BYTES) as u64;
+    let capacity = CHUNK_BYTES - table::encoded_row_len(crate::index::MAX_KEY_BYTES, 64 * 1024);
+    (bytes * path).div_ceil(capacity as u64) + (rows * path).div_ceil(CHUNK_ROWS as u64)
+}
+
+fn copy_contribution(data_bytes: u64) -> u64 {
+    // Each checkpoint row occupies at least 33 encoded bytes. An affected
+    // table can end one boundary-flushed run, even when all its rows disappear.
+    5 * data_bytes
+        + tree::growth_bytes(crate::index::MAX_KEY_BYTES) as u64
+        + split_bytes(data_bytes, data_bytes / 33)
 }
 
 impl Projection {
