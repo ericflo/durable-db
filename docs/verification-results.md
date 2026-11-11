@@ -1,12 +1,20 @@
 # Verification results
 
-## Retained-row reblocking admission (2026-11-10)
+## v0.13.0 retained-row reblocking admission (2026-11-10)
+
+[v0.13.0](https://github.com/ericflo/durable-db/releases/tag/v0.13.0) packages `c9ed530`, verified by [Woodpecker #150](https://ci.eflorenzano.com/repos/18/pipeline/150/1). The exact downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that same executable. The optimized musl 10,005-database check passes in 198.68 seconds, and both client contracts pass all 99 enabled tests.
 
 Native tenant admission now covers data/index encoding when maintenance repacks unchanged rows. The previous recorded-data-plus-index price underfunded an eight-block fixture by 7,657 bytes after a small insertion moved 1 KiB keys onto block boundaries. The replacement reserves five times each touched base table’s authenticated data size, with no extra reads, allocations or data/index format changes. It is intentionally conservative: the 533,678-byte rebuilt image receives 2,622,515 bytes of allowance including its new rows. Tightening this bound remains useful work; it is not provider billing.
 
 All 295 local Rust tests, formatting and strict clippy pass. The reblocking regression takes 0.14 seconds; cold pricing retains four manifest reads and no table reads; TCP checks refuse one byte short before allocation or PUT. Restoring old pricing fails both the encoded-image and HTTP checks. The unchanged 5,776-state admission model and all three negative controls pass. The old copy-size loop is removed. Budgeted native format `owned-candidate-18` excludes older policies and requires a fresh namespace; local/unbudgeted format remains `owned-candidate-15`. Manifest/retry accounting, retained-image export/restore, scheduling and physical timing remain open. [Milestone evidence](evidence/retained-row-reblocking-2026-11-10.json).
 
 The first release pipeline exposed two long native Pi cases exhausting the default 64 MiB allowance. Native contract checks now explicitly fund 512 MiB per database through the existing administrator endpoint; defaults and refusal tests remain unchanged. Both client suites pass all 99 enabled tests locally (native 28.19 seconds, local CLI 9.21 seconds). Their repeated database setup and retry loops were consolidated into one fixture.
+
+Real B2 and versioned MinIO pass on their first runs (200.53 and 181.99 seconds). Both refuse insufficient funding without PUTs, preserve values, receipts and balances across two cold reopens, and exercise retention/release and automatic cleanup. Warm reads require no authority updates or object GETs. Both buckets, all 46 remaining physical versions, the scoped B2 key and the MinIO container were removed. These are logical-clock fixtures with stopped predecessors, not physical timing, AWS or performance-SLO qualification.
+
+The exact v0.12.0 binary writes 260 transactions; v0.13.0 reopens its checkpoint and suffix with values and receipts intact, then adds a write that v0.12.0 successfully reopens. Forced stops separate each transition. This checks sequential local compatibility, not mixed-version clustered serving. Release verification leaves no test server, tokens or database directory.
+
+Client contracts now branch from completed debug Rust checks and run alongside optimized compilation and capacity checks. Artifact assembly still requires both branches. This removes an unnecessary serial dependency; no end-to-end speedup is claimed from differently cached runs. Superseded copy-size pricing, duplicate client-fixture setup, stale retention claims and temporary qualification files were removed.
 
 ## v0.12.0 checkpoint retention (2026-11-10)
 

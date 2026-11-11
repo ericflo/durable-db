@@ -419,7 +419,7 @@ COPY --from=model-tenantadmission /checks/ /checks/
 COPY --from=model-requestbudget /checks/ /checks/
 COPY --from=model-localexclusive /checks/ /checks/
 
-FROM tools AS build
+FROM tools AS rust-check
 COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./
 COPY .cargo .cargo
 COPY src src
@@ -432,17 +432,26 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT; \
     cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings \
     && cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect \
-    && cargo test --locked --release --target x86_64-unknown-linux-musl --test publication ten_thousand_databases_split_page_recover_and_collect \
-    && cargo build --locked --release --target x86_64-unknown-linux-musl \
-    && mkdir -p /out /test-tools && cp /cache/target/debug/durable-db /test-tools/durable-db \
+    && mkdir -p /test-tools && cp /cache/target/debug/durable-db /test-tools/durable-db \
     && cargo test --locked --lib --no-run --message-format=json > /tmp/native-tests.json \
     && node -e 'const fs = require("node:fs"); const artifacts = fs.readFileSync("/tmp/native-tests.json", "utf8").trim().split("\n").map(JSON.parse); const test = artifacts.find(a => a.executable && a.target.name === "durable_db" && a.profile.test); if (!test) throw Error("missing native test executable"); fs.copyFileSync(test.executable, "/test-tools/native-tests");' \
-    && strip --strip-debug /test-tools/native-tests \
+    && strip --strip-debug /test-tools/native-tests && kache stats
+
+# Client failures must not wait for optimized compilation and the capacity sweep.
+# Both branches consume the same checked Rust source and join in assembled.
+FROM rust-check AS build
+RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
+    --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
+    trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT; \
+    cargo test --locked --release --target x86_64-unknown-linux-musl --test publication ten_thousand_databases_split_page_recover_and_collect \
+    && cargo build --locked --release --target x86_64-unknown-linux-musl \
+    && mkdir -p /out \
     && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \
     && /out/durable-db --version && kache stats
 # Application-only edits must not invalidate the Rust checks/build layer.
 # This stage still tests against the executable built from this exact source.
-FROM build AS client-check
+FROM rust-check AS client-check
 COPY examples examples
 COPY clients clients
 COPY scripts/test-client.sh scripts/test-client.sh
