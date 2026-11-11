@@ -566,10 +566,11 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     }
     task.abort();
     let _ = task.await;
+    let data_admission = first_admission - creation_admission;
     let mut evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":recovered_balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
-        "catalog_admission_bytes":creation_admission,"admission_bytes_per_write":[first_admission-creation_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
+        "admission_bytes_per_write":[data_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
@@ -583,6 +584,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; logical clock; old server stopped before takeover. Not physical timing, AWS or performance-SLO qualification."});
+    evidence["catalog_admission_bytes"] = json!(creation_admission);
     evidence["maintenance_funding"] = json!({"cold_recovery_claimed_preserved_reserve":true,
         "no_new_admission_allocation_for_recovery":true,"before_recovery":balance["maintenance"],
         "after_recovery":recovered_balance["maintenance"],"second_cold_reopen_preserved_counters":true});
