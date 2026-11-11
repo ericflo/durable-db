@@ -1,5 +1,15 @@
 # Verification results
 
+## v0.22.0 membership-driven native placement (2026-11-11)
+
+The native library now installs an immutable database-to-partition mapping and automatically acquires, recovers and places partitions from membership snapshots. Requests retain the selected local or remote backend through authorization and dispatch. A bounded rotating sweep prevents one failed partition from starving later acquisitions; routine probes preserve readiness.
+
+Independent node transports and caches pass a **1 → 2 → 1 → 0 → 1** compute sequence over real B2 (115.46 seconds) and versioned MinIO (1.67 seconds). Values and exact retry receipts survive complete compute replacement; the still-live predecessor is refused, the unmoved owner keeps its identity, incompatible layouts fail and upload ceilings survive recovery. An earlier B2 attempt failed on HTTP 500 during the final budget-status read; that failure is retained beside the successful rerun. All three campaigns removed their buckets, scoped keys, containers and 447 remaining physical versions. This is supplied-membership HTTP qualification, not Kubernetes discovery, AWS, CLI cutover or an operating envelope. [Evidence](evidence/cluster-placement-2026-11-11.json).
+
+All 310 enabled Rust checks, formatting and strict clippy pass. Six focused controller/TCP checks take 0.29 seconds. The 42-state layout and 47-state routing models pass with five negative controls; five deliberately broken Rust variants are detected. Existing registration, permit and publication/rebase checks also pass. These remain bounded component arguments, not a composed proof of the implementation.
+
+The manual-placement cloud fixture and duplicate live-limit validation were replaced; shared TCP helpers avoid a second server harness. No dependency, collector or storage algorithm was added. Kubernetes membership discovery, aggregate process budgets and the cloud CLI cutover are the next integration step.
+
 ## v0.21.0 native owner forwarding (2026-11-11)
 
 [v0.21.0](https://github.com/ericflo/durable-db/releases/tag/v0.21.0) packages `af57066`, verified by [Woodpecker #196](https://ci.eflorenzano.com/repos/18/pipeline/196/1). The independently downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that identical binary. The release tag pipeline also passes. Both 99-test JavaScript/Pi contracts and the optimized 10,005-database regression (238.68 seconds) pass.
