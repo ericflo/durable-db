@@ -1,32 +1,17 @@
 # durable-db
 
-**Transactional storage. Replaceable compute. One binary.**
+**Transactional key-value storage that lives in your bucket.**
 
-durable-db is an ordered key-value database written in Rust. Keep authoritative data in object storage, run interchangeable API servers, and use bounded memory and optional local disk to make immutable reads cheaper. On a laptop, a local directory replaces the object store.
+durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
-**Status: experimental, v0.18.0.** The protocol is modeled in TLA+ and checked with TLC, with an [unbounded proof of abstract page-reachability safety](docs/proof-publication.md). The Rust implementation has adversarial and integration tests. Full protocol composition and implementation refinement remain open. Read [verification](docs/verification.md) before putting important data here.
+> [!WARNING]
+> **Experimental, v0.18.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
-| What you get | How it works |
-| --- | --- |
-| Atomic transactions | Revision checks and exact retries; native local journal and index, shared cloud publication |
-| Ordered scans | UTF-8 byte ordering, prefix/range filters, forward/reverse cursors |
-| Disposable cloud servers | B2/S3 remains authoritative; caches never decide ownership |
-| Local development | One executable, one directory, no additional service |
-| Tenant boundaries | Database-scoped signed tokens, exact logical quotas, bounded requests and concurrency |
-| Automatic maintenance | Checkpoints and fenced collection; cloud page compaction |
-| A checkable design | TLA+ specification, intentional broken-model counterexample, failure-injection tests |
+[Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
-Local `serve --data` now uses the native Rust journal and index, including protected creation, access policies, ordered reads, exact retries, automatic checkpoints and collection. Its lifetime directory lock excludes other processes even while paused; it needs no physical ownership clock. Warm reads avoid storage calls and conditional publication. [Local-format compatibility and migration](docs/recovery.md#local-format-upgrades).
+## Quick start
 
-The cloud CLI still uses shared read/publication barriers. That path does not meet the performance brief. The [owned-partition design](docs/design-owned-partitions.md) replaces it with locally served reads and independent durable log batches, using the same native components now shipped locally. The native Rust operator API can retain one namespace checkpoint through collection, export a database from that exact cut while live writes continue, and release it explicitly. Its archive uses the existing verified HTTP restore. [Backup and recovery](docs/recovery.md). Physical ownership timing, placement, scheduled backups and full maintenance accounting remain production gates.
-
-The replacement index now recovers an immutable checkpoint plus a bounded recent journal layer. Values stay in shared sorted tables, reads fetch the relevant blocks, and bounded memory/disk caches are disposable. Checkpoints bind values and retry receipts to an exact journal cut, reusing unchanged tables without reading their indexes. Manifest rewrites preserve base group boundaries and split overflow evenly, retaining untouched siblings after insertions and deletions. Their descriptors live directly in the authority record, eliminating header uploads and orphan header objects. Automatic maintenance also reclaims obsolete table data, indexes and manifest nodes; checkpoint staging cannot adopt a later collection generation. Failed checkpoint construction backs off, preventing incoming traffic from accelerating costly retries. Native HTTP tests on real B2 and versioned MinIO preserve tenant budgets, values and retry receipts across cold recovery; 100 warmed point reads and scans make zero provider calls. These [component results](docs/verification-results.md#native-http-budgets-and-recovery-2026-11-10) use an injected clock and do not qualify production timing or sustained performance.
-
-Budgeted native cloud serving charges each database for journal and checkpoint work before assigning shared order. Byte grants separately prepay a durable maintenance reserve; retries and recovered checkpoints claim fresh allowance before uploading. Lost replies, cancellation and owner replacement cannot restore spent rights. Pricing includes shared-table reblocking and manifest growth and can substantially overestimate actual work. [Accounting scope](docs/design-upload-admission.md#native-serving) still excludes tenant attribution of administrative work and other provider costs. Repeated failures can exhaust the reserve and stop shared maintenance until an explicit refill. Budgeted native format `owned-candidate-21` requires a fresh namespace; older budgeted policies are refused. Unbudgeted storage remains `owned-candidate-15`, so v0.9.0 local directories reopen directly. Local mode enforces logical quotas and request bounds; physical upload budgets apply to cloud namespaces.
-
-## Start locally
-
-[v0.18.0](https://github.com/ericflo/durable-db/releases/tag/v0.18.0) includes a statically linked **Linux x86_64** executable. No Rust toolchain or additional database service is needed. While the repository is private, authenticate `gh` with an account that has repository access.
+No bucket, container or extra service is needed. Releases ship a static **Linux x86_64** binary; other platforms can [build from source](#build-from-source). While the repository is private, authenticate the `gh` CLI with an account that has access.
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -34,9 +19,9 @@ export PATH="$HOME/.local/bin:$PATH"
 durable-db serve --data ./data
 ```
 
-The installer verifies the release checksum and installs one file into `~/.local/bin`. Set `DURABLE_DB_INSTALL_DIR` to choose another directory. For other platforms, [build from source](#build-from-source).
+The installer verifies the release checksum and installs one file in `~/.local/bin`; set `DURABLE_DB_INSTALL_DIR` to choose another directory. The server listens on `127.0.0.1:7654`. The first start creates `data/admin.key`, readable only by you, which signs administrator tokens. Keep it private.
 
-The default address is `127.0.0.1:7654`. First startup generates `data/admin.key` with owner-only file permissions. Keep that signing key private. Generate an administrator token in another terminal:
+In another terminal, create a database, commit and read:
 
 ```sh
 export DDB_TOKEN=$(durable-db token --key-file ./data/admin.key --admin)
@@ -53,63 +38,125 @@ curl http://127.0.0.1:7654/v1/databases/demo/read \
   -d '{"keys":["hello"]}'
 ```
 
-Values are base64-encoded arbitrary bytes: `d29ybGQ=` is `world`. Keys are UTF-8 strings. A read returns a revision; supply it when committing changes. A `409` requires a fresh read and recomputation. Retry an uncertain write with the **identical** request ID, revision, and body.
+Keys are UTF-8 strings; values are base64-encoded bytes, so `d29ybGQ=` is `world`. A read returns a revision; send it with your next commit. A `409` means another commit won: read again and recompute. If a commit's response is lost, resend the **identical** request ID, revision and body.
 
-This release includes [idempotent protected creation and durable token revocation](docs/api.md#create-a-protected-database), [expiring administrator capabilities and overlapping signing keys](docs/design-signing-rotation.md), and [consistent export and resumable restore](docs/recovery.md). New provisioning uses PUT with a persistent creation request ID, then mints revocable database credentials. Upgrade all serving processes before enabling protected databases or new keyring policies.
-
-Fresh cloud namespaces can also enable [cumulative immutable-upload admission](docs/design-upload-admission.md). Its byte and attempt ceilings survive restarts and scaling, and administrators can raise them without resetting spent credit. This shared ceiling is one part of resource protection; format 5 also reclaims unreachable pages without upload credit. Per-tenant spend isolation and sustained-load qualification remain production gates.
+Production provisioning mints revocable, database-scoped tokens after creation. See the [HTTP API](docs/api.md) for snapshots, scans, token revocation, errors and limits.
 
 ## Application code
 
-The TypeScript SDK keeps JSON encoding, revisions and transaction retries inside the client:
+The TypeScript SDK keeps JSON encoding, revisions and retries inside the client:
 
 ```ts
 import { Database } from '@durable-db/client';
 
 const db = new Database({ url, database: 'my-app', token });
-await db.set('settings', { theme: 'dark' });
 
+// One atomic read-modify-write. A conflict reruns the
+// callback; a lost response retries the identical commit.
 await db.transaction(async (tx) => {
-  const count = (await tx.get<number>('views')) ?? 0;
-  tx.set('views', count + 1);
+  const task = await tx.get<Task>(`tasks/${id}`);
+  if (!task || task.done) return;
+  const done = (await tx.get<number>('stats/done')) ?? 0;
+  tx.set(`tasks/${id}`, { ...task, done: true });
+  tx.set('stats/done', done + 1);
 });
+
+// Ordered scans, a page at a time.
+const { items, cursor } = await db.list<Task>({ prefix: 'tasks/', limit: 20 });
 ```
 
-The package is linked locally while this repository is private. The [task-board example](examples/web-app/README.md) provides setup, a short storage module, Hono routes and tests. See the [client guide](clients/javascript/README.md) for pagination, bounds and unresolved outcomes. Use the matching v0.18.0 client checkout.
+The package is linked from this repository while it is private; use the client from the same release as your server. The [client guide](clients/javascript/README.md) covers pagination, bounds and unresolved outcomes. The [task-board example](examples/web-app/README.md) adds setup, a short storage module, Hono routes and tests. Keep tokens on the application server, never in a browser bundle.
 
-## Scale without moving the database
+## How it works
 
 ```text
-                  ┌── API pod · bounded cache ──┐
-clients ─ service ├── API pod · bounded cache ──┼── immutable pages + shared directory
-                  └── API pod · bounded cache ──┘          object storage
+your app ──HTTPS──▶ API server (bounded cache) ──┐
+                    API server (bounded cache) ──┼──▶ S3 or B2 bucket: the source of truth
+                    0 to N servers, replaceable ─┘    - immutable, uniquely named data objects
+                                                      - an authority record changed only by
+                                                        conditional writes
 ```
 
-Pods need the same bucket and prefix, and compatible signing keys for the current rotation phase. They need no peer discovery, quorum membership changes, attached data volume, or distributed lease. Removing every pod stops availability but leaves the database in object storage. Starting one pod restores service.
+- **Immutable data, conditional authority.** Commits never overwrite data: new bytes go into fresh, uniquely named objects. Authority changes only through conditional writes (`If-Match` on S3, `ifRevisionIs` on B2). When two commits race from the same revision, one wins and the other gets `409`.
+- **Caches can be lost.** Servers keep bounded memory and disk caches and rebuild everything else from object storage. Cached bytes are verified by SHA-256. Losing a cache costs time, never data.
+- **Uncertain writes have an answer.** A stored receipt returns the original result to an identical retry, and the old revision check stops a second application.
+- **No clocks or leases in cleanup.** Garbage collection lists candidates, fences the state with a conditional write, and only then deletes. Pod-local locks, clocks, caches and Kubernetes leases never decide what is safe to delete.
+
+On a laptop, the same API runs over a local directory held by an exclusive OS lock, with automatic checkpoints, cleanup and crash recovery. The [architecture](docs/architecture.md) describes the full protocol.
+
+## Run on S3 or B2
+
+Every server gets the same bucket, prefix and administrator signing key. Servers need no peer discovery, quorum, attached volume or distributed lease. Removing every server stops availability but leaves the database in the bucket; starting one restores service.
 
 ```sh
+# S3: credentials come from workload identity or the provider's environment.
 export AWS_REGION=us-east-1
-# Configure AWS credentials through workload identity or the provider's environment.
 durable-db serve --listen 0.0.0.0:7654 --bucket my-private-bucket \
   --admin-key-file /run/secrets/admin.key --memory-cache-mib 64
+
+# B2: a dedicated bucket and a scoped application key.
+export B2_APPLICATION_KEY_ID=... B2_APPLICATION_KEY=...
+durable-db serve --listen 0.0.0.0:7654 --b2-bucket my-private-bucket \
+  --admin-key-file /run/secrets/admin.key
 ```
 
-S3-compatible providers must supply atomic `If-Match`/`If-None-Match` writes, durable immutable uploads, and ordered listings. Reads validate authority observations through a conditional barrier. Startup probes stale-write rejection; that probe does not establish the entire provider contract. **B2 and S3 use one publication implementation.** For B2, run with `--b2-bucket NAME` and `B2_APPLICATION_KEY_ID` / `B2_APPLICATION_KEY`. It publishes immutable manifests through revision-checked bucket metadata (`ifRevisionIs`) and physically deletes obsolete file versions. An immutable B+tree directory stores database entries outside bucket metadata; database count is no longer limited by metadata capacity. Initial real-B2 and versioned/unversioned S3-compatible tests pass; broader cloud qualification continues; see [B2 design and limits](docs/b2.md).
+S3-compatible providers must supply atomic `If-Match`/`If-None-Match` writes, durable immutable uploads and ordered listings. A startup probe refuses providers that accept stale conditional writes, but it cannot establish the whole provider contract. B2 and S3 share one publication implementation. Upgrade every server before enabling protected databases or a new signing keyring.
 
-Pods add request concurrency, but directory publication serializes within a bucket. The first B2 contention benchmark exhausted write retries with four active writers; publication progress and performance remain a [production blocker](docs/verification-results.md#b2-contention-baseline-release-gate-failed). Object-store round trips set the write-latency floor. The common directory uses 64-entry index pages and one bounded root pointer; lookup and publication copy a logarithmic path. The initial format also caps a database at 256 MiB and 2,048 pages. [Limits and semantics](docs/api.md).
+> [!IMPORTANT]
+> Cluster mode is not fast yet. Its shared publication path serializes writes within a bucket, and the first [B2 contention benchmark](docs/verification-results.md#b2-contention-baseline-release-gate-failed) failed its progress gate. The [owned-partition design](docs/design-owned-partitions.md) replaces it with the native engine already serving local mode.
 
-## Read more
+[Deployment](docs/deployment.md) covers Kubernetes manifests in `deploy/kubernetes/`, request budgets and key rotation. [B2](docs/b2.md) and [upload admission](docs/design-upload-admission.md) cover provider details and durable spending limits.
 
-- [Architecture and storage protocol](docs/architecture.md)
-- [HTTP API and consistency](docs/api.md)
-- [Kubernetes, operations, and recovery](docs/deployment.md)
-- [Security and resource isolation](docs/security.md)
-- [Formal model and verification evidence](docs/verification.md)
-- [Client and pi-durable integration](docs/clients.md)
-- [TypeScript web application example](examples/web-app/README.md)
-- [Development and Woodpecker CI](docs/development.md)
-- [Public documentation website](https://ericflo.github.io/durable-db-site/)
-- [Production readiness and release gates](docs/production-readiness.md)
+## Contract and limits
+
+This is the contract the first production release must qualify:
+
+- **Serializable transactions within a database.** Every commit names the revision it read; if anything committed since, it gets `409` and the client recomputes.
+- **Durable acknowledgements.** An acknowledged write must survive the loss of every API server and every cache.
+- **Ordered reads.** Keys sort by UTF-8 bytes. Scans take a prefix, a range, a cursor and a direction, and every key and scan in one request reads one snapshot.
+- **Exact retries.** Receipts for the last 128 commits return the original result to an identical retry.
+- **Limits that refuse instead of truncating.** Quotas, request sizes, caches and per-principal request budgets reject work before anything is published.
+- **Out of scope:** transactions that span databases, and long-running historical snapshots. Use one database per tenant or application.
+
+| Resource | Initial limit |
+| --- | --- |
+| Database | Up to 256 MiB and 1,000,000 keys |
+| Key | 1–1,024 UTF-8 bytes |
+| Value | 64 KiB |
+| Request | 1 MiB and 128 operations |
+| Scan page | Up to 1,000 entries |
+| Read result | 1 MiB |
+| Request deadline | 30 seconds |
+
+[All limits and error codes](docs/api.md#errors-and-bounds).
+
+## Status
+
+| State | Today |
+| --- | --- |
+| **Ready to try** | Local mode on the native engine: one process, one directory, automatic checkpoints, cleanup and crash recovery. The HTTP API with scoped, revocable tokens and per-database quotas. The TypeScript SDK. Consistent export and resumable restore. |
+| **Experimental** | Cluster mode on S3 and B2. It passes fault-injection, real-provider and Kubernetes scaling tests but does not meet its performance targets. Native owned partitions are replacing it. Durable per-database upload budgets for fresh cloud namespaces. |
+| **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
+
+Each [release gate](docs/production-readiness.md) closes only with reproducible evidence. Release-by-release changes and their evidence are in [verification results](docs/verification-results.md); format compatibility and upgrades are in [backup and restore](docs/recovery.md#local-format-upgrades).
+
+## Verification
+
+Protocol changes start as TLA+ models, which ship with deliberately broken variants that must produce counterexamples. An [unbounded TLAPS proof](docs/proof-publication.md) covers abstract page reachability. The Rust implementation faces adversarial and failure-injection tests against real B2, MinIO and Kubernetes, including SIGKILL, OOM, provider partitions and removal of every server.
+
+Bounded model checking is not a proof of the Rust implementation or of every deployment. Full protocol composition and implementation refinement remain open; the [verification record](docs/verification.md) lists every assumption, checked bound and remaining obligation.
+
+## Documentation
+
+| Section | Documents |
+| --- | --- |
+| **Start** | [Deployment](docs/deployment.md) · [HTTP API](docs/api.md) · [Clients](docs/clients.md) · [Web app example](docs/web-app.md) |
+| **Understand** | [Architecture](docs/architecture.md) · [B2 protocol](docs/b2.md) · [Security](docs/security.md) |
+| **Operate** | [Backup and restore](docs/recovery.md) · [Observability](docs/observability.md) · [Development](docs/development.md) |
+| **Verify** | [Production readiness](docs/production-readiness.md) · [Verification](docs/verification.md) · [Verification results](docs/verification-results.md) · [Publication proof](docs/proof-publication.md) |
+| **Design notes** | [Owned partitions](docs/design-owned-partitions.md) · [Upload admission](docs/design-upload-admission.md) · [Budgetless collection](docs/design-budgetless-collection.md) · [Signing key rotation](docs/design-signing-rotation.md) |
+
+The same documents are published at [ericflo.github.io/durable-db-site](https://ericflo.github.io/durable-db-site/).
 
 ## Build from source
 
@@ -124,6 +171,6 @@ export KACHE_CONFIG="$PWD/.kache.toml"
 cargo build --locked --release
 ```
 
-The executable is `target/release/durable-db`. The [development guide](docs/development.md) covers focused checks, the complete Rust/model/client suite and provider fixtures. Run the large directory capacity regression in release mode, as CI does; a debug sweep makes ordinary iteration unnecessarily slow.
+The executable is `target/release/durable-db`. The [development guide](docs/development.md) covers focused checks, the complete Rust, model and client suite, and provider fixtures. Run the large directory capacity regression in release mode, as CI does.
 
-CI, static binary builds, container builds, and documentation publication use **Woodpecker**. No GitHub Actions workflows are used. Apache-2.0 licensed. Contributions will open when the repository becomes public.
+CI, static binaries, container images and documentation publication use **Woodpecker**; no GitHub Actions workflows are used. Licensed under Apache-2.0. Contributions will open when the repository becomes public.
