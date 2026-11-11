@@ -703,12 +703,34 @@ async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
 #[tokio::test(start_paused = true)]
 async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change() {
     let provider = Provider::new();
-    let directory = directory(&provider).await;
+    let files = Arc::new(PausedPermit {
+        inner: provider.files.clone(),
+        pause: AtomicBool::new(true),
+        entered: Default::default(),
+        release: Default::default(),
+    });
+    let directory = Connection::new(files.clone(), provider.clone(), "test")
+        .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
+        .await
+        .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let node = Node::start(directory, listener, vec![]).await;
-    provider.pause_publication.store(true, Ordering::SeqCst);
     node.members(&[node.address]);
-    provider.entered.notified().await;
+    files.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            for db in names() {
+                let backend = node.cluster.resolve(&db).await.unwrap().unwrap();
+                if backend.owner_incarnation().is_some() && backend.ready().await {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("a paused partition cannot block another acquisition");
+    assert!(!node.cluster.ready().await);
     let calls = provider.calls.load(Ordering::SeqCst);
     tokio::time::advance(Duration::from_secs(40)).await;
     // Repeated identical membership must not abort useful acquisition either.

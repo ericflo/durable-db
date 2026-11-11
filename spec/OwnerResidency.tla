@@ -8,6 +8,7 @@ Owners == {1, 2, 3}
 Capacity == 2
 Init == s = [live |-> {}, reserved |-> {}, retired |-> {}]
 \* Reserve before acquisition/recovery, not just before entering the map.
+\* Acquisitions may overlap: no live owner must finish before another starts.
 Acquire(o) == /\ o \notin s.live
               /\ (Cardinality(s.reserved) < Capacity \/ Fault = "Acquire")
               /\ s' = [s EXCEPT !.live = @ \cup {o}, !.reserved = @ \cup {o}]

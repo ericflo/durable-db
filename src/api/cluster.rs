@@ -15,6 +15,7 @@ use crate::{
 };
 use anyhow::{Context, ensure};
 use async_trait::async_trait;
+use futures::{StreamExt, stream::FuturesUnordered};
 use sha2::{Digest, Sha256};
 use std::{
     net::SocketAddr,
@@ -210,7 +211,7 @@ impl Cluster {
             }
         }
         let mut checked = 0;
-        let mut acquired = false;
+        let mut acquisitions = FuturesUnordered::new();
         for _ in 0..self.partitions.len() {
             let id = *cursor;
             // Advance before I/O, so failure or cancellation cannot starve the
@@ -228,17 +229,32 @@ impl Cluster {
             if !healthy {
                 self.ready.store(false, Ordering::Release);
                 partition.local.write().await.take();
-                let local = self.acquire(id as u32, &partition.connection).await?;
-                *partition.local.write().await = Some(Arc::new(local));
-                // Never spend another owner's recovery deadline on this one.
-                // A successful acquisition schedules the next pass immediately.
-                acquired = true;
-                break;
+                acquisitions.push(async move {
+                    let local = self.acquire(id as u32, &partition.connection).await?;
+                    *partition.local.write().await = Some(Arc::new(local));
+                    Ok::<_, anyhow::Error>(())
+                });
+                if acquisitions.len() == 4 {
+                    break;
+                }
+                continue;
             }
             checked += 1;
             if checked == 8 {
                 break;
             }
+        }
+        let acquired = !acquisitions.is_empty();
+        let mut failure = None;
+        // Finish independent acquisitions even if another fails or stalls.
+        // Reservations bound all recovery/serving state through cancellation.
+        while let Some(result) = acquisitions.next().await {
+            if let Err(error) = result {
+                failure = Some(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
         }
         let mut complete = present;
         for (partition, wanted) in self.partitions.iter().zip(desired) {

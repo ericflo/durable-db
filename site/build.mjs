@@ -195,6 +195,7 @@ for (const file of [
   'owner-routing-2026-11-11.json',
   'cluster-placement-2026-11-11.json',
   'native-cloud-cli-2026-11-11.json',
+  'native-cloud-cli-partial-2026-11-11.history.jsonl',
   'provider-floor-2026-11-09.json',
   'wal-handoff-candidate-2026-11-09.json',
   'physical-memory-hour-2026-11-09.json',
