@@ -12,7 +12,7 @@ All 299 local Rust tests, formatting, strict clippy and both 99-test client cont
 
 B2 and versioned MinIO pass on their first runs (202.97 and 182.02 seconds): admission/refusal, exact retries, two cold reopens, retention/release and automatic collection. Both buckets, the scoped B2 key, the MinIO container and 46 physical versions were removed. These are logical-clock, small-image regression checks; the injected retry faults run locally. They do not qualify physical timing, sustained availability or AWS.
 
-This limits retry amplification within one owner; restart discards pacing state while retaining cumulative upload allocation. Every attempted PUT still consumes namespace credit. Per-tenant retry/recovery attribution, retained-image export/restore, scheduled backups, physical timing and broader production qualification remain open.
+This limits retry amplification within one owner; restart discards pacing state while retaining cumulative upload allocation. Every attempted PUT in a budgeted native namespace still consumes namespace credit. Per-tenant retry/recovery attribution, retained-image export/restore, scheduled backups, physical timing and broader production qualification remain open.
 
 ## v0.16.0 manifest encoding and split admission (2026-11-10)
 
