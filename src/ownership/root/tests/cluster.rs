@@ -775,3 +775,84 @@ async fn shared_maintenance_runs_once_and_moves_with_membership() {
     }
     assert_eq!(provider.maintenance.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn absent_uncertain_journal_reacquires_and_excludes_a_late_old_upload() {
+    use crate::storage::Storage;
+    let provider = Provider::new();
+    let faults = Arc::new(super::http::Faults::default());
+    let files = Arc::new(super::http::Files {
+        inner: provider.files.clone(),
+        faults: faults.clone(),
+    });
+    let directory = Connection::new(files, provider.clone(), "test")
+        .into_partitions(budget(), Arc::new(Cache::new(1024 * 1024, None).unwrap()))
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let node = Node::start(directory, listener, vec![address]).await;
+    settled(&[&node], &[address]).await;
+    let token = auth().administrator_token(600).unwrap();
+    node.server
+        .ok(
+            "PUT",
+            "/v1/databases/app",
+            &token,
+            json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
+    let old = node.cluster.resolve("app").await.unwrap().unwrap();
+    faults.fail_journal.store(true, Ordering::SeqCst);
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        node.server
+            .call("POST", "/v1/databases/app/commit", &token, commit(0)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!old.ready().await);
+    drop(old); // Release its resident reservation, like a completed HTTP request.
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let backend = node.cluster.resolve("app").await.unwrap().unwrap();
+            if backend.owner_incarnation().is_some() && backend.ready().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        node.server
+            .ok("POST", "/v1/databases/app/commit", &token, commit(0))
+            .await["revision"],
+        1
+    );
+    // The first provider PUT arrives only after the successor acknowledged.
+    let (key, bytes) = faults.late_upload.lock().unwrap().take().unwrap();
+    provider.files.put(&key, bytes).await.unwrap();
+    node.members(&[]);
+    settled(&[&node], &[]).await;
+    node.members(&[address]);
+    settled(&[&node], &[address]).await;
+    let retry = node
+        .server
+        .ok("POST", "/v1/databases/app/commit", &token, commit(0))
+        .await;
+    assert_eq!(retry["revision"], 1);
+    assert_eq!(retry["replayed"], true);
+    assert_eq!(
+        node.server
+            .ok(
+                "POST",
+                "/v1/databases/app/read",
+                &token,
+                json!({"keys":["x"]})
+            )
+            .await["values"][0],
+        "b25l"
+    );
+}

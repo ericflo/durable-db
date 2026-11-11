@@ -1432,5 +1432,29 @@
         "negative_controls": 4
       }
     }
+  },
+  "unknown_journal_upload": {
+    "failed_cloud_run": {
+      "source_commit": "cc9e1ebb47497b943551dd413eb2b010cb0ca5b7",
+      "provider": "B2",
+      "seconds": 399.4,
+      "result": "Repeated commit deadline, live owner with no provider I/O outstanding. An unresolved journal could remain absent forever while the worker kept polling.",
+      "cleanup": {
+        "bucket_removed": true,
+        "workload_key_revoked": true,
+        "physical_versions_deleted": 16
+      }
+    },
+    "fix": "Retire on an absent resolving GET; normal cluster reacquisition revokes the old permit and selects its durable journal prefix. No inference of abort and no repeated PUT.",
+    "local": {
+      "rust_passed": 320,
+      "focused_http_seconds": 6.16,
+      "old_indefinite_polling_mutant": "detected within the two-second request deadline",
+      "late_old_upload_and_second_reopen": "passed",
+      "RevocableOwner": {
+        "distinct_states": 856,
+        "controls": 9
+      }
+    }
   }
 }

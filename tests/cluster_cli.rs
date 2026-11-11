@@ -191,31 +191,35 @@ impl Server {
         .expect("native CLI health deadline");
     }
     async fn call(&self, method: &str, path: &str, body: Value) -> Value {
-        // Caller retries retain the identical ID and body, including uncertain writes.
-        for attempt in 0..12 {
-            let response = self
-                .client
-                .request(method.parse().unwrap(), format!("{}{path}", self.url))
-                .bearer_auth(&self.token)
-                .json(&body)
-                .send()
-                .await
-                .unwrap();
-            let status = response.status();
-            let result: Value = response.json().await.unwrap();
-            if status.is_success() {
-                return result;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            // Caller retries retain the identical ID and body, including uncertain writes.
+            for attempt in 0..12 {
+                let response = self
+                    .client
+                    .request(method.parse().unwrap(), format!("{}{path}", self.url))
+                    .bearer_auth(&self.token)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let result: Value = response.json().await.unwrap();
+                if status.is_success() {
+                    return result;
+                }
+                assert!(
+                    matches!(
+                        status,
+                        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+                    ) && attempt < 11,
+                    "{status}: {result}"
+                );
+                tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
             }
-            assert!(
-                matches!(
-                    status,
-                    StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
-                ) && attempt < 11,
-                "{status}: {result}"
-            );
-            tokio::time::sleep(Duration::from_millis(200 * (attempt + 1))).await;
-        }
-        unreachable!()
+            unreachable!()
+        })
+        .await
+        .expect("native CLI request/retry deadline")
     }
 }
 fn commit(id: usize) -> Value {

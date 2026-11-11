@@ -372,8 +372,16 @@ async fn run(
             _ = retry.tick() => {
                 let mut owner = owner.write().await;
                 if let Some(position) = unknown.first().copied() {
-                    if matches!(owner.resolve_upload(position).await, Ok(Resolution::Durable)) {
-                        unknown.remove(&position);
+                    match owner.resolve_upload(position).await {
+                        Ok(Resolution::Durable) => { unknown.remove(&position); }
+                        Ok(Resolution::Unknown) => {
+                            // Absence cannot prove an abort, but waiting cannot
+                            // repair a failed PUT either. Reacquisition revokes
+                            // this owner and selects its durable journal prefix.
+                            tracing::warn!("unresolved journal upload; native owner retired");
+                            return;
+                        }
+                        Err(_) => (),
                     }
                 } else if owner.maintain().await.is_err() {
                     tracing::warn!("native checkpoint deferred; checking authority before retry");

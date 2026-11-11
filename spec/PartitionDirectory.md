@@ -161,3 +161,12 @@ process. The old cloud CLI serving/maintenance branch is removed. Shutdown close
 correctness does not depend on either action.
 
 Acquisition scheduling completes one new owner per pass and immediately continues after success. Existing-owner health checks remain bounded at eight per pass. Provider request timeouts bound individual I/O; there is no fixed deadline for a complete recovery, which can legitimately need many requests. A changed membership snapshot or a closed feed cancels reconciliation; an identical snapshot does not. This avoids repeatedly abandoning a progressing recovery and amplifying its registration history. Cancellation remains safe under the existing acquisition protocol and resident reservations.
+
+An uncertain journal PUT gets an exact resolving GET. A present matching frame
+can complete normally. If that GET reports absence, the serving worker retires
+instead of waiting forever for an object that may never arrive. This is not an
+abort claim or permission to repeat the PUT. The cluster's normal acquisition
+revokes the old permit and selects the old journal's durable prefix before
+recovering. A late old PUT outside that prefix stays excluded, as checked by
+`RevocableOwner`'s late-upload case and journal selection. Clients still retry
+the identical request; only durable selected receipts can return success.

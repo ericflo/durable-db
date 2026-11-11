@@ -17,21 +17,23 @@ use tokio::sync::Notify;
 use tower::ServiceExt;
 
 #[derive(Default)]
-struct Faults {
+pub(super) struct Faults {
     pause: AtomicBool,
     pause_read: AtomicBool,
     pause_read_at: AtomicU64,
     corrupt_read: AtomicBool,
     fail_checkpoint: AtomicBool,
+    pub(super) fail_journal: AtomicBool,
+    pub(super) late_upload: Mutex<Option<(String, Bytes)>>,
     checkpoint_failures: AtomicU64,
     entered: Notify,
     release: Notify,
     puts: AtomicU64,
     range_reads: AtomicU64,
 }
-struct Files {
-    inner: Arc<Remote>,
-    faults: Arc<Faults>,
+pub(super) struct Files {
+    pub(super) inner: Arc<Remote>,
+    pub(super) faults: Arc<Faults>,
 }
 #[async_trait]
 impl Storage for Files {
@@ -64,6 +66,12 @@ impl Storage for Files {
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.faults.puts.fetch_add(1, Ordering::SeqCst);
+        if key.split('/').any(|part| part == "journal")
+            && self.faults.fail_journal.swap(false, Ordering::SeqCst)
+        {
+            *self.faults.late_upload.lock().unwrap() = Some((key.to_owned(), bytes));
+            anyhow::bail!("uncertain journal upload, delayed at the provider");
+        }
         if key.starts_with("tables/") && self.faults.fail_checkpoint.load(Ordering::SeqCst) {
             self.faults
                 .checkpoint_failures
