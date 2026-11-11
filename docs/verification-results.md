@@ -1,12 +1,18 @@
 # Verification results
 
-## Stable checkpoint manifest groups (2026-11-10)
+## v0.14.0 stable checkpoint manifest groups (2026-11-10)
+
+[v0.14.0](https://github.com/ericflo/durable-db/releases/tag/v0.14.0) packages `b6219cc`, verified by [Woodpecker #153](https://ci.eflorenzano.com/repos/18/pipeline/153/1). The exact downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that same executable. The optimized musl 10,005-database check passes in 196.73 seconds, and both client contracts pass all 99 enabled tests.
 
 Checkpoint rewrites now preserve base manifest groups and split overflowing groups evenly. An insertion into a 4,096-table manifest uploads five nodes instead of 68; an 8,193-table fixture retains unrelated siblings after insertion, deletion and whole-leaf removal. A serving-projection rewrite merges three tables into one with four uploads instead of six, the same ten reads, and all 540 values/deletions intact. Unchanged reconstruction makes no uploads, including after a split.
 
 The change adds 32 net runtime Rust lines and no encoding, admission-policy or dependency changes. Existing budgeted format `owned-candidate-18` and local format `owned-candidate-15` remain compatible. Balanced splits keep 128 repeated prefix insertions into 64 tables at height one. Forward/reverse order, root split/collapse, applied-but-lost responses and cancellation pass. Three Rust negative controls reproduce suffix amplification, a misplaced data-buffer flush and excessive height growth.
 
 All 298 local Rust tests, formatting, strict clippy and both 99-test client contracts pass. The unchanged 31,104-state checkpoint-overlay model and eight negative controls pass. The old regrouping path, redundant fixture base builds and outdated verification paragraph were removed. These are deterministic I/O results, not cloud latency/throughput qualification. Full-manifest traversal, sparse-node compaction, tenant manifest/retry accounting, retained-image export/restore, scheduled backups and physical timing remain open. [Milestone evidence](evidence/manifest-boundaries-2026-11-10.json).
+
+The existing native HTTP qualification passes on real B2 and versioned MinIO on the first run (198.47 and 182.03 seconds), including budget refusal, two cold reopens, retention/release and automatic cleanup. Both buckets, all 46 remaining physical versions, the scoped B2 key and the MinIO container were removed. These use small manifests, logical clocks and stopped predecessors; the multi-level amplification regressions run locally. They do not qualify large-manifest cloud performance, physical timing or AWS.
+
+The exact v0.13.0 binary writes 260 transactions; v0.14.0 reopens its checkpoint and suffix, resolves the latest receipt and writes again. After another forced stop, v0.13.0 reopens that new value and receipt. This checks sequential local upgrade/downgrade, not concurrent mixed-version serving or large-image compatibility. Temporary servers, database directories and tokens were removed.
 
 ## v0.13.0 retained-row reblocking admission (2026-11-10)
 
