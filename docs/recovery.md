@@ -16,7 +16,7 @@ Binaries before v0.12.0 reject the added authority field while a slot is occupie
 
 ## Local format upgrades
 
-v0.13.0 retains the local storage format used by v0.9.0 through v0.12.0. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions.
+v0.14.0 retains the local storage format used by v0.9.0 through v0.13.0. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions. v0.14.0 also keeps v0.13.0’s budgeted native format `owned-candidate-18`; manifest grouping changes no encoding or admission policy.
 
 v0.9.0 switched local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
 

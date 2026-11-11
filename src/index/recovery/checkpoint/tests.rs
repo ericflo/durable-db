@@ -509,77 +509,272 @@ async fn manifest_reuse_preserves_order_and_only_uploads_changed_paths() {
     .await
     .unwrap()
     .encode();
-    for count in [0, 1, 63, 64, 65, 4095, 4096, 4097, 8193] {
+    // Inserts/deletions cover 63/65 and 4095/4097 without building redundant bases.
+    for count in [0, 1, 64, 65, 4096, 8193] {
         let mut builder = tree::Builder::new(files.clone());
         let mut expected = Vec::new();
         for n in 0..count {
             let reference = descriptor(&template, n + 1);
-            expected.push(reference.encode());
-            builder
-                .push(reference, Bytes::from(format!("key-{n:08}")))
-                .await
-                .unwrap();
+            let key = Bytes::from(format!("key-{:08}", 2 * n + 1));
+            expected.push((reference.encode(), key.clone()));
+            builder.push(reference, key).await.unwrap();
         }
         let root = builder.finish().await.unwrap();
         let reads = files.range_reads.load(Ordering::SeqCst);
         let mut reader = tree::Reader::new(files.clone(), root).unwrap();
-        for expected in &expected {
-            assert_eq!(
-                reader.next().await.unwrap().unwrap().reference.encode(),
-                *expected
-            );
-        }
-        assert!(reader.next().await.unwrap().is_none());
+        while reader.next().await.unwrap().is_some() {}
         let traversal_reads = files.range_reads.load(Ordering::SeqCst) - reads;
         if count == 8193 {
             assert_eq!(traversal_reads, 133);
         }
-        for changed in [false, true] {
+        for (edit, position) in [
+            ("same", 0),
+            ("replace", count / 2),
+            ("insert", 0),
+            ("delete", 0),
+            ("remove-leaf", 0),
+            ("insert", count.saturating_sub(1)),
+        ] {
             let reads = files.range_reads.load(Ordering::SeqCst);
             let puts = files.puts.load(Ordering::SeqCst);
             let mut reader = tree::Reader::new(files.clone(), root).unwrap();
             let mut builder = tree::Builder::new(files.clone());
             let mut rewritten = expected.clone();
+            let replacement = descriptor(&template, count + 1);
+            let key = Bytes::from(format!("key-{:08}", 2 * position));
+            match edit {
+                "replace" if count > 0 => rewritten[position as usize].0 = replacement.encode(),
+                "insert" => {
+                    rewritten.insert(position as usize, (replacement.encode(), key.clone()))
+                }
+                "delete" if count > 0 => {
+                    rewritten.remove(0);
+                }
+                "remove-leaf" => {
+                    rewritten.drain(..(count.min(64) as usize));
+                }
+                _ => {}
+            }
             let mut n = 0;
             while let Some(mut routed) = reader.next().await.unwrap() {
-                builder.reuse_from(&reader);
-                if changed && n == count as usize / 2 {
-                    routed.reference = descriptor(&template, count + 1);
-                    rewritten[n] = routed.reference.encode();
+                builder.align_to(&reader).await.unwrap();
+                if edit == "insert" && n == position {
+                    builder
+                        .push(replacement.clone(), key.clone())
+                        .await
+                        .unwrap();
                 }
-                builder.push(routed.reference, routed.last).await.unwrap();
+                if edit == "replace" && n == position {
+                    routed.reference = replacement.clone();
+                }
+                if !(edit == "delete" && n == 0 || edit == "remove-leaf" && n < 64) {
+                    builder.push(routed.reference, routed.last).await.unwrap();
+                }
                 n += 1;
+            }
+            if edit == "insert" && count == 0 {
+                builder.push(replacement, key).await.unwrap();
             }
             let next = builder.finish().await.unwrap();
             assert_eq!(
                 files.range_reads.load(Ordering::SeqCst) - reads,
                 traversal_reads,
-                "reuse adds no provider reads to the existing traversal"
+                "alignment adds no provider reads"
             );
-            assert_eq!(
-                files.puts.load(Ordering::SeqCst) - puts,
-                if changed {
-                    root.map_or(0, |(height, _)| height as usize + 1)
-                } else {
-                    0
-                },
-                "only the changed leaf and its ancestors are uploaded"
+            let uploads = files.puts.load(Ordering::SeqCst) - puts;
+            let path = root.map_or(0, |(height, _)| height as usize + 1);
+            let bound = match edit {
+                "same" => 0,
+                "insert" => 2 * path + 1,
+                "remove-leaf" => path.saturating_sub(1),
+                _ => path,
+            };
+            assert!(
+                uploads <= bound,
+                "{count} tables, {edit} at {position}: {uploads} uploads > {bound}"
             );
-            if !changed {
+            if count == 8193 && position == 0 {
+                assert_eq!(
+                    uploads,
+                    match edit {
+                        "insert" => 5,
+                        "delete" => 3,
+                        "remove-leaf" => 2,
+                        _ => 0,
+                    }
+                );
+            }
+            if edit == "same" {
                 assert!(
                     next == root,
                     "unchanged manifests retain their exact identity"
                 );
             }
-            let mut reader = tree::Reader::new(files.clone(), next).unwrap();
-            for expected in rewritten {
+            if count >= 4096 && edit == "insert" && position == 0 {
+                let puts = files.puts.load(Ordering::SeqCst);
+                let mut reader = tree::Reader::new(files.clone(), next).unwrap();
+                let mut builder = tree::Builder::new(files.clone());
+                while let Some(routed) = reader.next().await.unwrap() {
+                    builder.align_to(&reader).await.unwrap();
+                    builder.push(routed.reference, routed.last).await.unwrap();
+                }
+                assert!(builder.finish().await.unwrap() == next);
                 assert_eq!(
-                    reader.next().await.unwrap().unwrap().reference.encode(),
-                    expected
+                    files.puts.load(Ordering::SeqCst),
+                    puts,
+                    "ragged groups stay stable"
                 );
             }
-            assert!(reader.next().await.unwrap().is_none());
+            for reverse in [false, true] {
+                let mut reader = if reverse {
+                    tree::Reader::seek_reverse(
+                        files.clone(),
+                        next,
+                        None,
+                        Arc::new(Cache::new(0, None).unwrap()),
+                    )
+                    .unwrap()
+                } else {
+                    tree::Reader::new(files.clone(), next).unwrap()
+                };
+                let rows: Vec<_> = if reverse {
+                    rewritten.iter().rev().collect()
+                } else {
+                    rewritten.iter().collect()
+                };
+                for (reference, last) in rows {
+                    let routed = reader.next().await.unwrap().unwrap();
+                    assert_eq!(
+                        (routed.reference.encode(), routed.last),
+                        (reference.clone(), last.clone())
+                    );
+                }
+                assert!(reader.next().await.unwrap().is_none());
+            }
         }
+    }
+}
+
+#[tokio::test]
+async fn repeated_prefix_inserts_keep_manifest_height_bounded() {
+    let files = Files::new(0);
+    let reference = table::build(
+        files.clone(),
+        [Row {
+            key: b"x",
+            revision: 1,
+            value: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let mut builder = tree::Builder::new(files.clone());
+    for n in 128..192 {
+        builder
+            .push(reference.clone(), Bytes::from(format!("key-{n:04}")))
+            .await
+            .unwrap();
+    }
+    let mut root = builder.finish().await.unwrap();
+    for n in (0..128).rev() {
+        let mut reader = tree::Reader::new(files.clone(), root).unwrap();
+        let mut builder = tree::Builder::new(files.clone());
+        let mut first = true;
+        while let Some(routed) = reader.next().await.unwrap() {
+            builder.align_to(&reader).await.unwrap();
+            if first {
+                builder
+                    .push(reference.clone(), Bytes::from(format!("key-{n:04}")))
+                    .await
+                    .unwrap();
+                first = false;
+            }
+            builder.push(routed.reference, routed.last).await.unwrap();
+        }
+        root = builder.finish().await.unwrap();
+        assert!(
+            root.unwrap().0 <= 1,
+            "prefix inserts must not build a tall chain of sparse nodes"
+        );
+    }
+    let mut reader = tree::Reader::new(files, root).unwrap();
+    for n in 0..192 {
+        assert_eq!(
+            reader.next().await.unwrap().unwrap().last,
+            format!("key-{n:04}")
+        );
+    }
+    assert!(reader.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn lost_or_cancelled_boundary_flush_cannot_replace_the_base_manifest() {
+    let files = Files::new(0);
+    let reference = table::build(
+        files.clone(),
+        [Row {
+            key: b"x",
+            revision: 1,
+            value: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let mut builder = tree::Builder::new(files.clone());
+    for n in 0..65 {
+        builder
+            .push(reference.clone(), Bytes::from(format!("key-{n:04}")))
+            .await
+            .unwrap();
+    }
+    let root = builder.finish().await.unwrap();
+    let rewrite = || async {
+        let mut builder = tree::Builder::new(files.clone());
+        let mut reader = tree::Reader::new(files.clone(), root)?;
+        let mut first = true;
+        while let Some(routed) = reader.next().await? {
+            builder.align_to(&reader).await?;
+            if first {
+                builder
+                    .push(reference.clone(), Bytes::from_static(b"added"))
+                    .await?;
+                first = false;
+            }
+            builder.push(routed.reference, routed.last).await?;
+        }
+        builder.finish().await
+    };
+    // The first PUT fills a leaf; the second flushes its remainder at the old
+    // boundary. Both faults occur after the provider has stored that object.
+    files
+        .lose
+        .store(files.puts.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
+    assert!(rewrite().await.is_err());
+    files.lose.store(0, Ordering::SeqCst);
+    files
+        .pause
+        .store(files.puts.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
+    tokio::select! {
+        result = rewrite() => panic!("paused boundary flush completed: {}", result.is_ok()),
+        permit = files.entered.acquire() => permit.unwrap().forget(),
+    }
+    files.pause.store(0, Ordering::SeqCst);
+    let next = rewrite().await.unwrap();
+    for (root, added) in [(root, false), (next, true)] {
+        let mut reader = tree::Reader::new(files.clone(), root).unwrap();
+        if added {
+            assert_eq!(
+                reader.next().await.unwrap().unwrap().last,
+                b"added".as_slice()
+            );
+        }
+        for n in 0..65 {
+            assert_eq!(
+                reader.next().await.unwrap().unwrap().last,
+                format!("key-{n:04}")
+            );
+        }
+        assert!(reader.next().await.unwrap().is_none());
     }
 }
 

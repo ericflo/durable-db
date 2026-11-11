@@ -299,7 +299,10 @@ async fn build_projection(
         builder.rows = base.header().rows;
         let mut boundary: Option<Bytes> = None;
         while let Some(routed) = tables.next().await? {
-            builder.tree.reuse_from(&tables);
+            if builder.tree.crosses_leaf(&tables) {
+                builder.flush().await?;
+            }
+            builder.tree.align_to(&tables).await?;
             let lower = boundary.replace(routed.last.clone());
             ensure!(
                 lower.as_ref().is_none_or(|last| last < &routed.last),

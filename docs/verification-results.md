@@ -1,5 +1,13 @@
 # Verification results
 
+## Stable checkpoint manifest groups (2026-11-10)
+
+Checkpoint rewrites now preserve base manifest groups and split overflowing groups evenly. An insertion into a 4,096-table manifest uploads five nodes instead of 68; an 8,193-table fixture retains unrelated siblings after insertion, deletion and whole-leaf removal. A serving-projection rewrite merges three tables into one with four uploads instead of six, the same ten reads, and all 540 values/deletions intact. Unchanged reconstruction makes no uploads, including after a split.
+
+The change adds 32 net runtime Rust lines and no encoding, admission-policy or dependency changes. Existing budgeted format `owned-candidate-18` and local format `owned-candidate-15` remain compatible. Balanced splits keep 128 repeated prefix insertions into 64 tables at height one. Forward/reverse order, root split/collapse, applied-but-lost responses and cancellation pass. Three Rust negative controls reproduce suffix amplification, a misplaced data-buffer flush and excessive height growth.
+
+All 298 local Rust tests, formatting, strict clippy and both 99-test client contracts pass. The unchanged 31,104-state checkpoint-overlay model and eight negative controls pass. The old regrouping path, redundant fixture base builds and outdated verification paragraph were removed. These are deterministic I/O results, not cloud latency/throughput qualification. Full-manifest traversal, sparse-node compaction, tenant manifest/retry accounting, retained-image export/restore, scheduled backups and physical timing remain open. [Milestone evidence](evidence/manifest-boundaries-2026-11-10.json).
+
 ## v0.13.0 retained-row reblocking admission (2026-11-10)
 
 [v0.13.0](https://github.com/ericflo/durable-db/releases/tag/v0.13.0) packages `c9ed530`, verified by [Woodpecker #150](https://ci.eflorenzano.com/repos/18/pipeline/150/1). The exact downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that same executable. The optimized musl 10,005-database check passes in 198.68 seconds, and both client contracts pass all 99 enabled tests.

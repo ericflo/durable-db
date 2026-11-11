@@ -58,6 +58,12 @@ Merged == [p \in Pairs |-> IF Reuse(p) THEN Base[p] ELSE Visible[p]]
 \* An authenticated manifest reference can also be retained when its complete
 \* immutable subtree is unchanged. Rust compares length and digest of the
 \* encoded node, including every child identity, boundary and digest.
+\* Streaming reconstruction preserves old group boundaries before entering a
+\* different base node. Splits/deletions can therefore retain later siblings.
+\* This affects packing/upload count, not the equality required for reuse;
+\* Rust tests cover node heights, boundaries and interrupted flushes separately.
+\* Overflowing rewrite groups split evenly; preserving full+one groups would
+\* let repeated prefix inserts increase height without proportional growth.
 Manifest == IF UnsafeManifestReuse \/ Merged = Base THEN Base ELSE Merged
 Rewrite == /\ phase = "ready" /\ rewritten = {}
            /\ rewritten' = {IF UnsafeRewrite THEN recent ELSE Manifest}

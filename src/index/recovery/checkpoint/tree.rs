@@ -41,8 +41,27 @@ impl Builder {
             tables: 0,
         }
     }
-    pub fn reuse_from(&mut self, reader: &Reader) {
+    pub fn crosses_leaf(&self, reader: &Reader) -> bool {
+        self.reuse[0].is_some() && self.reuse[0] != reader.reuse[0]
+    }
+    pub async fn align_to(&mut self, reader: &Reader) -> anyhow::Result<()> {
+        // Finish each old group before adopting its successor's reuse candidate.
+        // Otherwise one inserted/deleted table shifts every later sibling.
+        for height in 0..=MAX_HEIGHT {
+            if self.reuse[height].is_some() && self.reuse[height] != reader.reuse[height] {
+                if height == 0 {
+                    self.flush_leaf().await?;
+                } else if let Some(children) = self.levels.get_mut(height - 1) {
+                    let children = std::mem::take(children);
+                    if !children.is_empty() {
+                        let child = self.branch(height, &children).await?;
+                        self.carry(height, child).await?;
+                    }
+                }
+            }
+        }
         self.reuse = reader.reuse;
+        Ok(())
     }
     async fn upload(&self, height: usize, bytes: Vec<u8>) -> anyhow::Result<Blob> {
         if let Some(blob) = self.reuse[height].filter(|blob| blob.matches(&bytes)) {
@@ -61,7 +80,7 @@ impl Builder {
             .context("checkpoint table count overflow")?;
         self.last = Some(last.clone());
         self.leaf.push(RoutedTable { last, reference });
-        if self.leaf.len() == FANOUT {
+        if self.leaf.len() > FANOUT || self.leaf.len() == FANOUT && self.reuse[0].is_none() {
             self.flush_leaf().await?;
         }
         Ok(())
@@ -70,9 +89,17 @@ impl Builder {
         if self.leaf.is_empty() {
             return Ok(());
         }
-        let mut bytes = header(0, self.leaf.len());
-        let last = self.leaf.last().unwrap().last.clone();
-        for routed in self.leaf.drain(..) {
+        // Aligned rewrites wait for overflow, then split evenly. A full+one
+        // split would let repeated prefix inserts create a new level every 64
+        // tables. Fresh bulk construction still packs full nodes.
+        let count = if self.leaf.len() > FANOUT {
+            self.leaf.len() / 2
+        } else {
+            self.leaf.len()
+        };
+        let mut bytes = header(0, count);
+        let last = self.leaf[count - 1].last.clone();
+        for routed in self.leaf.drain(..count) {
             boundary(&mut bytes, &routed.last);
             bytes.extend_from_slice(&routed.reference.encode());
         }
@@ -86,10 +113,12 @@ impl Builder {
                 self.levels.push(Vec::new());
             }
             self.levels[level].push(child);
-            if self.levels[level].len() < FANOUT {
+            let len = self.levels[level].len();
+            if len < FANOUT || len == FANOUT && self.reuse[0].is_some() {
                 return Ok(());
             }
-            let children = std::mem::take(&mut self.levels[level]);
+            let count = if len > FANOUT { len / 2 } else { len };
+            let children: Vec<_> = self.levels[level].drain(..count).collect();
             child = self.branch(level + 1, &children).await?;
             level += 1;
         }

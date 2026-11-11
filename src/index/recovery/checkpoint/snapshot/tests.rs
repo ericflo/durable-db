@@ -12,6 +12,7 @@ use uuid::Uuid;
 struct Files {
     inner: Remote,
     reads: AtomicUsize,
+    puts: AtomicUsize,
     fail: AtomicBool,
     pause: AtomicBool,
     entered: tokio::sync::Semaphore,
@@ -23,6 +24,7 @@ impl Files {
             inner: Remote::new(Arc::new(object_store::memory::InMemory::new()), "snapshot")
                 .unwrap(),
             reads: AtomicUsize::new(0),
+            puts: AtomicUsize::new(0),
             fail: AtomicBool::new(false),
             pause: AtomicBool::new(false),
             entered: tokio::sync::Semaphore::new(0),
@@ -46,6 +48,7 @@ impl Storage for Files {
         self.inner.get_range(k, r, s).await
     }
     async fn put(&self, k: &str, b: Bytes) -> anyhow::Result<()> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
         self.inner.put(k, b).await
     }
     async fn get(&self, _: &str, _: usize) -> anyhow::Result<Option<Object>> {
@@ -155,6 +158,73 @@ async fn open(files: Arc<Files>, reference: Reference, memory: usize) -> Databas
         .await
         .unwrap()
         .unwrap()
+}
+
+#[tokio::test]
+async fn checkpoint_repacking_preserves_unmodified_manifest_siblings() {
+    use crate::transactions::{
+        record::{Commit, Mutation},
+        recovery::Target,
+    };
+    let files = Files::new();
+    let reference = fixture(files.clone()).await;
+    let mut projection = super::super::Projection::new(super::super::Limits::default()).unwrap();
+    projection.rebase(Snapshot::new(files.clone(), cache(0), reference));
+    // Database 8 metadata and its first six values are the final three tables
+    // of the first 64-table leaf. They merge into one table; both later leaves
+    // must retain their identities despite that removal of two references.
+    let keys: Vec<_> = (0..6).map(|n| format!("k/{n:04}")).collect();
+    let mutations: Vec<_> = keys
+        .iter()
+        .map(|key| Mutation {
+            key,
+            value: Some(b"updated"),
+        })
+        .collect();
+    let bytes = Commit::encode(db(8), 4, 3, 3, "r-4", [4; 32], &mutations).unwrap();
+    let commit = Commit::decode(&bytes).unwrap();
+    let state = projection
+        .take_state(db(8))
+        .await
+        .unwrap()
+        .advance(&commit)
+        .unwrap();
+    projection.apply(&commit, state).await.unwrap();
+    let puts = files.puts.load(Ordering::SeqCst);
+    files.reads.store(0, Ordering::SeqCst);
+    let next = super::super::build_projection(&projection, files.clone(), reference.cut)
+        .await
+        .unwrap();
+    assert_eq!(
+        files.puts.load(Ordering::SeqCst) - puts,
+        4,
+        "one data/index pair, the changed leaf, and the root; no sibling uploads"
+    );
+    assert_eq!(
+        files.reads.load(Ordering::SeqCst),
+        10,
+        "four manifest nodes and three changed index/data pairs"
+    );
+    assert_eq!(next.tables, reference.tables - 2);
+    let next = Snapshot::new(files.clone(), cache(0), next);
+    next.verify(super::super::Limits::default()).await.unwrap();
+    for generation in 7..=9 {
+        let view = next.database(db(generation)).await.unwrap().unwrap();
+        for n in 0..180 {
+            let expected = if generation == 8 && n < 6 {
+                Some(Bytes::from_static(b"updated"))
+            } else {
+                value(generation, n)
+            };
+            assert_eq!(
+                view.get(&format!("k/{n:04}"))
+                    .await
+                    .unwrap()
+                    .and_then(|row| row.value),
+                expected
+            );
+        }
+    }
 }
 
 #[tokio::test]
