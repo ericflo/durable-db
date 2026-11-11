@@ -1348,5 +1348,89 @@
       "finished_at": "2026-11-11T15:22:22.895347+00:00"
     },
     "scope": "Failed the initial 240-second readiness deadline with sixteen partitions. Not a passing Kubernetes qualification. The namespace, disposable bucket, and workload key were removed."
+  },
+  "default_layout_startup": {
+    "before": {
+      "source_commit": "28b90b2",
+      "b2": {
+        "native_default_cli_ready": false,
+        "partitions": 16,
+        "scope": "One debug process, default partition count and resident allowance, automatic maintenance, 1 GiB / 100,000 PUT ceiling; startup only, not Kubernetes or a throughput/RSS claim.",
+        "startup_seconds": 240.001232073
+      },
+      "b2_cleanup": {
+        "bucket_removed": true,
+        "workload_key_revoked": true,
+        "physical_versions_deleted": 120
+      },
+      "s3": {
+        "provider": "versioned MinIO",
+        "image": "epsilon-maintenance-minio:20261105",
+        "image_id": "sha256:9d75ed8ad714bbe8111050a031fe9cb31eb446e1ee4651bb94b805c96eaadef1",
+        "test": {
+          "native_default_cli_ready": true,
+          "partitions": 16,
+          "scope": "One debug process, default partition count and resident allowance, automatic maintenance, 1 GiB / 100,000 PUT ceiling; startup only, not Kubernetes or a throughput/RSS claim.",
+          "startup_seconds": 2.025993353
+        },
+        "cleanup": {
+          "bucket_removed": true,
+          "physical_versions_deleted": 398,
+          "container_removed": true
+        }
+      }
+    },
+    "after": {
+      "date_utc": "2026-11-11",
+      "source_commit": "929620175c09ececce4233a7f0f8f8b169c83218",
+      "clean_worktree": true,
+      "native_format": "owned-candidate-23",
+      "command": "cargo test --locked --test cluster_cli -- --ignored --exact native_default_cli_starts_sixteen_partitions --nocapture",
+      "scope": "Debug native cloud CLI; sixteen partitions, 4 MiB cache, 128 MiB aggregate resident allowance. Default-layout startup with scheduled maintenance and fixed-stage diagnostics. Real B2 and versioned MinIO, not AWS, Kubernetes placement, RSS, sustained load or an SLO.",
+      "results": [
+        {
+          "provider": "B2",
+          "test": {
+            "native_default_cli_ready": true,
+            "partitions": 16,
+            "scope": "One debug process, default partition count and resident allowance, automatic maintenance, 1 GiB / 100,000 PUT ceiling; startup only, not Kubernetes or a throughput/RSS claim.",
+            "startup_seconds": 126.628451879
+          },
+          "cleanup": {
+            "bucket_removed": true,
+            "workload_key_revoked": true,
+            "physical_versions_deleted": 115
+          }
+        },
+        {
+          "provider": "versioned MinIO",
+          "image": "epsilon-maintenance-minio:20261105",
+          "image_id": "sha256:9d75ed8ad714bbe8111050a031fe9cb31eb446e1ee4651bb94b805c96eaadef1",
+          "test": {
+            "native_default_cli_ready": true,
+            "partitions": 16,
+            "scope": "One debug process, default partition count and resident allowance, automatic maintenance, 1 GiB / 100,000 PUT ceiling; startup only, not Kubernetes or a throughput/RSS claim.",
+            "startup_seconds": 2.024375933
+          },
+          "cleanup": {
+            "bucket_removed": true,
+            "physical_versions_deleted": 398,
+            "container_removed": true
+          }
+        }
+      ]
+    },
+    "change": "Shared directory collection is scheduled once on the peer preferred for partition zero, not delegated by each native partition collector. Membership disagreement remains safe under the existing fenced collector.",
+    "local_checks": {
+      "rust_passed": 319,
+      "cargo_fmt": "passed",
+      "cargo_clippy_all_targets": "passed",
+      "shared_maintenance_reassignment_regression": "passed",
+      "reintroduced_recovery_timeout": "detected after 50 seconds of virtual time",
+      "PublicationSafety": {
+        "distinct_states": 175546,
+        "negative_controls": 4
+      }
+    }
   }
 }
