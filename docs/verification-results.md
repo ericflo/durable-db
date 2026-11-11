@@ -1,5 +1,11 @@
 # Verification results
 
+## Retained-row reblocking admission (2026-11-10)
+
+Native tenant admission now covers data/index encoding when maintenance repacks unchanged rows. The previous recorded-data-plus-index price underfunded an eight-block fixture by 7,657 bytes after a small insertion moved 1 KiB keys onto block boundaries. The replacement reserves five times each touched base table’s authenticated data size, with no extra reads, allocations or data/index format changes. It is intentionally conservative: the 533,678-byte rebuilt image receives 2,622,515 bytes of allowance including its new rows. Tightening this bound remains useful work; it is not provider billing.
+
+All 295 local Rust tests, formatting and strict clippy pass. The reblocking regression takes 0.14 seconds; cold pricing retains four manifest reads and no table reads; TCP checks refuse one byte short before allocation or PUT. Restoring old pricing fails both the encoded-image and HTTP checks. The unchanged 5,776-state admission model and all three negative controls pass. The old copy-size loop is removed. Budgeted native format `owned-candidate-18` excludes older policies and requires a fresh namespace; local/unbudgeted format remains `owned-candidate-15`. Manifest/retry accounting, retained-image export/restore, scheduling and physical timing remain open. [Milestone evidence](evidence/retained-row-reblocking-2026-11-10.json).
+
 ## v0.12.0 checkpoint retention (2026-11-10)
 
 [v0.12.0](https://github.com/ericflo/durable-db/releases/tag/v0.12.0) packages `10eb661`, verified by [Woodpecker #146](https://ci.eflorenzano.com/repos/18/pipeline/146/1). The exact downloaded static executable passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that same binary. The optimized musl 10,005-database regression passes in 205.59 seconds, and the local/native client contract checks each pass all 99 enabled tests.

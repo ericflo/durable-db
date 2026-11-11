@@ -101,7 +101,7 @@ impl Snapshot {
         }))
     }
 
-    /// Conservative copy contribution, derived only from authenticated manifest
+    /// Conservative reblocking contribution, derived only from authenticated manifest
     /// descriptors. A changed metadata/receipt interval and each mutation key
     /// can replace its routed base table, including any neighboring rows.
     pub(super) async fn rewrite_bytes(
@@ -136,11 +136,13 @@ impl Snapshot {
                     .as_ref()
                     .is_none_or(|last| last < &routed.last)
                 {
-                    for blob in routed.reference.blobs() {
-                        bytes = bytes
-                            .checked_add(blob.size())
-                            .context("checkpoint copy admission overflow")?;
-                    }
+                    // A checkpoint key has at least 19 bytes. Its row encoding
+                    // is 14+k+v; even a singleton table costs 106+3k+v <=
+                    // 5*(14+k+v). Data size includes every row plus headers,
+                    // so this covers any repacking, including new boundaries.
+                    bytes = bytes
+                        .checked_add(5 * routed.reference.blobs()[0].size())
+                        .context("checkpoint copy admission overflow")?;
                     charged_through = Some(routed.last.clone());
                 }
                 if routed.last >= end {

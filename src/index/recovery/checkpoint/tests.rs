@@ -225,12 +225,7 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             .await
             .unwrap()
             .unwrap();
-        let table_bytes = routed
-            .reference
-            .blobs()
-            .iter()
-            .map(|b| b.size())
-            .sum::<u64>();
+        let table_bytes = 5 * routed.reference.blobs()[0].size();
         projection.rebase(snapshot);
         let mutations = [
             Mutation {
@@ -1013,4 +1008,101 @@ async fn rewrites_reuse_untouched_tables_and_replace_expired_receipt_windows() {
         build_projection(&projection, files, cut()).await.is_err(),
         "a replaced table must be read and validated"
     );
+}
+
+#[tokio::test]
+async fn reblocking_retained_rows_can_exceed_the_original_data_and_index_sizes() {
+    use crate::transactions::{record::Commit, recovery::Target};
+    let files = Files::new(0);
+    let db = Database {
+        name: "app",
+        generation: Uuid::from_u128(7),
+    };
+    let prefix_bytes = db.name.len() + 18;
+    let metadata_bytes = 14 + prefix_bytes + 32;
+    let receipt_bytes = 14 + prefix_bytes + "initial".len() + 32;
+    let mut rows = Vec::new();
+    for group in 0..8 {
+        let first = format!("group/{group:02}/a");
+        let middle = format!("group/{group:02}/b{}", "x".repeat(1000));
+        let last = format!("group/{group:02}/c");
+        let headers = 3 * (14 + prefix_bytes) + first.len() + middle.len() + last.len();
+        let value = 65536
+            - headers
+            - if group == 0 {
+                metadata_bytes + receipt_bytes
+            } else {
+                0
+            };
+        rows.extend([
+            (first, Vec::new()),
+            (middle, vec![42; value]),
+            (last, Vec::new()),
+        ]);
+    }
+    let mutations: Vec<_> = rows
+        .iter()
+        .map(|(key, value)| Mutation {
+            key,
+            value: Some(value.as_slice()),
+        })
+        .collect();
+    let mut projection = Projection::new(Limits::default()).unwrap();
+    let bytes = Commit::encode(db, 1, 0, 0, "initial", [1; 32], &mutations).unwrap();
+    let commit = Commit::decode(&bytes).unwrap();
+    let state = projection
+        .take_state(db)
+        .await
+        .unwrap()
+        .advance(&commit)
+        .unwrap();
+    projection.apply(&commit, state).await.unwrap();
+    let reference = build_projection(&projection, files.clone(), cut())
+        .await
+        .unwrap();
+    assert_eq!(reference.tables, 1);
+    let snapshot = Snapshot::new(
+        files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        reference,
+    );
+    let old_bytes = encoded_table_bytes(&snapshot).await;
+    projection.rebase(snapshot);
+    // The base blocks end on short keys. A small insertion shifts their
+    // boundaries onto the unchanged 1 KiB keys, growing every block's index.
+    let mutation = [Mutation {
+        key: "aaaa",
+        value: Some(b""),
+    }];
+    let direct = contribution_bytes(db, "next", &mutation) as u64;
+    let copies = projection
+        .checkpoint_rewrite_bytes(db, &mutation)
+        .await
+        .unwrap();
+    let bytes = Commit::encode(db, 2, 1, 0, "next", [2; 32], &mutation).unwrap();
+    let commit = Commit::decode(&bytes).unwrap();
+    let state = projection
+        .take_state(db)
+        .await
+        .unwrap()
+        .advance(&commit)
+        .unwrap();
+    projection.apply(&commit, state).await.unwrap();
+    let reference = build_projection(&projection, files.clone(), cut())
+        .await
+        .unwrap();
+    let snapshot = Snapshot::new(files, Arc::new(Cache::new(0, None).unwrap()), reference);
+    let actual = encoded_table_bytes(&snapshot).await;
+    assert!(
+        actual > direct + old_bytes,
+        "fixture must exceed the old copy allowance: {actual} <= {}",
+        direct + old_bytes
+    );
+    assert!(
+        actual <= direct + copies,
+        "reblocked tables exceed admission: {actual} > {}",
+        direct + copies
+    );
+    assert_eq!((actual, direct + copies), (533_678, 2_622_515));
+    snapshot.verify(Limits::default()).await.unwrap();
 }

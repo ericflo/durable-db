@@ -173,8 +173,8 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
     let mut idle = std::collections::BTreeSet::new();
     let mut table_sizes = std::collections::BTreeMap::new();
     while let Some(table) = manifest.next().await.unwrap() {
-        for blob in table.reference.blobs() {
-            table_sizes.insert(blob.key(), blob.size());
+        for (i, blob) in table.reference.blobs().into_iter().enumerate() {
+            table_sizes.insert(blob.key(), if i == 0 { 5 * blob.size() } else { 0 });
         }
         if super::super::split_key(&table.last).unwrap().0 != db(7) {
             idle.extend(table.reference.blobs().map(|b| b.key()));

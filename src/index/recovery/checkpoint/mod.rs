@@ -25,7 +25,7 @@ const CHUNK_ROWS: usize = 4096;
 
 /// Direct contribution of a validated transaction: metadata, its new receipt,
 /// and mutations (including tombstones), each priced as a singleton data/index
-/// pair. Excludes retained-row reblocking, manifests and retry attempts.
+/// pair. Base-table reblocking is charged separately; excludes manifests and retries.
 /// It is not a reservation authorizing any future physical upload.
 pub(crate) fn contribution_bytes(
     database: Database<'_>,

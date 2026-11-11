@@ -768,13 +768,23 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(status, StatusCode::OK);
 }
 
-// Inspect actual encoded data and index objects independently of admission.
-async fn checkpoint_table_objects(files: &dyn Storage) -> std::collections::BTreeMap<String, u64> {
+// Price actual encoded data independently of admission; retain index identities
+// to detect which pairs changed. Reblocking allowance is five data bytes per byte.
+async fn checkpoint_copy_allowances(
+    files: &dyn Storage,
+) -> std::collections::BTreeMap<String, u64> {
     let mut data = std::collections::BTreeMap::new();
     for key in files.list("tables/", None, 128).await.unwrap() {
         let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
         if object.bytes.starts_with(b"DDBBLK01") || object.bytes.starts_with(b"DDBIDX01") {
-            data.insert(key, object.bytes.len() as u64);
+            data.insert(
+                key,
+                if object.bytes.starts_with(b"DDBBLK01") {
+                    5 * object.bytes.len() as u64
+                } else {
+                    0
+                },
+            );
         }
     }
     data
@@ -843,7 +853,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         );
     }
     let a = format!("{base}/v1/databases/a/commit");
-    let initial_tables = checkpoint_table_objects(provider.files.as_ref()).await;
+    let initial_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
     assert_eq!(initial_tables.len(), 2, "one data/index pair");
     let first_admission = 822 + initial_tables.values().sum::<u64>();
     // 250 journal + 170 row + 402 singleton block/index allowance bytes.
@@ -905,7 +915,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         before, after,
         "checkpointing and neighboring admission preserve the ledger"
     );
-    let current_tables = checkpoint_table_objects(provider.files.as_ref()).await;
+    let current_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
     let replaced: Vec<_> = current_tables
         .iter()
         .filter(|(key, _)| !initial_tables.contains_key(*key))
@@ -922,7 +932,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
     );
-    // One byte below the direct work plus complete shared-table copy must
+    // One byte below the direct work plus shared-table reblocking allowance must
     // refuse without allocating credit or issuing an immutable PUT.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
@@ -962,7 +972,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 async fn native_http_collects_checkpointed_journals() {
     let (router, provider, _, _, token) = fixture(8, 2).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":4096,"attempts":1}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":32768,"attempts":1}});
     for _ in 0..2 {
         assert_eq!(
             call(&router, "POST", budget, &token, fund.clone()).await.0,
@@ -974,7 +984,7 @@ async fn native_http_collects_checkpointed_journals() {
     }
     for (name, revision) in [("a", 0), ("b", 0), ("a", 1)] {
         if revision == 1 {
-            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":8192,"attempts":2}});
+            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":65536,"attempts":2}});
             assert_eq!(
                 call(&router, "POST", budget, &token, refill).await.0,
                 StatusCode::OK

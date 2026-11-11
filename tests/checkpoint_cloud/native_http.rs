@@ -170,14 +170,21 @@ async fn collected(connection: &Connection, expected: [usize; 3]) -> (f64, usize
     (start.elapsed().as_secs_f64() * 1000.0, remaining[3])
 }
 
-async fn checkpoint_table_objects(
+async fn checkpoint_copy_allowances(
     files: &dyn durable_db::storage::Storage,
 ) -> std::collections::BTreeMap<String, u64> {
     let mut data = std::collections::BTreeMap::new();
     for key in files.list("tables/", None, 128).await.unwrap() {
         let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
         if object.bytes.starts_with(b"DDBBLK01") || object.bytes.starts_with(b"DDBIDX01") {
-            data.insert(key, object.bytes.len() as u64);
+            data.insert(
+                key,
+                if object.bytes.starts_with(b"DDBBLK01") {
+                    5 * object.bytes.len() as u64
+                } else {
+                    0
+                },
+            );
         }
     }
     data
@@ -218,7 +225,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             .await;
     }
     let commit = "/v1/databases/a/commit";
-    let initial_tables = checkpoint_table_objects(connection.objects().as_ref()).await;
+    let initial_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     assert_eq!(initial_tables.len(), 2, "one data/index pair");
     let initial_copies = initial_tables.values().sum::<u64>();
     let first_admission = 834 + initial_copies;
@@ -256,7 +263,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         server.ok("POST", "/v1/databases/b/commit", &write(0)).await["revision"],
         1
     );
-    let current_tables = checkpoint_table_objects(connection.objects().as_ref()).await;
+    let current_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     let replaced: Vec<_> = current_tables
         .iter()
         .filter(|(key, _)| !initial_tables.contains_key(*key))
@@ -470,7 +477,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
-        "admission_bytes_per_write":[first_admission,second_admission],"base_copy_bytes_per_write":[initial_copies,copies],
+        "admission_bytes_per_write":[first_admission,second_admission],"base_reblocking_allowance_per_write":[initial_copies,copies],
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
