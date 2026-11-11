@@ -1,5 +1,15 @@
 # Verification results
 
+## v0.17.0 retained checkpoint export (2026-11-10)
+
+The Rust operator API now exports a database from one retained checkpoint while live writes advance. Catalog identity, original logical quotas, revision and values all come from that exact cut. The resulting archive uses the existing verified, resumable HTTP restore. This adds 81 net runtime Rust lines, no dependencies and no format or admission changes. Both exporters now verify temporary output before publishing it without replacement. There is no new CLI/HTTP retained-export endpoint or scheduler.
+
+The expanded TCP regression exports 11 live keys and 524,358 logical bytes in two restore chunks, removes the source, and restores twice into an independent destination. It also checks empty databases/values, Unicode, tombstones, 64 KiB values, original quotas, absent post-cut databases, cancellation, corrupt reads/files and a racing output creator. Five deliberately broken Rust variants fail. The focused TCP test takes 1.34 seconds after compilation. All 299 local Rust tests, formatting, strict clippy, both 99-test client contracts and four web-app tests pass.
+
+The existing logical-backup model now includes immutable retained reads: 6,888 distinct states, 40,320 generated, depth 16 and four negative controls, with no extra distinct states or configuration. This is bounded protocol checking, not Rust refinement or a filesystem-durability proof. Duplicate catalog parsing and file publication, validation after publication, and stale current documentation were removed. [Milestone evidence](evidence/retained-export-2026-11-10.json).
+
+Per-tenant retry/recovery attribution remains open: charging a depleted tenant after accepting its write could block shared recovery; durable funding for already accepted work must precede that change. Scheduled backups, multiple restore points, independent backup credentials, physical timing/placement and broader production qualification also remain open.
+
 ## v0.16.1 checkpoint retry pacing (2026-11-10)
 
 [v0.16.1](https://github.com/ericflo/durable-db/releases/tag/v0.16.1) packages `a50ad42`, verified by [Woodpecker #162](https://ci.eflorenzano.com/repos/18/pipeline/162/1). The independently downloaded static binary passes transactions/retries, ordered reads, export/restore and forced-stop recovery. The public default installer installs that exact binary. The optimized 10,005-database capacity check passes in 198.61 seconds.

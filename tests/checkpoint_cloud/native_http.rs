@@ -4,6 +4,7 @@ use super::*;
 use durable_db::{
     api::{self, App, RateLimits},
     auth::Auth,
+    backup,
     transactions::live::{self, Opening},
     upload_budget::UploadLimits,
 };
@@ -410,6 +411,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         retained.reference(),
     );
     retained_image.verify(Limits::default()).await.unwrap();
+    let archives = tempfile::tempdir().unwrap();
+    let export_puts = calls("object_put");
     for name in ["a", "b"] {
         let info = server
             .ok("GET", &format!("/v1/databases/{name}"), &json!({}))
@@ -424,7 +427,26 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             old.get("x").await.unwrap().unwrap().value.as_deref(),
             Some(b"one".as_slice())
         );
+        let exported = backup::export_checkpoint(
+            &retained_image,
+            name,
+            &archives.path().join(format!("{name}.jsonl")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exported.snapshot.revision, 1);
+        assert_eq!(exported.snapshot.keys, 1);
+        assert_eq!(exported.snapshot.bytes, 4);
+        assert_eq!(
+            exported.snapshot.incarnation.as_deref(),
+            info["policy"]["incarnation"].as_str()
+        );
     }
+    assert_eq!(
+        calls("object_put"),
+        export_puts,
+        "export makes no immutable PUT"
+    );
     assert!(matches!(
         server
             .control
@@ -483,7 +505,42 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         true
     );
     server.stop().await;
-    let evidence = json!({"provider":provider,"namespace":namespace,
+    // The retained source has been collected and all cloud servers stopped.
+    // The unchanged restore path accepts its archives into an independent laptop directory.
+    let local = api::open_local(
+        archives.path().join("restored"),
+        Arc::new(Cache::new(0, None).unwrap()),
+        8,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let auth = Auth::new(&"47".repeat(32)).unwrap();
+    let token_file = archives.path().join("admin-token");
+    std::fs::write(&token_file, auth.admin_token()).unwrap();
+    let app = api::router(Arc::new(App::with_rate_limits(
+        Arc::new(local),
+        auth,
+        16,
+        RateLimits::new(1000, 1000).unwrap(),
+    )));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for name in ["a", "b"] {
+        let path = archives.path().join(format!("{name}.jsonl"));
+        for _ in 0..2 {
+            let restored = backup::restore(&url, &token_file, name, &path)
+                .await
+                .unwrap();
+            assert_eq!(restored.source_revision, 1);
+            assert_eq!(restored.verified_keys, 1);
+            assert_eq!(restored.destination.bytes, 4);
+        }
+    }
+    task.abort();
+    let _ = task.await;
+    let mut evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
         "admission_bytes_per_write":[first_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
@@ -500,5 +557,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; logical clock; old server stopped before takeover. Not physical timing, AWS or performance-SLO qualification."});
+    evidence["retained_export"] = json!({"databases":2,"source_revision":1,"immutable_puts":0,
+        "restored_after_source_image_collection":true,"independent_local_destination":true,"identical_restore_repeated":true});
     std::fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }

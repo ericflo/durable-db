@@ -7,6 +7,7 @@ mod catalog;
 mod control;
 pub use control::{Control, Renewal};
 mod checkpoint;
+pub(crate) use catalog::checkpoint_database;
 pub use catalog::{AuthorizedBatch, AuthorizedTicket, CatalogChange, CatalogResult};
 mod commit;
 mod read;

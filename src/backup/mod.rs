@@ -1,4 +1,4 @@
-//! Consistent logical export and resumable restore through the ordinary HTTP API.
+//! Consistent logical archives from HTTP or immutable checkpoints; one restore path.
 mod archive;
 mod http;
 use crate::engine::{
@@ -28,6 +28,61 @@ pub fn inspect(input: &Path) -> anyhow::Result<ArchiveInfo> {
         restore_chunks: archive.chunks,
     })
 }
+fn parent(output: &Path) -> &Path {
+    output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+fn temporary(output: &Path) -> anyhow::Result<tempfile::NamedTempFile> {
+    ensure!(!output.exists(), "output already exists");
+    Ok(tempfile::NamedTempFile::new_in(parent(output))?)
+}
+fn publish(
+    temporary: tempfile::NamedTempFile,
+    output: &Path,
+    sha256: &str,
+) -> anyhow::Result<ArchiveInfo> {
+    temporary.as_file().sync_all()?;
+    let verified = inspect(temporary.path())?;
+    ensure!(verified.sha256 == sha256, "archive checksum mismatch");
+    temporary
+        .persist_noclobber(output)
+        .map_err(|_| anyhow::anyhow!("cannot publish archive without overwriting"))?;
+    #[cfg(unix)]
+    std::fs::File::open(parent(output))?.sync_all()?;
+    Ok(verified)
+}
+/// Operator-only readback of one checkpoint's catalog and live values. Keep its
+/// durable retention slot occupied until export finishes; a Snapshot is not a pin.
+/// New writes do not affect this archive. Missing/corrupt objects fail closed.
+/// The existing HTTP restore accepts the resulting archive without conversion.
+pub async fn export_checkpoint(
+    snapshot: &crate::index::recovery::checkpoint::Snapshot,
+    database: &str,
+    output: &Path,
+) -> anyhow::Result<ArchiveInfo> {
+    validate_db(database)?;
+    let mut temporary = temporary(output)?;
+    let (info, view) = crate::transactions::live::checkpoint_database(snapshot, database).await?;
+    let mut writer = Writer::new(
+        BufWriter::new(temporary.as_file_mut()),
+        Header::from_info(database, &info),
+    )?;
+    if let Some(view) = view {
+        let mut rows = view.scan("", None)?;
+        while let Some(row) = rows.next().await? {
+            if let Some(value) = row.value {
+                writer.pair(Pair {
+                    key: String::from_utf8(row.key.to_vec())?,
+                    value: STANDARD.encode(value),
+                })?;
+            }
+        }
+    }
+    let sha256 = writer.finish()?;
+    publish(temporary, output, &sha256)
+}
 fn path(database: &str, suffix: &str) -> String {
     format!("/v1/databases/{database}{suffix}")
 }
@@ -46,14 +101,9 @@ pub async fn export(
     output: &Path,
 ) -> anyhow::Result<ArchiveInfo> {
     validate_db(database)?;
-    ensure!(!output.exists(), "output already exists");
+    let mut temporary = temporary(output)?;
     let remote = Remote::new(url, token_file)?;
     let info: Info = remote.get(&path(database, "")).await?;
-    let parent = output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     let header = Header::from_info(database, &info);
     let mut writer = Writer::new(BufWriter::new(temporary.as_file_mut()), header.clone())?;
     let mut after = None;
@@ -113,18 +163,7 @@ pub async fn export(
         "source changed during export; retry with a new consistent snapshot"
     );
     let sha256 = writer.finish()?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(output)
-        .map_err(|_| anyhow::anyhow!("cannot publish archive without overwriting"))?;
-    #[cfg(unix)]
-    std::fs::File::open(parent)?.sync_all()?;
-    let verified = inspect(output)?;
-    ensure!(
-        verified.sha256 == sha256,
-        "published archive checksum mismatch"
-    );
-    Ok(verified)
+    publish(temporary, output, &sha256)
 }
 #[derive(Serialize)]
 pub struct RestoreInfo {

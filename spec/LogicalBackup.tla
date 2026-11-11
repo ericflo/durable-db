@@ -23,9 +23,14 @@ Begin == /\ phase = "idle" /\ phase' = "reading"
          /\ original' = source /\ observed' = revision
          /\ UNCHANGED <<source, revision, archive, sealed, owner, target,
                         targetRevision, verified, pending, foreignChanged, completed>>
-ReadPage == /\ phase = "reading" /\ Len(archive) < N
-            /\ (UnsafeScanRevision \/ observed = revision)
-            /\ archive' = Append(archive, source[Len(archive)+1])
+\* A retained checkpoint supplies immutable metadata and values from original.
+\* HTTP export instead validates the live revision for every page. Retention
+\* protects availability separately; missing/corrupt objects must fail export.
+\* Treat catalog metadata as part of the same source image, never a live lookup.
+ReadPage(retained) == /\ phase = "reading" /\ Len(archive) < N
+            /\ (retained \/ UnsafeScanRevision \/ observed = revision)
+            /\ archive' = Append(archive,
+                 (IF retained /\ ~UnsafeScanRevision THEN original ELSE source)[Len(archive)+1])
             /\ UNCHANGED <<source, revision, phase, original, observed, sealed,
                            owner, target, targetRevision, verified, pending, foreignChanged, completed>>
 Seal == /\ phase = "reading" /\ (Len(archive) = N \/ UnsafeTruncated)
@@ -65,7 +70,8 @@ Complete == /\ owner = "ours" /\ targetRevision = Len(archive) /\ target = archi
             /\ completed' = TRUE
             /\ UNCHANGED <<source, revision, phase, original, observed, archive, sealed,
                            owner, target, targetRevision, verified, pending, foreignChanged>>
-Next == Begin \/ ReadPage \/ Seal \/ FailExport \/ ForeignCreate \/ Claim \/ VerifyPrefix
+Next == Begin \/ (\E retained \in BOOLEAN: ReadPage(retained))
+        \/ Seal \/ FailExport \/ ForeignCreate \/ Claim \/ VerifyPrefix
         \/ CrashRestore \/ Complete \/ (\E r \in Requests: Prepare(r) \/ Apply(r))
         \/ (\E k \in 1..N, v \in Values: WriteSource(k,v))
 TypeOK == /\ revision \in 0..MaxRevision /\ observed \in 0..MaxRevision

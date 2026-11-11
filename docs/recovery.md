@@ -10,13 +10,29 @@ The native Rust operator API now provides one durable backup slot per namespace 
 
 Retain succeeds only after `Outcome::Confirmed`. On an uncertain reply, validate with `retained_checkpoint()` and compare its identity with the tentative result. Do not blindly recreate a request. Release compares the identity, refuses a different slot, and is idempotent when the slot is empty. Administrators must coordinate release with backup readers: retaining a descriptor in memory does not extend protection after release. There is no automatic expiry or clock dependency.
 
-The collector protects both the current checkpoint and the retained checkpoint. Retention survives ownership takeover and cold reopening; publication preserves a concurrently changed slot without adopting a newer collection generation. Released objects become eligible for ordinary automatic collection. The slot uses at most 1 KiB of authority metadata and no immutable uploads, and cannot accumulate arbitrary historical images. It is a namespace backup primitive, not tenant-isolated snapshots, a backup archive, multiple restore points, scheduled retention or point-in-time recovery. Copies outside the namespace and recurring restore drills remain necessary production work.
+The collector protects both the current checkpoint and the retained checkpoint. Retention survives ownership takeover and cold reopening; publication preserves a concurrently changed slot without adopting a newer collection generation. Released objects become eligible for ordinary automatic collection. The slot uses at most 1 KiB of authority metadata and no immutable uploads, and cannot accumulate arbitrary historical images. The slot alone is a namespace backup primitive. Export copies data into an independent archive; tenant-isolated snapshots, multiple restore points, scheduled retention, point-in-time recovery and recurring disaster drills remain production work.
 
 Binaries before v0.12.0 reject the added authority field while a slot is occupied, preventing an older collector from deleting the image. Release it with the new runtime before downgrading. Namespaces without an occupied slot retain their existing format. [Verification](verification.md#native-checkpoint-retention) records the protocol mapping and tests.
 
+## Export a retained checkpoint
+
+`backup::export_checkpoint` is a Rust operator API. Obtain a `checkpoint::Snapshot` from the confirmed retained reference, keep the slot occupied, and export each desired database:
+
+```rust
+let archive = durable_db::backup::export_checkpoint(
+    &snapshot,
+    "application",
+    std::path::Path::new("application.jsonl"),
+).await?;
+```
+
+The catalog entry, authorization incarnation, original logical quotas, revision and values all come from that exact checkpoint. New live writes cannot change them. Empty databases and empty values are preserved; tombstones are omitted. An absent database or a missing/corrupt object encountered during export fails the operation. The source receives no immutable uploads. A `Snapshot` handle does not keep the slot occupied: coordinate explicit release with readers, and release only after the completed archives reach independent backup storage.
+
+This produces the same bounded, checksummed archive as HTTP export below. Use the existing `backup inspect` and `backup restore` commands without conversion. Both exporters validate the complete temporary archive before publishing the final file, refuse replacement, and remove temporary output on cancellation or ordinary failure. There is no CLI/HTTP retained-export endpoint or backup scheduler yet; the ordinary CLI export still scans the live database.
+
 ## Local format upgrades
 
-v0.16.1 retains both v0.16.0 formats: local `owned-candidate-15` and budgeted native `owned-candidate-20`. Local directories from v0.9.0 onward remain compatible. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions. Budgeted native serving refuses v0.15.0 and earlier accounting policies and requires a fresh namespace when moving from those versions. There is no in-place budgeted-native migration. This does not change the cloud CLI publication format.
+v0.17.0 retains both v0.16.0 formats: local `owned-candidate-15` and budgeted native `owned-candidate-20`. Local directories from v0.9.0 onward remain compatible. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions. Budgeted native serving refuses v0.15.0 and earlier accounting policies and requires a fresh namespace when moving from those versions. There is no in-place budgeted-native migration. This does not change the cloud CLI publication format.
 
 v0.9.0 switched local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
 
@@ -66,6 +82,6 @@ After writing, restore rereads every value at the final target revision and chec
 
 ## Verification boundary
 
-`LogicalBackup.tla` was checked before implementation: two keys/values, three delayed restore requests, two source revision advances, 6,888 states (40,064 generated, depth 16). Four negative controls detect mixed-revision export, accepting truncation, taking over an unrelated destination, and applying a delayed chunk without its revision comparison. The abstraction assumes atomic source reads/commits, monotonic revisions, fresh destination ownership, an isolated restore destination, and an integrity-checked immutable archive. It does not model SHA-256 internals, filesystem durability, TLS, scheduling, or retained object-store roots.
+`LogicalBackup.tla` was checked before implementation: two keys/values, three delayed restore requests, two source revision advances, 6,888 states (40,320 generated, depth 16). Four negative controls detect mixed-revision export, accepting truncation, taking over an unrelated destination, and applying a delayed chunk without its revision comparison. The same model now also reads from an immutable retained source image (including catalog metadata) while live writes advance. The abstraction assumes atomic source reads/commits, monotonic revisions, fresh destination ownership, an isolated restore destination, and an integrity-checked immutable archive. It does not model SHA-256 internals, filesystem durability, TLS, scheduling, or retained object-store roots.
 
 Implementation qualification and cloud restore evidence are tracked in the [verification record](verification-results.md). Backup storage retention, encryption-key recovery, cross-region/provider disaster drills, ongoing scheduling, and recovery-time objectives require separate qualification.

@@ -20,6 +20,8 @@ use tower::ServiceExt;
 struct Faults {
     pause: AtomicBool,
     pause_read: AtomicBool,
+    pause_read_at: AtomicU64,
+    corrupt_read: AtomicBool,
     fail_checkpoint: AtomicBool,
     checkpoint_failures: AtomicU64,
     entered: Notify,
@@ -42,12 +44,20 @@ impl Storage for Files {
         range: std::ops::Range<u64>,
         size: u64,
     ) -> anyhow::Result<Bytes> {
-        self.faults.range_reads.fetch_add(1, Ordering::SeqCst);
-        if self.faults.pause_read.swap(false, Ordering::SeqCst) {
+        let read = self.faults.range_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.faults.pause_read.swap(false, Ordering::SeqCst)
+            || self.faults.pause_read_at.load(Ordering::SeqCst) == read
+        {
             self.faults.entered.notify_one();
             self.faults.release.notified().await;
         }
-        self.inner.get_range(key, range, size).await
+        let bytes = self.inner.get_range(key, range, size).await?;
+        if self.faults.corrupt_read.swap(false, Ordering::SeqCst) {
+            let mut damaged = bytes.to_vec();
+            damaged[0] ^= 1;
+            return Ok(Bytes::from(damaged));
+        }
+        Ok(bytes)
     }
     async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
         panic!("native data path cannot use object CAS")
@@ -1177,11 +1187,13 @@ async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
 }
 
 #[tokio::test]
-async fn native_tcp_writes_continue_while_an_administrator_retains_a_checkpoint() {
+async fn native_tcp_retained_export_restores_after_source_removal() {
     use crate::{
+        backup,
         index::recovery::{Limits, checkpoint::Snapshot},
         transactions::record::Database,
     };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     let provider = Provider::new();
     let clock = ManualClock::default();
     let root = active(&provider, &clock).await;
@@ -1221,15 +1233,51 @@ async fn native_tcp_writes_continue_while_an_administrator_retains_a_checkpoint(
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let mut first = commit();
+    first["writes"].as_array_mut().unwrap().extend([
+        json!({"key":"empty","value":""}),
+        json!({"key":"雪","value":"AAH+/w=="}),
+        json!({"key":"deleted","value":null}),
+    ]);
+    for i in 0..8 {
+        first["writes"].as_array_mut().unwrap().push(json!({
+            "key":format!("large-{i}"), "value":STANDARD.encode(vec![i as u8; 65536])
+        }));
+    }
     assert_eq!(
-        tcp_call(&client, "POST", &format!("{url}/commit"), &token, commit())
+        tcp_call(&client, "POST", &format!("{url}/commit"), &token, first)
             .await
             .0,
+        StatusCode::OK
+    );
+    let empty_url = url.replace("/app", "/empty");
+    assert_eq!(
+        tcp_call(
+            &client,
+            "PUT",
+            &empty_url,
+            &token,
+            json!({"request_id":"create-empty","limits":{"max_keys":7,"max_bytes":777}})
+        )
+        .await
+        .0,
         StatusCode::OK
     );
     let (retained, outcome) = control.retain_checkpoint().await.unwrap();
     assert!(matches!(outcome, Outcome::Confirmed));
     let old_tables = provider.files.list("tables/", None, 128).await.unwrap();
+    assert_eq!(
+        tcp_call(
+            &client,
+            "PUT",
+            &url.replace("/app", "/later"),
+            &token,
+            json!({"request_id":"create-later","limits":{"max_keys":7,"max_bytes":777}})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     let mut changed = commit();
     changed["request_id"] = json!("second");
     changed["expected_revision"] = json!(1);
@@ -1272,11 +1320,119 @@ async fn native_tcp_writes_continue_while_an_administrator_retains_a_checkpoint(
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(read["revision"], 2);
+    let temporary = tempfile::tempdir().unwrap();
+    let archive = temporary.path().join("app.jsonl");
+    let faults = Arc::new(Faults::default());
+    let files = Arc::new(Files {
+        inner: provider.files.clone(),
+        faults: faults.clone(),
+    });
+    let cold = || {
+        Snapshot::new(
+            files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            retained.reference(),
+        )
+    };
+    let exported = backup::export_checkpoint(&cold(), "app", &archive)
+        .await
+        .unwrap();
+    assert_eq!(exported.snapshot.revision, 1);
+    assert_eq!(exported.snapshot.keys, 11);
+    assert_eq!(exported.snapshot.bytes, 14 + 8 * (7 + 65536));
+    assert_eq!(exported.restore_chunks, 2);
+    assert_eq!(
+        exported.snapshot.incarnation.as_deref(),
+        created["info"]["policy"]["incarnation"].as_str()
+    );
+    assert_eq!(exported.snapshot.limits.max_keys, 1000);
+    let reads = faults.range_reads.load(Ordering::SeqCst);
+    assert!(reads > 2);
+    assert!(
+        backup::export_checkpoint(&cold(), "app", &archive)
+            .await
+            .is_err()
+    );
+    assert_eq!(backup::inspect(&archive).unwrap().sha256, exported.sha256);
+    let absent = temporary.path().join("absent.jsonl");
+    assert!(
+        backup::export_checkpoint(&cold(), "later", &absent)
+            .await
+            .is_err()
+    );
+    assert!(!absent.exists());
+    let empty = temporary.path().join("empty.jsonl");
+    let exported_empty = backup::export_checkpoint(&cold(), "empty", &empty)
+        .await
+        .unwrap();
+    assert_eq!(exported_empty.snapshot.revision, 0);
+    assert_eq!(exported_empty.snapshot.keys, 0);
+    assert_eq!(exported_empty.snapshot.limits.max_keys, 7);
+    let partial = temporary.path().join("partial.jsonl");
+    let entries = std::fs::read_dir(temporary.path()).unwrap().count();
+    for action in ["cancel", "race", "corrupt"] {
+        faults.range_reads.store(0, Ordering::SeqCst);
+        faults.pause_read_at.store(reads, Ordering::SeqCst);
+        {
+            let image = cold();
+            let exporting = backup::export_checkpoint(&image, "app", &partial);
+            tokio::pin!(exporting);
+            tokio::select! {
+                result = &mut exporting => panic!("export did not pause: {}", result.is_ok()),
+                _ = faults.entered.notified() => (),
+            }
+            if action != "cancel" {
+                if action == "race" {
+                    std::fs::write(&partial, b"keep").unwrap();
+                } else {
+                    let staged = std::fs::read_dir(temporary.path())
+                        .unwrap()
+                        .map(|p| p.unwrap().path())
+                        .find(|p| p != &archive && p != &empty)
+                        .unwrap();
+                    assert!(std::fs::metadata(&staged).unwrap().len() > 0);
+                    std::fs::write(staged, b"corrupted partial archive").unwrap();
+                }
+                faults.release.notify_one();
+                assert!(exporting.await.is_err());
+                if action == "race" {
+                    assert_eq!(std::fs::read(&partial).unwrap(), b"keep");
+                    std::fs::remove_file(&partial).unwrap();
+                }
+            }
+        }
+        assert!(!partial.exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path()).unwrap().count(),
+            entries
+        );
+    }
+    faults.pause_read_at.store(0, Ordering::SeqCst);
+    faults.corrupt_read.store(true, Ordering::SeqCst);
+    assert!(
+        backup::export_checkpoint(&cold(), "app", &partial)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_dir(temporary.path()).unwrap().count(),
+        entries
+    );
+    faults.corrupt_read.store(false, Ordering::SeqCst);
     assert!(matches!(
         control.release_checkpoint(retained.id()).await.unwrap(),
         Outcome::Confirmed
     ));
     collector.collect().await.unwrap();
+    assert!(
+        backup::export_checkpoint(&cold(), "app", &partial)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_dir(temporary.path()).unwrap().count(),
+        entries
+    );
     let remaining = provider.files.list("tables/", None, 128).await.unwrap();
     assert!(old_tables.iter().any(|key| !remaining.contains(key)));
     assert!(
@@ -1302,4 +1458,50 @@ async fn native_tcp_writes_continue_while_an_administrator_retains_a_checkpoint(
         StatusCode::OK
     );
     server.abort();
+    let _ = server.await;
+    // Restore needs only the archive: stop the source and remove every object.
+    for prefix in [
+        "tables/",
+        "journal/",
+        "ownership/",
+        "catalogs/",
+        "manifests/",
+        "indexes/",
+    ] {
+        for key in provider.files.list(prefix, None, 1000).await.unwrap() {
+            provider.files.delete(&key).await.unwrap();
+        }
+        assert!(
+            provider
+                .files
+                .list(prefix, None, 1000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let (destination, _, _, _, destination_token) = fixture(8, 256).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, destination).await.unwrap() });
+    let token_file = temporary.path().join("admin-token");
+    std::fs::write(&token_file, destination_token).unwrap();
+    for _ in 0..2 {
+        let restored = backup::restore(&base, &token_file, "restored", &archive)
+            .await
+            .unwrap();
+        assert_eq!(restored.source_revision, 1);
+        assert_eq!(restored.verified_keys, 11);
+        assert_ne!(
+            restored.destination.policy.unwrap().incarnation,
+            exported.snapshot.incarnation.clone().unwrap()
+        );
+    }
+    let restored_empty = backup::restore(&base, &token_file, "empty-restored", &empty)
+        .await
+        .unwrap();
+    assert_eq!(restored_empty.verified_keys, 0);
+    assert_eq!(restored_empty.destination.limits.max_bytes, 777);
+    server.abort();
+    let _ = server.await;
 }

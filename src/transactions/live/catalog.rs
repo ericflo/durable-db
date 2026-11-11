@@ -26,6 +26,11 @@ struct Entry {
     creation: CreationReceipt,
 }
 impl Entry {
+    fn decode(value: &[u8]) -> anyhow::Result<Self> {
+        let entry: Self = serde_json::from_slice(value).context("invalid native catalog row")?;
+        entry.validate()?;
+        Ok(entry)
+    }
     fn validate(&self) -> anyhow::Result<()> {
         ensure!(self.format == 1, "unsupported native catalog");
         self.policy.validate()?;
@@ -42,6 +47,43 @@ impl Entry {
     fn authorize(&self, db: &str, caller: &Access, write: bool) -> Result<()> {
         access::authorize(Some(&self.policy), db, caller, write)
     }
+}
+/// Operator readback: catalog identity/quotas and values come from the same cut.
+pub(crate) async fn checkpoint_database(
+    snapshot: &crate::index::recovery::checkpoint::Snapshot,
+    db: &str,
+) -> anyhow::Result<(
+    engine::Info,
+    Option<crate::index::recovery::checkpoint::DatabaseSnapshot>,
+)> {
+    engine::validate_db(db)?;
+    let catalog = snapshot
+        .database(CATALOG)
+        .await?
+        .context("checkpoint has no catalog")?;
+    let value = catalog
+        .get(db)
+        .await?
+        .and_then(|r| r.value)
+        .context("database absent from checkpoint")?;
+    let entry = Entry::decode(&value)?;
+    let view = snapshot
+        .database(Database {
+            name: db,
+            generation: entry.generation()?,
+        })
+        .await?;
+    let usage = view.as_ref().map_or(Default::default(), |v| v.statistics());
+    Ok((
+        engine::Info {
+            revision: view.as_ref().map_or(0, |v| v.revision()),
+            keys: usage.keys,
+            bytes: usage.bytes,
+            limits: entry.creation.limits().clone(),
+            policy: Some(entry.policy.info()),
+        },
+        view,
+    ))
 }
 #[derive(Clone)]
 pub enum CatalogResult {
@@ -106,8 +148,7 @@ impl<C: Clock> Owner<C> {
         else {
             return Ok(None);
         };
-        let entry: Entry = serde_json::from_slice(&value).context("invalid native catalog row")?;
-        entry.validate()?;
+        let entry = Entry::decode(&value)?;
         self.check()?;
         Ok(Some(entry))
     }
