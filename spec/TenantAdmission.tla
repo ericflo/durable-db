@@ -5,14 +5,16 @@ CONSTANTS Tenants, Nodes, Grants, Operations, Capacity, InitialCapacity, MaxAtte
 ASSUME Cardinality(Tenants) = 2
 \* Byte-dimension abstraction of one transaction: direct work (journal +
 \* new rows with their block/index encoding allowance) and base-table reblocking
-\* need same-name credit before assignment. For each checkpoint row with key
+\* plus copied manifest paths need same-name credit before assignment. For each checkpoint row with key
 \* length k >= 19 and value length v >= 0, the singleton data/index encoding
 \* 106 + 3*k + v <= 5*(14 + k + v). A table's authenticated data bytes include
 \* all row encodings and block headers, so five times those bytes bounds any
 \* repacking of its retained rows. This is conservative admission, not billing.
 \* The writer pays even for a neighbor's rows and index in a shared table. Runtime
 \* charges the sum and ONE attempt. Range selection/byte sizing are checked
-\* separately against actual objects; manifest/retry costs are omitted.
+\* separately against actual objects. Copies include authenticated manifest
+\* nodes on affected paths, including the rightmost path for appends. New
+\* manifest entries/split overhead and maintenance retries are not modeled.
 Components == {"direct", "copies"}
 Required(o) == {<<o,c>>: c \in Components}
 A == CHOOSE t \in Tenants: TRUE

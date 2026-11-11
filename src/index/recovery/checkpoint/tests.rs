@@ -243,7 +243,8 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             .await
             .unwrap();
         assert_eq!(
-            copies, table_bytes,
+            copies,
+            table_bytes + reference.tree.unwrap().1.size(),
             "deduplicate receipt/value routes to the same table"
         );
         assert_eq!(
@@ -264,8 +265,8 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
                 .checkpoint_rewrite_bytes(Database { name: "zzz", ..db }, &[])
                 .await
                 .unwrap(),
-            0,
-            "append after all base tables copies no existing rows"
+            reference.tree.unwrap().1.size(),
+            "append copies no existing rows but rewrites the rightmost manifest path"
         );
         let bytes = Commit::encode(
             db,
@@ -1298,6 +1299,6 @@ async fn reblocking_retained_rows_can_exceed_the_original_data_and_index_sizes()
         "reblocked tables exceed admission: {actual} > {}",
         direct + copies
     );
-    assert_eq!((actual, direct + copies), (533_678, 2_622_515));
+    assert_eq!((actual, direct + copies), (533_678, 2_622_710));
     snapshot.verify(Limits::default()).await.unwrap();
 }

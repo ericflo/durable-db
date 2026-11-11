@@ -103,7 +103,7 @@ impl Snapshot {
 
     /// Conservative reblocking contribution, derived only from authenticated manifest
     /// descriptors. A changed metadata/receipt interval and each mutation key
-    /// can replace its routed base table, including any neighboring rows.
+    /// can replace its routed base table and manifest path, including neighbors.
     pub(super) async fn rewrite_bytes(
         &self,
         database: Database<'_>,
@@ -119,6 +119,7 @@ impl Snapshot {
         }));
         ranges.sort_unstable();
         let mut charged_through: Option<Bytes> = None;
+        let mut paths = Default::default();
         let mut bytes = 0u64;
         for (start, end) in ranges {
             if charged_through.as_ref().is_some_and(|last| last >= &end) {
@@ -141,13 +142,33 @@ impl Snapshot {
                     // 5*(14+k+v). Data size includes every row plus headers,
                     // so this covers any repacking, including new boundaries.
                     bytes = bytes
-                        .checked_add(5 * routed.reference.blobs()[0].size())
+                        .checked_add(
+                            5 * routed.reference.blobs()[0].size()
+                                + manifest.path_bytes(&mut paths),
+                        )
                         .context("checkpoint copy admission overflow")?;
                     charged_through = Some(routed.last.clone());
                 }
                 if routed.last >= end {
                     break;
                 }
+            }
+            if previous.is_none() {
+                // Appending beyond the last table still rewrites its manifest
+                // path. A forward seek may prune that path, so validate it in
+                // reverse. All later sorted ranges are also beyond the base.
+                let mut right = tree::Reader::seek_reverse(
+                    self.0.files.clone(),
+                    self.0.header.tree,
+                    None,
+                    self.0.cache.clone(),
+                )?;
+                if right.next().await?.is_some() {
+                    bytes = bytes
+                        .checked_add(right.path_bytes(&mut paths))
+                        .context("checkpoint manifest admission overflow")?;
+                }
+                break;
             }
         }
         Ok(bytes)

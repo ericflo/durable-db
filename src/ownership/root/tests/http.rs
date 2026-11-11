@@ -769,20 +769,25 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
 }
 
 // Price actual encoded data independently of admission; retain index identities
-// to detect which pairs changed. Reblocking allowance is five data bytes per byte.
+// to detect which pairs changed. These fixtures have one manifest node.
 async fn checkpoint_copy_allowances(
     files: &dyn Storage,
 ) -> std::collections::BTreeMap<String, u64> {
     let mut data = std::collections::BTreeMap::new();
     for key in files.list("tables/", None, 128).await.unwrap() {
         let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
-        if object.bytes.starts_with(b"DDBBLK01") || object.bytes.starts_with(b"DDBIDX01") {
+        if object.bytes.starts_with(b"DDBBLK01")
+            || object.bytes.starts_with(b"DDBIDX01")
+            || object.bytes.starts_with(b"DDBCPN01")
+        {
             data.insert(
                 key,
                 if object.bytes.starts_with(b"DDBBLK01") {
                     5 * object.bytes.len() as u64
-                } else {
+                } else if object.bytes.starts_with(b"DDBIDX01") {
                     0
+                } else {
+                    object.bytes.len() as u64
                 },
             );
         }
@@ -854,7 +859,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     }
     let a = format!("{base}/v1/databases/a/commit");
     let initial_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
-    assert_eq!(initial_tables.len(), 2, "one data/index pair");
+    assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
     let first_admission = 822 + initial_tables.values().sum::<u64>();
     // 250 journal + 170 row + 402 singleton block/index allowance bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
@@ -922,8 +927,8 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         .collect();
     assert_eq!(
         replaced.len(),
-        2,
-        "one new data/index pair after checkpoint"
+        3,
+        "one new data/index pair and manifest after checkpoint"
     );
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
     let second_total = first_admission + 818 + copies;

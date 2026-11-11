@@ -31,7 +31,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .unwrap();
     assert_eq!(
         cloud.read().await.unwrap().info["durable-db-format"],
-        "owned-candidate-18"
+        "owned-candidate-19"
     );
     let root = connection.root(ManualClock::default(), profile()).unwrap();
     root.observe().await.unwrap();
@@ -42,7 +42,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .last_mut()
         .unwrap()
         .info
-        .insert("durable-db-format".into(), "owned-candidate-17".into());
+        .insert("durable-db-format".into(), "owned-candidate-18".into());
     let before = cloud.calls.load(Ordering::SeqCst);
     assert!(matches!(root.observe().await, Err(Error::Incompatible)));
     assert!(

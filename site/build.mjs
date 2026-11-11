@@ -94,6 +94,7 @@ for (const file of [
   'checkpoint-retention-2026-11-10.json',
   'retained-row-reblocking-2026-11-10.json',
   'manifest-boundaries-2026-11-10.json',
+  'manifest-path-admission-2026-11-10.json',
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
   'placement-requests-candidate-2026-11-09.json',

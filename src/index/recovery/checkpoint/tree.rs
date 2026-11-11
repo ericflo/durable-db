@@ -183,6 +183,21 @@ pub(super) struct Reader {
     reuse: [Option<Blob>; MAX_HEIGHT + 1],
 }
 impl Reader {
+    /// Existing nodes on the most recently validated table's path. Rebuilding
+    /// a touched path can copy neighbors' descriptors even when their tables
+    /// remain unchanged. This excludes new entries and split overhead.
+    /// Sorted admission ranges need only the last charged node at each height.
+    pub fn path_bytes(&self, charged: &mut [Option<Blob>; MAX_HEIGHT + 1]) -> u64 {
+        self.reuse
+            .iter()
+            .zip(charged)
+            .filter_map(|(node, prior)| {
+                let blob = node.filter(|_| node != prior)?;
+                *prior = *node;
+                Some(blob.size())
+            })
+            .sum()
+    }
     pub fn new(files: Arc<dyn Storage>, root: Option<(u8, Blob)>) -> anyhow::Result<Self> {
         ensure!(
             root.is_none_or(|(h, _)| h as usize <= MAX_HEIGHT),

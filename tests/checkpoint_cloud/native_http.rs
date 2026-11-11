@@ -176,13 +176,18 @@ async fn checkpoint_copy_allowances(
     let mut data = std::collections::BTreeMap::new();
     for key in files.list("tables/", None, 128).await.unwrap() {
         let object = files.get(&key, 1024 * 1024).await.unwrap().unwrap();
-        if object.bytes.starts_with(b"DDBBLK01") || object.bytes.starts_with(b"DDBIDX01") {
+        if object.bytes.starts_with(b"DDBBLK01")
+            || object.bytes.starts_with(b"DDBIDX01")
+            || object.bytes.starts_with(b"DDBCPN01")
+        {
             data.insert(
                 key,
                 if object.bytes.starts_with(b"DDBBLK01") {
                     5 * object.bytes.len() as u64
-                } else {
+                } else if object.bytes.starts_with(b"DDBIDX01") {
                     0
+                } else {
+                    object.bytes.len() as u64
                 },
             );
         }
@@ -226,7 +231,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     }
     let commit = "/v1/databases/a/commit";
     let initial_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
-    assert_eq!(initial_tables.len(), 2, "one data/index pair");
+    assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
     let initial_copies = initial_tables.values().sum::<u64>();
     let first_admission = 834 + initial_copies;
     // 254 journal + 174 row + 406 singleton block/index allowance bytes.
@@ -268,7 +273,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .iter()
         .filter(|(key, _)| !initial_tables.contains_key(*key))
         .collect();
-    assert_eq!(replaced.len(), 2, "one data/index pair");
+    assert_eq!(replaced.len(), 3, "one data/index pair and manifest");
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
     let second_admission = 834 + copies;
     server
@@ -477,7 +482,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
-        "admission_bytes_per_write":[first_admission,second_admission],"base_reblocking_allowance_per_write":[initial_copies,copies],
+        "admission_bytes_per_write":[first_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,

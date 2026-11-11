@@ -161,6 +161,70 @@ async fn open(files: Arc<Files>, reference: Reference, memory: usize) -> Databas
 }
 
 #[tokio::test]
+async fn append_admission_prices_the_rightmost_path_and_fails_closed() {
+    let files = Files::new();
+    let reference = fixture(files.clone()).await;
+    let snapshot = Snapshot::new(files.clone(), cache(1024 * 1024), reference);
+    let database = crate::transactions::record::Database {
+        name: "zzz",
+        ..db(7)
+    };
+    let mutations = [crate::transactions::record::Mutation {
+        key: "x",
+        value: None,
+    }];
+    files.keys.lock().unwrap().clear();
+    files.reads.store(0, Ordering::SeqCst);
+    let charged = snapshot.rewrite_bytes(database, &mutations).await.unwrap();
+    let keys: Vec<_> = files.keys.lock().unwrap().iter().cloned().collect();
+    assert_eq!(keys.len(), 2, "only the root and rightmost leaf");
+    assert_eq!(
+        files.reads.load(Ordering::SeqCst),
+        2,
+        "the reverse seek reuses the cached root"
+    );
+    let mut actual = 0;
+    for key in &keys {
+        let bytes = files
+            .inner
+            .get(key, 144 * 1024)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes;
+        assert!(
+            bytes.starts_with(b"DDBCPN01"),
+            "pricing must not read table data or indexes"
+        );
+        actual += bytes.len() as u64;
+    }
+    assert_eq!(
+        charged, actual,
+        "an append pays for the complete existing path once"
+    );
+    assert_eq!(
+        snapshot.rewrite_bytes(database, &mutations).await.unwrap(),
+        charged
+    );
+    assert_eq!(
+        files.reads.load(Ordering::SeqCst),
+        2,
+        "warm pricing needs no provider reads"
+    );
+
+    let root = reference.tree.unwrap().1.key();
+    let leaf = keys.iter().find(|key| **key != root).unwrap();
+    files.inner.delete(leaf).await.unwrap();
+    let cold = Snapshot::new(files.clone(), cache(0), reference);
+    let puts = files.puts.load(Ordering::SeqCst);
+    assert!(
+        cold.rewrite_bytes(database, &mutations).await.is_err(),
+        "an absent append-path node cannot be priced as zero"
+    );
+    assert_eq!(files.puts.load(Ordering::SeqCst), puts);
+}
+
+#[tokio::test]
 async fn checkpoint_repacking_preserves_unmodified_manifest_siblings() {
     use crate::transactions::{
         record::{Commit, Mutation},
@@ -300,6 +364,55 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
             .iter()
             .all(|key| !table_sizes.contains_key(key) && !idle.contains(key))
     );
+    let priced_nodes: std::collections::BTreeSet<_> =
+        files.keys.lock().unwrap().iter().cloned().collect();
+    assert_eq!(priced_nodes.len(), 2, "the affected leaf and its root");
+    let mut path_bytes = 0;
+    for key in priced_nodes {
+        path_bytes += files
+            .inner
+            .get(&key, 144 * 1024)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .len() as u64;
+    }
+    // Generation 8 spans two leaves. The root is charged once across both
+    // seeks, while the second leaf must not inherit the first leaf's credit.
+    assert!(
+        copies >= path_bytes,
+        "existing manifest bytes must be admitted"
+    );
+    files.keys.lock().unwrap().clear();
+    let across = projection
+        .checkpoint_rewrite_bytes(
+            db(8),
+            &[Mutation {
+                key: "k/0179",
+                value: None,
+            }],
+        )
+        .await
+        .unwrap();
+    let nodes: std::collections::BTreeSet<_> = files.keys.lock().unwrap().iter().cloned().collect();
+    assert_eq!(nodes.len(), 3, "two leaves and their shared root");
+    let mut across_path_bytes = 0;
+    for key in nodes {
+        across_path_bytes += files
+            .inner
+            .get(&key, 144 * 1024)
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes
+            .len() as u64;
+    }
+    assert_eq!(
+        across,
+        copies - path_bytes + across_path_bytes,
+        "equal-sized rows in both generations; pay each manifest node once"
+    );
     let state = projection
         .take_state(db(7))
         .await
@@ -326,8 +439,9 @@ async fn checkpoint_rewrite_skips_idle_tenant_indexes_and_checks_exact_upper_bou
         .filter_map(|key| table_sizes.get(key))
         .sum();
     assert_eq!(
-        copies, copied,
-        "admission covers every rewritten base table, including an exact upper-bound deletion"
+        copies,
+        copied + path_bytes,
+        "three affected tables pay once for their shared manifest path"
     );
     assert_eq!(
         rewritten.rows,
