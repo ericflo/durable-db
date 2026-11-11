@@ -1,5 +1,38 @@
 # Verification results
 
+## v0.23.3 routing readiness during recovery (2026-11-11)
+
+[v0.23.3](https://github.com/ericflo/durable-db/releases/tag/v0.23.3) packages
+`5a69e41`, verified by [Woodpecker #220](https://ci.eflorenzano.com/repos/18/pipeline/220/1)
+and its tag pipeline. The controller keeps HTTP routing and administrator refill
+reachable during partition recovery or exhausted upload credit. Each database
+response still requires recovered ownership and a fresh permit; readiness grants
+no data-serving authority. The aggregate placement-readiness scan and flag resets
+were removed: 16 controller lines deleted, seven added. Formats are unchanged.
+
+All 324 enabled Rust checks, strict clippy, the routing model's 110 states and
+five negative controls pass. The downloaded static executable passes installation
+without a toolchain, transactions, ordered reads, export/restore and forced-stop
+recovery. Versioned MinIO also passes the strengthened sixteen-partition startup
+and zero-credit administrator/cold-recovery fixtures; this does not qualify AWS.
+
+The fresh B2/Kubernetes debug run completes 1→3→6, its short steady phase, forced
+pod loss, and rolling replacement plus aggregate write progress in about
+**85 seconds**, under the original one-slot policy and 240-second gate. It then
+fails one client's 180-second retry deadline during scale-down after provider
+interruption: **915 acknowledgements, 912 readbacks**, without final recovered
+history verification. This establishes rollout progress, not full writer recovery
+or a production SLO. [Exact scope and evidence](evidence/native-recovery-2026-11-11.json).
+
+The harness now requires two new verified readbacks from **every writer** before
+advancing to another fault. A focused regression detects the old aggregate-only
+check; timeout diagnostics identify read/commit and final HTTP status while
+redacting unknown response text. A fresh cloud run with that stronger barrier is
+still required. The unused rollout-headroom option was removed. Cleanup deleted
+the latest bucket/key/namespace and 1,211 B2 versions, plus the MinIO container,
+two buckets and 503 versions. The inconclusive prior headroom experiment removed
+its bucket/key/namespace and 481 versions before reaching rolling replacement.
+
 ## v0.23.2 same-owner acquisition recovery (2026-11-11)
 
 [v0.23.2](https://github.com/ericflo/durable-db/releases/tag/v0.23.2) packages
@@ -28,8 +61,9 @@ The namespace, bucket, scoped key and 611 physical versions were removed. An
 image-address error was corrected before the workload started in a separate
 empty fixture. Cleanup also removed an obsolete three-node local kind cluster,
 its credentials, temporary contexts and the duplicated validation/reporting code.
-The next experiment varies replacement headroom within the same fixed quota;
-the production gates remain open.
+The following headroom experiment failed at pod-loss recovery before exercising
+its new setting; the option was removed. v0.23.3 addresses HTTP readiness.
+The production gates remain open.
 
 ## v0.23.1 recovery progress fixes (2026-11-11)
 

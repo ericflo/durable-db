@@ -828,4 +828,32 @@ checks remain. `OwnerRouting` includes independent readiness changes and a
 negative control granting a response from readiness alone. The disposable CLI
 startup fixture now requires authenticated absent-database responses from all
 sixteen partitions, so the broader probe cannot make that check pass early.
-Cloud rollout qualification of this change remains open.
+The cloud observations below distinguish rollout completion from writer recovery.
+
+Both updated CLI fixtures pass on versioned MinIO at `5a69e41`: all sixteen
+partitions answer in 1.46 seconds, and zero-credit administrator refill plus
+cold values/receipt recovery takes 5.11 seconds. The two buckets, 503 physical
+versions and temporary container were removed. This is not AWS or Kubernetes
+qualification. The attempted three-slot rollout experiment on the preceding
+binary failed at pod-loss recovery before it exercised that setting; its
+temporary configuration option was removed. The maintained harness retains the
+original one-slot rollout and 240-second deadline.
+
+
+At `cbf4a70`, the B2/Kubernetes debug campaign completes rolling replacement and
+aggregate write progress in about 85 seconds with the original one-slot policy
+and 240-second deadline. It later fails one client retry deadline during scale-down
+after provider interruption. Its partial snapshot has 915 acknowledgements and
+912 readbacks; it never reaches final recovered-history verification. All task
+resources and 1,211 physical versions were removed. This is not full recovery or
+a production latency/availability claim.
+
+The old harness could advance a phase while one writer remained stalled. It now
+requires two further verified readbacks from each of four writers before advancing,
+including after the steady pilot. A temporary regression executes the actual
+progress function against a ten-write single-writer advance: the previous function
+accepts it, while the corrected function waits for the other writers' readbacks.
+Timeout diagnostics identify the operation and last HTTP/refusal category without
+recording arbitrary response text; both classification and redaction were checked.
+Existing campaigns retain their aggregate-only scope. The next cloud campaign must
+use this stronger per-writer barrier to isolate the stalled operation.

@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.23.2. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.23.3. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,7 +142,7 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-Native B2/Kubernetes qualification has reached six pods and recovered from forced pod loss. Rolling replacement still misses its deadline; provider interruption, scale-down and cold replacement remain unqualified. Recovery preserves pending work, checkpoints inherited idle history and validates uncertain claims/activation on the same owner. Performance and failure qualification remain open.
+Native B2/Kubernetes qualification reaches six pods and completes rolling replacement. A writer still timed out during the following provider-interruption/scale-down sequence, so complete recovery remains unqualified. Routing and administrator access now stay reachable during partition recovery, and uncertain claims/activation validate the same owner. Performance and failure qualification remain open.
 
 The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) lists the remaining gates, their rough size and what can wait until after 1.0. [Verification results](docs/verification-results.md) record each release and its evidence; [backup and restore](docs/recovery.md#local-format-upgrades) covers format compatibility and upgrades.
 
