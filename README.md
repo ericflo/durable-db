@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental, v0.18.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental, v0.18.1. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -135,10 +135,10 @@ This is the contract the first production release must qualify:
 | State | Today |
 | --- | --- |
 | **Ready to try** | Local mode on the native engine: one process, one directory, automatic checkpoints, cleanup and crash recovery. The HTTP API with scoped, revocable tokens and per-database quotas. The TypeScript SDK. Consistent export and resumable restore. |
-| **Experimental** | Cluster mode on S3 and B2. It passes fault-injection, real-provider and Kubernetes scaling tests but does not meet its performance targets. Native owned partitions are replacing it. Durable per-database upload budgets for fresh cloud namespaces. |
+| **Experimental** | Cluster mode on S3 and B2. It passes fault-injection, real-provider and Kubernetes scaling tests but does not meet its performance targets. Native owned partitions are replacing it. Namespace upload ceilings in cloud CLI mode; per-database admission and maintenance funding in the experimental native library. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-Each [release gate](docs/production-readiness.md) closes only with reproducible evidence. Release-by-release changes and their evidence are in [verification results](docs/verification-results.md); format compatibility and upgrades are in [backup and restore](docs/recovery.md#local-format-upgrades).
+The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) identifies the remaining work, its rough size and what can wait until after 1.0. Native cluster timing and placement are the largest current blocker. Each gate closes only with reproducible evidence. Release-by-release changes and their evidence are in [verification results](docs/verification-results.md); format compatibility and upgrades are in [backup and restore](docs/recovery.md#local-format-upgrades).
 
 ## Verification
 
