@@ -440,3 +440,142 @@ async fn invalid_cluster_configuration_cannot_acquire_or_change_the_layout() {
         assert_eq!(provider.calls.load(Ordering::SeqCst), before);
     }
 }
+
+#[tokio::test]
+async fn a_failed_partition_does_not_starve_later_acquisitions() {
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = Node::start(directory.clone(), listener, vec![]).await;
+    let first = directory
+        .partition(0, UploadLimits::default())
+        .await
+        .unwrap();
+    let original = first.authority().read().await.unwrap();
+    let mut damaged = original.info.clone();
+    damaged.insert("durable-db-format".into(), "unsupported".into());
+    first
+        .authority()
+        .replace(&original, damaged)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while node
+            .cluster
+            .resolve(&names()[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation()
+            .is_none()
+        {
+            node.members(&[node.address]);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("another partition's failure cannot pin the retry cursor");
+    assert!(
+        node.cluster
+            .resolve(&names()[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation()
+            .is_none()
+    );
+    let token = auth().administrator_token(600).unwrap();
+    node.server
+        .ok(
+            "PUT",
+            &format!("/v1/databases/{}", names()[1]),
+            &token,
+            json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
+    let damaged = first.authority().read().await.unwrap();
+    first
+        .authority()
+        .replace(&damaged, original.info)
+        .await
+        .unwrap()
+        .unwrap();
+    node.members(&[node.address]);
+    settled(&[&node], &[node.address]).await;
+}
+
+struct PausedPermit {
+    inner: Arc<Remote>,
+    pause: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait]
+impl crate::storage::Storage for PausedPermit {
+    async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<crate::storage::Object>> {
+        if key.contains("/permits/") && self.pause.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.get(key, max).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        size: u64,
+    ) -> anyhow::Result<bytes::Bytes> {
+        self.inner.get_range(key, range, size).await
+    }
+    async fn put(&self, key: &str, bytes: bytes::Bytes) -> anyhow::Result<()> {
+        self.inner.put(key, bytes).await
+    }
+    async fn cas(
+        &self,
+        key: &str,
+        old: Option<&crate::storage::Version>,
+        bytes: bytes::Bytes,
+    ) -> anyhow::Result<bool> {
+        self.inner.cas(key, old, bytes).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        self.inner.list(prefix, after, limit).await
+    }
+    async fn delete(&self, key: &str) -> anyhow::Result<()> {
+        self.inner.delete(key).await
+    }
+}
+#[tokio::test]
+async fn routine_health_validation_does_not_clear_readiness() {
+    let provider = Provider::new();
+    let files = Arc::new(PausedPermit {
+        inner: provider.files.clone(),
+        pause: AtomicBool::new(false),
+        entered: Default::default(),
+        release: Default::default(),
+    });
+    let directory = Connection::new(files.clone(), provider, "test")
+        .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let node = Node::start(directory, listener, vec![address]).await;
+    settled(&[&node], &[address]).await;
+    files.pause.store(true, Ordering::SeqCst);
+    node.members(&[address]);
+    tokio::time::timeout(Duration::from_secs(2), files.entered.notified())
+        .await
+        .unwrap();
+    assert!(
+        node.cluster.ready().await,
+        "a routine permit probe is not a placement loss"
+    );
+    files.release.notify_one();
+}

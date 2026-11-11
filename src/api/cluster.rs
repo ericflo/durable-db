@@ -95,6 +95,7 @@ impl Cluster {
         let worker = tokio::spawn(async move {
             let mut retry = tokio::time::interval(Duration::from_secs(3));
             retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut cursor = 0;
             loop {
                 tokio::select! {
                     _ = retry.tick() => (),
@@ -106,8 +107,11 @@ impl Cluster {
                 };
                 // The deadline changes availability only. A canceled claim may
                 // still publish; its persisted registration remains discoverable.
-                let result =
-                    tokio::time::timeout(Duration::from_secs(30), cluster.reconcile(&peers)).await;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    cluster.reconcile(&peers, &mut cursor),
+                )
+                .await;
                 if !matches!(result, Ok(Ok(()))) {
                     cluster.ready.store(false, Ordering::Release);
                     tracing::warn!("native placement incomplete; retrying");
@@ -126,31 +130,55 @@ impl Cluster {
             partition.local.write().await.take();
         }
     }
-    async fn reconcile(&self, peers: &[SocketAddr]) -> anyhow::Result<()> {
-        self.ready.store(false, Ordering::Release);
+    async fn reconcile(&self, peers: &[SocketAddr], cursor: &mut usize) -> anyhow::Result<()> {
         let peers = membership(peers)?;
-        // Retire every removed placement before doing any potentially slow I/O.
-        for (id, partition) in self.partitions.iter().enumerate() {
-            if preferred(id as u32, &peers) != Some(self.config.address) {
+        let present = peers.contains(&self.config.address);
+        if !present {
+            self.ready.store(false, Ordering::Release);
+        }
+        let desired: Vec<_> = (0..self.partitions.len())
+            .map(|id| preferred(id as u32, &peers) == Some(self.config.address))
+            .collect();
+        // Retire removed placements before I/O. A routine health sweep keeps
+        // readiness until an actual loss; it must not flap on every retry tick.
+        for (partition, wanted) in self.partitions.iter().zip(&desired) {
+            if !wanted {
                 partition.local.write().await.take();
             }
         }
-        for (id, partition) in self.partitions.iter().enumerate() {
-            if preferred(id as u32, &peers) != Some(self.config.address) {
+        let mut checked = 0;
+        for _ in 0..self.partitions.len() {
+            let id = *cursor;
+            // Advance before I/O, so failure or cancellation cannot starve the
+            // next partition. Limit work even when the provider is healthy.
+            *cursor = (id + 1) % self.partitions.len();
+            if !desired[id] {
                 continue;
             }
+            let partition = &self.partitions[id];
             let local = partition.local.read().await.clone();
-            if let Some(local) = local
-                && local.ready().await
-            {
-                continue;
+            let healthy = match local {
+                Some(local) => local.ready().await,
+                None => false,
+            };
+            if !healthy {
+                self.ready.store(false, Ordering::Release);
+                partition.local.write().await.take();
+                let local = self.acquire(&partition.connection).await?;
+                *partition.local.write().await = Some(Arc::new(local));
             }
-            partition.local.write().await.take();
-            let local = self.acquire(&partition.connection).await?;
-            *partition.local.write().await = Some(Arc::new(local));
+            checked += 1;
+            if checked == 8 {
+                break;
+            }
         }
-        self.ready
-            .store(peers.contains(&self.config.address), Ordering::Release);
+        let mut complete = present;
+        for (partition, wanted) in self.partitions.iter().zip(desired) {
+            if wanted && partition.local.read().await.is_none() {
+                complete = false;
+            }
+        }
+        self.ready.store(complete, Ordering::Release);
         Ok(())
     }
     async fn acquire(&self, connection: &Connection) -> anyhow::Result<Native> {

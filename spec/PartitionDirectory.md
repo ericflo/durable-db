@@ -91,8 +91,10 @@ therefore discovers/revokes any abandoned winner through its registration chain.
 These are the existing `RootAcquisition`, `RootRegistration`, `RevocableOwner`
 and replay obligations, not a second ownership protocol.
 
-Reconciliation is serialized per process and bounded by the configured partition
-count. Membership updates and a retry timer trigger it. Timers affect progress
+Reconciliation is serialized per process. Each pass checks at most eight owned
+partitions and advances a rotating cursor before I/O, including failed or
+canceled attempts, so one failing partition cannot monopolize retries. Membership
+updates and a retry timer trigger it. Timers affect progress
 only. Removing a local placement drops its serving-map entry; already admitted
 requests retain the exact backend they selected and still validate its permit.
 An expected-incarnation header must be checked against that same pinned backend,
