@@ -56,6 +56,7 @@ def main():
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      upload_budget=dict(bytes=1073741824, attempts=100000),
+                                     tenant_upload_budget=dict(bytes=1073741824, attempts=100000),
                                      steady_seconds=args.steady_seconds, memory_observation=args.observe_memory,
                                      maximum_write_intents=100000),
                   phases=[], budget_observations=[], resource_samples=[], failures=[], limitations=[
@@ -120,7 +121,14 @@ def main():
         earlier = report['budget_observations']
         if any(status['allocated'][k]>status['limits'][k] or (earlier and status['allocated'][k]<earlier[-1]['status']['allocated'][k]) for k in ('bytes','attempts')):
             raise RuntimeError('Upload allocation decreased or exceeded its ceiling')
-        earlier.append(dict(stage=stage,status=status));save()
+        tenants=call('/tenant-budgets',{})
+        if len(tenants)!=4:raise RuntimeError('Expected four tenant budgets')
+        for index,tenant in enumerate(tenants):
+            if tenant['limits']!=report['configuration']['tenant_upload_budget'] or tenant['configuration_revision']!=1:
+                raise RuntimeError('Tenant upload ceilings changed')
+            if any(tenant['allocated'][k]>tenant['limits'][k] or (earlier and tenant['allocated'][k]<earlier[-1]['tenants'][index]['allocated'][k]) for k in ('bytes','attempts')):
+                raise RuntimeError('Tenant allocation decreased or exceeded its ceiling')
+        earlier.append(dict(stage=stage,status=status,tenants=tenants));save()
 
     def progress(additional=8):
         start = snapshot()['writes_acknowledged'];deadline=time.monotonic()+240
@@ -188,6 +196,7 @@ def main():
             return result
         finally:kube('delete','pod',name,'--wait=false')
 
+    save()
     try:
         if kube('get','namespace',namespace,'--ignore-not-found','-o','name').strip():
             raise RuntimeError('Test namespace already exists')
@@ -303,6 +312,8 @@ def main():
         save()
         if forward and forward.poll() is None:
             try:report['partial_workload']=call('/status?history=1',timeout=30)
+            except Exception:pass
+            try:report['final_tenant_budgets']=call('/tenant-budgets',{},timeout=60)
             except Exception:pass
         raise
     finally:

@@ -13,22 +13,31 @@ const names=Array.from({length:4},(_,i)=>`${prefix}-writer-${i}`);
 const tokens=[];
 let running=false, workers=[], commandBusy=false, issued=0;
 const maxIntents=100000;
+const tenantLimits={bytes:1024*1024*1024,attempts:100000};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const hash=value=>createHash('sha256').update(value).digest('hex');
 async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
   const encoded=body===undefined?undefined:JSON.stringify(body), start=performance.now();
   let attempts=0;
   for(;;) {
-    let code='transport_or_decode_error', result;
+    let code='transport_or_decode_error', result, refusal;
     try {
       const response=await fetch(origins[route++ % origins.length]+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
       code=String(response.status);
       if(response.ok) result=await response.json();
-      else await response.body?.cancel();
+      else if(response.status===413) {
+        const error=await response.json();
+        // Only fixed public refusal categories enter the report.
+        refusal=new Map([
+          ['database write admission budget exhausted','tenant_funding'],
+          ['database quota exceeded','logical_quota'],
+          ['read work budget exceeded; narrow the scan','scan_work'],
+        ]).get(error.message)??'resource_limit';
+      } else await response.body?.cancel();
     } catch { code='transport_or_decode_error'; }
     status.http_attempt_statuses[code]=(status.http_attempt_statuses[code]??0)+1;
     if(result!==undefined) return result;
-    if(!['transport_or_decode_error','409','429','500','502','503','504'].includes(code)) throw new Error(`Unexpected HTTP status ${code}`);
+    if(!['transport_or_decode_error','409','429','500','502','503','504'].includes(code)) throw new Error(`Unexpected HTTP status ${code}${refusal?' ('+refusal+')':''}`);
     if(performance.now()-start>180000) throw new Error('Identical-request recovery deadline exceeded');
     await sleep(Math.min(++attempts*100,1000));
   }
@@ -104,6 +113,7 @@ createServer(async(request,response)=>{
     } else if(request.url==='/pause'){await pause();result={paused:true};}
     else if(request.url==='/verify')result=await verify();
     else if(request.url==='/budget')result=await rpc('/v1/storage/upload-budget');
+    else if(request.url==='/tenant-budgets')result=await Promise.all(names.map(name=>rpc(`/v1/databases/${name}/upload-budget`)));
     else throw new Error('Unsupported command');
     response.end(JSON.stringify(result));
   } catch(error){response.writeHead(500).end(JSON.stringify({error:error.message}));}
@@ -111,6 +121,7 @@ createServer(async(request,response)=>{
 }).listen(9001,'0.0.0.0');
 try {
   for(const name of names) {
+    await rpc(`/v1/databases/${name}/upload-budget`,{request_id:'fund-campaign',expected_configuration_revision:0,limits:tenantLimits});
     await rpc(`/v1/databases/${name}`,{request_id:randomUUID(),limits:{max_bytes:16*1024*1024,max_keys:100000}},admin,'PUT');
     tokens.push((await rpc('/v1/tokens',{database:name,write:true,ttl_seconds:14400})).token);
   }

@@ -1,5 +1,54 @@
 # Verification results
 
+## Native cloud CLI candidate (2026-11-11)
+
+The v0.23.0 candidate on `main` integrates headless-service DNS discovery, native
+cloud serving for B2 and S3, and aggregate resident index/validation/journal
+budgets. Resident reservations survive retirement and pending I/O. Cloud startup
+requires upload ceilings and preserves administrator access before owners are
+ready, including a fresh zero-credit namespace. Prior cloud formats require
+export with their previous binary and restore into a fresh namespace; local
+format 15 remains compatible.
+
+Qualification found and fixed three progress problems: a 429 response could pin
+a stale route, a whole-recovery timeout repeatedly abandoned useful acquisition,
+and every partition scheduled the same shared directory collector. A further
+failure showed an uncertain absent journal upload polling forever. The native
+worker now retires in that case; ordinary reacquisition revokes its permit and
+selects its durable prefix. A delayed old PUT after the successor commits remains
+excluded through another reopen. Absence never proves an abort or authorizes
+repeating the original physical PUT.
+
+All 320 enabled Rust checks, formatting and strict clippy pass. The routing,
+residency, layout, collection and revocation models retain their negative
+controls. Focused Rust mutations detect premature resident release, eager
+zero-credit initialization, stale-route caching, a whole-recovery deadline and
+indefinite unresolved-upload polling.
+
+At `14ba978`, the actual debug CLI passes zero-credit bootstrap, refill, three cold
+processes, exact receipts and incompatible-layout refusal on B2 in 74.864 seconds
+and versioned MinIO in 4.628 seconds. Default sixteen-partition startup passes in
+129.345 and 2.027 seconds respectively. Earlier B2 default startup exceeded 240
+seconds; two Kubernetes candidates failed readiness/convergence, and a recovery
+run exposed the indefinite polling defect. Failed attempts remain recorded.
+The final Kubernetes image passes one-to-three-to-six-pod readiness on the existing
+hosts, then the steady phase stops with an unclassified HTTP 413 after 874
+acknowledged and read-back writes. A separate MinIO reproduction exhausts the
+default 64 MiB tenant allowance on its fourth cold owner, with only 300 tiny
+appends: unused grants are deliberately lost across ownership changes. The
+qualification fixture now preprovisions finite tenant ceilings and records their
+monotone counters alongside the unchanged shared physical ceiling. Grant sizing
+and default-quota usability remain production work, not claims that larger test
+allowances solve tenant isolation. All completed disposable runs removed their
+buckets, keys and containers.
+[Evidence](evidence/native-cloud-cli-2026-11-11.json).
+
+This candidate is not yet published as v0.23.0. Native Kubernetes scaling and the
+production operating envelope remain under qualification. MinIO results do not
+qualify AWS S3; component budgets do not establish an RSS bound. The old cloud CLI
+serving/maintenance branch and six obsolete qualification scripts (827 lines)
+were removed, along with an orphaned publication working-design document. Historical evidence keeps its original engine and deployment scope.
+
 ## v0.22.0 membership-driven native placement (2026-11-11)
 
 [v0.22.0](https://github.com/ericflo/durable-db/releases/tag/v0.22.0) packages `9dfd19a`, verified by [Woodpecker #199](https://ci.eflorenzano.com/repos/18/pipeline/199/1). The independently downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that identical binary. The release tag pipeline also passes. Both 99-test JavaScript/Pi contracts and the optimized 10,005-database regression (199.28 seconds) pass.

@@ -16,6 +16,13 @@ Requests arriving elsewhere are forwarded once to an advertised owner incarnatio
 
 A transaction operates within one database and names the revision it read. Admission validates its scope, logical quotas, receipt identity and resource allowances before accepting a new revision. An immutable journal upload can group transactions; only a contiguous durable prefix becomes readable. Acknowledgement also requires current serving permission. A rejected or uncertain upload cannot create a successful receipt by observation alone.
 
+An uncertain journal PUT is resolved by an exact GET. If its frame is present,
+normal confirmation can continue; if absent, the worker retires so the cluster
+can reacquire, revoke and select the old journal prefix. It never repeats the
+uncertain physical PUT or treats absence as proof of abort. A late old frame
+outside the selected prefix cannot enter recovered state. Local mode reports
+unavailability and requires reopening its directory after this failure.
+
 Receipts bind the original request body and return its original result on an identical retry. A conflicting body reusing the ID is refused. The cloud CLI retains a 128-commit retry window; callers must resolve uncertainty within that window. Transactions spanning databases are not supported.
 
 Durable upload allowances cover immutable PUT attempts, including unsuccessful or uncertain attempts. The namespace ceiling covers data and metadata; tenant admission and maintenance reserves supply additional isolation. Volatile unused rights are stranded on process loss rather than recreated from observations. The namespace administrator can inspect and refill its ceiling before partition owners become ready. Full administrative/egress accounting remains a production gate.
@@ -30,7 +37,7 @@ Aggregate index/validation counts and payload allowances, and journal bytes, are
 
 ## Collection without leases or clock assumptions
 
-Each native worker schedules bounded maintenance. Checkpoints let the collector reclaim covered journal frames and obsolete tables/manifests while retaining live checkpoint references and explicit retained images. Shared-directory maintenance reclaims its obsolete metadata. B2 deletion removes physical file versions, rather than leaving billable hidden versions.
+Each native worker collects its own partition. The peer preferred for partition zero schedules shared-directory cleanup once per interval, independently of readiness; disagreement can run concurrent collectors safely. Checkpoints let collectors reclaim covered journal frames and obsolete tables/manifests while retaining live checkpoint references and explicit retained images. B2 deletion removes physical file versions, rather than leaving billable hidden versions.
 
 Collection lists candidates before obtaining its publication fence and deletes only listed, unreachable objects. Failed or ambiguous fences grant no deletion authority. A paused publisher must lose the relevant comparison; a restarted collector begins a fresh attempt. External lifecycle/retention rules must neither delete live objects nor prevent required reclamation. Registration/catalog-header reclamation and complete growth qualification remain open.
 
