@@ -373,3 +373,62 @@ async fn native_cloud_cli_recovers_exhausted_admission_and_preserves_data() {
         "scope":"Debug executable with single-process membership over real B2/versioned MinIO. Not DNS/Kubernetes, AWS, a sustained workload or an RSS/SLO bound."
     })).unwrap()).unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires explicitly disposable B2/S3 bucket and report path"]
+async fn native_default_cli_starts_sixteen_partitions() {
+    assert_eq!(std::env::var("DURABLE_DB_DISPOSABLE").as_deref(), Ok("1"));
+    let provider = std::env::var("DURABLE_DB_TEST_PROVIDER").unwrap();
+    assert!(matches!(provider.as_str(), "b2" | "s3"));
+    let bucket = std::env::var("DURABLE_DB_TEST_BUCKET").unwrap();
+    assert!(bucket.starts_with("durable-db-test-"));
+    let report = std::env::var("DURABLE_DB_NATIVE_HTTP_REPORT").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("admin.key"), "2a".repeat(32)).unwrap();
+    let prefix = format!("default-{}", uuid::Uuid::new_v4());
+    let mut server = Server::start(dir.path(), &provider, &bucket, &prefix, 16).await;
+    server.health("/health/live").await;
+    server
+        .call(
+            "POST",
+            "/v1/storage/upload-budget",
+            json!({
+                "request_id":"startup-credit", "expected_configuration_revision":0,
+                "limits":{"bytes":1073741824,"attempts":100000}
+            }),
+        )
+        .await;
+    let started = Instant::now();
+    // Preserve safe, fixed-stage diagnostics even if the startup deadline fails.
+    let ready = tokio::time::timeout(Duration::from_secs(240), async {
+        loop {
+            assert!(server.child.try_wait().unwrap().is_none());
+            if server
+                .client
+                .get(format!("{}/health/ready", server.url))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                == StatusCode::OK
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let log = std::fs::read_to_string(&server.log).unwrap();
+    std::fs::write(
+        std::path::Path::new(&report).with_extension("server.log"),
+        log,
+    )
+    .unwrap();
+    std::fs::write(report, serde_json::to_vec_pretty(&json!({
+        "native_default_cli_ready":ready, "partitions":16,
+        "startup_seconds":started.elapsed().as_secs_f64(),
+        "scope":"One debug process, default partition count and resident allowance, automatic maintenance, 1 GiB / 100,000 PUT ceiling; startup only, not Kubernetes or a throughput/RSS claim."
+    })).unwrap()).unwrap();
+    assert!(ready, "default partition layout startup deadline");
+}

@@ -199,7 +199,7 @@ impl Cluster {
             if !healthy {
                 self.ready.store(false, Ordering::Release);
                 partition.local.write().await.take();
-                let local = self.acquire(&partition.connection).await?;
+                let local = self.acquire(id as u32, &partition.connection).await?;
                 *partition.local.write().await = Some(Arc::new(local));
                 // Never spend another owner's recovery deadline on this one.
                 // A successful acquisition schedules the next pass immediately.
@@ -220,44 +220,59 @@ impl Cluster {
         self.ready.store(complete, Ordering::Release);
         Ok(acquired)
     }
-    async fn acquire(&self, connection: &Connection) -> anyhow::Result<Native> {
-        let reservation = self
-            .residents
-            .clone()
-            .try_acquire_owned()
-            .context("retired owners still occupy the resident budget")?;
-        connection
-            .initialize_upload_budget(self.config.upload_limits)
-            .await?;
-        // A bootstrap upload grant can invalidate a captured comparison. Only
-        // definite conflicts get a fresh attempt here; uncertainty returns.
-        for _ in 0..4 {
-            let mut root = connection.root()?.advertise(self.config.address)?;
-            let observed = root.observe().await?;
-            let claim = root.claim(observed)?;
-            match root.finish(claim.execute().await)? {
-                Outcome::Confirmed => (),
-                Outcome::Conflict => continue,
-                _ => anyhow::bail!("ownership claim unconfirmed"),
-            }
-            let activate = root.activate()?;
-            ensure!(
-                matches!(root.finish(activate.execute().await)?, Outcome::Confirmed),
-                "ownership activation unconfirmed"
-            );
-            root.select_journals().await?;
-            let owner = Opening::new(root, self.limits, self.cache.clone())?
-                .recover()
+    async fn acquire(&self, id: u32, connection: &Connection) -> anyhow::Result<Native> {
+        let mut stage = "resident";
+        let result = async {
+            let reservation = self
+                .residents
+                .clone()
+                .try_acquire_owned()
+                .context("retired owners still occupy the resident budget")?;
+            stage = "budget";
+            connection
+                .initialize_upload_budget(self.config.upload_limits)
                 .await?;
-            return Native::start_reserved(
-                owner,
-                self.config.capacity,
-                self.config.maintenance,
-                Some(reservation),
-            )
-            .map_err(anyhow::Error::from);
+            // A bootstrap upload grant can invalidate a captured comparison. Only
+            // definite conflicts get a fresh attempt here; uncertainty returns.
+            for _ in 0..4 {
+                let mut root = connection.root()?.advertise(self.config.address)?;
+                stage = "observe";
+                let observed = root.observe().await?;
+                stage = "claim";
+                let claim = root.claim(observed)?;
+                match root.finish(claim.execute().await)? {
+                    Outcome::Confirmed => (),
+                    Outcome::Conflict => continue,
+                    _ => anyhow::bail!("ownership claim unconfirmed"),
+                }
+                stage = "activate";
+                let activate = root.activate()?;
+                ensure!(
+                    matches!(root.finish(activate.execute().await)?, Outcome::Confirmed),
+                    "ownership activation unconfirmed"
+                );
+                stage = "select_journals";
+                root.select_journals().await?;
+                stage = "recover";
+                let owner = Opening::new(root, self.limits, self.cache.clone())?
+                    .recover()
+                    .await?;
+                stage = "serve";
+                return Native::start_reserved(
+                    owner,
+                    self.config.capacity,
+                    self.config.maintenance,
+                    Some(reservation),
+                )
+                .map_err(anyhow::Error::from);
+            }
+            anyhow::bail!("ownership claim remained contended")
         }
-        anyhow::bail!("ownership claim remained contended")
+        .await;
+        if result.is_err() {
+            tracing::warn!(partition = id, stage, "native acquisition failed");
+        }
+        result
     }
 }
 impl Drop for Cluster {
