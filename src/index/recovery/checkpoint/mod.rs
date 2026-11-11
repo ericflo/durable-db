@@ -66,6 +66,56 @@ fn copy_contribution(data_bytes: u64) -> u64 {
 }
 
 impl Projection {
+    /// Recompute the attempt allowance from the exact recovered projection.
+    /// Old receipts are covered by base copies; only new receipts add rows.
+    pub(crate) async fn checkpoint_charges(
+        &self,
+    ) -> anyhow::Result<std::collections::BTreeMap<(String, Uuid), u64>> {
+        let mut charges = std::collections::BTreeMap::new();
+        for ((name, generation), resident) in &self.databases {
+            if !resident.changed() {
+                continue;
+            }
+            let state = resident
+                .state
+                .as_ref()
+                .context("checkpoint metadata is incomplete")?;
+            state.checkpoint_complete()?;
+            let database = Database {
+                name,
+                generation: *generation,
+            };
+            let prefix = name.len() + 18;
+            let base_revision = resident.base.as_ref().map_or(0, DatabaseSnapshot::revision);
+            let rows: Vec<_> = resident.memory.scan(b"", None, state.revision())?.collect();
+            let mutations: Vec<_> = rows
+                .iter()
+                .map(|row| {
+                    Ok(Mutation {
+                        key: std::str::from_utf8(&row.key)?,
+                        value: row.value.as_deref(),
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            let direct = row_contribution(prefix, 32)
+                + state
+                    .checkpoint_receipts()
+                    .filter(|(revision, _, _)| *revision > base_revision)
+                    .map(|(_, request, _)| row_contribution(prefix + request.len(), 32))
+                    .sum::<usize>()
+                + mutations
+                    .iter()
+                    .map(|m| row_contribution(prefix + m.key.len(), m.value.map_or(0, <[u8]>::len)))
+                    .sum::<usize>();
+            let cost = self
+                .checkpoint_rewrite_bytes(database, &mutations)
+                .await?
+                .checked_add(direct as u64)
+                .context("checkpoint allowance overflow")?;
+            charges.insert((name.clone(), *generation), cost);
+        }
+        Ok(charges)
+    }
     pub(crate) async fn checkpoint_rewrite_bytes(
         &self,
         database: Database<'_>,

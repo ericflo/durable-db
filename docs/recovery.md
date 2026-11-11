@@ -32,7 +32,7 @@ This produces the same bounded, checksummed archive as HTTP export below. Use th
 
 ## Local format upgrades
 
-v0.17.0 retains both v0.16.0 formats: local `owned-candidate-15` and budgeted native `owned-candidate-20`. Local directories from v0.9.0 onward remain compatible. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions. Budgeted native serving refuses v0.15.0 and earlier accounting policies and requires a fresh namespace when moving from those versions. There is no in-place budgeted-native migration. This does not change the cloud CLI publication format.
+v0.18.0 retains local `owned-candidate-15`: local directories from v0.9.0 onward reopen directly, preserving values, revisions and receipts. No export is required between these local versions. Budgeted native serving now uses `owned-candidate-21` for durable maintenance funding and refuses all earlier budgeted accounting policies, including v0.17.0. It requires a fresh namespace; there is no in-place budgeted-native migration. This does not change the cloud CLI publication format.
 
 v0.9.0 switched local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
 

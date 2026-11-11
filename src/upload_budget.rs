@@ -55,6 +55,16 @@ pub struct UploadStatus {
     pub configuration_revision: u64,
     pub limits: UploadLimits,
     pub allocated: UploadLimits,
+    /// Tenant-only reserve. Admission rights are volatile; these unissued
+    /// maintenance bytes remain durable until an attempt claims them by CAS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<MaintenanceBudget>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceBudget {
+    pub funded_bytes: u64,
+    pub allocated: UploadLimits,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +98,7 @@ impl Record {
                 configuration_revision: 0,
                 limits: UploadLimits::default(),
                 allocated: UploadLimits::default(),
+                maintenance: None,
             },
             receipts: vec![],
         }
@@ -101,6 +112,14 @@ impl Record {
                 && self.receipts.len() <= RECEIPTS,
             "invalid upload budget counters"
         );
+        if let Some(maintenance) = &self.status.maintenance {
+            ensure!(
+                maintenance.allocated.attempts <= maintenance.allocated.bytes
+                    && maintenance.allocated.bytes <= maintenance.funded_bytes
+                    && maintenance.funded_bytes <= self.status.allocated.bytes,
+                "invalid maintenance reserve"
+            );
+        }
         let mut previous = 0;
         let mut ids = std::collections::BTreeSet::new();
         for receipt in &self.receipts {
@@ -141,6 +160,10 @@ fn record_info(info: &std::collections::BTreeMap<String, String>) -> anyhow::Res
             .context("missing authoritative upload budget")?,
     )?;
     record.validate()?;
+    ensure!(
+        record.status.maintenance.is_none(),
+        "tenant reserve in namespace budget"
+    );
     Ok(record)
 }
 pub(crate) fn initial(limits: UploadLimits) -> anyhow::Result<String> {
@@ -150,6 +173,7 @@ pub(crate) fn initial(limits: UploadLimits) -> anyhow::Result<String> {
             configuration_revision: 0,
             limits,
             allocated: UploadLimits::default(),
+            maintenance: None,
         },
         receipts: vec![],
     })?)
@@ -249,7 +273,10 @@ impl Allocator {
             let before = self.authority.read().await?;
             let mut record = self.record(&before).await?;
             let available = UploadLimits {
-                bytes: record.status.limits.bytes - record.status.allocated.bytes,
+                // Tenant grants prepay both admission and a separate durable
+                // maintenance reserve. Namespace physical grants are unchanged.
+                bytes: (record.status.limits.bytes - record.status.allocated.bytes)
+                    / if self.database.is_some() { 2 } else { 1 },
                 attempts: record.status.limits.attempts - record.status.allocated.attempts,
             };
             if available.bytes < needed.bytes || available.attempts < needed.attempts {
@@ -274,6 +301,10 @@ impl Allocator {
                 },
             };
             record.status.allocated.bytes += grant.bytes;
+            if let Some(maintenance) = &mut record.status.maintenance {
+                maintenance.funded_bytes += grant.bytes;
+                record.status.allocated.bytes += grant.bytes;
+            }
             record.status.allocated.attempts += grant.attempts;
             if self.publish(&before, &record).await? {
                 // No await/cancellation point between confirmed allocation
@@ -358,7 +389,11 @@ impl Allocator {
     }
     async fn record(&self, before: &Bucket) -> anyhow::Result<Record> {
         match &self.database {
-            Some(ledger) => Ok(ledger.read(before).await?.unwrap_or_else(Record::empty)),
+            Some(ledger) => Ok(ledger.read(before).await?.unwrap_or_else(|| {
+                let mut record = Record::empty();
+                record.status.maintenance = Some(MaintenanceBudget::default());
+                record
+            })),
             None => record(before),
         }
     }
@@ -386,6 +421,51 @@ impl Allocator {
 pub(crate) struct Files {
     pub(crate) inner: Arc<dyn Storage>,
     pub(crate) allocator: Arc<Allocator>,
+}
+
+/// A claimed checkpoint attempt cannot spend beyond its conservative allowance.
+/// The underlying namespace allocator still charges every physical PUT.
+pub(crate) struct Attempt {
+    inner: Arc<dyn Storage>,
+    remaining: std::sync::atomic::AtomicU64,
+}
+impl Attempt {
+    pub(crate) fn bounded(inner: Arc<dyn Storage>, bytes: u64) -> Arc<dyn Storage> {
+        Arc::new(Self {
+            inner,
+            remaining: std::sync::atomic::AtomicU64::new(bytes),
+        })
+    }
+}
+#[async_trait]
+impl Storage for Attempt {
+    async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        ensure!(!bytes.is_empty(), "empty checkpoint upload");
+        self.remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(bytes.len() as u64)
+            })
+            .map_err(|_| anyhow::anyhow!("checkpoint exceeded its funded allowance"))?;
+        self.inner.put(key, bytes).await
+    }
+    async fn get(&self, key: &str, max_bytes: usize) -> anyhow::Result<Option<Object>> {
+        self.inner.get(key, max_bytes).await
+    }
+    async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
+        bail!("checkpoint attempt only permits immutable writes")
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        self.inner.list(prefix, after, limit).await
+    }
+    async fn delete(&self, _: &str) -> anyhow::Result<()> {
+        bail!("checkpoint attempt cannot delete objects")
+    }
 }
 #[async_trait]
 impl Storage for Files {

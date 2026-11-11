@@ -50,6 +50,7 @@ struct Provider {
     lose_reply: AtomicBool,
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
+    pause_root: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -71,6 +72,7 @@ impl Provider {
             lose_reply: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
+            pause_root: AtomicBool::new(false),
             entered: Default::default(),
             release: Default::default(),
         })
@@ -109,7 +111,10 @@ impl Authority for Provider {
         info: BTreeMap<String, String>,
     ) -> anyhow::Result<Option<Bucket>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.pause.swap(false, Ordering::SeqCst) {
+        if self.pause.swap(false, Ordering::SeqCst)
+            || (old.info.get("durable-db-owned-root") != info.get("durable-db-owned-root")
+                && self.pause_root.swap(false, Ordering::SeqCst))
+        {
             self.entered.notify_one();
             self.release.notified().await;
         }

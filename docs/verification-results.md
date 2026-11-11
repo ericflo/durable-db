@@ -1,5 +1,13 @@
 # Verification results
 
+## v0.18.0 durable maintenance funding (2026-11-10)
+
+Native tenant byte grants now prepay separate admission rights and durable maintenance reserve. A checkpoint claims every participating tenant's conservative allowance in one conditional directory update before uploading. Retry and recovery consume fresh reserve; lost replies, cancellation and takeover never recreate spent rights. An exhausted group refuses without debiting a funded neighbor, and a user database named `durable-catalog` is charged normally. Resolving already staged publication makes no new claim.
+
+The updated two-tenant model checks 10,402 states and six required counterexamples. Rust regressions cover competing refills, lost funding replies, takeover, reserve exhaustion/refill, cancelled uploads, bounded physical attempts and collection races. Six deliberate Rust defects are detected. Formatting, strict clippy and all 300 enabled local Rust tests pass. The previous two-instance admission wrapper, duplicate ledger-writing path and obsolete retry-accounting documentation were removed; no dependency, journal or table encoding was added. [Milestone evidence](evidence/maintenance-funding-2026-11-10.json).
+
+Budgeted native format `owned-candidate-21` requires a fresh namespace. Local format `owned-candidate-15` and cloud CLI publication formats are unchanged. Finite reserve cannot fund unlimited faults: repeated failures can stop shared maintenance until an explicit refill. Administrative metadata, stronger tenant progress isolation, scheduled backups, physical ownership timing and AWS qualification remain open. This remains experimental.
+
 ## v0.17.0 retained checkpoint export (2026-11-10)
 
 [v0.17.0](https://github.com/ericflo/durable-db/releases/tag/v0.17.0) packages `f430354`, verified by [Woodpecker #166](https://ci.eflorenzano.com/repos/18/pipeline/166/1). The independently downloaded static binary passes transactions/retries, ordered reads, export/restore and forced-stop recovery. The public default installer installs that exact binary. The optimized 10,005-database capacity check passes in 198.47 seconds.

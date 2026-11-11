@@ -60,26 +60,38 @@ impl Ledger {
             "database upload ledger scope mismatch"
         );
         envelope.record.validate()?;
+        ensure!(
+            envelope.record.status.maintenance.is_some(),
+            "missing maintenance reserve"
+        );
         Ok(Some(envelope.record))
     }
     pub(super) async fn write(&self, before: &Bucket, record: &Record) -> anyhow::Result<String> {
+        Self::write_many(self.files.clone(), before, &[(&self.name, record)]).await
+    }
+    async fn write_many(
+        files: Arc<dyn Storage>,
+        before: &Bucket,
+        records: &[(&str, &Record)],
+    ) -> anyhow::Result<String> {
         // These metadata uploads pass through the namespace allocator. Its CAS
         // can invalidate `before`; a retry rebuilds from the new directory root.
-        let key = format!("manifests/{}.{}", self.name, Uuid::new_v4());
-        let bytes = Bytes::from(serde_json::to_vec(
-            &serde_json::json!({"database": self.name, "record": record}),
-        )?);
-        ensure!(bytes.len() <= 4096, "database upload ledger too large");
-        let pointer = Pointer {
-            key: key.clone(),
-            sha256: hex::encode(Sha256::digest(&bytes)),
-        };
-        self.files.put(&key, bytes).await?;
-        let root = Directory::new(self.files.clone())
-            .insert_many(
-                root(before)?.as_ref(),
-                &BTreeMap::from([(self.name.clone(), pointer)]),
-            )
+        let mut pointers = BTreeMap::new();
+        for (name, record) in records {
+            let key = format!("manifests/{}.{}", name, Uuid::new_v4());
+            let bytes = Bytes::from(serde_json::to_vec(
+                &serde_json::json!({"database": name, "record": record}),
+            )?);
+            ensure!(bytes.len() <= 4096, "database upload ledger too large");
+            let pointer = Pointer {
+                key: key.clone(),
+                sha256: hex::encode(Sha256::digest(&bytes)),
+            };
+            files.put(&key, bytes).await?;
+            pointers.insert((*name).to_owned(), pointer);
+        }
+        let root = Directory::new(files)
+            .insert_many(root(before)?.as_ref(), &pointers)
             .await?;
         Ok(serde_json::to_string(&root)?)
     }
@@ -108,10 +120,90 @@ impl Allocator {
             }
             let mut record = Record::empty();
             record.status.limits = DEFAULT_LIMITS;
+            record.status.maintenance = Some(MaintenanceBudget::default());
             if self.publish(&before, &record).await? {
                 return Ok(());
             }
         }
         bail!("database upload budget initialization contention budget exceeded")
+    }
+
+    /// Atomically claim every tenant's allowance before any checkpoint PUT.
+    /// A lost reply strands the entire attempt. No observation recreates it.
+    pub(crate) async fn fund_maintenance(
+        charges: &[(Arc<Self>, u64)],
+        check: impl Fn(&Bucket) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        let Some((first, _)) = charges.first() else {
+            return Ok(());
+        };
+        let mut remaining = Vec::with_capacity(charges.len());
+        let mut previous: Option<&str> = None;
+        for (allocator, _) in charges {
+            let name = &allocator
+                .database
+                .as_ref()
+                .context("expected tenant reserve")?
+                .name;
+            ensure!(
+                Arc::ptr_eq(&first.authority, &allocator.authority)
+                    && previous.is_none_or(|prior| prior < name.as_str()),
+                "maintenance charges must be unique, ordered and in one namespace"
+            );
+            previous = Some(name);
+            remaining.push(allocator.remaining.lock().await);
+        }
+        for _ in 0..8 {
+            let before = first.authority.read().await?;
+            check(&before)?;
+            let mut records = Vec::with_capacity(charges.len());
+            for (allocator, bytes) in charges {
+                ensure!(*bytes > 0, "empty maintenance charge");
+                let ledger = allocator
+                    .database
+                    .as_ref()
+                    .context("expected tenant reserve")?;
+                let mut record = ledger
+                    .read(&before)
+                    .await?
+                    .context("missing tenant reserve")?;
+                let reserve = record.status.maintenance.as_mut().unwrap();
+                let extra = bytes.saturating_sub(reserve.funded_bytes - reserve.allocated.bytes);
+                if extra > record.status.limits.bytes - record.status.allocated.bytes {
+                    return Err(Exhausted { database: true }.into());
+                }
+                record.status.allocated.bytes += extra;
+                reserve.funded_bytes += extra;
+                reserve.allocated.bytes += bytes;
+                reserve.allocated.attempts += 1;
+                record.validate()?;
+                records.push((ledger.name.as_str(), record));
+            }
+            // Retry work may consume reserve backing unused admission rights.
+            // Forfeit those local rights before a possibly applied/lost CAS.
+            for (remaining, (_, record)) in remaining.iter_mut().zip(&records) {
+                let reserve = record.status.maintenance.as_ref().unwrap();
+                remaining.bytes = remaining
+                    .bytes
+                    .min(reserve.funded_bytes - reserve.allocated.bytes);
+            }
+            let records: Vec<_> = records
+                .iter()
+                .map(|(name, record)| (*name, record))
+                .collect();
+            let directory = Ledger::write_many(
+                first.database.as_ref().unwrap().files.clone(),
+                &before,
+                &records,
+            )
+            .await?;
+            let mut info = before.info.clone();
+            info.insert(FIELD.into(), directory);
+            crate::publication::budget(&info)?;
+            if first.authority.replace(&before, info).await?.is_some() {
+                return Ok(());
+            }
+        }
+        bail!("maintenance funding contention budget exceeded")
     }
 }

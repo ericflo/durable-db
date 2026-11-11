@@ -238,7 +238,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let initial_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
     let initial_copies = initial_tables.values().sum::<u64>();
-    let first_admission = 6285 + initial_copies;
+    let first_admission = 2 * (6285 + initial_copies);
     // 254 journal + 580 data/index + 5,451 manifest growth/split allowance bytes.
     // Admission must precede every journal PUT.
     let puts = calls("object_put");
@@ -280,13 +280,13 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .collect();
     assert_eq!(replaced.len(), 3, "one data/index pair and manifest");
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
-    let second_admission = 6285 + copies;
+    let second_admission = 2 * (6285 + copies);
     server
         .ok(
             "POST",
             budget,
             &json!({"request_id":"more","expected_configuration_revision":2,
-        "limits":{"bytes":first_admission + 6285,"attempts":2}}),
+        "limits":{"bytes":first_admission + 2 * 6285,"attempts":2}}),
         )
         .await;
     let puts = calls("object_put");
@@ -405,6 +405,27 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
     let (_, protected_tables) = collected(&connection, [3, 2, 0]).await;
+    let recovered_balance = server.ok("GET", budget, &json!({})).await;
+    assert_eq!(recovered_balance["allocated"], balance["allocated"]);
+    assert_eq!(
+        recovered_balance["maintenance"]["funded_bytes"],
+        balance["maintenance"]["funded_bytes"]
+    );
+    assert_eq!(
+        recovered_balance["maintenance"]["allocated"]["attempts"],
+        balance["maintenance"]["allocated"]["attempts"]
+            .as_u64()
+            .unwrap()
+            + 1
+    );
+    assert!(
+        recovered_balance["maintenance"]["allocated"]["bytes"]
+            .as_u64()
+            .unwrap()
+            > balance["maintenance"]["allocated"]["bytes"]
+                .as_u64()
+                .unwrap()
+    );
     let retained_image = Snapshot::new(
         connection.objects(),
         Arc::new(Cache::new(0, None).unwrap()),
@@ -489,7 +510,10 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let namespace_budget = connection.objects().upload_budget().await.unwrap().unwrap();
     assert_eq!(namespace_budget.limits.bytes, 32 * 1024 * 1024);
     assert_eq!(namespace_budget.allocated.bytes, 24 * 1024 * 1024);
-    assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
+    assert_eq!(
+        server.ok("GET", budget, &json!({})).await,
+        recovered_balance
+    );
     for (path, revision, value) in readers {
         let response = server.ok("POST", path, &read).await;
         assert_eq!(response["revision"], revision);
@@ -541,7 +565,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     task.abort();
     let _ = task.await;
     let mut evidence = json!({"provider":provider,"namespace":namespace,
-        "tenant_budget":balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
+        "tenant_budget":recovered_balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
         "admission_bytes_per_write":[first_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
@@ -557,6 +581,9 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; logical clock; old server stopped before takeover. Not physical timing, AWS or performance-SLO qualification."});
+    evidence["maintenance_funding"] = json!({"cold_recovery_claimed_preserved_reserve":true,
+        "no_new_admission_allocation_for_recovery":true,"before_recovery":balance["maintenance"],
+        "after_recovery":recovered_balance["maintenance"],"second_cold_reopen_preserved_counters":true});
     evidence["retained_export"] = json!({"databases":2,"source_revision":1,"immutable_puts":0,
         "restored_after_source_image_collection":true,"independent_local_destination":true,"identical_restore_repeated":true});
     std::fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();

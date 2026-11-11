@@ -645,6 +645,29 @@ async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold
     })
     .await
     .unwrap();
+    let healed = call(
+        &router,
+        "GET",
+        "/v1/databases/app/upload-budget",
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(healed.1["allocated"], before.1["allocated"]);
+    assert!(
+        healed.1["maintenance"]["allocated"]["bytes"]
+            .as_u64()
+            .unwrap()
+            > before.1["maintenance"]["allocated"]["bytes"]
+                .as_u64()
+                .unwrap()
+    );
+    assert!(
+        healed.1["maintenance"]["allocated"]["attempts"]
+            .as_u64()
+            .unwrap()
+            >= 2
+    );
     // No byte cache: pause the worker's cold lookup, before admission finishes.
     // Cancelling the HTTP handler must not cancel that exclusive operation.
     faults.pause_read.store(true, Ordering::SeqCst);
@@ -927,7 +950,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let a = format!("{base}/v1/databases/a/commit");
     let initial_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
-    let first_admission = 6237 + initial_tables.values().sum::<u64>();
+    let first_admission = 2 * (6237 + initial_tables.values().sum::<u64>());
     // 250 journal + 572 data/index + 5,415 manifest growth/split allowance bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
@@ -983,10 +1006,9 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         "an exhausted neighbor must not leave a shared journal gap"
     );
     let (_, after) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
-    assert_eq!(
-        before, after,
-        "checkpointing and neighboring admission preserve the ledger"
-    );
+    assert_eq!(before["allocated"], after["allocated"]);
+    assert!(after["maintenance"]["allocated"]["bytes"].as_u64().unwrap() > 0);
+    assert_eq!(after["maintenance"]["funded_bytes"], first_admission / 2);
     let current_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
     let replaced: Vec<_> = current_tables
         .iter()
@@ -998,7 +1020,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         "one new data/index pair and manifest after checkpoint"
     );
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
-    let second_total = first_admission + 6215 + copies;
+    let second_total = first_admission + 2 * (6215 + copies);
     let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":2}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
@@ -1025,7 +1047,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     // A dirty write conservatively pays the same base-copy contribution again.
     // This needs no persistent paid-table set or cross-transaction refund.
-    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 6237 + copies,"attempts":3}});
+    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 2 * (6237 + copies),"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
@@ -1044,7 +1066,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 async fn native_http_collects_checkpointed_journals() {
     let (router, provider, _, _, token) = fixture(8, 2).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":65536,"attempts":1}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":131072,"attempts":1}});
     for _ in 0..2 {
         assert_eq!(
             call(&router, "POST", budget, &token, fund.clone()).await.0,
@@ -1056,7 +1078,7 @@ async fn native_http_collects_checkpointed_journals() {
     }
     for (name, revision) in [("a", 0), ("b", 0), ("a", 1)] {
         if revision == 1 {
-            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":131072,"attempts":2}});
+            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":262144,"attempts":2}});
             assert_eq!(
                 call(&router, "POST", budget, &token, refill).await.0,
                 StatusCode::OK

@@ -96,6 +96,26 @@ fn receipt(fingerprint: u8) -> Bytes {
 #[tokio::test]
 async fn contribution_covers_complete_checkpoints_including_tombstones_and_splits() {
     use crate::transactions::{record::Commit, recovery::Target};
+    // A possibly applied PUT spends its allowance even without a reply. An
+    // overrun is rejected before the physical provider sees another request.
+    let files = Files::new(1);
+    let attempt = crate::upload_budget::Attempt::bounded(files.clone(), 3);
+    assert!(
+        attempt
+            .put("lost", Bytes::from_static(b"ab"))
+            .await
+            .is_err()
+    );
+    assert!(
+        attempt
+            .put("over", Bytes::from_static(b"cd"))
+            .await
+            .is_err()
+    );
+    assert_eq!(files.puts.load(Ordering::SeqCst), 1);
+    attempt.put("last", Bytes::from_static(b"e")).await.unwrap();
+    assert!(attempt.put("empty", Bytes::new()).await.is_err());
+    assert_eq!(files.uploaded.load(Ordering::SeqCst), 3);
     let name = "d".repeat(64);
     let value = vec![42; 64 * 1024];
     for (count, large, long) in [
@@ -148,9 +168,11 @@ async fn contribution_covers_complete_checkpoints_including_tombstones_and_split
             projection.apply(&commit, state).await.unwrap();
             charged += contribution_bytes(db, &request, batch);
         }
-        let reference = build_projection(&projection, files.clone(), cut())
-            .await
-            .unwrap();
+        let reserve =
+            projection.checkpoint_charges().await.unwrap()[&(db.name.to_owned(), db.generation)];
+        assert!(reserve <= charged as u64);
+        let funded = crate::upload_budget::Attempt::bounded(files.clone(), reserve);
+        let reference = build_projection(&projection, funded, cut()).await.unwrap();
         let snapshot = Snapshot::new(
             files.clone(),
             Arc::new(Cache::new(0, None).unwrap()),
@@ -1324,6 +1346,9 @@ async fn reblocking_retained_rows_can_exceed_the_original_data_and_index_sizes()
         .await
         .unwrap();
     let image_bytes = files.uploaded.load(Ordering::SeqCst) - uploaded;
+    let reserve =
+        projection.checkpoint_charges().await.unwrap()[&(db.name.to_owned(), db.generation)];
+    assert!(image_bytes as u64 <= reserve && reserve <= direct + copies);
     assert!(
         image_bytes as u64 <= direct + copies,
         "complete rebuilt image exceeds admission"

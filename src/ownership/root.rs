@@ -142,6 +142,18 @@ pub struct Root<C> {
 }
 
 impl<C: Clock> Root<C> {
+    pub(crate) fn check_funding_origin(
+        &self,
+        bucket: &crate::publication::Bucket,
+        origin: Record,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            metadata::decode(&bucket.info, &self.prefix, self.profile, self.budgeted)?
+                .is_some_and(|record| record.same_recovery(origin)),
+            "maintenance funding origin changed"
+        );
+        Ok(())
+    }
     pub(crate) fn collection(&self) -> Collection {
         Collection::new(
             self.session.authority(),

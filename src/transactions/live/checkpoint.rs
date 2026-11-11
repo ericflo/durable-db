@@ -103,13 +103,51 @@ impl<C: Clock> Owner<C> {
                 identity: self.identity,
                 prefix: self.writer.durable_prefix(),
             };
-            let staged = checkpoint::write_projection(
-                &self.projection,
-                self.maintenance.files.clone(),
-                origin,
-                cut,
-            )
-            .await?;
+            let mut files = self.maintenance.files.clone();
+            if self.database_budget(catalog::CATALOG.name)?.is_some() {
+                let costs = self.projection.checkpoint_charges().await?;
+                let mut total = 0u64;
+                let mut tenants = BTreeMap::<String, u64>::new();
+                for ((name, generation), bytes) in costs {
+                    total = total
+                        .checked_add(bytes)
+                        .context("checkpoint allowance overflow")?;
+                    if (Database {
+                        name: &name,
+                        generation,
+                    }) != catalog::CATALOG
+                    {
+                        let cost = tenants.entry(name).or_default();
+                        *cost = cost
+                            .checked_add(bytes)
+                            .context("checkpoint allowance overflow")?;
+                    }
+                }
+                let charges: Vec<_> = tenants
+                    .into_iter()
+                    .map(|(name, bytes)| {
+                        Ok((
+                            self.cached_budget(&name)?
+                                .context("missing tenant allocator")?,
+                            bytes,
+                        ))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+                if let Err(error) =
+                    crate::upload_budget::Allocator::fund_maintenance(&charges, |before| {
+                        self.control.lock()?.check_funding_origin(before, origin)
+                    })
+                    .await
+                {
+                    // Collection/takeover can invalidate the captured origin.
+                    // Refresh control before the paced retry; do not upload or
+                    // reconstruct any rights from an uncertain funding reply.
+                    let _ = self.control.renew().await;
+                    return Err(error);
+                }
+                files = crate::upload_budget::Attempt::bounded(files, total);
+            }
+            let staged = checkpoint::write_projection(&self.projection, files, origin, cut).await?;
             let snapshot = checkpoint::Snapshot::new(
                 self.maintenance.files.clone(),
                 self.maintenance.cache.clone(),

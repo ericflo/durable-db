@@ -31,7 +31,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .unwrap();
     assert_eq!(
         cloud.read().await.unwrap().info["durable-db-format"],
-        "owned-candidate-20"
+        "owned-candidate-21"
     );
     let root = connection.root(ManualClock::default(), profile()).unwrap();
     root.observe().await.unwrap();
@@ -42,7 +42,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .last_mut()
         .unwrap()
         .info
-        .insert("durable-db-format".into(), "owned-candidate-19".into());
+        .insert("durable-db-format".into(), "owned-candidate-20".into());
     let before = cloud.calls.load(Ordering::SeqCst);
     assert!(matches!(root.observe().await, Err(Error::Incompatible)));
     assert!(
@@ -340,7 +340,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
                 request_id: "fund".into(),
                 expected_configuration_revision: 0,
                 limits: UploadLimits {
-                    bytes: 100,
+                    bytes: 200,
                     attempts: 1,
                 },
             })
@@ -376,7 +376,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
         request_id: "fund".into(),
         expected_configuration_revision: 0,
         limits: UploadLimits {
-            bytes: 100,
+            bytes: 200,
             attempts: 10,
         },
     })
@@ -389,7 +389,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
         request_id: "fund".into(),
         expected_configuration_revision: 0,
         limits: UploadLimits {
-            bytes: 100,
+            bytes: 200,
             attempts: 1,
         },
     })
@@ -501,7 +501,7 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
         + crate::transactions::record::Commit::encoded_len(database, "first", &mutations).unwrap();
     let rows =
         crate::index::recovery::checkpoint::contribution_bytes(database, "first", &mutations);
-    let admission = (journal + rows) as u64;
+    let admission = 2 * (journal + rows) as u64;
     for name in ["a", "b"] {
         owner
             .database_budget(name)
@@ -827,5 +827,183 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing_spent_credit() {
+    use crate::upload_budget::Allocator;
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        })
+        .await
+        .unwrap();
+    let _ = attempt(&connection, &clock).await;
+    let (mut root, outcome) = attempt(&connection, &clock).await;
+    assert!(matches!(outcome, Outcome::Confirmed));
+    clock.set(23);
+    validate(&mut root).await;
+    activate(&mut root).await;
+    let origin = root.recovery_record().unwrap();
+    let a = root.database_budget("a").unwrap().unwrap();
+    let b = root.database_budget("b").unwrap().unwrap();
+    for budget in [&a, &b] {
+        budget
+            .replenish(&UploadRequest {
+                request_id: "initial".into(),
+                expected_configuration_revision: 0,
+                limits: UploadLimits {
+                    bytes: 200,
+                    attempts: 3,
+                },
+            })
+            .await
+            .unwrap();
+        budget.charge(40).await.unwrap();
+        let status = budget.status().await.unwrap();
+        assert_eq!(status.allocated.bytes, 200);
+        assert_eq!(status.maintenance.unwrap().funded_bytes, 100);
+    }
+    let check = |bucket: &Bucket| root.check_funding_origin(bucket, origin);
+    Allocator::fund_maintenance(&[(a.clone(), 30), (b.clone(), 30)], check)
+        .await
+        .unwrap();
+    // A competing refill changes the directory while the complete group CAS
+    // is paused. Rebuilding must preserve that refill and debit each name once.
+    provider.pause.store(true, Ordering::SeqCst);
+    let charges = [(a.clone(), 10), (b.clone(), 10)];
+    let funding = Allocator::fund_maintenance(&charges, check);
+    tokio::pin!(funding);
+    tokio::select! {
+        result = &mut funding => panic!("funding did not pause: {}", result.is_ok()),
+        _ = provider.entered.notified() => (),
+    }
+    b.replenish(&UploadRequest {
+        request_id: "race".into(),
+        expected_configuration_revision: 1,
+        limits: UploadLimits {
+            bytes: 202,
+            attempts: 3,
+        },
+    })
+    .await
+    .unwrap();
+    provider.release.notify_one();
+    funding.await.unwrap();
+    assert_eq!(b.status().await.unwrap().limits.bytes, 202);
+    assert_eq!(
+        a.status()
+            .await
+            .unwrap()
+            .maintenance
+            .unwrap()
+            .allocated
+            .bytes,
+        40
+    );
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(
+        Allocator::fund_maintenance(&[(a.clone(), 40), (b.clone(), 40)], check)
+            .await
+            .is_err()
+    );
+    for budget in [&a, &b] {
+        let reserve = budget.status().await.unwrap().maintenance.unwrap();
+        assert_eq!(
+            reserve.allocated,
+            UploadLimits {
+                bytes: 80,
+                attempts: 3
+            }
+        );
+        assert!(
+            budget.charge(22).await.is_err(),
+            "uncertain maintenance forfeits admission rights no longer backed by reserve"
+        );
+    }
+    // A later tenant's refusal must not debit its funded neighbor or upload
+    // any ledger/object. All names are checked before the first metadata PUT.
+    let status = a.status().await.unwrap();
+    let before = provider.calls.load(Ordering::SeqCst);
+    let manifests = provider.files.list("manifests/", None, 1000).await.unwrap();
+    assert!(
+        Allocator::fund_maintenance(&[(a.clone(), 10), (b.clone(), 23)], check)
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+    assert_eq!(a.status().await.unwrap(), status);
+    assert_eq!(
+        provider.files.list("manifests/", None, 1000).await.unwrap(),
+        manifests
+    );
+    // Restart creates no admission rights, but the unissued reserve survives.
+    // A new owner fences the old claimant, even if it uses a fresh observation.
+    let (mut replacement, outcome) = attempt(&connection, &clock).await;
+    assert!(matches!(outcome, Outcome::Confirmed));
+    clock.set(46);
+    validate(&mut replacement).await;
+    activate(&mut replacement).await;
+    let replacement_origin = replacement.recovery_record().unwrap();
+    let before = provider.calls.load(Ordering::SeqCst);
+    assert!(
+        Allocator::fund_maintenance(&[(a.clone(), 1)], check)
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+    let fresh_a = replacement.database_budget("a").unwrap().unwrap();
+    let fresh_b = replacement.database_budget("b").unwrap().unwrap();
+    assert!(fresh_a.charge(1).await.is_err());
+    let check = |bucket: &Bucket| replacement.check_funding_origin(bucket, replacement_origin);
+    Allocator::fund_maintenance(&[(fresh_a.clone(), 20), (fresh_b, 20)], check)
+        .await
+        .unwrap();
+    let reserve = fresh_a.status().await.unwrap().maintenance.unwrap();
+    assert_eq!(
+        reserve.allocated,
+        UploadLimits {
+            bytes: 100,
+            attempts: 4
+        }
+    );
+    assert!(
+        Allocator::fund_maintenance(&[(fresh_a.clone(), 1)], check)
+            .await
+            .is_err()
+    );
+    fresh_a
+        .replenish(&UploadRequest {
+            request_id: "recovery".into(),
+            expected_configuration_revision: 1,
+            limits: UploadLimits {
+                bytes: 201,
+                attempts: 3,
+            },
+        })
+        .await
+        .unwrap();
+    Allocator::fund_maintenance(&[(fresh_a.clone(), 1)], check)
+        .await
+        .unwrap();
+    let status = fresh_a.status().await.unwrap();
+    assert_eq!(status.allocated.bytes, 201);
+    let reserve = status.maintenance.unwrap();
+    assert_eq!(reserve.funded_bytes, 101);
+    assert_eq!(
+        reserve.allocated,
+        UploadLimits {
+            bytes: 101,
+            attempts: 5
+        }
+    );
+    assert!(
+        fresh_a.charge(1).await.is_err(),
+        "a refill for recovery cannot recreate admission rights"
     );
 }

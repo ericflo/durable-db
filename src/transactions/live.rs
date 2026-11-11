@@ -222,15 +222,9 @@ impl<C: Clock> Owner<C> {
         {
             return Ok(true);
         }
-        if !self.budgets.contains_key(database.name) {
-            let Some(budget) = self.database_budget(database.name)? else {
-                return Ok(true);
-            };
-            if self.budgets.len() >= self.limits.index.databases {
-                self.budgets.pop_first();
-            }
-            self.budgets.insert(Arc::from(database.name), budget);
-        }
+        let Some(budget) = self.cached_budget(database.name)? else {
+            return Ok(true);
+        };
         let bytes = (bytes as u64)
             .checked_add(
                 self.projection
@@ -238,7 +232,7 @@ impl<C: Clock> Owner<C> {
                     .await?,
             )
             .context("database admission overflow")?;
-        match self.budgets[database.name].charge(bytes).await {
+        match budget.charge(bytes).await {
             Ok(()) => Ok(true),
             Err(e)
                 if e.downcast_ref::<crate::upload_budget::Exhausted>()
@@ -248,6 +242,21 @@ impl<C: Clock> Owner<C> {
             }
             Err(e) => Err(e),
         }
+    }
+    fn cached_budget(
+        &mut self,
+        name: &str,
+    ) -> anyhow::Result<Option<Arc<crate::upload_budget::Allocator>>> {
+        if !self.budgets.contains_key(name) {
+            let Some(budget) = self.database_budget(name)? else {
+                return Ok(None);
+            };
+            if self.budgets.len() >= self.limits.index.databases {
+                self.budgets.pop_first();
+            }
+            self.budgets.insert(Arc::from(name), budget);
+        }
+        Ok(Some(self.budgets[name].clone()))
     }
     pub fn usage(&self) -> recovery::Usage {
         self.projection.usage()

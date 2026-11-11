@@ -7,7 +7,7 @@ const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
 const RETAINED: &str = "durable-db-retained-checkpoint";
-pub(crate) const VERSION: &str = "owned-candidate-20";
+pub(crate) const VERSION: &str = "owned-candidate-21";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 

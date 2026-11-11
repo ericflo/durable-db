@@ -520,8 +520,10 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
             old: &Bucket,
             info: BTreeMap<String, String>,
         ) -> anyhow::Result<Option<Bucket>> {
+            let changes_root =
+                old.info.get("durable-db-owned-root") != info.get("durable-db-owned-root");
             let result = self.provider.replace(old, info).await?;
-            if self.pause.swap(false, Ordering::SeqCst) {
+            if changes_root && self.pause.swap(false, Ordering::SeqCst) {
                 self.entered.notify_one();
                 std::future::pending::<()>().await;
             }
@@ -587,13 +589,16 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         expire: AtomicBool::new(false),
         entered: tokio::sync::Notify::new(),
     });
-    let mut root = Connection::new(paused.clone(), paused.clone(), "test")
-        .root(clock.clone(), profile())
+    let connection = Connection::new(paused.clone(), paused.clone(), "test")
+        .with_upload_budget(crate::upload_budget::UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 4096,
+        })
+        .await
         .unwrap();
-    claim(&mut root).await;
-    clock.set(23);
-    validate(&mut root).await;
-    activate(&mut root).await;
+    let root = super::checkpoint::budgeted_active(&connection, &clock).await;
+    let budget = root.database_budget("durable-catalog").unwrap().unwrap();
+    budget.initialize_database().await.unwrap();
     let mut owner = Opening::new(
         root,
         live::Limits {
@@ -606,7 +611,7 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
     .recover()
     .await
     .unwrap();
-    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    let snapshot = owner.snapshot(database("durable-catalog")).await.unwrap();
     let prepared = owner
         .prepare(&[request(
             &snapshot,
@@ -625,6 +630,10 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         result = owner.complete(completion) => panic!("table upload was not paused: {result:?}"),
         _ = paused.entered.notified() => (),
     }
+    let first_charge = budget.status().await.unwrap().maintenance.unwrap();
+    assert_eq!(first_charge.allocated.attempts, 1);
+    assert!(first_charge.allocated.bytes > 0);
+    let mut attempts = 1;
     paused.fail_upload.store(true, Ordering::SeqCst);
     for delay in [1, 2, 4, 8, 16, 30, 30] {
         let puts = paused.table_puts.load(Ordering::SeqCst);
@@ -637,6 +646,13 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         tokio::time::advance(Duration::from_nanos(1)).await;
         assert!(owner.maintain().await.is_err());
         assert_eq!(paused.table_puts.load(Ordering::SeqCst), puts + 1);
+        attempts += 1;
+        let reserve = budget.status().await.unwrap().maintenance.unwrap();
+        assert_eq!(reserve.allocated.attempts, attempts);
+        assert_eq!(
+            reserve.allocated.bytes,
+            attempts * first_charge.allocated.bytes
+        );
     }
     paused.fail_upload.store(false, Ordering::SeqCst);
     tokio::time::advance(Duration::from_secs(30)).await;
@@ -646,8 +662,23 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         _ = paused.entered.notified() => (),
     }
     let objects = provider.files.list("tables/", None, 100).await.unwrap();
+    let staged_charge = budget.status().await.unwrap();
+    assert_eq!(
+        staged_charge
+            .maintenance
+            .as_ref()
+            .unwrap()
+            .allocated
+            .attempts,
+        9
+    );
     assert!(owner.checkpoint_due());
     assert!(owner.maintain().await.unwrap());
+    assert_eq!(
+        budget.status().await.unwrap(),
+        staged_charge,
+        "staged publication resolution cannot claim another attempt"
+    );
     assert_eq!(
         provider.files.list("tables/", None, 100).await.unwrap(),
         objects,
@@ -658,7 +689,7 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         Result::Committed(1)
     );
     // Success resets pacing. The next ordinary checkpoint starts immediately.
-    let next = owner.snapshot(database("a")).await.unwrap();
+    let next = owner.snapshot(database("durable-catalog")).await.unwrap();
     let batch = owner
         .prepare(&[request(&next, "second", &[], &[])])
         .await
@@ -670,12 +701,12 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         .unwrap();
     assert!(!owner.checkpoint_due());
     assert!(paused.table_puts.load(Ordering::SeqCst) > puts);
-    let snapshot = owner.snapshot(database("a")).await.unwrap();
+    let snapshot = owner.snapshot(database("durable-catalog")).await.unwrap();
     paused.expire.store(true, Ordering::SeqCst);
     assert!(
         owner
             .read_request(
-                database("a"),
+                database("durable-catalog"),
                 &crate::engine::ReadRequest {
                     expected_revision: Some(snapshot.revision()),
                     keys: vec!["x".into()],
@@ -1248,9 +1279,22 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         .await
         .unwrap();
     let completion = batch.upload.unwrap().send().await;
-    provider.pause.store(true, Ordering::SeqCst);
+    // Collection can invalidate control before funding starts. Refusal must
+    // refresh it so a runtime without a separate renewal task can retry.
+    files
+        .put(
+            &format!("tables/{}", Uuid::new_v4().simple()),
+            bytes::Bytes::new(),
+        )
+        .await
+        .unwrap();
+    collector.collect().await.unwrap();
+    assert!(owner.complete(completion).await.is_err());
+    assert!(files.list("tables/", None, 128).await.unwrap().is_empty());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    provider.pause_root.store(true, Ordering::SeqCst);
     tokio::select! {
-        result = owner.complete(completion) => panic!("publication did not pause: {result:?}"),
+        result = owner.maintain() => panic!("publication did not pause: {result:?}"),
         _ = provider.entered.notified() => (),
     }
     assert_eq!(files.list("tables/", None, 128).await.unwrap().len(), 3);
@@ -1264,7 +1308,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         !owner.maintain().await.unwrap(),
         "collection does not bypass pacing"
     );
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
     assert!(owner.maintain().await.unwrap());
     let retained = files.list("tables/", None, 128).await.unwrap();
     assert_eq!(retained.len(), 3);

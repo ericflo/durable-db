@@ -187,7 +187,7 @@ async fn check_native_budget(connection: Connection) {
                 request_id: "fund".into(),
                 expected_configuration_revision: 0,
                 limits: UploadLimits {
-                    bytes: 100,
+                    bytes: 200,
                     attempts: 1,
                 },
             })

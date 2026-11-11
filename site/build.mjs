@@ -148,6 +148,7 @@ for (const file of [
   'manifest-growth-admission-2026-11-10.json',
   'checkpoint-retry-pacing-2026-11-10.json',
   'retained-export-2026-11-10.json',
+  'maintenance-funding-2026-11-10.json',
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
   'placement-requests-candidate-2026-11-09.json',

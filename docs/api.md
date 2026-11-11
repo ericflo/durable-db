@@ -1,6 +1,6 @@
 # HTTP API
 
-This page describes v0.17.0. Local CLI serving uses the native backend. The cloud CLI retains the shared publication backend; clustered native serving remains an experimental library path gated on physical timing and placement qualification.
+This page describes v0.18.0. Local CLI serving uses the native backend. The cloud CLI retains the shared publication backend; clustered native serving remains an experimental library path gated on physical timing and placement qualification.
 
 Administrator tokens from current `token --admin` are expiring `ddb_control_` capabilities. Token TTL defaults to one hour and is bounded to 30 days. See the [key rollout procedure](design-signing-rotation.md) before migrating control clients or rotating keys.
 
@@ -24,8 +24,8 @@ Native readiness also checks current ownership permission. Local serving derives
 | `POST /v1/tokens` | Admin: mint a database-scoped token |
 | `GET /v1/storage/upload-budget` | Admin: authoritative cumulative upload ceilings and allocation, or `null` when unbudgeted |
 | `POST /v1/storage/upload-budget` | Admin: revision-checked, idempotent increase of upload ceilings |
-| `GET /v1/databases/{db}/upload-budget` | Admin, native backend: database journal allowance and allocation; a missing ledger reports zeros |
-| `POST /v1/databases/{db}/upload-budget` | Admin, native backend: preprovision or increase the database journal allowance |
+| `GET /v1/databases/{db}/upload-budget` | Admin, native backend: database admission/reserve allowance and allocation; a missing ledger reports zeros |
+| `POST /v1/databases/{db}/upload-budget` | Admin, native backend: preprovision or increase the database admission/reserve allowance |
 | `GET /metrics` | Administrator or metrics-only credential: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
 | `GET /health/live` | Process is serving HTTP |
 | `GET /health/ready` | Startup completed and server is not draining |
@@ -151,4 +151,6 @@ Errors use `{error,message}`: 400 invalid request, 401 invalid/mismatched creden
 
 Quota accounting includes user key and value bytes. Physical object bytes, receipts, manifests, and transient orphan uploads are additional. Limits reject before publishing; they never silently truncate. Use bounded scans and values, and choose an ingress spend/rate budget for an Internet-facing deployment.
 
-Native database budgets use these same request/result shapes at `/v1/databases/{db}/upload-budget`. Defaults on protected creation are 64 MiB of write admission (journal plus checkpoint row contribution) and 16,384 admissions; an administrator-preprovisioned ledger is preserved. Exhaustion returns `413 limit_exceeded` before assigning journal order, so another funded database can continue. Credential rotation and checkpoints do not reset spent credit. The unit and shared-cost exclusions are described in [native upload admission](design-upload-admission.md#native-serving). The cloud CLI publication engine and unbudgeted local mode return `501` for database-specific budget routes.
+Native database budgets use these same request/result shapes at `/v1/databases/{db}/upload-budget`, with an additional `maintenance: {funded_bytes, allocated: {bytes, attempts}}` in status. Defaults on protected creation are 64 MiB of combined admission/reserve funding and 16,384 transaction admissions; an administrator-preprovisioned ledger is preserved. Each byte grant divides its allocation equally between volatile admission rights and durable maintenance reserve. The nested counter counts construction claims and their conservative byte allowance, including lost replies; the outer allocation includes all grants and reserve funding.
+
+Write-admission exhaustion returns `413 limit_exceeded` before journal order, so funded neighbors can continue. A first checkpoint is prepaid; retries or recovery claim additional reserve before construction. If repeated failures exhaust reserve and the remaining ceiling, shared checkpointing can stop until an explicit refill. Neither credential rotation, checkpoints nor process replacement resets spent credit. See [native upload admission](design-upload-admission.md#native-serving) for units and exclusions. The cloud CLI publication engine and unbudgeted local mode return `501` for database-specific budget routes.
