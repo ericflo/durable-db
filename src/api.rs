@@ -1,6 +1,8 @@
 mod backend;
 mod cluster;
+mod membership;
 pub use cluster::{Cluster, ClusterConfig};
+pub use membership::Membership;
 mod forward;
 pub use forward::Forward;
 mod local;

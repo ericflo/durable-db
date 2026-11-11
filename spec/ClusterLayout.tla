@@ -17,11 +17,12 @@ Open(n) == /\ n = s.layout /\ n # 0
 Publish == /\ ~s.data
            /\ s' = [s EXCEPT !.data = TRUE,
                        !.layout = IF Fault = "Erase" THEN 0 ELSE @]
-Membership(m) == /\ m \in SUBSET Nodes /\ m # {}
+Membership(m) == /\ m \in SUBSET Nodes
                  /\ s' = [s EXCEPT !.members = m]
 Map == /\ s.opened # {}
        /\ s' = [s EXCEPT !.mapped = IF Fault = "Members"
-                   THEN 1 % Cardinality(s.members) ELSE 1 % s.chosen]
+                   THEN IF s.members = {} THEN 0 ELSE 1 % Cardinality(s.members)
+                   ELSE 1 % s.chosen]
 Next == (\E n \in Nodes: Configure(n) \/ Open(n)) \/ Publish \/ Map
         \/ (\E m \in SUBSET Nodes: Membership(m))
 TypeOK == s \in [layout: 0..2, chosen: 0..2, data: BOOLEAN,

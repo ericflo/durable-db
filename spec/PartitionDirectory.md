@@ -118,3 +118,18 @@ progress, upload credit must remain available, and the preferred node must keep
 retrying. Permanent partitions and unlimited placement churn have no availability
 promise. Membership discovery, Kubernetes qualification and CLI migration are
 separate integration work; the library accepts explicit membership snapshots.
+
+## Membership discovery
+
+A headless Kubernetes Service supplies peer addresses through ordinary DNS. It
+must publish not-ready endpoints so acquisition/readiness cannot deadlock with
+discovery. All peers use the same service port and address family; duplicate
+answers are canonicalized and more than 256 distinct peers are refused. The pod
+IP is an advertised address, never a serving-authority credential.
+
+Only one resolution may be outstanding. Lookup failure preserves the last valid
+snapshot; a successful empty answer can remove all placements. A hung resolver
+may delay placement, but cannot spawn an unbounded sequence of blocking lookups.
+The lookup loop ends with its lifetime handle. Timers, DNS TTLs, omission, stale
+answers and disagreement affect progress only. The existing layout and ownership
+models admit arbitrary membership and empty sets; no DNS lease becomes authority.

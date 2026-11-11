@@ -29,6 +29,8 @@ use tokio::{
     task::JoinHandle,
 };
 
+pub(super) const MAX_MEMBERS: usize = 256;
+
 /// Index/validation and journal byte allowances are aggregate across residents.
 /// The byte cache is shared; frame/window/checkpoint thresholds stay per partition.
 /// Membership and this process's advertised socket addresses must be canonical.
@@ -256,7 +258,7 @@ impl Backend for Cluster {
     }
 }
 fn membership(peers: &[SocketAddr]) -> anyhow::Result<Vec<SocketAddr>> {
-    ensure!(peers.len() <= 256, "membership exceeds 256 peers");
+    ensure!(peers.len() <= MAX_MEMBERS, "membership exceeds 256 peers");
     for peer in peers {
         crate::ownership::root::valid_address(*peer)?;
     }
