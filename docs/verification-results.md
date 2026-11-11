@@ -1,10 +1,16 @@
 # Verification results
 
-## Native checkpoint retention (2026-11-10)
+## v0.12.0 checkpoint retention (2026-11-10)
+
+[v0.12.0](https://github.com/ericflo/durable-db/releases/tag/v0.12.0) packages `10eb661`, verified by [Woodpecker #146](https://ci.eflorenzano.com/repos/18/pipeline/146/1). The exact downloaded static executable passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs that same binary. The optimized musl 10,005-database regression passes in 205.59 seconds, and the local/native client contract checks each pass all 99 enabled tests.
 
 The native Rust operator API now retains one published namespace checkpoint through ownership takeover and collection, with explicit identity-checked release. It adds no immutable uploads or clock-dependent expiry. The collector protects the current and retained images; publication preserves backup-slot changes without relaxing the collection-generation check. Older binaries refuse an occupied slot. This is an in-process operator primitive; public retention routes, scheduled backups, multiple restore points and retained-image restore remain open.
 
 All 294 local Rust tests pass, along with formatting and strict clippy. Four focused retention regressions take 0.02 seconds and the real TCP write/read/retention test takes 0.03 seconds. Omitting retained-root protection makes cold readback fail. The unchanged publication model passes 175,546 states and four negative controls; its abstract TLAPS proof passes 35 obligations and the negative fence control. The current-checkpoint-only collector branch and the obsolete retention-plan paragraph were replaced. [Milestone evidence](evidence/checkpoint-retention-2026-11-10.json) records the checked scope.
+
+Real B2 and versioned MinIO pass on their first attempts (200.70 and 181.90 seconds). Both retain old checkpoint values at their exact cut through current writes, two cold reopens and automatic collection, then reclaim the old image after explicit release. Retention itself sends no immutable PUTs. Both buckets, all 46 remaining physical versions, the scoped B2 key and the MinIO container were removed. These are logical-clock fixtures with stopped predecessors, not physical timing, AWS or performance-SLO qualification.
+
+The exact v0.11.0 binary writes 260 transactions; v0.12.0 reopens its checkpoint and suffix with values and receipts intact. A disposable offline metadata fixture installs a valid retained descriptor: v0.11.0 refuses it without changing authority, while v0.12.0 opens it. Removing that fixture field permits v0.11.0 to reopen again. This checks sequential compatibility and refusal behavior; offline metadata editing is not an operator recovery procedure. The initial drill hit HTTP 429 at the default rate budget; a larger bounded fixture budget passes without runtime changes. The milestone adds 165 net runtime Rust lines including comments and no new runtime dependencies. Retained-row reblocking, manifest/retry accounting, scheduled retention and physical ownership qualification remain open.
 
 ## v0.11.0 checkpoint encoding admission (2026-11-10)
 
