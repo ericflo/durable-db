@@ -6,6 +6,7 @@ mod checkpoint;
 mod http;
 mod lifecycle;
 mod live;
+mod partitions;
 mod permit;
 mod registration;
 mod replay;
@@ -33,6 +34,7 @@ struct Provider {
     reads: AtomicU64,
     maintenance: AtomicU64,
     lose_reply: AtomicBool,
+    lose_publication_reply: AtomicBool,
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
     pause_root: AtomicBool,
@@ -56,6 +58,7 @@ impl Provider {
             reads: AtomicU64::new(0),
             maintenance: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
+            lose_publication_reply: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
             pause_root: AtomicBool::new(false),
@@ -129,7 +132,10 @@ impl Authority for Provider {
             info,
         };
         history.push(bucket.clone());
-        if self.lose_reply.swap(false, Ordering::SeqCst) {
+        if self.lose_reply.swap(false, Ordering::SeqCst)
+            || (old.info.get("durable-db-root") != bucket.info.get("durable-db-root")
+                && self.lose_publication_reply.swap(false, Ordering::SeqCst))
+        {
             anyhow::bail!("injected lost response");
         }
         if self.corrupt_reply.swap(false, Ordering::SeqCst) {

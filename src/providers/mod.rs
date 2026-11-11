@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod b2;
 pub mod control;
+pub mod partitions;
 mod register;
 pub mod s3;
 mod transport;
@@ -19,6 +20,20 @@ mod transport;
 // Deletion is restricted to the namespaces with implemented collectors. Native
 // journal names additionally bind a canonical incarnation and frame position.
 pub(crate) fn collection_key(key: &str) -> anyhow::Result<()> {
+    if let Some(scoped) = key.strip_prefix("partitions/") {
+        let (partition, key) = scoped
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("invalid partition scope"))?;
+        anyhow::ensure!(
+            partition.len() == 8
+                && partition
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "invalid partition scope"
+        );
+        anyhow::ensure!(!key.starts_with("partitions/"), "nested partition scope");
+        return collection_key(key);
+    }
     if key.starts_with("permits/") {
         crate::ownership::root::permit_key(key)?;
     } else if key.starts_with("journal/") {
@@ -120,6 +135,21 @@ impl Connection {
             false,
             Some(directory),
         )
+    }
+
+    /// Open the shared directory for independently owned native partitions.
+    /// Both shared and per-partition upload ceilings are mandatory. This does
+    /// not elect owners, choose placement, or route HTTP requests.
+    pub async fn into_partitions(
+        self,
+        limits: UploadLimits,
+        cache: Arc<crate::cache::Cache>,
+    ) -> anyhow::Result<partitions::Partitions> {
+        anyhow::ensure!(
+            !self.budgeted,
+            "partition directory requires an uninitialized connection"
+        );
+        partitions::Partitions::open(self, limits, cache).await
     }
 
     /// Explicitly initialize or open the current publication engine.

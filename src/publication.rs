@@ -99,6 +99,23 @@ impl Published {
         prefix: &str,
         limits: Option<UploadLimits>,
     ) -> anyhow::Result<Self> {
+        Self::open_directory(files, authority, prefix, limits, false).await
+    }
+    pub(crate) async fn open_partitioned(
+        files: Arc<dyn Storage>,
+        authority: Arc<dyn Authority>,
+        prefix: &str,
+        limits: UploadLimits,
+    ) -> anyhow::Result<Self> {
+        Self::open_directory(files, authority, prefix, Some(limits), true).await
+    }
+    async fn open_directory(
+        files: Arc<dyn Storage>,
+        authority: Arc<dyn Authority>,
+        prefix: &str,
+        limits: Option<UploadLimits>,
+        partitioned: bool,
+    ) -> anyhow::Result<Self> {
         if let Some(limits) = limits {
             limits.validate()?;
         }
@@ -119,8 +136,11 @@ impl Published {
         for _ in 0..8 {
             let bucket = authority.read().await?;
             if let Some(format) = bucket.info.get("durable-db-format") {
-                if !["3", "4", "5"].contains(&format.as_str())
-                    || bucket.info.get("durable-db-prefix").map(String::as_str) != Some(prefix)
+                if !(if partitioned {
+                    format == "6"
+                } else {
+                    ["3", "4", "5"].contains(&format.as_str())
+                }) || bucket.info.get("durable-db-prefix").map(String::as_str) != Some(prefix)
                 {
                     bail!("publication directory is initialized with a different format or prefix");
                 }
@@ -143,7 +163,13 @@ impl Published {
                 bail!("unrecognized durable-db bucket metadata");
             }
             let mut info = bucket.info.clone();
-            let format = if limits.is_some() { "5" } else { "3" };
+            let format = if partitioned {
+                "6"
+            } else if limits.is_some() {
+                "5"
+            } else {
+                "3"
+            };
             info.insert("durable-db-format".into(), format.into());
             info.insert("durable-db-prefix".into(), prefix.into());
             if let Some(limits) = limits {
@@ -151,7 +177,7 @@ impl Published {
                 info.insert(
                     HEAD.into(),
                     serde_json::to_string(&BudgetRoot {
-                        upload_format: 5,
+                        upload_format: if partitioned { 6 } else { 5 },
                         directory: None,
                     })?,
                 );
@@ -294,6 +320,7 @@ fn budgeted_format(info: &BTreeMap<String, String>) -> Option<u8> {
     match info.get("durable-db-format").map(String::as_str) {
         Some("4") => Some(4),
         Some("5") => Some(5),
+        Some("6") => Some(6),
         _ => None,
     }
 }
@@ -356,6 +383,18 @@ pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
 }
 #[async_trait]
 impl Storage for Published {
+    async fn get_range(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        object_size: u64,
+    ) -> anyhow::Result<Bytes> {
+        anyhow::ensure!(
+            !key.starts_with("heads/"),
+            "range reads require immutable objects"
+        );
+        self.files.get_range(key, range, object_size).await
+    }
     async fn upload_budget(&self) -> anyhow::Result<Option<UploadStatus>> {
         match &self.upload_budget {
             Some(allocator) => Ok(Some(allocator.status().await?)),

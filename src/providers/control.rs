@@ -1,9 +1,9 @@
 //! Conditional control requests with explicit uncertainty and invocation identity.
 //!
 //! A confirmed observation names one successful comparison, not ongoing serving
-//! permission. The owner must separately check its root interval, invalidate
-//! affected placements before a freeze, and complete their drains. This module
-//! implements the request-handling subset of `PlacementRequests`, not a controller.
+//! permission. Native owners separately revoke predecessors, recover selected
+//! journals and validate a fresh permit after sealing responses. This module
+//! handles exact invocations and uncertainty, not election or serving.
 use crate::publication::{Authority, Bucket};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;

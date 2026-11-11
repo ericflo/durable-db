@@ -14,9 +14,9 @@ The current [engine protocol](architecture.md) remains the compatibility referen
 
 ## Exclusive local serving
 
-A local directory has one process-lifetime OS lock. The native local adapter retains that guard through its serving worker and every pending filesystem mutation; cancellation cannot hand off the directory while an old write is still running. A paused process retains ownership. A new process acquires the lock only after the old process and its pending work have relinquished it, then selects and recovers the old journal before serving. This replaces the cluster timing assumption for the local directory only; it is not a lease or a mechanism for shared/network filesystems.
+A local directory has one process-lifetime OS lock. The native local adapter retains that guard through its serving worker and every pending filesystem mutation; cancellation cannot hand off the directory while an old write is still running. A paused process retains ownership. A new process acquires the lock only after the old process and its pending work have relinquished it, then selects and recovers the old journal before serving. This supplies local exclusion without remote permit reads; it does not extend to shared/network filesystems.
 
-The private adapter passes the retained directory guard directly to the shared root controller. It exposes only the HTTP backend, never a reusable clock or cluster connection. PID changes refuse use. There is no physical clock dependency or renewal timer. The cluster replacement must establish exclusion without assuming those local filesystem semantics or a bounded VM clock. `LocalExclusive.tla` checks exclusive guard retention, recovery-before-serving and pending-I/O cancellation; filesystem locking/fsync semantics, process exit, journal correctness and implementation refinement remain separate assumptions/obligations.
+The private adapter passes the retained directory guard directly to the shared root controller. It exposes only the HTTP backend, never a reusable clock or cluster connection. PID changes refuse use. There is no physical clock dependency or renewal timer. Remote native owners instead use revocable permits without local filesystem or bounded-clock assumptions. `LocalExclusive.tla` checks exclusive guard retention, recovery-before-serving and pending-I/O cancellation; filesystem locking/fsync semantics, process exit, journal correctness and implementation refinement remain separate assumptions/obligations.
 
 ## Preserve the original contract
 
@@ -40,6 +40,16 @@ This design does not weaken acknowledgement to mean RAM replication or a future 
 A slow conditional control register is useful for creating a new ownership epoch, publishing a durable handoff decision and changing placement. It should not be on every application read or every independent database write.
 
 A partition contains many databases and has one current writer incarnation. Its owner maintains the committed view and groups accepted transactions into a bounded log batch. Other processes route requests to that owner. The number of databases is not the number of buckets, partitions or permanently assigned processes. Placement and partition-count limits must be measured and documented; this does not reintroduce a fixed small database cap.
+
+### Independent partition control
+
+`Connection::into_partitions` opens a shared, budgeted B+tree directory. Each stable `u32` partition ID selects its own native control record and object prefix. The existing owner, journal, checkpoint, tenant ledgers and collector run unchanged within that scope. A partition can contain many databases; this is not a database-count limit or a bucket per partition.
+
+Control changes use the existing publication/rebase protocol. Ordinary native reads and acknowledgements validate the partition's permit directly. Moving one partition does not revoke another. Shared collection protects directory pages and control records; partition collection cannot list or delete another partition's data. Format 6 prevents legacy cloud servers from interpreting control records as database manifests.
+
+The shared upload ceiling covers both control publication and partition data. Per-partition and per-tenant ceilings remain additional limits. Shared control publication needs upload credit, including partition collection fences; administrators can replenish the shared ceiling directly. Attribution of shared overhead and guaranteed maintenance progress remain production gates.
+
+This library interface supplies independent owners, not an automatic cluster controller. Database mapping, membership, election, route discovery, transfer policy and the CLI cutover remain to be implemented. See the [verification scope](verification.md#independent-partition-control).
 
 ### Revocable writer permits
 

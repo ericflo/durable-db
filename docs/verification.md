@@ -646,3 +646,11 @@ The opt-in release measurement uses 4,096 keys, 20,000 deterministic lookups per
 | 4,096 | 4.0 µs | 0.93 µs | 4.3× |
 
 Smaller values pack more rows into each block, so complete block validation does more work per lookup. These are single-host component measurements, with no HTTP, ownership, provider latency or concurrent workload. They are not database throughput or latency SLOs. Eight table tests and the existing SortedTable model/negative controls pass; the full regression suite and B2/MinIO checkpoint campaign also pass. [Exact measurements, source and validation](evidence/index-read-cost-2026-11-09.json). Reproduce the release measurement with the [development command](development.md#work-on-one-component).
+
+## Independent partition control
+
+The partition adapter reuses the shared publication directory rather than a new CAS algorithm. `spec/PartitionDirectory.md` maps its target and unrelated control records onto `PublicationRebase`; `PublicationSafety` and `PublicationCombining` cover directory collection and delayed proposal publication. Native root/permit ordering remains unchanged. This mapping is not a composed proof of placement or Rust.
+
+Four focused Rust tests cover independent claims and takeover, cross-partition collection isolation, scoped range reads/list cursors/physical deletion, invalid paths, 66 partition entries across a directory split, ceilings preserved on reopen, exhausted shared admission, incompatible legacy opens, stale comparisons and lost publication replies. They complete in 0.64 seconds after compilation. `PublicationRebase` checks 195,642 distinct states at depth 24; its three broken variants still expose lost unrelated updates, overwritten target updates and collection races.
+
+Automatic membership, election, HTTP routing, database mapping, partition removal, fairness, shared maintenance reserves and end-to-end cluster qualification are outside this adapter. Ordinary native response validation still depends on the provider's fresh-read-after-revocation contract.

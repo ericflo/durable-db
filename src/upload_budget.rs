@@ -151,7 +151,7 @@ fn record_info(info: &std::collections::BTreeMap<String, String>) -> anyhow::Res
     ensure!(
         matches!(
             info.get("durable-db-format").map(String::as_str),
-            Some("4" | "5" | crate::ownership::root::VERSION)
+            Some("4" | "5" | "6" | crate::ownership::root::VERSION)
         ),
         "unsupported upload budget format"
     );

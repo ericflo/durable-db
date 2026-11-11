@@ -632,3 +632,118 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "restored_after_source_image_collection":true,"independent_local_destination":true,"identical_restore_repeated":true});
     std::fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a fresh disposable B2/S3 bucket and report path"]
+async fn independent_partitions_serve_and_recover_over_http() {
+    assert_eq!(std::env::var("DURABLE_DB_DISPOSABLE").as_deref(), Ok("1"));
+    let bucket = std::env::var("DURABLE_DB_TEST_BUCKET").unwrap();
+    assert!(bucket.starts_with("durable-db-test-"));
+    let provider = std::env::var("DURABLE_DB_TEST_PROVIDER").unwrap();
+    let report = std::env::var("DURABLE_DB_NATIVE_HTTP_REPORT").unwrap();
+    let namespace = format!("partitions-{}", Uuid::new_v4());
+    let shared = UploadLimits {
+        bytes: 256 * 1024 * 1024,
+        attempts: 4096,
+    };
+    let limits = UploadLimits {
+        bytes: 64 * 1024 * 1024,
+        attempts: 512,
+    };
+    let started = Instant::now();
+    let partitions = connect(&provider, &bucket, &namespace)
+        .await
+        .into_partitions(shared, Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap()))
+        .await
+        .unwrap();
+    let a = partitions.partition(7, limits).await.unwrap();
+    let b = partitions.partition(u32::MAX, limits).await.unwrap();
+    let first = Server::start(&a).await;
+    let other = Server::start(&b).await;
+    let create = json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":10000}});
+    let commit = "/v1/databases/a/commit";
+    let read = "/v1/databases/a/read";
+    first.ok("PUT", "/v1/databases/a", &create).await;
+    other.ok("PUT", "/v1/databases/a", &create).await;
+    let mut other_write = write(0);
+    other_write["writes"][0]["value"] = json!("b3RoZXI=");
+    let first_write = write(0);
+    let writes = tokio::join!(
+        first.ok("POST", commit, &first_write),
+        other.ok("POST", commit, &other_write)
+    );
+    assert_eq!(writes.0["revision"], 1);
+    assert_eq!(writes.1["revision"], 1);
+    let before = first.ok("POST", read, &json!({"keys":["x"]})).await;
+    let independent = other.ok("POST", read, &json!({"keys":["x"]})).await;
+    assert_ne!(
+        before, independent,
+        "partitions with identical database names aliased"
+    );
+    wait_checkpoint(&a, None).await;
+    wait_checkpoint(&b, None).await;
+
+    // Fresh transport, cache and local upload credit. The first server stays
+    // alive; it must be fenced while the other partition continues serving.
+    let reopened = connect(&provider, &bucket, &namespace)
+        .await
+        .into_partitions(
+            UploadLimits::default(),
+            Arc::new(Cache::new(0, None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let next_a = reopened
+        .partition(7, UploadLimits::default())
+        .await
+        .unwrap();
+    let second = Server::start(&next_a).await;
+    assert_eq!(
+        first.call("POST", read, &json!({"keys":["x"]})).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        first.call("POST", commit, &write(0)).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        second.ok("POST", read, &json!({"keys":["x"]})).await,
+        before
+    );
+    assert_eq!(second.ok("POST", commit, &write(0)).await["replayed"], true);
+    assert_eq!(
+        other.ok("POST", read, &json!({"keys":["x"]})).await,
+        independent
+    );
+    assert_eq!(other.ok("POST", commit, &write(1)).await["revision"], 2);
+    next_a.authority().maintenance().await.unwrap();
+    assert_eq!(
+        second.ok("POST", read, &json!({"keys":["x"]})).await,
+        before
+    );
+    assert_eq!(other.ok("POST", commit, &write(1)).await["replayed"], true);
+    assert_eq!(reopened.upload_budget().await.unwrap().limits, shared);
+    assert_eq!(
+        next_a
+            .objects()
+            .upload_budget()
+            .await
+            .unwrap()
+            .unwrap()
+            .limits,
+        limits
+    );
+    let evidence = json!({
+        "seconds": started.elapsed().as_secs_f64(),
+        "partitions": [7, u32::MAX], "simultaneous_http_servers": 3,
+        "independent_values": true, "concurrent_writes": true,
+        "checkpoint_recovery": true, "old_owner_read_and_retry_refused": true,
+        "unmoved_partition_progress": true, "shared_metadata_collection": true,
+        "ceilings_preserved_on_reopen": true,
+        "scope": "Explicit Rust placement; no automatic election, routing, Kubernetes scaling or performance SLO"
+    });
+    first.stop().await;
+    second.stop().await;
+    other.stop().await;
+    std::fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+}
