@@ -8,7 +8,7 @@ const origin=process.env.DATABASE_URL;
 const admin=readFileSync('/run/credentials/admin.token','utf8').trim();
 const control=Buffer.from(readFileSync('/run/credentials/control.token','utf8').trim());
 const prefix=process.env.DATABASE_PREFIX;
-const status={schema:1,state:'initializing',writes_acknowledged:0,reads_verified:0,http_attempt_statuses:{},failures:[],history:[],expected:[0,0,0,0]};
+const status={schema:1,state:'initializing',writes_acknowledged:0,reads_verified:0,http_attempt_statuses:{},failures:[],history:[],expected:[0,0,0,0],verified:[0,0,0,0]};
 const names=Array.from({length:4},(_,i)=>`${prefix}-writer-${i}`);
 const tokens=[];
 let running=false, workers=[], commandBusy=false, issued=0;
@@ -33,12 +33,18 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
           ['database quota exceeded','logical_quota'],
           ['read work budget exceeded; narrow the scan','scan_work'],
         ]).get(error.message)??'resource_limit';
+      } else if(response.status===409) {
+        const error=await response.json();
+        refusal=['conflict','receipt_expired'].includes(error.code)?error.code:'unclassified_conflict';
       } else await response.body?.cancel();
     } catch { code='transport_or_decode_error'; }
     status.http_attempt_statuses[code]=(status.http_attempt_statuses[code]??0)+1;
     if(result!==undefined) return result;
     if(!['transport_or_decode_error','409','429','500','502','503','504'].includes(code)) throw new Error(`Unexpected HTTP status ${code}${refusal?' ('+refusal+')':''}`);
-    if(performance.now()-start>180000) throw new Error('Identical-request recovery deadline exceeded');
+    if(performance.now()-start>180000) {
+      const operation=path.endsWith('/commit')?'commit':path.endsWith('/read')?'read':'control';
+      throw new Error(`Identical-request recovery deadline exceeded (${operation}, last HTTP status ${code}${refusal?', '+refusal:''})`);
+    }
     await sleep(Math.min(++attempts*100,1000));
   }
 }
@@ -56,7 +62,7 @@ async function writer(index) {
       status.history.push({database_index:index,request_id,revision:revision+1,start,end:performance.now()/1000,value_sha256:hash(value)});
       const read=await rpc(`/v1/databases/${names[index]}/read`,{expected_revision:revision+1,keys:[key]},tokens[index]);
       if(read.revision!==revision+1||JSON.stringify(read.values)!==JSON.stringify([value.toString('base64')])) throw new Error('Read after acknowledgement mismatch');
-      status.reads_verified++;
+      status.reads_verified++;status.verified[index]=revision+1;
       await sleep(250);
     }
   } catch(error) { status.failures.push({worker:index,reason:error.message});running=false; }

@@ -31,8 +31,6 @@ def main():
     parser.add_argument('--admin-token-file', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--control-port', type=int, default=17840)
-    parser.add_argument('--rollout-surge', type=int, choices=(1, 2, 3), default=1,
-                        help='Concurrent replacement headroom within the fixed test quota')
     parser.add_argument('--steady-seconds', type=int, default=0,
                         help='Optional bounded six-replica pilot, at most one hour, before disruption')
     parser.add_argument('--observe-memory', action='store_true',
@@ -58,7 +56,8 @@ def main():
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
                                      client_origin='http://durable-db:7654',
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
-                                     rollout_surge=args.rollout_surge, rollout_unavailable=0, rollout_deadline_seconds=240,
+                                     rollout_surge=1, rollout_unavailable=0, rollout_deadline_seconds=240,
+                                     per_writer_readbacks_before_phase=2,
                                      upload_budget=dict(bytes=1073741824, attempts=100000),
                                      tenant_upload_budget=dict(bytes=1073741824, attempts=100000),
                                      steady_seconds=args.steady_seconds, memory_observation=args.observe_memory,
@@ -150,13 +149,14 @@ def main():
                 raise RuntimeError('Tenant allocation decreased or exceeded its ceiling')
         earlier.append(dict(stage=stage,status=status,tenants=tenants));save()
 
-    def progress(additional=8):
-        start = snapshot()['writes_acknowledged'];deadline=time.monotonic()+240
+    def progress():
+        start = snapshot()['verified'];deadline=time.monotonic()+240
         while time.monotonic()<deadline:
-            now=snapshot()['writes_acknowledged']
-            if now>=start+additional:return now
+            now=snapshot()
+            if len(start)==4 and len(now['verified'])==4 and all(after>=before+2 for before,after in zip(start,now['verified'])):
+                return now['writes_acknowledged']
             time.sleep(3)
-        raise RuntimeError('Acknowledged-write progress deadline exceeded')
+        raise RuntimeError('Per-writer acknowledged/readback progress deadline exceeded')
 
     def sample_resources():
         sample = dict(time_utc=utc(), pods=[])
@@ -235,7 +235,6 @@ def main():
         for resource in yaml.safe_load_all(base):
             if resource['kind'] not in ('Deployment','Service','PodDisruptionBudget'):continue
             if resource['kind']=='Deployment':
-                resource['spec']['strategy']['rollingUpdate']['maxSurge']=args.rollout_surge
                 template=resource['spec']['template'];template['metadata']['labels']['durable-db-role']='storage-client'
                 template['spec']['topologySpreadConstraints'][0]['whenUnsatisfiable']='DoNotSchedule'
                 container=template['spec']['containers'][0];container['image']=args.image
@@ -294,7 +293,7 @@ def main():
                     budget('steady-'+str(int(now-start)))
                 report['steady_observed_seconds']=now-start;save()
                 time.sleep(min(15,max(0,args.steady_seconds-(time.monotonic()-start))))
-            phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=snapshot()['writes_acknowledged'])
+            phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=progress())
         victim=pods()[0]
         kube('delete','pod',victim['metadata']['name'],'--grace-period=0','--force','--wait=false')
         phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=placement(wait_replicas(6)),writes_acknowledged=progress())
