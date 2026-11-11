@@ -737,6 +737,107 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
 }
 
 #[tokio::test]
+async fn database_budget_metadata_reuses_staging_and_bounds_stale_comparisons() {
+    async fn objects(provider: &Provider) -> Vec<String> {
+        let mut objects = provider.files.list("manifests/", None, 128).await.unwrap();
+        objects.extend(provider.files.list("indexes/", None, 128).await.unwrap());
+        objects
+    }
+    let provider = Provider::new();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 32 * 1024 * 1024,
+            attempts: 128,
+        })
+        .await
+        .unwrap();
+    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let ledger = root.database_budget("app").unwrap().unwrap();
+    let refill = UploadRequest {
+        request_id: "refill".into(),
+        expected_configuration_revision: 0,
+        limits: UploadLimits {
+            bytes: 64 * 1024 * 1024 + 1,
+            attempts: 16_384,
+        },
+    };
+    for action in 0..3 {
+        provider.pause_budget.store(true, Ordering::SeqCst);
+        let task = {
+            let ledger = ledger.clone();
+            let refill = refill.clone();
+            tokio::spawn(async move {
+                match action {
+                    0 => ledger.initialize_database().await,
+                    1 => ledger
+                        .replenish(&refill)
+                        .await
+                        .map(|_| ())
+                        .map_err(Into::into),
+                    _ => ledger.charge(100).await,
+                }
+            })
+        };
+        provider.entered.notified().await;
+        let staged = objects(&provider).await;
+        // A status/read barrier changes the nonce, not the tenant directory or
+        // metadata collection fence. Initialization also crosses a physical grant.
+        connection.authority().read_fresh().await.unwrap();
+        provider.release.notify_one();
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            objects(&provider).await,
+            staged,
+            "control conflict reuploaded metadata"
+        );
+    }
+    assert_eq!(objects(&provider).await.len(), 6);
+    let status = ledger.status().await.unwrap();
+    assert_eq!(status.configuration_revision, 1);
+    assert_eq!(status.allocated.bytes, 16 * 1024 * 1024);
+    assert_eq!(status.allocated.attempts, 32);
+
+    let mut refill = refill;
+    refill.request_id = "next".into();
+    refill.expected_configuration_revision = 1;
+    refill.limits.bytes += 1;
+    for malformed in [false, true] {
+        provider.pause_budget.store(true, Ordering::SeqCst);
+        let task = {
+            let ledger = ledger.clone();
+            let refill = refill.clone();
+            tokio::spawn(async move { ledger.replenish(&refill).await })
+        };
+        provider.entered.notified().await;
+        let staged = objects(&provider).await;
+        if malformed {
+            let before = provider.read().await.unwrap();
+            let mut info = before.info.clone();
+            info.insert("durable-db-format".into(), "owned-candidate-20".into());
+            provider.replace(&before, info).await.unwrap().unwrap();
+        } else {
+            let captured = provider.history.lock().unwrap().len() - 1;
+            connection.authority().read_fresh().await.unwrap();
+            *provider.stale.lock().unwrap() = Some(captured);
+        }
+        let calls = provider.calls.load(Ordering::SeqCst);
+        provider.release.notify_one();
+        assert!(task.await.unwrap().is_err());
+        assert!(provider.calls.load(Ordering::SeqCst) - calls < 8);
+        assert_eq!(
+            objects(&provider).await,
+            staged,
+            "refusal rebuilt immutable metadata"
+        );
+        *provider.stale.lock().unwrap() = None;
+        if !malformed {
+            assert_eq!(ledger.status().await.unwrap(), status);
+        }
+    }
+}
+
+#[tokio::test]
 async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes() {
     let provider = Provider::new();
     let connection = provider

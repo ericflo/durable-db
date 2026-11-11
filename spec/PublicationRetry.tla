@@ -1,4 +1,7 @@
 ------------------------- MODULE PublicationRetry -------------------------
+\* Native tenant ledger updates (initialization, refill, grants and maintenance
+\* claims) use head = tenant-directory root and gc = metadata collection fence.
+\* Renewals/read barriers/namespace grants change revision without either root.
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS Attempts, MaxRevision, UnsafeRetry
 VARIABLES revision, gc, head, files, issued, phase, file, seen, snapshot, observedGC,

@@ -66,16 +66,55 @@ impl Ledger {
         );
         Ok(Some(envelope.record))
     }
-    pub(super) async fn write(&self, before: &Bucket, record: &Record) -> anyhow::Result<String> {
-        Self::write_many(self.files.clone(), before, &[(&self.name, record)]).await
+    pub(super) async fn publish(
+        &self,
+        authority: &dyn Authority,
+        before: &Bucket,
+        record: &Record,
+    ) -> anyhow::Result<bool> {
+        Self::publish_many(
+            self.files.clone(),
+            authority,
+            before,
+            &[(&self.name, record)],
+            |_| Ok(()),
+        )
+        .await
+    }
+    async fn publish_many(
+        files: Arc<dyn Storage>,
+        authority: &dyn Authority,
+        before: &Bucket,
+        records: &[(&str, &Record)],
+        check: impl Fn(&Bucket) -> anyhow::Result<()>,
+    ) -> anyhow::Result<bool> {
+        let directory = Self::write_many(files, before, records).await?;
+        let mut comparison = before.clone();
+        for _ in 0..8 {
+            let mut info = comparison.info.clone();
+            info.insert(FIELD.into(), directory.clone());
+            crate::publication::budget(&info)?;
+            if authority.replace(&comparison, info).await?.is_some() {
+                return Ok(true);
+            }
+            comparison = authority.read().await?;
+            check(&comparison)?;
+            root(&comparison)?; // Refuse a changed format or malformed budget.
+            if comparison.info.get(FIELD) != before.info.get(FIELD)
+                || !crate::ownership::root::Collection::same_metadata_fence(before, &comparison)
+            {
+                return Ok(false);
+            }
+        }
+        bail!("ledger publication contention budget exceeded")
     }
     async fn write_many(
         files: Arc<dyn Storage>,
         before: &Bucket,
         records: &[(&str, &Record)],
     ) -> anyhow::Result<String> {
-        // These metadata uploads pass through the namespace allocator. Its CAS
-        // can invalidate `before`; a retry rebuilds from the new directory root.
+        // Namespace grants can change the authority during these uploads.
+        // Publication rebases only across unchanged ledgers and collection fences.
         let directory = Directory::new(files.clone());
         let mut next = root(before)?;
         for batch in records.chunks(crate::directory::MAX_UPDATES) {
@@ -195,32 +234,16 @@ impl Allocator {
                 .iter()
                 .map(|(name, record)| (*name, record))
                 .collect();
-            let directory = Ledger::write_many(
+            if Ledger::publish_many(
                 first.database.as_ref().unwrap().files.clone(),
+                &*first.authority,
                 &before,
                 &records,
+                &check,
             )
-            .await?;
-            let mut comparison = before.clone();
-            for _ in 0..8 {
-                let mut info = comparison.info.clone();
-                info.insert(FIELD.into(), directory.clone());
-                crate::publication::budget(&info)?;
-                if first.authority.replace(&comparison, info).await?.is_some() {
-                    return Ok(());
-                }
-                comparison = first.authority.read().await?;
-                check(&comparison)?;
-                // Bulk ledger uploads can allocate namespace grants. Reuse
-                // staging across those/renewals, never a ledger change or sweep.
-                if comparison.info.get(FIELD) != before.info.get(FIELD)
-                    || !crate::ownership::root::Collection::same_metadata_fence(
-                        &before,
-                        &comparison,
-                    )
-                {
-                    break;
-                }
+            .await?
+            {
+                return Ok(());
             }
         }
         bail!("maintenance funding contention budget exceeded")

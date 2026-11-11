@@ -398,15 +398,11 @@ impl Allocator {
         }
     }
     async fn publish(&self, before: &Bucket, record: &Record) -> anyhow::Result<bool> {
-        let mut info = before.info.clone();
-        match &self.database {
-            Some(ledger) => {
-                info.insert(DATABASE_FIELD.into(), ledger.write(before, record).await?);
-            }
-            None => {
-                info.insert(FIELD.into(), serde_json::to_string(record)?);
-            }
+        if let Some(ledger) = &self.database {
+            return ledger.publish(&*self.authority, before, record).await;
         }
+        let mut info = before.info.clone();
+        info.insert(FIELD.into(), serde_json::to_string(record)?);
         crate::publication::budget(&info)?;
         Ok(self.authority.replace(before, info).await?.is_some())
     }
