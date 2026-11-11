@@ -699,3 +699,41 @@ async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
         1
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change() {
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node = Node::start(directory, listener, vec![]).await;
+    provider.pause_publication.store(true, Ordering::SeqCst);
+    node.members(&[node.address]);
+    provider.entered.notified().await;
+    let calls = provider.calls.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    // Repeated identical membership must not abort useful acquisition either.
+    node.members(&[node.address]);
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(10)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        calls,
+        "elapsed time restarted the paused operation"
+    );
+    node.members(&[]);
+    // Let the controller observe removal before restoring the same address;
+    // watch snapshots intentionally coalesce unobserved intermediate changes.
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    settled(&[&node], &[]).await;
+    // The old provider future remains blocked. Only cancellation can release
+    // the controller to acquire for this new placement.
+    node.members(&[node.address]);
+    settled(&[&node], &[node.address]).await;
+}

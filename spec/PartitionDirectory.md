@@ -155,3 +155,5 @@ refused, never implicitly rewritten. Export with the prior binary and restore
 into a new namespace. Maintenance uses native owner workers; the old cloud CLI
 serving/maintenance branch is removed. Shutdown closes discovery and drains HTTP;
 correctness does not depend on either action.
+
+Acquisition scheduling completes one new owner per pass and immediately continues after success. Existing-owner health checks remain bounded at eight per pass. Provider request timeouts bound individual I/O; there is no fixed deadline for a complete recovery, which can legitimately need many requests. A changed membership snapshot or a closed feed cancels reconciliation; an identical snapshot does not. This avoids repeatedly abandoning a progressing recovery and amplifying its registration history. Cancellation remains safe under the existing acquisition protocol and resident reservations.

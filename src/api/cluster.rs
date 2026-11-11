@@ -121,16 +121,34 @@ impl Cluster {
                 let Some(cluster) = weak.upgrade() else {
                     return;
                 };
-                // The deadline changes availability only. A canceled claim may
-                // still publish; its persisted registration remains discoverable.
-                let result = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    cluster.reconcile(&peers, &mut cursor),
-                )
-                .await;
-                if !matches!(result, Ok(Ok(()))) {
-                    cluster.ready.store(false, Ordering::Release);
-                    tracing::warn!("native placement incomplete; retrying");
+                // Individual provider calls are bounded. A whole recovery may
+                // legitimately take longer; restarting it on a fixed timer can
+                // prevent progress forever. Changed placement still cancels it.
+                let mut work = Box::pin(cluster.reconcile(&peers, &mut cursor));
+                let result = loop {
+                    tokio::select! {
+                        result = &mut work => break Some(result),
+                        update = members.changed() => {
+                            if update.is_err() || *members.borrow() != peers {
+                                break None;
+                            }
+                        }
+                    }
+                };
+                match result {
+                    Some(Ok(true)) => retry.reset_immediately(),
+                    Some(Ok(false)) => (),
+                    Some(Err(_)) => {
+                        cluster.ready.store(false, Ordering::Release);
+                        tracing::warn!("native placement incomplete; retrying");
+                    }
+                    None => {
+                        cluster.ready.store(false, Ordering::Release);
+                        retry.reset_immediately();
+                        if members.has_changed().is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             if let Some(cluster) = weak.upgrade() {
@@ -146,7 +164,7 @@ impl Cluster {
             partition.local.write().await.take();
         }
     }
-    async fn reconcile(&self, peers: &[SocketAddr], cursor: &mut usize) -> anyhow::Result<()> {
+    async fn reconcile(&self, peers: &[SocketAddr], cursor: &mut usize) -> anyhow::Result<bool> {
         let peers = membership(peers)?;
         let present = peers.contains(&self.config.address);
         if !present {
@@ -163,6 +181,7 @@ impl Cluster {
             }
         }
         let mut checked = 0;
+        let mut acquired = false;
         for _ in 0..self.partitions.len() {
             let id = *cursor;
             // Advance before I/O, so failure or cancellation cannot starve the
@@ -182,6 +201,10 @@ impl Cluster {
                 partition.local.write().await.take();
                 let local = self.acquire(&partition.connection).await?;
                 *partition.local.write().await = Some(Arc::new(local));
+                // Never spend another owner's recovery deadline on this one.
+                // A successful acquisition schedules the next pass immediately.
+                acquired = true;
+                break;
             }
             checked += 1;
             if checked == 8 {
@@ -195,7 +218,7 @@ impl Cluster {
             }
         }
         self.ready.store(complete, Ordering::Release);
-        Ok(())
+        Ok(acquired)
     }
     async fn acquire(&self, connection: &Connection) -> anyhow::Result<Native> {
         let reservation = self
