@@ -86,7 +86,7 @@ On a laptop, the same API runs over a local directory held by an exclusive OS lo
 
 ## Run on S3 or B2
 
-Every server gets the same bucket, prefix and administrator signing key. Servers need no peer discovery, quorum, attached volume or distributed lease. Removing every server stops availability but leaves the database in the bucket; starting one restores service.
+Every server gets the same bucket, prefix and administrator signing key. The released cloud CLI needs no peer discovery, quorum, attached volume or distributed lease. Removing every server stops availability but leaves the database in the bucket; starting one restores service.
 
 ```sh
 # S3: credentials come from workload identity or the provider's environment.
