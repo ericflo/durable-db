@@ -1,5 +1,11 @@
 # Verification results
 
+## ClockBound VM boundary rejection (2026-11-11)
+
+The pinned upstream ClockBound V3 client does not qualify our stock QEMU/KVM guest. A short ACPI suspend leaves the disruption marker unchanged and the client reports synchronized time. Waiting until its next owner-visible timestamp is nondecreasing still produces an elapsed interval of −1.31 to 2.73 ms against an external interval of at least 61.15 ms. Thus a backwards-clock guard is insufficient. Ordinary pauses pass; snapshot restore is detected, and the deliberately unguarded client exposes the stale interval.
+
+The experiment uses synthetic calibration to isolate counter/disruption behavior, not an NTP daemon or a production clock source. It reuses the VM harness, adds no database dependency, and changes no runtime protocol, storage format or release. The speculative ClockBound shortcut in the design document was removed. [Scope and reproduction](verification.md#clockbound-counter-and-disruption-experiment); [source hashes and observations](evidence/vm-clock-2026-11-10.json). A qualified platform contract or a different serving-authority mechanism is still required for native clustered serving.
+
 ## Unreleased catalog admission (2026-11-10)
 
 Protected creation now pays from the target database’s existing admission budget before journal ordering. The blanket internal-catalog exemption is replaced with target-bound creation admission; policy changes remain operator-funded so tenant exhaustion cannot block credential revocation. No allocator or model is added. Identical pending/committed retries reuse admission, lost grant replies create no usable rights, and a refused tenant cannot leave a shared journal gap. Budgeted native format 22 excludes older writers; local format 15 and the released cloud CLI format are unchanged. This is not yet full administrative-cost accounting: policy changes, shared catalog construction claims and ledger publication work remain namespace-funded.

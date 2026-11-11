@@ -48,6 +48,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
 | Physical process pause (Linux) | `cargo test --locked --lib physical_owner_pause` (about eight seconds, including the frozen-clock control) |
 | VM pause/restore clock boundary | `scripts/check-vm-clock.py --kernel nosleep --output /tmp/vm-clock.json` (Docker + `/dev/kvm`; first run builds a cached no-sleep kernel) |
+| ClockBound counter/disruption rejection | `python3 scripts/check-clockbound.py --output /tmp/clockbound.json` (Docker + `/dev/kvm`; pinned upstream client, no database dependency; exit zero confirms the expected rejection and controls) |
 | Kernel sleep admission | `scripts/check-vm-clock.py --kernel nosleep --clocksource tsc --scenario sleep-disabled --output /tmp/vm-admission.json`; stock kernels must refuse admission |
 | Native takeover across VM restore | `scripts/check-vm-clock.py --kernel nosleep --owner --output /tmp/vm-owner.json` (same Rust fixture, guard and required unsafe control; about 23 seconds after guest preparation) |
 | Ownership intervals | `cargo test --locked --lib ownership::timing` and `scripts/check-proof.sh GrantBounds` |

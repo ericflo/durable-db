@@ -422,6 +422,21 @@ Nine Rust tests cover delayed replies, independent origins, expiry boundaries, c
 
 There is deliberately no production operating-system clock adapter or selected physical profile. A serving path must match successful invocation responses, authenticate a common timing profile, bind it to current root/placement identities, complete recovery and check the interval after preparing the response's consistent data view. A deadline is not ownership. Live-memory restoration that resumes old authority is outside the timing contract. Native local HTTP serving uses the exclusive filesystem adapter; cloud CLI serving remains on the publication engine.
 
+### ClockBound counter and disruption experiment
+
+`scripts/check-clockbound.py` reuses the disposable KVM harness and builds the pinned upstream ClockBound client through kache, outside the database dependency graph. The stock guest receives a synthetic V3 calibration with a locally estimated counter period, 1 ms initial error and 1,000 ppm period uncertainty. This isolates counter/disruption behavior; it does not qualify that calibration, an NTP service, or the daemon. No host clock or configuration is changed.
+
+Baseline, three-second QMP pause and container freeze return trusted intervals overlapping the host's elapsed-time brackets. A short ACPI suspend does not: the marker remains unchanged and the client reports `Synchronized`. The first owner-visible sample is deliberately delayed until its midpoint is nondecreasing. Its elapsed interval is **−1.31 to 2.73 ms**, while the external bracket starts at **61.15 ms** and ends at **10.49 seconds**. These ranges do not overlap. Host brackets include serial/QMP latency; no exact cross-machine timestamp alignment is assumed. Snapshot restore changes the marker and yields `Disrupted`; the simultaneous unguarded client remains trusted with an invalid interval, demonstrating the control's sensitivity.
+
+The counterexample rejects this stock guest as a ClockBound-backed serving platform even with the current backwards-reading check. It does not change the `GrantBoundsProof` assumptions or prove a defect on supported EC2 hardware. ClockBound is not a database dependency, and the experiment grants no serving authority. The [recorded source, binary, kernel and observations](evidence/vm-clock-2026-11-10.json) make this rejection reproducible:
+
+```sh
+# Source the documented kache environment first; requires Docker and /dev/kvm.
+python3 scripts/check-clockbound.py --output /tmp/clockbound.json
+```
+
+Exit zero means the expected counterexample and positive/negative controls were reproduced, **not** that a clock was qualified. Temporary sources, guests and files are removed; compiler artifacts remain cached. The probe targets Linux x86_64. Repeat platform qualification if the kernel, hypervisor or clock source changes.
+
 ### Reported clock error prerequisites
 
 `ReportedSampleBounds` proves that timestamps each within `A` of a continuous reference clock satisfy the existing elapsed-measurement contract `[t - E, 2t + E]` with `E = 2A`. No rate scaling is needed. Both endpoint errors count; the negative control `E = A` fails. The proof assumes the per-sample bound is true. It does not establish it for any physical device. A source must include maximum calibration error, accumulated counter-rate error, sampling and rounding within `A` on **every accepted read**, with a coherent counter/calibration sample. Backwards readings retire the timeline; a valid timestamp does not authorize a restored or cloned incarnation.
