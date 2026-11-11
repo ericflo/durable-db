@@ -1,5 +1,5 @@
 //! Immutable root/journal identities and a durable predecessor chain.
-use super::{Identity, Profile};
+use super::{Encoding, Identity};
 use crate::{journal::LogId, storage::Storage};
 use anyhow::{Context, ensure};
 use bytes::Bytes;
@@ -33,7 +33,7 @@ impl Registration {
         Self { identity, parent }
     }
 
-    fn encode(self, prefix: &str, profile: Profile) -> Bytes {
+    fn encode(self, prefix: &str, encoding: Encoding) -> Bytes {
         let mut bytes = Vec::with_capacity(MAX_BYTES);
         bytes.extend_from_slice(MAGIC);
         for identity in [
@@ -46,8 +46,9 @@ impl Registration {
             bytes.extend_from_slice(&identity.epoch.to_be_bytes());
             bytes.extend_from_slice(identity.incarnation.as_bytes());
         }
-        bytes.extend_from_slice(&(profile.bounds.root_lifetime().as_nanos() as u64).to_be_bytes());
-        bytes.extend_from_slice(&(profile.error.as_nanos() as u64).to_be_bytes());
+        // Preserve released local registration bytes; remote values are reserved zeros.
+        bytes.extend_from_slice(&encoding.legacy_lifetime().to_be_bytes());
+        bytes.extend_from_slice(&0u64.to_be_bytes());
         bytes.extend_from_slice(&(prefix.len() as u16).to_be_bytes());
         bytes.extend_from_slice(prefix.as_bytes());
         let digest = Sha256::digest(&bytes);
@@ -59,7 +60,7 @@ impl Registration {
         bytes: &[u8],
         expected: Uuid,
         prefix: &str,
-        profile: Profile,
+        encoding: Encoding,
     ) -> anyhow::Result<Self> {
         ensure!(
             (FIXED_BYTES + 1..=MAX_BYTES).contains(&bytes.len()),
@@ -99,9 +100,8 @@ impl Registration {
         let lifetime = u64::from_be_bytes(take(&mut input)?);
         let error = u64::from_be_bytes(take(&mut input)?);
         ensure!(
-            u128::from(lifetime) == profile.bounds.root_lifetime().as_nanos()
-                && u128::from(error) == profile.error.as_nanos(),
-            "registration timing profile mismatch"
+            lifetime == encoding.legacy_lifetime() && error == 0,
+            "registration storage encoding mismatch"
         );
         let length = usize::from(u16::from_be_bytes(take(&mut input)?));
         ensure!(
@@ -115,25 +115,25 @@ impl Registration {
         files: &Arc<dyn Storage>,
         incarnation: Uuid,
         prefix: &str,
-        profile: Profile,
+        encoding: Encoding,
     ) -> anyhow::Result<Self> {
         let object = files
             .get(&key(incarnation), MAX_BYTES)
             .await?
             .context("registered root is missing")?;
-        Self::decode(&object.bytes, incarnation, prefix, profile)
+        Self::decode(&object.bytes, incarnation, prefix, encoding)
     }
 
     pub(super) fn prepare(
         self,
         files: Arc<dyn Storage>,
         prefix: &str,
-        profile: Profile,
+        encoding: Encoding,
     ) -> Prepared {
         Prepared {
             files,
             key: key(self.identity.incarnation),
-            bytes: self.encode(prefix, profile),
+            bytes: self.encode(prefix, encoding),
         }
     }
 }
@@ -183,20 +183,20 @@ impl Prepared {
 pub struct Registrations {
     files: Arc<dyn Storage>,
     prefix: String,
-    profile: Profile,
+    encoding: Encoding,
     next: Option<Identity>,
 }
 impl Registrations {
     pub(super) fn new(
         files: Arc<dyn Storage>,
         prefix: String,
-        profile: Profile,
+        encoding: Encoding,
         identity: Identity,
     ) -> Self {
         Self {
             files,
             prefix,
-            profile,
+            encoding,
             next: Some(identity),
         }
     }
@@ -209,7 +209,7 @@ impl Registrations {
             &self.files,
             identity.incarnation,
             &self.prefix,
-            self.profile,
+            self.encoding,
         )
         .await?;
         ensure!(

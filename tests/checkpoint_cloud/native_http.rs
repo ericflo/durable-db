@@ -1,5 +1,5 @@
 //! Live provider qualification through the native HTTP backend. The fixture
-//! supplies a logical clock and STOPS the old server before takeover.
+//! keeps the first server alive across permit revocation and cold takeover.
 use super::*;
 use durable_db::{
     api::{self, App, RateLimits},
@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 struct Server {
-    control: live::Control<TestClock>,
+    control: live::Control,
     url: String,
     token: String,
     client: reqwest::Client,
@@ -22,8 +22,7 @@ struct Server {
 }
 impl Server {
     async fn start(connection: &Connection) -> Self {
-        let clock = TestClock::default();
-        let mut root = activate(connection, &clock).await;
+        let mut root = activate(connection).await;
         select(&mut root).await;
         let owner = Opening::new(
             root,
@@ -336,7 +335,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     assert_eq!(calls("object_put"), puts, "retention uploads no objects");
     let (cleanup_ms, retained_tables) = collected(&connection, [2, 1, 1]).await;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
-    server.stop().await;
+    let previous = server;
     drop((connection, files));
 
     let recovery = Instant::now();
@@ -347,6 +346,19 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .unwrap_or_else(|_| panic!("native reopen failed"));
     let server = Server::start(&connection).await;
     let recovery_ms = recovery.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(
+        previous
+            .call("POST", "/v1/databases/a/read", &json!({"keys":["x"]}))
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        previous.call("POST", commit, &write(1)).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    previous.stop().await;
+
     assert!(server.control.retained_checkpoint().await.unwrap() == Some(retained));
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     assert_eq!(server.ok("POST", commit, &write(1)).await["replayed"], true);
@@ -391,9 +403,9 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "warm reads do not mutate or fetch authority"
     );
     assert_eq!(
-        gets,
+        gets + 100,
         calls("object_get"),
-        "warm reads use the bounded cache and suffix"
+        "each sealed warm read validates one fresh permit, without refetching values"
     );
     elapsed.sort_by(f64::total_cmp);
 
@@ -574,7 +586,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
-        "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
+        "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":100,"warm_read_paths":["checkpoint","recovered_suffix"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
         "retention":{"cold_reopen_and_collection":true,"exact_cut_values":true,"release_reclaimed_old_checkpoint":true,"immutable_puts":0},
         "automatic_table_and_manifest_collection":true,"checkpoint_objects_after_first_sweep":retained_tables,"checkpoint_objects_after_takeover_sweep":takeover_tables,
@@ -583,7 +595,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "journal_objects_after_takeover_sweep":0,"closed_journal_epochs_reclaimed":true,
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
-        "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; logical clock; old server stopped before takeover. Not physical timing, AWS or performance-SLO qualification."});
+        "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; clock-independent permits; live predecessor refused reads and receipt retries after takeover. Not AWS, Kubernetes placement, arbitrary memory rollback or performance-SLO qualification."});
+    evidence["live_predecessor_refused_after_takeover"] = json!(true);
     evidence["catalog_admission_bytes"] = json!(creation_admission);
     evidence["maintenance_funding"] = json!({"cold_recovery_claimed_preserved_reserve":true,
         "no_new_admission_allocation_for_recovery":true,"before_recovery":balance["maintenance"],

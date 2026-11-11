@@ -6,9 +6,9 @@ use bytes::Bytes;
 #[tokio::test]
 async fn replay_requires_every_prior_cut_and_preserves_transaction_order_after_expiry() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let (_old, late) = source(&provider, &clock).await;
-    let mut middle = successor(&provider, &clock).await;
+
+    let (_old, late) = source(&provider).await;
+    let mut middle = successor(&provider).await;
     let mut incomplete = middle.replay().unwrap();
     assert!(incomplete.read_next().await.is_err());
     assert!(!incomplete.completed());
@@ -20,7 +20,7 @@ async fn replay_requires_every_prior_cut_and_preserves_transaction_order_after_e
         writer.complete(upload.send().await).unwrap();
         assert!(writer.pop_durable().unwrap().is_some());
     }
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let mut incomplete = root.replay().unwrap();
     // An incomplete catalog exposes no earlier frames, even if those are valid.
     assert!(incomplete.read_next().await.is_err());
@@ -31,7 +31,7 @@ async fn replay_requires_every_prior_cut_and_preserves_transaction_order_after_e
     drop(writer);
     drop(middle);
     let mut replay = root.replay().unwrap();
-    clock.set(clock.now.load(Ordering::SeqCst) + 10);
+
     for (epoch, position, bytes) in [
         (1, 1, b"acknowledged".as_slice()),
         (2, 1, b"second".as_slice()),
@@ -47,14 +47,15 @@ async fn replay_requires_every_prior_cut_and_preserves_transaction_order_after_e
     assert!(replay.completed());
     assert!(replay.read_next().await.unwrap().is_none());
     // Immutable replay may finish after expiry; completion grants no authority.
-    assert!(root.permission().unwrap().is_none());
+    provider.revoke_current().await;
+    assert!(root.permission().await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn ordered_replay_pages_a_split_catalog_with_empty_and_nonempty_journals() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = active(&provider, &clock).await;
+
+    let mut root = active(&provider).await;
     let mut empty = root.replay().unwrap();
     assert!(!empty.completed());
     assert!(empty.read_next().await.unwrap().is_none());
@@ -68,7 +69,7 @@ async fn ordered_replay_pages_a_split_catalog_with_empty_and_nonempty_journals()
             writer.complete(upload.send().await).unwrap();
             assert!(writer.pop_durable().unwrap().is_some());
         }
-        root = successor(&provider, &clock).await;
+        root = successor(&provider).await;
         let journal = scan(&mut root).await;
         seal(&mut root, journal).await;
     }
@@ -89,9 +90,9 @@ async fn ordered_replay_pages_a_split_catalog_with_empty_and_nonempty_journals()
 #[tokio::test]
 async fn selected_frame_errors_do_not_advance_replay_or_complete_it() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let (_old, _late) = source(&provider, &clock).await;
-    let mut root = successor(&provider, &clock).await;
+
+    let (_old, _late) = source(&provider).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let keys = provider.files.list("journal/", None, 10).await.unwrap();
@@ -129,9 +130,9 @@ async fn catalog_count_alone_cannot_hide_a_noncanonical_key_or_epoch_gap() {
     use crate::directory::{Directory, Pointer};
     use sha2::{Digest, Sha256};
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let (_old, _late) = source(&provider, &clock).await;
-    let mut root = successor(&provider, &clock).await;
+
+    let (_old, _late) = source(&provider).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let original_prefix = provider

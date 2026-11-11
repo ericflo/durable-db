@@ -1,7 +1,3 @@
-//! Components for the replacement ownership protocol.
-//!
-//! The native HTTP backend uses these under an injected clock contract.
-//! The CLI runtime is not selected. A deadline is not authority:
-//! provider confirmation, incarnation, placement and recovery must also agree.
+//! Native ownership: permanent revocation and fresh response validation.
+//! Local directories retain an exclusive OS guard through all pending I/O.
 pub mod root;
-pub mod timing;

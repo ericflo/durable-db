@@ -8,10 +8,7 @@ use durable_db::{
     index::recovery::{Limits, Recovering, checkpoint::Snapshot},
     journal::{QueueLimits, Writer},
     metrics::REGISTRY,
-    ownership::{
-        root::{Outcome, Profile, Root},
-        timing::Clock,
-    },
+    ownership::root::{Outcome, Root},
     providers::{Connection, b2::Native, s3::S3},
     transactions::{
         record::{Commit, Database, Mutation},
@@ -19,20 +16,10 @@ use durable_db::{
     },
 };
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
-#[derive(Clone, Default)]
-struct TestClock(Arc<AtomicU64>);
-impl Clock for TestClock {
-    fn read(&self) -> Option<Duration> {
-        Some(Duration::from_nanos(self.0.load(Ordering::SeqCst)))
-    }
-}
 async fn connect(provider: &str, bucket: &str, namespace: &str) -> Connection {
     match provider {
         "b2" => Native::connect_storage(bucket, namespace).await,
@@ -41,13 +28,12 @@ async fn connect(provider: &str, bucket: &str, namespace: &str) -> Connection {
     }
     .unwrap_or_else(|_| panic!("checkpoint provider connection failed"))
 }
-async fn activate(connection: &Connection, clock: &TestClock) -> Root<TestClock> {
-    let profile = Profile::new(Duration::from_nanos(10), Duration::from_nanos(1)).unwrap();
+async fn activate(connection: &Connection) -> Root {
     // Budgeted bootstrap can consume a grant while uploading registration,
     // invalidating its captured comparison. A fresh candidate reuses the grant.
     let mut root = None;
     for _ in 0..2 {
-        let mut candidate = connection.root(clock.clone(), profile).unwrap();
+        let mut candidate = connection.root().unwrap();
         let observed = candidate
             .observe()
             .await
@@ -63,7 +49,7 @@ async fn activate(connection: &Connection, clock: &TestClock) -> Root<TestClock>
         }
     }
     let mut root = root.expect("root claim conflicted twice");
-    clock.0.fetch_add(23, Ordering::SeqCst);
+
     validate(&mut root).await;
     let request = root.activate().unwrap();
     assert!(matches!(
@@ -72,7 +58,7 @@ async fn activate(connection: &Connection, clock: &TestClock) -> Root<TestClock>
     ));
     root
 }
-async fn validate(root: &mut Root<TestClock>) {
+async fn validate(root: &mut Root) {
     let observed = root
         .observe()
         .await
@@ -83,7 +69,7 @@ async fn validate(root: &mut Root<TestClock>) {
         Outcome::Confirmed
     ));
 }
-async fn select(root: &mut Root<TestClock>) {
+async fn select(root: &mut Root) {
     loop {
         let mut recovery = root.recovery().unwrap();
         let mut chosen = None;
@@ -168,7 +154,7 @@ fn controls() -> [u64; 3] {
         calls("read_barrier"),
     ]
 }
-async fn lazy_reads(connection: &Connection, root: &mut Root<TestClock>) -> serde_json::Value {
+async fn lazy_reads(connection: &Connection, root: &mut Root) -> serde_json::Value {
     let before = controls();
     let gets = calls("object_get");
     let cache = Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap());
@@ -255,8 +241,8 @@ async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
     let report = std::env::var("DURABLE_DB_CHECKPOINT_REPORT").unwrap();
     let namespace = format!("checkpoint-{}", Uuid::new_v4());
     let connection = connect(&provider, &bucket, &namespace).await;
-    let clock = TestClock::default();
-    let mut first = activate(&connection, &clock).await;
+
+    let mut first = activate(&connection).await;
     let mut writer = first.take_journal(QueueLimits::default()).unwrap();
     for revision in 1..=6 {
         for batch in 0..4 {
@@ -274,7 +260,7 @@ async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
         .await
         .unwrap_or_else(|_| panic!("fixture journal listing failed"));
     assert_eq!(covered.len(), 24);
-    let mut second = activate(&connection, &clock).await;
+    let mut second = activate(&connection).await;
     select(&mut second).await;
     let recovery = Recovering::begin(second.replay().unwrap(), Limits::default())
         .await
@@ -305,12 +291,10 @@ async fn native_checkpoints_recover_selected_suffix_across_complete_reopen() {
     let _late = late.send().await;
     let mut current = second.take_journal(QueueLimits::default()).unwrap();
     append(&mut current, &records(7, 0, 256, false)).await;
-    drop((
-        first, writer, second, current, recovery, connection, files, clock,
-    ));
+    drop((first, writer, second, current, recovery, connection, files));
     let connection = connect(&provider, &bucket, &namespace).await;
-    let clock = TestClock::default();
-    let mut root = activate(&connection, &clock).await;
+
+    let mut root = activate(&connection).await;
     select(&mut root).await;
     let lazy = lazy_reads(&connection, &mut root).await;
     let before = controls();

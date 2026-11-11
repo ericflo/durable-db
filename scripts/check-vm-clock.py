@@ -322,7 +322,7 @@ def main():
     parser.add_argument('--scenario', choices=SCENARIOS, help='run one clock fault for a focused check')
     parser.add_argument('--repeat', type=int, choices=range(1, 17), default=1, metavar='1..16')
     parser.add_argument('--owner', action='store_true', help='exercise native takeover across memory restore, including the unsafe control')
-    parser.add_argument('--test-binary', type=Path, help='reuse a cargo test --lib --no-run artifact; otherwise build with the repository kache configuration')
+    parser.add_argument('--test-binary', type=Path, help='historical timed-owner test artifact from commit 6688d47, built with kache')
     parser.add_argument('--capabilities', action='store_true', help='inspect VMClock prerequisites in a disposable VM; no Rust build or ownership')
     parser.add_argument('--device', type=Path, help='inspect this local VMClock device instead of starting a VM; no build or mutation')
     args = parser.parse_args()
@@ -346,12 +346,7 @@ def main():
     elif args.test_binary:
         binary = args.test_binary.resolve()
     else:
-        build = run('cargo', 'test', '--locked', '--lib', '--no-run', '--message-format=json', timeout=600)
-        binaries = [json.loads(line)['executable'] for line in build.splitlines()
-                    if json.loads(line).get('executable')]
-        if len(binaries) != 1:
-            raise RuntimeError('expected exactly one library test artifact')
-        binary = Path(binaries[0])
+        parser.error('timed ownership was retired; supply --test-binary from historical commit 6688d47')
     with tempfile.TemporaryDirectory(prefix='durable-db-clock-') as directory, ExitStack() as cleanup:
         work = Path(directory)
         cleanup.callback(cleanup_guest, work)

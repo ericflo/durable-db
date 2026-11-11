@@ -1,6 +1,6 @@
 ----------------------- MODULE RootRegistration -----------------------
 EXTENDS RootAcquisition
-CONSTANTS UnsafeEarlyPublication, UnsafeParent, UnsafeImmediateOnly
+CONSTANTS UnsafeEarlyPublication, UnsafeParent, UnsafeImmediateOnly, UnsafeCheckpointCut
 
 \* Each fresh root identity names an immutable registration containing its
 \* unique journal identity and its predecessor registration. Candidate IDs
@@ -68,16 +68,22 @@ OrderedAncestry == \A c \in persisted:
 \* A confirmed claim can be arbitrarily old. Its immutable ancestor chain is
 \* still safe to revoke. An intermediate winner need not have run any recovery.
 Ancestors(c) == Walk(durableParents[c], Cardinality(Candidates))
-Required(c) == IF UnsafeImmediateOnly
-              THEN {durableParents[c]} \ {None} ELSE Ancestors(c)
+Required(c, stop) == IF UnsafeImmediateOnly
+    THEN {durableParents[c]} \ {None}
+    ELSE {d \in Ancestors(c): IF stop = None THEN TRUE ELSE target[d] >= target[stop]}
 RevokeAncestor(c, d) ==
     /\ confirmed[c] # 0 /\ c \in persisted
-    /\ d \in Required(c) \cap live
+    /\ d \in Required(c, None) \cap live
     /\ live' = live \ {d}
     /\ UNCHANGED <<vars, parents, durableParents, persisted, known, sent, acknowledged, ready>>
-FinishRevocation(c) ==
+\* A checkpoint may stop traversal only at a previously completed owner.
+\* Selecting its already-durable identity is abstract here; publication and
+\* data recovery are checked separately. The cut owner's permit is included.
+FinishRevocation(c, stop) ==
     /\ confirmed[c] # 0 /\ c \in persisted /\ c \notin ready
-    /\ Required(c) \cap live = {}
+    /\ stop \in Ancestors(c) \cup {None}
+    /\ stop = None \/ stop \in ready \/ UnsafeCheckpointCut
+    /\ Required(c, stop) \cap live = {}
     /\ ready' = ready \cup {c}
     /\ UNCHANGED <<vars, parents, durableParents, persisted, known, sent, acknowledged, live>>
 AllEarlierPermitsRevoked == \A c \in ready:
@@ -93,7 +99,7 @@ DataTypeOK == /\ parents \in [Candidates -> Candidates \cup {None}]
 
 CombinedNext == (\E a \in Ids: Send(a) \/ ApplyRegistered(a) \/ DeliverRegistered(a))
     \/ (\E c, d \in Candidates: RevokeAncestor(c, d))
-    \/ (\E c \in Candidates: FinishRevocation(c))
+    \/ (\E c \in Candidates, stop \in Candidates \cup {None}: FinishRevocation(c, stop))
     \/ (\E c \in Candidates: UploadRegistration(c) \/ ObserveRegistration(c) \/ MarkAcknowledged(c))
     \/ (\E c \in Candidates, a \in Ids:
         TimeoutRegistered(c, a) \/ (\E kind \in {"claim", "validate"}:

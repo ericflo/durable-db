@@ -1,16 +1,13 @@
-//! Root ownership control for the candidate engine, under an injected clock contract.
-//!
-//! A successful comparison earns an interval anchored to its request. A first
-//! confirmation begins a conservative drain; activation never extends the interval.
-//! This is not a serving engine: journal selection/recovery and data-view checks
-//! must still precede every permission check. There is no system clock adapter.
+//! Exact root acquisition, permanent predecessor revocation and fresh response
+//! validation. Remote serving has no clock bound. Local directories retain an
+//! exclusive OS guard. Journal recovery must precede service in either mode.
 mod catalog;
 mod collection;
 mod metadata;
+mod permit;
 mod registration;
 mod replay;
 
-use super::timing::{self, Bounds, Clock, Deadline, Drain, Timeline};
 use crate::providers::control;
 use crate::{
     journal::{QueueLimits, Writer},
@@ -20,7 +17,8 @@ pub(crate) use collection::Collection;
 use metadata::Phase;
 pub(crate) use metadata::Record;
 pub(crate) use metadata::{VERSION, budget as metadata_budget};
-use std::{sync::Arc, time::Duration};
+pub(crate) use permit::validate_key as permit_key;
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub use catalog::{JournalRecovery, Recovery};
@@ -31,7 +29,7 @@ pub use replay::{Replay, ReplayBatch};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("invalid or incompatible ownership metadata, prefix or timing profile")]
+    #[error("invalid or incompatible ownership metadata, prefix or storage format")]
     Incompatible,
     #[error("this incarnation is already bound; a new claim needs a fresh controller")]
     Bound,
@@ -41,7 +39,7 @@ pub enum Error {
     Exhausted,
     #[error("a control request is already pending")]
     Busy,
-    #[error("activation requires a confirmed fence, completed drain and live interval")]
+    #[error("activation requires this incarnation's confirmed fence")]
     NotReady,
     #[error("controller retired after an invalid confirmation")]
     Retired,
@@ -54,25 +52,20 @@ pub enum Error {
     #[error("control provider observation failed")]
     Provider(#[from] anyhow::Error),
     #[error(transparent)]
-    Timing(#[from] timing::Error),
-    #[error(transparent)]
     Control(#[from] control::Error),
 }
 
-/// Every participant must use the same durably recorded profile. Constructing
-/// this value checks arithmetic, not physical clock behavior or deployment safety.
+// Local directories retain their released encoding. Remote namespaces use a
+// new format so an older timed writer can never join a permit-based controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Profile {
-    bounds: Bounds,
-    error: Duration,
+pub(crate) struct Encoding {
+    pub local: bool,
 }
-
-impl Profile {
-    pub fn new(lifetime: Duration, error: Duration) -> Result<Self, Error> {
-        Ok(Self {
-            bounds: Bounds::new(lifetime, error)?,
-            error,
-        })
+impl Encoding {
+    pub(crate) const REMOTE: Self = Self { local: false };
+    pub(crate) const LOCAL: Self = Self { local: true };
+    fn legacy_lifetime(self) -> u64 {
+        u64::from(self.local)
     }
 }
 
@@ -106,49 +99,37 @@ pub struct Observation {
     record: Option<Record>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Claim,
-    Validate,
-    Activate,
-    Select,
-    Checkpoint,
-}
-
 struct Pending {
     id: Arc<()>,
-    kind: Kind,
     record: Record,
-    deadline: Deadline,
 }
 
 /// One non-reusable candidate incarnation. Only a fresh controller can target
 /// another predecessor. Retained observations/requests need caller-side bounds.
-pub struct Root<C> {
+pub struct Root {
     files: Arc<dyn Storage>,
     session: control::Session,
-    timeline: Timeline<C>,
-    profile: Profile,
+    encoding: Encoding,
     prefix: String,
     incarnation: Uuid,
     epoch: Option<u64>,
     pending: Option<Pending>,
-    deadline: Option<Deadline>,
-    drain: Option<Drain>,
+    local_guard: Option<Arc<crate::storage::Local>>,
+    pid: u32,
     active: bool,
     retired: bool,
     journal_opened: bool,
     budgeted: bool,
 }
 
-impl<C: Clock> Root<C> {
+impl Root {
     pub(crate) fn check_funding_origin(
         &self,
         bucket: &crate::publication::Bucket,
         origin: Record,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            metadata::decode(&bucket.info, &self.prefix, self.profile, self.budgeted)?
+            metadata::decode(&bucket.info, &self.prefix, self.encoding, self.budgeted)?
                 .is_some_and(|record| record.same_recovery(origin)),
             "maintenance funding origin changed"
         );
@@ -159,7 +140,7 @@ impl<C: Clock> Root<C> {
             self.session.authority(),
             self.files.clone(),
             self.prefix.clone(),
-            self.profile,
+            self.encoding,
             self.budgeted,
         )
     }
@@ -184,9 +165,9 @@ impl<C: Clock> Root<C> {
         files: Arc<dyn Storage>,
         session: control::Session,
         prefix: &str,
-        clock: C,
-        profile: Profile,
+        encoding: Encoding,
         budgeted: bool,
+        local_guard: Option<Arc<crate::storage::Local>>,
     ) -> Result<Self, Error> {
         if prefix.is_empty()
             || prefix.len() > 128
@@ -199,14 +180,13 @@ impl<C: Clock> Root<C> {
         Ok(Self {
             files,
             session,
-            timeline: Timeline::new(clock, profile.bounds)?,
-            profile,
+            encoding,
             prefix: prefix.into(),
             incarnation: Uuid::new_v4(),
             epoch: None,
             pending: None,
-            deadline: None,
-            drain: None,
+            local_guard,
+            pid: std::process::id(),
             active: false,
             retired: false,
             journal_opened: false,
@@ -215,17 +195,17 @@ impl<C: Clock> Root<C> {
     }
 
     /// The returned future owns its request state. Await it outside the root's
-    /// mutex so an observation cannot stall local permission checks or renewals.
-    pub fn observe(&self) -> impl Future<Output = Result<Observation, Error>> + Send + use<C> {
+    /// mutex so an observation cannot stall response validation.
+    pub fn observe(&self) -> impl Future<Output = Result<Observation, Error>> + Send + use<> {
         let available = self.available();
         let observation = self.session.observe();
         let prefix = self.prefix.clone();
-        let profile = self.profile;
+        let encoding = self.encoding;
         let budgeted = self.budgeted;
         async move {
             available?;
             let raw = observation.await?;
-            let record = metadata::decode(raw.metadata(), &prefix, profile, budgeted)?;
+            let record = metadata::decode(raw.metadata(), &prefix, encoding, budgeted)?;
             Ok(Observation { raw, record })
         }
     }
@@ -255,9 +235,12 @@ impl<C: Clock> Root<C> {
             retained: observed.record.and_then(|r| r.retained),
         };
         let registration = Registration::new(record.identity, observed.record.map(|r| r.identity));
-        let mut prepared = self.begin(observed.raw, record, Kind::Claim)?;
+        let mut prepared = self.begin(observed.raw, record)?;
         prepared.registration =
-            Some(registration.prepare(self.files.clone(), &self.prefix, self.profile));
+            Some(registration.prepare(self.files.clone(), &self.prefix, self.encoding));
+        if !self.encoding.local {
+            prepared.permit = Some(permit::Prepared::new(self.files.clone(), self.incarnation));
+        }
         self.epoch = Some(epoch);
         Ok(prepared)
     }
@@ -272,7 +255,7 @@ impl<C: Clock> Root<C> {
         {
             return Err(Error::NotOwner);
         }
-        self.begin(observed.raw, record, Kind::Validate)
+        self.begin(observed.raw, record)
     }
 
     pub fn activate(&mut self) -> Result<Prepared, Error> {
@@ -280,12 +263,12 @@ impl<C: Clock> Root<C> {
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
-        if self.active || !self.drained()? || !self.live_interval()? {
+        if self.active {
             return Err(Error::NotReady);
         }
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         let mut record =
-            metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
+            metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?
                 .ok_or(Error::NotReady)?;
         if record.phase != Phase::Fenced
             || Some(record.identity.epoch) != self.epoch
@@ -294,45 +277,47 @@ impl<C: Clock> Root<C> {
             return Err(Error::NotReady);
         }
         record.phase = Phase::Open;
-        self.begin(raw, record, Kind::Activate)
+        let mut prepared = self.begin(raw, record)?;
+        if !self.encoding.local {
+            prepared.revoke = Some(Revocation {
+                registrations: self.registrations()?,
+                authority: self.session.authority(),
+                files: self.files.clone(),
+                cut: record.checkpoint.map(|reference| reference.cut.identity),
+            });
+        }
+        Ok(prepared)
     }
 
-    fn begin(
-        &mut self,
-        observed: control::Observation,
-        record: Record,
-        kind: Kind,
-    ) -> Result<Prepared, Error> {
+    fn begin(&mut self, observed: control::Observation, record: Record) -> Result<Prepared, Error> {
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
         let metadata = metadata::encode(
             observed.metadata(),
             &self.prefix,
-            self.profile,
+            self.encoding,
             record,
             self.budgeted,
         )?;
-        let start = self.timeline.begin()?;
-        let deadline = self.timeline.root_deadline(&start)?;
         let raw = self.session.begin(observed, metadata)?;
         let id = Arc::new(());
         self.pending = Some(Pending {
             id: id.clone(),
-            kind,
             record,
-            deadline,
         });
         Ok(Prepared {
             id,
             raw,
             registration: None,
+            permit: None,
+            revoke: None,
             catalog: None,
         })
     }
 
-    /// Abandon local interest; the remote operation may still apply. A previously
-    /// earned active interval survives, without any extension.
+    /// Abandon local interest; the remote operation may still apply. This grants
+    /// no permission; every response still requires fresh validation.
     pub fn abandon(&mut self) {
         self.pending = None;
         self.session.abandon();
@@ -371,63 +356,60 @@ impl<C: Clock> Root<C> {
 
     fn confirm(&mut self, pending: Pending) -> Result<(), Error> {
         let raw = self.session.confirmed().ok_or(Error::Incompatible)?;
-        let record = metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?;
+        let record = metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?;
         if record != Some(pending.record) {
             return Err(Error::Incompatible);
         }
-        if self.drain.is_none() {
-            if pending.record.phase != Phase::Fenced {
-                return Err(Error::NotReady);
-            }
-            self.drain = Some(self.timeline.begin_drain()?);
-        }
-        if pending.record.phase == Phase::Open {
-            if !self.drained()? {
-                return Err(Error::NotReady);
-            }
-            self.active = true;
-        }
-        if pending.kind != Kind::Activate {
-            self.deadline = Some(pending.deadline);
-        }
+        self.active = pending.record.phase == Phase::Open;
         Ok(())
     }
 
-    /// Check AFTER preparing the consistent data view or durable acknowledgement.
-    /// A returned identity is a fact about this check, not future permission.
-    /// Journal recovery and assignment checks are separate caller obligations.
-    pub fn permission(&mut self) -> Result<Option<Identity>, Error> {
+    /// Structural admission check only. Never use this as serving permission.
+    pub(crate) fn identity(&self) -> Result<Option<Identity>, Error> {
         self.available()?;
-        if !self.active || !self.live_interval()? {
-            return Ok(None);
-        }
-        Ok(Some(Identity {
-            epoch: self.epoch.expect("active incarnation has a bound epoch"),
+        Ok(self.active.then(|| Identity {
+            epoch: self.epoch.expect("active root has an epoch"),
             incarnation: self.incarnation,
         }))
     }
 
-    /// A child must anchor this duration to its own request start and bind the
-    /// reply to a current assignment and invocation. Zero permits no service.
-    pub fn child_duration(&mut self) -> Result<Duration, Error> {
-        self.available()?;
-        if !self.active {
-            return Ok(Duration::ZERO);
-        }
-        match &self.deadline {
-            Some(deadline) => Ok(self.timeline.child_lifetime(deadline)?),
-            None => Ok(Duration::ZERO),
+    /// Issue only AFTER sealing a response and completing its durable prefix.
+    /// This future owns its state; no root mutex or reusable permission token
+    /// spans I/O. A late success applies only to that already sealed response.
+    pub fn permission(
+        &self,
+    ) -> impl Future<Output = Result<Option<Identity>, Error>> + Send + use<> {
+        let identity = self.identity();
+        let files = self.files.clone();
+        let local = self.local_guard.clone();
+        let pid = self.pid;
+        async move {
+            if pid != std::process::id() {
+                return Err(Error::Retired);
+            }
+            let Some(identity) = identity? else {
+                return Ok(None);
+            };
+            let permitted = local.is_some() || permit::live(&files, identity.incarnation).await?;
+            if pid != std::process::id() {
+                return Err(Error::Retired);
+            }
+            if permitted {
+                Ok(Some(identity))
+            } else {
+                Ok(None)
+            }
         }
     }
 
-    /// Open this incarnation's writer exactly once, under a live interval.
+    /// Open this incarnation's writer exactly once, after activation.
     /// Recovery and selected-prefix publication remain separate requirements
     /// before accepting or acknowledging data through the returned journal.
     pub fn take_journal(&mut self, limits: QueueLimits) -> Result<Writer, Error> {
         if self.journal_opened {
             return Err(Error::JournalOpened);
         }
-        self.permission()?.ok_or(Error::NotReady)?;
+        self.identity()?.ok_or(Error::NotReady)?;
         self.journal_opened = true;
         Ok(Writer::for_root(
             self.files.clone(),
@@ -444,7 +426,7 @@ impl<C: Clock> Root<C> {
         Ok(Registrations::new(
             self.files.clone(),
             self.prefix.clone(),
-            self.profile,
+            self.encoding,
             Identity {
                 epoch,
                 incarnation: self.incarnation,
@@ -452,7 +434,7 @@ impl<C: Clock> Root<C> {
         ))
     }
 
-    /// Begin old-journal discovery only after activation has completed the drain.
+    /// Begin old-journal discovery only after activation has revoked predecessors.
     /// The returned cursor owns its snapshot and can be awaited outside the lock.
     pub fn recovery(&mut self) -> Result<Recovery, Error> {
         let record = self.recovery_record()?;
@@ -501,7 +483,7 @@ impl<C: Clock> Root<C> {
         };
         record.retained = Some(retained);
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
-        Ok((retained, self.begin(raw, record, Kind::Checkpoint)?))
+        Ok((retained, self.begin(raw, record)?))
     }
 
     /// Explicit, identity-checked release. An empty slot is an idempotent
@@ -514,7 +496,7 @@ impl<C: Clock> Root<C> {
         }
         record.retained = None;
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
-        self.begin(raw, record, Kind::Checkpoint)
+        self.begin(raw, record)
     }
 
     /// Atomically publish a fully uploaded native checkpoint built from this
@@ -538,14 +520,13 @@ impl<C: Clock> Root<C> {
                 checkpoint: Some(staged.reference),
                 ..record
             },
-            Kind::Checkpoint,
         )
     }
 
     pub(crate) fn recovery_record(&mut self) -> Result<Record, Error> {
-        let identity = self.permission()?.ok_or(Error::NotReady)?;
+        let identity = self.identity()?.ok_or(Error::NotReady)?;
         let raw = self.session.confirmed().ok_or(Error::NotReady)?;
-        let record = metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
+        let record = metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?
             .ok_or(Error::NotReady)?;
         if record.identity != identity || record.phase != Phase::Open {
             return Err(Error::NotReady);
@@ -554,16 +535,16 @@ impl<C: Clock> Root<C> {
     }
 
     /// Persist a complete discovery against an unchanged confirmed catalog.
-    /// Renewal can refresh the comparison while a scan is running. A changed
+    /// Validation can refresh the comparison while a scan is running. A changed
     /// catalog requires a new snapshot; an already selected prefix never extends.
     pub fn select_prefix(&mut self, recovered: JournalRecovery) -> Result<Prepared, Error> {
-        let identity = self.permission()?.ok_or(Error::NotReady)?;
+        let identity = self.identity()?.ok_or(Error::NotReady)?;
         if recovered.record.identity != identity {
             return Err(Error::NotOwner);
         }
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         let confirmed =
-            metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
+            metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?
                 .ok_or(Error::NotReady)?;
         if !confirmed.same_recovery(recovered.record) {
             return Err(Error::StaleRecovery);
@@ -572,27 +553,18 @@ impl<C: Clock> Root<C> {
         let catalog = recovered.publication(self.files.clone(), id)?;
         let mut record = confirmed;
         record.catalog = Some(id);
-        let mut prepared = self.begin(raw, record, Kind::Select)?;
+        let mut prepared = self.begin(raw, record)?;
         prepared.catalog = Some(catalog);
         Ok(prepared)
     }
 
-    fn drained(&mut self) -> Result<bool, Error> {
-        match &self.drain {
-            Some(drain) => Ok(self.timeline.drain_complete(drain)?),
-            None => Ok(false),
-        }
-    }
-
-    fn live_interval(&mut self) -> Result<bool, Error> {
-        match &self.deadline {
-            Some(deadline) => Ok(!self.timeline.remaining(deadline)?.is_zero()),
-            None => Ok(false),
-        }
+    pub(crate) fn retire(&mut self) {
+        self.retired = true;
+        self.active = false;
     }
 
     fn available(&self) -> Result<(), Error> {
-        if self.retired {
+        if self.retired || self.pid != std::process::id() {
             Err(Error::Retired)
         } else {
             Ok(())
@@ -606,7 +578,16 @@ pub struct Prepared {
     id: Arc<()>,
     raw: control::Prepared,
     registration: Option<registration::Prepared>,
+    permit: Option<permit::Prepared>,
+    revoke: Option<Revocation>,
     catalog: Option<catalog::Publication>,
+}
+
+struct Revocation {
+    registrations: Registrations,
+    authority: Arc<dyn crate::publication::Authority>,
+    files: Arc<dyn Storage>,
+    cut: Option<Identity>,
 }
 
 impl Prepared {
@@ -614,6 +595,35 @@ impl Prepared {
         let raw = async {
             if let Some(registration) = self.registration {
                 registration.execute().await?;
+            }
+            if let Some(permit) = self.permit {
+                permit.execute().await?;
+            }
+            if let Some(Revocation {
+                mut registrations,
+                authority,
+                files,
+                cut,
+            }) = self.revoke
+            {
+                // Keep registrations: deleting permission must not erase ancestry.
+                let own = registrations.next().await?.ok_or(Error::NotReady)?;
+                let mut reached = cut.is_none();
+                while let Some(old) = registrations.next().await? {
+                    permit::revoke(&files, &authority, old.identity().incarnation).await?;
+                    // A published checkpoint's owner completed revocation before
+                    // it could serve. Revoke that owner too; earlier registrations
+                    // need not survive collection. Never stop at an unfinished claim.
+                    if Some(old.identity()) == cut {
+                        reached = true;
+                        break;
+                    }
+                }
+                anyhow::ensure!(reached, "checkpoint owner missing from ancestry");
+                anyhow::ensure!(
+                    permit::live(&files, own.identity().incarnation).await?,
+                    "activation permit revoked"
+                );
             }
             if let Some(catalog) = self.catalog {
                 catalog.execute().await?;

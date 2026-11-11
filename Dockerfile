@@ -99,12 +99,6 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 # Research model: checked independently without adopting its runtime assumptions.
-FROM model-tools AS model-candidate-delegatedgrant
-COPY spec/candidates/DelegatedGrant.tla spec/candidates/DelegatedGrant.checks spec/candidates/DelegatedGrant*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh DelegatedGrant && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
 FROM model-tools AS model-candidate-revocableowner
 COPY spec/candidates/RevocableOwner.tla spec/candidates/RevocableOwner.checks spec/candidates/RevocableOwner*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -115,12 +109,6 @@ FROM model-tools AS model-journal
 COPY spec/Journal.tla spec/Journal.checks spec/Journal.cfg spec/UnsafeJournal*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh Journal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-rootcontrol
-COPY spec/candidates/RootControl.tla spec/candidates/RootControl.checks spec/candidates/RootControl*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh RootControl && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-transactionclient
@@ -257,87 +245,6 @@ COPY spec/Journal.tla spec/JournalProof.tla spec/Journal.proof spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-proof.sh Journal && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
 
-FROM proof-tools AS proof-grant-bounds
-RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
-COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY scripts/check-vm-clock.py scripts/test-vm-clock.py scripts/
-COPY spec/candidates/GrantBounds.tla spec/candidates/GrantBoundsProof.tla spec/candidates/GrantBounds.proof spec/candidates/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-proof.sh GrantBounds && mkdir -p /checks && cp .tools/proof-*.log /checks/ \
-    && python3 scripts/test-vm-clock.py > /checks/clock-capabilities.log 2>&1 && touch /checks/passed
-
-FROM proof-tools AS proof-root-control
-COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY spec/candidates/RootControl.tla spec/candidates/RootControlProof.tla spec/candidates/RootControl.proof spec/candidates/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-proof.sh RootControl && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
-
-FROM proof-tools AS proof-root-requests
-COPY scripts/check-proof.sh scripts/check-proof.sh
-COPY spec/candidates/RootRequests.tla spec/candidates/RootRequestsProof.tla spec/candidates/RootRequests.proof spec/candidates/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-proof.sh RootRequests && mkdir -p /checks && cp .tools/proof-*.log /checks/ && touch /checks/passed
-
-FROM proof-root-control AS proof-root-journal
-COPY spec/candidates/RootJournal.tla spec/candidates/RootJournalProof.tla spec/candidates/RootJournal.proof spec/candidates/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh RootJournal \
-    && cp .tools/proof-*.log /checks/ && touch /checks/passed
-
-FROM proof-root-control AS proof-partition-control
-COPY spec/candidates/PartitionControl.tla spec/candidates/PartitionControlProof.tla spec/candidates/PartitionControl.proof spec/candidates/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh PartitionControl \
-    && cp .tools/proof-*.log /checks/ && touch /checks/passed
-
-FROM proof-partition-control AS proof-partition-journal
-COPY spec/candidates/PartitionJournal.tla spec/candidates/PartitionJournalProof.tla spec/candidates/PartitionJournal.proof spec/candidates/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    DURABLE_DB_PROOF_DEPENDENCIES_CHECKED=1 scripts/check-proof.sh PartitionJournal \
-    && cp .tools/proof-*.log /checks/ && touch /checks/passed
-
-FROM model-tools AS model-candidate-rootjournal
-COPY spec/candidates/RootControl.tla spec/candidates/RootJournal.tla spec/candidates/RootJournal.checks spec/candidates/RootJournal*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh RootJournal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-partitioncontrol
-COPY spec/candidates/RootControl.tla spec/candidates/PartitionControl.tla spec/candidates/PartitionControl.checks spec/candidates/PartitionControl*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh PartitionControl && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-partitionjournal
-COPY spec/candidates/RootControl.tla spec/candidates/PartitionControl.tla spec/candidates/PartitionJournal.tla spec/candidates/PartitionJournal.checks spec/candidates/PartitionJournal*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh PartitionJournal && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-latecontrol
-COPY spec/candidates/RootControl.tla spec/candidates/PartitionControl.tla spec/candidates/PartitionJournal.tla spec/candidates/LateControlCoverage.tla spec/candidates/LateControlCoverage.checks spec/candidates/LateControl*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh LateControlCoverage && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-placementrequests
-COPY spec/candidates/PlacementRequests.tla spec/candidates/PlacementRequests.checks spec/candidates/PlacementRequests*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh PlacementRequests && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-placementtakeover
-COPY spec/candidates/RootControl.tla spec/candidates/PlacementTakeover.tla spec/candidates/PlacementTakeover.checks spec/candidates/PlacementTakeover*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh PlacementTakeover && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
-FROM model-tools AS model-candidate-rootrequests
-COPY spec/candidates/RootRequests.tla spec/candidates/RootRequests.checks spec/candidates/RootRequests*.cfg spec/
-RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
-    scripts/check-model.sh RootRequests && mkdir -p /checks && cp .tools/model-*.log /checks/ \
-    && rm -rf .tools/tlc-* && touch /checks/passed
-
 FROM model-tools AS model-candidate-rootacquisition
 COPY spec/candidates/RootAcquisition.tla spec/candidates/RootAcquisition.checks spec/candidates/RootAcquisition*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -367,10 +274,6 @@ COPY --from=model-candidate-catalogreplay /checks/ /checks/
 COPY --from=model-candidate-rootcatalog /checks/ /checks/
 COPY --from=model-candidate-rootregistration /checks/ /checks/
 COPY --from=model-candidate-rootacquisition /checks/ /checks/
-COPY --from=proof-root-requests /checks/ /checks/
-COPY --from=model-candidate-rootrequests /checks/ /checks/
-COPY --from=model-candidate-placementtakeover /checks/ /checks/
-COPY --from=model-candidate-placementrequests /checks/ /checks/
 COPY --from=model-transactionvalidation /checks/ /checks/
 COPY --from=model-transactionrecovery /checks/ /checks/
 COPY --from=model-livetransactions /checks/ /checks/
@@ -381,18 +284,7 @@ COPY --from=model-memoryindex /checks/ /checks/
 COPY --from=model-checkpoint /checks/ /checks/
 COPY --from=model-checkpointread /checks/ /checks/
 COPY --from=model-checkpointoverlay /checks/ /checks/
-COPY --from=model-candidate-latecontrol /checks/ /checks/
-COPY --from=proof-partition-journal /checks/ /checks/
-COPY --from=proof-partition-control /checks/ /checks/
-COPY --from=model-candidate-partitionjournal /checks/ /checks/
-COPY --from=model-candidate-partitioncontrol /checks/ /checks/
 COPY --from=model-provider-register /checks/ /checks/
-COPY --from=proof-root-journal /checks/ /checks/
-COPY --from=model-candidate-rootjournal /checks/ /checks/
-COPY --from=proof-root-control /checks/ /checks/
-COPY --from=proof-grant-bounds /checks/ /checks/
-COPY --from=model-candidate-rootcontrol /checks/ /checks/
-COPY --from=model-candidate-delegatedgrant /checks/ /checks/
 COPY --from=model-candidate-revocableowner /checks/ /checks/
 COPY --from=model-journal /checks/ /checks/
 COPY --from=proof-journal /checks/ /checks/

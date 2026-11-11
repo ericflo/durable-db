@@ -1,6 +1,6 @@
 //! Upload-free collection of native metadata, checkpoints and covered journals.
 //! Uses PublicationSafety's list-before-fence protocol and Directory membership.
-use super::{Profile, Registration, catalog, metadata};
+use super::{Encoding, Registration, catalog, metadata};
 use crate::{
     directory::{Directory, witness},
     journal::LogId,
@@ -31,6 +31,8 @@ struct Cursor {
     indexes: Option<String>,
     journal: Option<String>,
     tables: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permits: Option<String>,
 }
 pub(super) fn generation(info: &BTreeMap<String, String>) -> anyhow::Result<u64> {
     Ok(Cursor::read(info)?.generation)
@@ -56,6 +58,9 @@ impl Cursor {
         if let Some(key) = &cursor.tables {
             Blob::validate_key(key)?;
         }
+        if let Some(key) = &cursor.permits {
+            super::permit::validate_key(key)?;
+        }
         Ok(cursor)
     }
 }
@@ -64,7 +69,7 @@ pub(crate) struct Collection {
     authority: Arc<dyn Authority>,
     files: Arc<dyn Storage>,
     prefix: String,
-    profile: Profile,
+    encoding: Encoding,
     budgeted: bool,
 }
 impl Collection {
@@ -75,14 +80,14 @@ impl Collection {
         authority: Arc<dyn Authority>,
         files: Arc<dyn Storage>,
         prefix: String,
-        profile: Profile,
+        encoding: Encoding,
         budgeted: bool,
     ) -> Self {
         Self {
             authority,
             files,
             prefix,
-            profile,
+            encoding,
             budgeted,
         }
     }
@@ -92,7 +97,7 @@ impl Collection {
         }
         ensure!(
             before.info.get("durable-db-format").map(String::as_str)
-                == Some(metadata::version(false))
+                == Some(metadata::version(false, self.encoding))
                 && !before.info.contains_key(crate::upload_budget::FIELD)
                 && !before
                     .info
@@ -125,6 +130,16 @@ impl Collection {
             .files
             .list("tables/", cursor.tables.as_deref(), PAGE)
             .await?;
+        let permits = if self.encoding.local {
+            Vec::new()
+        } else {
+            self.files
+                .list("permits/", cursor.permits.as_deref(), PAGE)
+                .await?
+        };
+        for key in &permits {
+            super::permit::validate_key(key)?;
+        }
         for key in &tables {
             Blob::validate_key(key)?;
         }
@@ -135,19 +150,25 @@ impl Collection {
                 && tables.len() <= PAGE,
             "collection listing exceeds its bound"
         );
+        ensure!(
+            permits.len() <= PAGE,
+            "collection listing exceeds its bound"
+        );
         if manifests.is_empty()
             && indexes.is_empty()
             && journal.is_empty()
             && tables.is_empty()
+            && permits.is_empty()
             && cursor.manifests.is_none()
             && cursor.indexes.is_none()
             && cursor.journal.is_none()
             && cursor.tables.is_none()
+            && cursor.permits.is_none()
         {
             return Ok(0);
         }
         let observed = self.authority.read().await?;
-        let record = metadata::decode(&observed.info, &self.prefix, self.profile, self.budgeted)?;
+        let record = metadata::decode(&observed.info, &self.prefix, self.encoding, self.budgeted)?;
         let protected = [
             self.database_root(&observed)?,
             catalog::load(&self.files, record.and_then(|r| r.catalog)).await?,
@@ -202,6 +223,7 @@ impl Collection {
             indexes: (indexes.len() == PAGE).then(|| indexes.last().unwrap().clone()),
             journal: (journal.len() == PAGE).then(|| journal.last().unwrap().clone()),
             tables: (tables.len() == PAGE).then(|| tables.last().unwrap().clone()),
+            permits: (permits.len() == PAGE).then(|| permits.last().unwrap().clone()),
         };
         let mut info = observed.info.clone();
         info.insert(FIELD.into(), serde_json::to_string(&cursor)?);
@@ -212,9 +234,22 @@ impl Collection {
         if self.authority.replace(&observed, info).await?.is_none() {
             return Ok(0);
         }
+        // A claim captures its comparison before creating its write-once permit.
+        // This fence defeats every unreferenced candidate listed above. Protect
+        // the current identity, including its unfinished activation. Revoking an
+        // ancestor early is safe: takeover still confirms absence before recovery.
+        let current_permit = record.map(|r| super::permit::key(r.identity.incarnation));
+        let mut retired = 0;
+        for key in permits {
+            if Some(&key) != current_permit.as_ref() {
+                self.authority.delete_versions(&key).await?;
+                retired += 1;
+            }
+        }
         let mut deleted = Directory::new(self.files.clone())
             .collect_unreachable(&protected, &manifests, &indexes, &*self.authority)
-            .await?;
+            .await?
+            + retired;
         for key in obsolete {
             REGISTRY.event(Event::DataCandidates, 1);
             self.authority.delete_versions(&key).await?;
@@ -233,7 +268,7 @@ impl Collection {
                 }
                 if registration.is_none_or(|r| r.identity().incarnation != log.epoch()) {
                     registration = Some(
-                        Registration::load(&self.files, log.epoch(), &self.prefix, self.profile)
+                        Registration::load(&self.files, log.epoch(), &self.prefix, self.encoding)
                             .await?,
                     );
                 }

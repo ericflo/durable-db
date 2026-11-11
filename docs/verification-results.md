@@ -1,5 +1,13 @@
 # Verification results
 
+## Native permit integration (unreleased, 2026-11-11)
+
+The native library now creates write-once positive permits, revokes every unresolved ancestor before recovery, and validates sealed response groups using fresh uncached GETs. It takes no clock and runs no lease renewal. A checkpoint can bound revocation traversal only through an owner that already completed it; a new model negative control detects cutting at an unfinished owner. The collector uses its existing list-before-fence rule to remove unpublished/obsolete permits while protecting the current root.
+
+All 291 enabled local Rust tests, formatting and strict clippy pass. The six focused permit regressions pass in under 0.01 seconds after compilation; deliberately accepting absent permission and revoking only the immediate predecessor both fail. The registration model checks 34,061/281,563 states with four unsafe and two coverage controls; permit, transaction, publication and local-exclusion models pass with their controls. These are bounded component checks, not a proof of Rust or complete cluster composition.
+
+The timed runtime, local logical startup adapter, renewal scheduler and fifteen obsolete timing/delegation CI stages are removed. Historical models, proofs and pinned VM evidence remain reproducible as fallback research. Remote format 23 refuses older timed writers; released local format 15 is unchanged. Cloud CLI election/routing, partition placement, provider qualification and the production failure/performance campaign remain gates. This is a native library milestone, not a completed cluster cutover.
+
 ## Timing-independent ownership candidate (2026-11-11)
 
 The first production release must support the existing Kubernetes hosts. Revocable writer permits now replace restricted clock profiles as the selected ownership experiment: create a positive permit once, validate sealed response groups with fresh GETs, revoke before selecting the predecessor's durable journal prefix. No bucket-wide conditional update is required on that proposed ordinary path, but an object GET per group remains.

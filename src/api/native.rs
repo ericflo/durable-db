@@ -10,8 +10,7 @@ use crate::{
         PolicyResult, ReadRequest, ReadResult,
     },
     journal::{self, Resolution},
-    ownership::timing::Clock,
-    transactions::live::{AuthorizedTicket, CatalogChange, CatalogResult, Owner, Renewal},
+    transactions::live::{AuthorizedTicket, CatalogChange, CatalogResult, Owner},
 };
 use async_trait::async_trait;
 use std::{
@@ -27,13 +26,12 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
-/// Native HTTP backend for an already recovered owner. The caller must supply
-/// a qualified ownership contract. Use `renewing` to own its renewal task, or
-/// `new` with externally driven renewal. Neither selects a physical clock,
-/// elects an owner, or enables the CLI cloud runtime.
+/// Native HTTP backend for a recovered owner. Remote responses validate a fresh
+/// write-once permit after sealing their result. Local directories hold an OS
+/// guard. Election and routing are the caller's responsibility.
 /// Dropping it retires the worker; accepted writes can have unknown outcomes.
-pub struct Native<C> {
-    owner: Arc<RwLock<Owner<C>>>,
+pub struct Native {
+    owner: Arc<RwLock<Owner>>,
     cache: Arc<Cache>,
     queue: mpsc::Sender<Command>,
     permits: Arc<Semaphore>,
@@ -75,30 +73,14 @@ fn unavailable() -> Error {
     Error::Storage(anyhow::anyhow!("native worker retired"))
 }
 
-impl<C: Clock + Send + 'static> Native<C> {
+impl Native {
     /// Bound queued plus executing plus pending replies, including duplicates.
     /// Requests also obey the public wire bounds; journal/cache limits remain
     /// independent. Capacity is 1..128; saturation refuses before admission.
-    pub fn new(owner: Owner<C>, capacity: usize) -> Result<Self> {
-        Self::start(owner, capacity, None, Duration::from_secs(60))
+    pub fn new(owner: Owner, capacity: usize) -> Result<Self> {
+        Self::start(owner, capacity, Duration::from_secs(60))
     }
-    /// Own bounded renewal scheduling alongside serving. The injected clock and
-    /// profile must already be qualified. Worker failure/drop also stops renewal.
-    pub fn renewing(
-        owner: Owner<C>,
-        capacity: usize,
-        period: Duration,
-        timeout: Duration,
-    ) -> Result<Self> {
-        let renewal = owner.control().keep_alive(period, timeout)?;
-        Self::start(owner, capacity, Some(renewal), Duration::from_secs(60))
-    }
-    pub(super) fn start(
-        owner: Owner<C>,
-        capacity: usize,
-        renewal: Option<Renewal>,
-        maintenance: Duration,
-    ) -> Result<Self> {
+    pub(super) fn start(owner: Owner, capacity: usize, maintenance: Duration) -> Result<Self> {
         if !(Duration::from_secs(1)..=Duration::from_secs(86400)).contains(&maintenance) {
             return Err(Error::Invalid(
                 "maintenance interval must be 1 second..1 day".into(),
@@ -119,7 +101,6 @@ impl<C: Clock + Send + 'static> Native<C> {
             owner.clone(),
             receive,
             Running(running.clone()),
-            renewal,
             collection,
             maintenance,
         ));
@@ -162,14 +143,14 @@ impl<C: Clock + Send + 'static> Native<C> {
         receive.await.map_err(|_| unavailable())?
     }
 }
-impl<C> Drop for Native<C> {
+impl Drop for Native {
     fn drop(&mut self) {
         self.worker.abort();
     }
 }
 
 #[async_trait]
-impl<C: Clock + Send + 'static> Backend for Native<C> {
+impl Backend for Native {
     async fn database_upload_budget(&self, db: &str) -> Result<crate::upload_budget::UploadStatus> {
         let budget = self
             .owner
@@ -204,7 +185,7 @@ impl<C: Clock + Send + 'static> Backend for Native<C> {
         files.replenish_upload_budget(request).await
     }
     async fn ready(&self) -> bool {
-        self.check().is_ok() && self.owner.read().await.check().is_ok()
+        self.check().is_ok() && self.owner.read().await.validate().await.is_ok()
     }
     async fn memory_bytes(&self) -> usize {
         self.cache.memory_bytes().await
@@ -252,8 +233,8 @@ impl<C: Clock + Send + 'static> Backend for Native<C> {
     }
 }
 
-async fn prepare<C: Clock>(
-    owner: &mut Owner<C>,
+async fn prepare(
+    owner: &mut Owner,
     write: Write,
 ) -> Result<(Ticket, Option<journal::PreparedUpload>)> {
     let mut change = match write {
@@ -281,11 +262,10 @@ async fn prepare<C: Clock>(
     Ok((Ticket::Catalog(change), upload))
 }
 
-async fn run<C: Clock + Send>(
-    owner: Arc<RwLock<Owner<C>>>,
+async fn run(
+    owner: Arc<RwLock<Owner>>,
     mut queue: mpsc::Receiver<Command>,
     _running: Running,
-    _renewal: Option<Renewal>,
     collection: crate::ownership::root::Collection,
     maintenance: Duration,
 ) {
@@ -329,7 +309,10 @@ async fn run<C: Clock + Send>(
                             }
                             pending.push(Pending { ticket, response: command.response });
                         }
-                        Err(error) => { let _ = command.response.send.send(Err(error)); }
+                        Err(error) => {
+                            if owner.read().await.validate().await.is_err() { return; }
+                            let _ = command.response.send.send(Err(error));
+                        }
                     }
                 }
             }
@@ -364,6 +347,7 @@ async fn run<C: Clock + Send>(
         if owner.check().is_err() {
             return;
         }
+        let mut replies = Vec::new();
         let mut i = 0;
         while i < pending.len() {
             let response = &pending[i].response;
@@ -372,11 +356,11 @@ async fn run<C: Clock + Send>(
                 continue;
             }
             let result = match &pending[i].ticket {
-                Ticket::Catalog(change) => {
-                    owner.catalog_result(change).map(|r| r.map(Reply::Catalog))
-                }
+                Ticket::Catalog(change) => owner
+                    .catalog_result_unvalidated(change)
+                    .map(|r| r.map(Reply::Catalog)),
                 Ticket::Commit(ticket, access) => owner
-                    .authorized_result(ticket, access)
+                    .authorized_result_unvalidated(ticket, access)
                     .await
                     .map(|r| r.map(Reply::Commit)),
             };
@@ -388,7 +372,15 @@ async fn run<C: Clock + Send>(
                 Ok(Some(reply)) => Ok(reply),
                 Err(error) => Err(error),
             };
-            let _ = pending.swap_remove(i).response.send.send(result);
+            replies.push((pending.swap_remove(i).response, result));
+        }
+        if !replies.is_empty() {
+            if owner.validate().await.is_err() {
+                return;
+            }
+            for (response, result) in replies {
+                let _ = response.send.send(result);
+            }
         }
     }
 }

@@ -1,10 +1,12 @@
 use super::*;
+use std::time::Duration;
 mod budget;
 mod catalog;
 mod checkpoint;
 mod http;
 mod lifecycle;
 mod live;
+mod permit;
 mod registration;
 mod replay;
 mod retention;
@@ -22,23 +24,6 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-
-#[derive(Clone, Default)]
-struct ManualClock {
-    now: Arc<AtomicU64>,
-    failed: Arc<AtomicBool>,
-}
-impl ManualClock {
-    fn set(&self, now: u64) {
-        self.now.store(now, Ordering::SeqCst);
-    }
-}
-impl Clock for ManualClock {
-    fn read(&self) -> Option<Duration> {
-        (!self.failed.load(Ordering::SeqCst))
-            .then(|| Duration::from_nanos(self.now.load(Ordering::SeqCst)))
-    }
-}
 
 struct Provider {
     files: Arc<Remote>,
@@ -82,10 +67,16 @@ impl Provider {
     fn connection(self: &Arc<Self>, prefix: &str) -> Connection {
         Connection::new(self.files.clone(), self.clone(), prefix)
     }
-    fn root(self: &Arc<Self>, clock: &ManualClock) -> Root<ManualClock> {
-        self.connection("test")
-            .root(clock.clone(), profile())
-            .unwrap()
+    fn root(self: &Arc<Self>) -> Root {
+        self.connection("test").root().unwrap()
+    }
+    async fn revoke_current(&self) {
+        use crate::storage::Storage;
+        let id = self.record().identity.incarnation;
+        self.files
+            .delete(&format!("permits/{}", id.simple()))
+            .await
+            .unwrap();
     }
     fn record(&self) -> Record {
         let history = self.history.lock().unwrap();
@@ -93,7 +84,7 @@ impl Provider {
         metadata::decode(
             info,
             "test",
-            profile(),
+            encoding(),
             info.contains_key(crate::upload_budget::FIELD),
         )
         .unwrap()
@@ -157,10 +148,10 @@ impl Authority for Provider {
     }
 }
 
-fn profile() -> Profile {
-    Profile::new(Duration::from_nanos(10), Duration::from_nanos(1)).unwrap()
+fn encoding() -> Encoding {
+    Encoding::REMOTE
 }
-async fn claim(root: &mut Root<ManualClock>) {
+async fn claim(root: &mut Root) {
     let observed = root.observe().await.unwrap();
     let request = root.claim(observed).unwrap();
     assert!(matches!(
@@ -168,7 +159,7 @@ async fn claim(root: &mut Root<ManualClock>) {
         Outcome::Confirmed
     ));
 }
-async fn validate(root: &mut Root<ManualClock>) {
+async fn validate(root: &mut Root) {
     let observed = root.observe().await.unwrap();
     let request = root.validate(observed).unwrap();
     assert!(matches!(
@@ -176,54 +167,29 @@ async fn validate(root: &mut Root<ManualClock>) {
         Outcome::Confirmed
     ));
 }
-async fn activate(root: &mut Root<ManualClock>) {
+async fn activate(root: &mut Root) {
     let request = root.activate().unwrap();
     assert!(matches!(
         root.finish(request.execute().await).unwrap(),
         Outcome::Confirmed
     ));
 }
-async fn active(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
-    let mut root = provider.root(clock);
+async fn active(provider: &Arc<Provider>) -> Root {
+    let mut root = provider.root();
     claim(&mut root).await;
-    clock.set(23);
-    validate(&mut root).await;
-    activate(&mut root).await;
-    assert!(root.permission().unwrap().is_some());
-    root
-}
 
-#[tokio::test]
-async fn bootstrap_drains_and_activation_never_extends_the_earned_interval() {
-    let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = provider.root(&clock);
-    assert!(root.permission().unwrap().is_none());
-    assert_eq!(root.child_duration().unwrap(), Duration::ZERO);
-    claim(&mut root).await;
-    assert!(root.permission().unwrap().is_none());
-    assert!(matches!(root.activate(), Err(Error::NotReady)));
-    clock.set(22);
     validate(&mut root).await;
-    assert!(matches!(root.activate(), Err(Error::NotReady)));
-    clock.set(23);
     activate(&mut root).await;
-    assert_eq!(root.permission().unwrap().unwrap().epoch, 1);
-    assert_eq!(root.child_duration().unwrap(), Duration::from_nanos(3));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
-    clock.set(31);
-    assert!(root.permission().unwrap().is_some());
-    assert_eq!(root.child_duration().unwrap(), Duration::ZERO);
-    clock.set(32); // Renewal began at 22; activation at 23 did not move expiry.
-    assert!(root.permission().unwrap().is_none());
+    assert!(root.permission().await.unwrap().is_some());
+    root
 }
 
 #[tokio::test]
 async fn competing_candidates_bind_once_and_only_the_exact_winner_can_revalidate() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut a = provider.root(&clock);
-    let mut b = provider.root(&clock);
+
+    let mut a = provider.root();
+    let mut b = provider.root();
     let a_observed = a.observe().await.unwrap();
     let b_observed = b.observe().await.unwrap();
     let a_request = a.claim(a_observed).unwrap();
@@ -241,13 +207,13 @@ async fn competing_candidates_bind_once_and_only_the_exact_winner_can_revalidate
     assert!(matches!(a.claim(observed), Err(Error::Bound)));
     let observed = a.observe().await.unwrap();
     assert!(matches!(a.validate(observed), Err(Error::NotOwner)));
-    let mut c = provider.root(&clock);
+    let mut c = provider.root();
     claim(&mut c).await;
     assert_eq!(provider.record().identity.epoch, 2);
     assert_eq!(provider.record().identity.incarnation, c.incarnation);
     // An old empty-register observation cannot reset epoch two to epoch one.
     *provider.stale.lock().unwrap() = Some(0);
-    let mut stale = provider.root(&clock);
+    let mut stale = provider.root();
     let observed = stale.observe().await.unwrap();
     let request = stale.claim(observed).unwrap();
     assert!(matches!(
@@ -258,35 +224,30 @@ async fn competing_candidates_bind_once_and_only_the_exact_winner_can_revalidate
 }
 
 #[tokio::test]
-async fn claim_applied_after_timeout_needs_validation_and_a_new_drain() {
+async fn claim_applied_after_timeout_needs_validation_before_activation() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = provider.root(&clock);
+
+    let mut root = provider.root();
     let observed = root.observe().await.unwrap();
     let delayed = root.claim(observed).unwrap();
     root.abandon();
-    clock.set(3);
+
     assert!(matches!(
         root.finish(delayed.execute().await).unwrap(),
         Outcome::Ignored
     ));
-    assert!(root.permission().unwrap().is_none());
-    assert!(root.drain.is_none());
-    clock.set(5);
+    assert!(root.permission().await.unwrap().is_none());
+
     validate(&mut root).await;
-    clock.set(27);
-    validate(&mut root).await;
-    assert!(matches!(root.activate(), Err(Error::NotReady)));
-    clock.set(28);
     activate(&mut root).await;
-    assert!(root.permission().unwrap().is_some());
+    assert!(root.permission().await.unwrap().is_some());
 }
 
 #[tokio::test]
 async fn lost_claim_and_activation_replies_recover_without_inventing_permission() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = provider.root(&clock);
+
+    let mut root = provider.root();
     let observed = root.observe().await.unwrap();
     let request = root.claim(observed).unwrap();
     provider.lose_reply.store(true, Ordering::SeqCst);
@@ -294,11 +255,10 @@ async fn lost_claim_and_activation_replies_recover_without_inventing_permission(
         root.finish(request.execute().await).unwrap(),
         Outcome::Uncertain(_)
     ));
-    assert!(root.drain.is_none());
-    assert!(root.permission().unwrap().is_none());
-    clock.set(5);
+    assert!(root.permission().await.unwrap().is_none());
+
     validate(&mut root).await;
-    clock.set(28);
+
     validate(&mut root).await;
     let request = root.activate().unwrap();
     provider.lose_reply.store(true, Ordering::SeqCst);
@@ -306,37 +266,38 @@ async fn lost_claim_and_activation_replies_recover_without_inventing_permission(
         root.finish(request.execute().await).unwrap(),
         Outcome::Uncertain(_)
     ));
-    assert!(root.permission().unwrap().is_none());
+    assert!(root.permission().await.unwrap().is_none());
     // Observing the open record does not authorize reads. Matching validation
-    // recovers the earlier, already-drained activation without restarting its drain.
+    // recovers the earlier activation whose ancestor revocation already completed.
     let observed = root.observe().await.unwrap();
-    assert!(root.permission().unwrap().is_none());
-    clock.set(29);
+    assert!(root.permission().await.unwrap().is_none());
+
     let request = root.validate(observed).unwrap();
     assert!(matches!(
         root.finish(request.execute().await).unwrap(),
         Outcome::Confirmed
     ));
-    assert!(root.permission().unwrap().is_some());
-    clock.set(39);
-    assert!(root.permission().unwrap().is_none());
+    assert!(root.permission().await.unwrap().is_some());
+
+    provider.revoke_current().await;
+    assert!(root.permission().await.unwrap().is_none());
 }
 
 #[tokio::test]
-async fn late_old_writes_and_replies_cannot_overlap_a_successors_interval() {
+async fn late_control_writes_cannot_restore_a_revoked_owner() {
     for apply_before_fence in [false, true] {
         let provider = Provider::new();
-        let clock = ManualClock::default();
-        let mut old = active(&provider, &clock).await;
-        clock.set(24);
+
+        let mut old = active(&provider).await;
+
         let observation = old.observe();
         // Network work owns its request state; local permission checks remain
         // available while an observation future is outstanding.
-        assert!(old.permission().unwrap().is_some());
+        assert!(old.permission().await.unwrap().is_some());
         let observed = observation.await.unwrap();
         let request = old.validate(observed).unwrap();
-        // Starting or abandoning renewal preserves the old interval, ending at 33.
-        assert!(old.permission().unwrap().is_some());
+        // Starting or abandoning control validation cannot extend or recreate permission.
+        assert!(old.permission().await.unwrap().is_some());
         old.abandon();
         let mut deferred = Some(request);
         let early_reply = if apply_before_fence {
@@ -344,21 +305,21 @@ async fn late_old_writes_and_replies_cannot_overlap_a_successors_interval() {
         } else {
             None
         };
-        clock.set(25);
-        let mut successor = provider.root(&clock);
+
+        let mut successor = provider.root();
         claim(&mut successor).await;
-        assert!(old.permission().unwrap().is_some());
+        assert!(old.permission().await.unwrap().is_some());
         let reply = match early_reply {
             Some(reply) => reply,
             None => deferred.take().unwrap().execute().await,
         };
-        clock.set(48);
+
         validate(&mut successor).await;
         activate(&mut successor).await;
         assert!(matches!(old.finish(reply).unwrap(), Outcome::Ignored));
-        assert!(old.permission().unwrap().is_none());
-        assert_eq!(successor.permission().unwrap().unwrap().epoch, 2);
-        // A stale observation of the old owner's metadata cannot renew it.
+        assert!(old.permission().await.unwrap().is_none());
+        assert_eq!(successor.permission().await.unwrap().unwrap().epoch, 2);
+        // A stale observation of the old owner's metadata cannot restore its permission.
         *provider.stale.lock().unwrap() = Some(3);
         let observed = old.observe().await.unwrap();
         let request = old.validate(observed).unwrap();
@@ -366,38 +327,16 @@ async fn late_old_writes_and_replies_cannot_overlap_a_successors_interval() {
             old.finish(request.execute().await).unwrap(),
             Outcome::Conflict
         ));
-        assert!(old.permission().unwrap().is_none());
+        assert!(old.permission().await.unwrap().is_none());
     }
-}
-
-#[tokio::test]
-async fn delayed_replies_consume_their_original_interval() {
-    let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = provider.root(&clock);
-    let observed = root.observe().await.unwrap();
-    let request = root.claim(observed).unwrap();
-    let reply = request.execute().await;
-    clock.set(20);
-    assert!(matches!(root.finish(reply).unwrap(), Outcome::Confirmed));
-    let observed = root.observe().await.unwrap();
-    let request = root.validate(observed).unwrap();
-    let reply = request.execute().await;
-    clock.set(45);
-    assert!(matches!(root.finish(reply).unwrap(), Outcome::Confirmed));
-    assert!(root.drained().unwrap());
-    assert!(matches!(root.activate(), Err(Error::NotReady)));
-    validate(&mut root).await;
-    activate(&mut root).await;
-    assert!(root.permission().unwrap().is_some());
 }
 
 #[tokio::test]
 async fn foreign_observations_and_completions_do_not_consume_the_current_request() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut a = provider.root(&clock);
-    let mut b = provider.root(&clock);
+
+    let mut a = provider.root();
+    let mut b = provider.root();
     let foreign = a.observe().await.unwrap();
     assert!(matches!(
         b.claim(foreign),
@@ -420,39 +359,9 @@ async fn foreign_observations_and_completions_do_not_consume_the_current_request
 }
 
 #[tokio::test]
-async fn failed_clocks_and_corrupt_confirmations_cannot_be_revived() {
+async fn incompatible_namespaces_encodings_and_metadata_fail_before_writes() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = active(&provider, &clock).await;
-    let old_identity = root.permission().unwrap().unwrap();
-    clock.failed.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        root.permission(),
-        Err(Error::Timing(timing::Error::Retired))
-    ));
-    clock.failed.store(false, Ordering::SeqCst);
-    assert!(root.permission().is_err());
-    let mut replacement = provider.root(&clock);
-    assert_ne!(replacement.incarnation, old_identity.incarnation);
-    claim(&mut replacement).await;
-    clock.set(46);
-    validate(&mut replacement).await;
-    activate(&mut replacement).await;
-    let observed = replacement.observe().await.unwrap();
-    let request = replacement.validate(observed).unwrap();
-    provider.corrupt_reply.store(true, Ordering::SeqCst);
-    assert!(matches!(
-        replacement.finish(request.execute().await),
-        Err(Error::Incompatible)
-    ));
-    assert!(matches!(replacement.permission(), Err(Error::Retired)));
-    assert!(matches!(replacement.observe().await, Err(Error::Retired)));
-}
 
-#[tokio::test]
-async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
-    let provider = Provider::new();
-    let clock = ManualClock::default();
     let connection = provider.connection("test");
     for format in [
         "3",
@@ -470,30 +379,19 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
     ] {
         provider.history.lock().unwrap()[0].info =
             BTreeMap::from([("durable-db-format".into(), format.into())]);
-        let root = connection.root(clock.clone(), profile()).unwrap();
+        let root = connection.root().unwrap();
         assert!(matches!(root.observe().await, Err(Error::Incompatible)));
     }
     provider.history.lock().unwrap()[0].info.clear();
-    let mut root = provider.root(&clock);
+    let mut root = provider.root();
     claim(&mut root).await;
     let calls = provider.calls.load(Ordering::SeqCst);
-    let different = Profile::new(Duration::from_nanos(11), Duration::from_nanos(1)).unwrap();
-    let mismatch = connection.root(clock.clone(), different).unwrap();
-    assert!(matches!(mismatch.observe().await, Err(Error::Incompatible)));
-    let wrong_prefix = provider
-        .connection("other")
-        .root(clock.clone(), profile())
-        .unwrap();
+    let wrong_prefix = provider.connection("other").root().unwrap();
     assert!(matches!(
         wrong_prefix.observe().await,
         Err(Error::Incompatible)
     ));
-    assert!(
-        provider
-            .connection(&"x".repeat(129))
-            .root(clock.clone(), profile())
-            .is_err()
-    );
+    assert!(provider.connection(&"x".repeat(129)).root().is_err());
     assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
     let valid = provider
         .history
@@ -506,7 +404,7 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
     for value in ["{}".to_owned(), "x".repeat(1025)] {
         let mut invalid = valid.clone();
         invalid.insert("durable-db-owned-root".into(), value);
-        assert!(metadata::decode(&invalid, "test", profile(), false).is_err());
+        assert!(metadata::decode(&invalid, "test", encoding(), false).is_err());
     }
     for field in [
         "epoch",
@@ -522,11 +420,11 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
         wire[field] = if field == "incarnation" || field == "catalog" {
             serde_json::json!(Uuid::nil().to_string())
         } else {
-            serde_json::json!(0)
+            serde_json::json!(if field == "epoch" { 0 } else { 1 })
         };
         invalid.insert("durable-db-owned-root".into(), wire.to_string());
         assert!(
-            metadata::decode(&invalid, "test", profile(), false).is_err(),
+            metadata::decode(&invalid, "test", encoding(), false).is_err(),
             "{field}"
         );
     }
@@ -535,11 +433,11 @@ async fn incompatible_namespaces_profiles_and_metadata_fail_before_writes() {
 #[tokio::test]
 async fn metadata_limits_and_epoch_exhaustion_do_not_send_or_bind_a_claim() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     provider.history.lock().unwrap()[0].info = (0..7)
         .map(|n| (format!("custom-{n}"), "keep".into()))
         .collect();
-    let mut root = provider.root(&clock);
+    let mut root = provider.root();
     let observed = root.observe().await.unwrap();
     assert!(matches!(root.claim(observed), Err(Error::Incompatible)));
     assert!(root.epoch.is_none());
@@ -562,7 +460,7 @@ async fn metadata_limits_and_epoch_exhaustion_do_not_send_or_bind_a_claim() {
         wire["epoch"] = serde_json::json!(u64::MAX);
         info.insert("durable-db-owned-root".into(), wire.to_string());
     }
-    let mut fresh = provider.root(&clock);
+    let mut fresh = provider.root();
     let observed = fresh.observe().await.unwrap();
     assert!(matches!(fresh.claim(observed), Err(Error::Exhausted)));
     assert!(fresh.epoch.is_none());

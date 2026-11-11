@@ -1,4 +1,4 @@
-use super::{Error, Identity, Profile};
+use super::{Encoding, Error, Identity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -7,17 +7,18 @@ const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
 const RETAINED: &str = "durable-db-retained-checkpoint";
-pub(crate) const VERSION: &str = "owned-candidate-22";
+pub(crate) const VERSION: &str = "owned-candidate-23";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
 
-// Admission-policy changes must exclude older budgeted writers without
-// invalidating unbudgeted storage, including directories shipped in v0.9.0.
-pub(super) fn version(budgeted: bool) -> &'static str {
+// Exclude timed remote writers while preserving released exclusive local data.
+pub(super) fn version(budgeted: bool, encoding: Encoding) -> &'static str {
     if budgeted {
         VERSION
-    } else {
+    } else if encoding.local {
         "owned-candidate-15"
+    } else {
+        "owned-candidate-23-unbudgeted"
     }
 }
 
@@ -74,7 +75,7 @@ struct Wire {
 pub(super) fn decode(
     info: &BTreeMap<String, String>,
     prefix: &str,
-    profile: Profile,
+    encoding: Encoding,
     budgeted: bool,
 ) -> Result<Option<Record>, Error> {
     if !info.contains_key(FORMAT) {
@@ -87,7 +88,7 @@ pub(super) fn decode(
         }
         return Ok(None);
     }
-    if info.get(FORMAT).map(String::as_str) != Some(version(budgeted))
+    if info.get(FORMAT).map(String::as_str) != Some(version(budgeted, encoding))
         || info.get(PREFIX).map(String::as_str) != Some(prefix)
         || info.contains_key(crate::upload_budget::FIELD) != budgeted
         || info.keys().any(|k| {
@@ -135,8 +136,8 @@ pub(super) fn decode(
     if wire.epoch == 0
         || incarnation.is_nil()
         || incarnation.to_string() != wire.incarnation
-        || u128::from(wire.lifetime_ns) != profile.bounds.root_lifetime().as_nanos()
-        || u128::from(wire.error_ns) != profile.error.as_nanos()
+        || wire.lifetime_ns != encoding.legacy_lifetime()
+        || wire.error_ns != 0
     {
         return Err(Error::Incompatible);
     }
@@ -182,15 +183,15 @@ pub(super) fn decode(
 pub(super) fn encode(
     observed: &BTreeMap<String, String>,
     prefix: &str,
-    profile: Profile,
+    encoding: Encoding,
     record: Record,
     budgeted: bool,
 ) -> Result<BTreeMap<String, String>, Error> {
     // Validate before replacing anything, including stale observations and
     // namespaces belonging to the existing publication engine.
-    decode(observed, prefix, profile, budgeted)?;
+    decode(observed, prefix, encoding, budgeted)?;
     let mut info = observed.clone();
-    info.insert(FORMAT.into(), version(budgeted).into());
+    info.insert(FORMAT.into(), version(budgeted, encoding).into());
     info.insert(PREFIX.into(), prefix.into());
     if let Some(retained) = record.retained {
         let encoded = serde_json::to_string(&RetainedWire {
@@ -214,8 +215,8 @@ pub(super) fn encode(
             epoch: record.identity.epoch,
             incarnation: record.identity.incarnation.to_string(),
             phase: record.phase,
-            lifetime_ns: profile.bounds.root_lifetime().as_nanos() as u64,
-            error_ns: profile.error.as_nanos() as u64,
+            lifetime_ns: encoding.legacy_lifetime(),
+            error_ns: 0,
             catalog: record.catalog.map(|id| id.to_string()),
             checkpoint: record
                 .checkpoint

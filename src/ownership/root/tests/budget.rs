@@ -13,15 +13,15 @@ fn limits(attempts: u64) -> UploadLimits {
 }
 
 #[tokio::test]
-async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted_writers() {
+async fn permit_format_refuses_timed_cloud_namespaces() {
     let local = Provider::new();
-    claim(&mut local.root(&ManualClock::default())).await;
+    claim(&mut local.root()).await;
     assert_eq!(
         local.read().await.unwrap().info["durable-db-format"],
-        "owned-candidate-15",
-        "v0.9.0 local directories remain compatible"
+        "owned-candidate-23-unbudgeted",
+        "remote roots use a fresh format"
     );
-    local.root(&ManualClock::default()).observe().await.unwrap();
+    local.root().observe().await.unwrap();
 
     let cloud = Provider::new();
     let connection = cloud
@@ -31,9 +31,9 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .unwrap();
     assert_eq!(
         cloud.read().await.unwrap().info["durable-db-format"],
-        "owned-candidate-22"
+        "owned-candidate-23"
     );
-    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let root = connection.root().unwrap();
     root.observe().await.unwrap();
     cloud
         .history
@@ -42,7 +42,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .last_mut()
         .unwrap()
         .info
-        .insert("durable-db-format".into(), "owned-candidate-21".into());
+        .insert("durable-db-format".into(), "owned-candidate-22".into());
     let before = cloud.calls.load(Ordering::SeqCst);
     assert!(matches!(root.observe().await, Err(Error::Incompatible)));
     assert!(
@@ -59,11 +59,8 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
     );
 }
 
-pub(super) async fn attempt(
-    connection: &Connection,
-    clock: &ManualClock,
-) -> (Root<ManualClock>, Outcome) {
-    let mut root = connection.root(clock.clone(), profile()).unwrap();
+pub(super) async fn attempt(connection: &Connection) -> (Root, Outcome) {
+    let mut root = connection.root().unwrap();
     let observed = root.observe().await.unwrap();
     let request = root.claim(observed).unwrap();
     let outcome = root.finish(request.execute().await).unwrap();
@@ -109,16 +106,10 @@ async fn native_budget_bootstrap_loss_reopen_and_format_refusal() {
             .is_err()
     );
     // A connection that omitted enforcement cannot open the budgeted format.
-    assert!(
-        provider
-            .root(&ManualClock::default())
-            .observe()
-            .await
-            .is_err()
-    );
+    assert!(provider.root().observe().await.is_err());
     let before = provider.calls.load(Ordering::SeqCst);
     let unbudgeted = Provider::new();
-    claim(&mut unbudgeted.root(&ManualClock::default())).await;
+    claim(&mut unbudgeted.root()).await;
     assert!(
         unbudgeted
             .connection("test")
@@ -148,18 +139,18 @@ async fn native_budget_bootstrap_loss_reopen_and_format_refusal() {
 #[tokio::test]
 async fn native_budget_charges_abandoned_bootstrap_and_survives_replacement() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
-        .with_upload_budget(limits(2))
+        .with_upload_budget(limits(4))
         .await
         .unwrap();
-    let (_, outcome) = attempt(&connection, &clock).await;
+    let (_, outcome) = attempt(&connection).await;
     assert!(
         matches!(outcome, Outcome::Conflict),
         "credit allocation invalidates the earlier comparison"
     );
-    let (mut root, outcome) = attempt(&connection, &clock).await;
+    let (mut root, outcome) = attempt(&connection).await;
     assert!(matches!(outcome, Outcome::Confirmed));
     assert_eq!(
         provider
@@ -170,7 +161,7 @@ async fn native_budget_charges_abandoned_bootstrap_and_survives_replacement() {
             .len(),
         2
     );
-    clock.set(23);
+
     validate(&mut root).await;
     activate(&mut root).await;
     let mut writer = root.take_journal(QueueLimits::default()).unwrap();
@@ -186,7 +177,7 @@ async fn native_budget_charges_abandoned_bootstrap_and_survives_replacement() {
             .is_empty()
     );
     let status = connection.objects().upload_budget().await.unwrap().unwrap();
-    assert_eq!(status.allocated, limits(2));
+    assert_eq!(status.allocated, limits(4));
     drop((root, writer, connection));
     let reopened = provider
         .connection("test")
@@ -197,7 +188,7 @@ async fn native_budget_charges_abandoned_bootstrap_and_survives_replacement() {
         reopened.objects().upload_budget().await.unwrap().unwrap(),
         status
     );
-    let (_, outcome) = attempt(&reopened, &clock).await;
+    let (_, outcome) = attempt(&reopened).await;
     assert!(matches!(outcome, Outcome::Uncertain(_)));
     assert_eq!(
         provider
@@ -213,7 +204,7 @@ async fn native_budget_charges_abandoned_bootstrap_and_survives_replacement() {
         expected_configuration_revision: 0,
         limits: UploadLimits {
             bytes: 8192,
-            attempts: 6,
+            attempts: 8,
         },
     };
     let funded = reopened
@@ -230,9 +221,9 @@ async fn native_budget_charges_abandoned_bootstrap_and_survives_replacement() {
             .unwrap()
             .replayed
     );
-    let (_, outcome) = attempt(&reopened, &clock).await;
+    let (_, outcome) = attempt(&reopened).await;
     assert!(matches!(outcome, Outcome::Conflict));
-    let (_, outcome) = attempt(&reopened, &clock).await;
+    let (_, outcome) = attempt(&reopened).await;
     assert!(matches!(outcome, Outcome::Confirmed));
 }
 
@@ -331,7 +322,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
         })
         .await
         .unwrap();
-    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let root = connection.root().unwrap();
     let a = root.database_budget("a").unwrap().unwrap();
     let b = root.database_budget("b").unwrap().unwrap();
     for ledger in [&a, &b] {
@@ -402,7 +393,7 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
         "a lost allocation response creates no local rights"
     );
     let reopened = connection
-        .root(ManualClock::default(), profile())
+        .root()
         .unwrap()
         .database_budget("d")
         .unwrap()
@@ -472,7 +463,7 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
         transactions::live::Limits,
     };
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -481,10 +472,10 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
         })
         .await
         .unwrap();
-    let _ = attempt(&connection, &clock).await;
-    let (mut root, outcome) = attempt(&connection, &clock).await;
+    let _ = attempt(&connection).await;
+    let (mut root, outcome) = attempt(&connection).await;
     assert!(matches!(outcome, Outcome::Confirmed));
-    clock.set(23);
+
     validate(&mut root).await;
     activate(&mut root).await;
     let mut owner = live::open(root, Limits::default()).await;
@@ -655,7 +646,7 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
 #[tokio::test]
 async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collisions() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -664,15 +655,12 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
         })
         .await
         .unwrap();
-    assert!(matches!(
-        attempt(&connection, &clock).await.1,
-        Outcome::Conflict
-    ));
+    assert!(matches!(attempt(&connection).await.1, Outcome::Conflict));
     let mut collision = None;
     for epoch in 1..=3 {
-        let (mut root, outcome) = attempt(&connection, &clock).await;
+        let (mut root, outcome) = attempt(&connection).await;
         assert!(matches!(outcome, Outcome::Confirmed));
-        clock.set(clock.now.load(Ordering::SeqCst) + 23);
+
         validate(&mut root).await;
         activate(&mut root).await;
         if epoch > 1 {
@@ -728,7 +716,7 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
         writer.complete(upload.send().await).unwrap();
         writer.pop_durable().unwrap().unwrap();
     }
-    let collector = connection.root(clock, profile()).unwrap().collection();
+    let collector = connection.root().unwrap().collection();
     // A missing/corrupt catalog is an error, not an empty protected tree.
     let header = format!("catalogs/{}", provider.record().catalog.unwrap().simple());
     let orphan = format!("manifests/orphan.{}", Uuid::new_v4());
@@ -761,7 +749,7 @@ async fn database_budget_metadata_reuses_staging_and_bounds_stale_comparisons() 
         })
         .await
         .unwrap();
-    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let root = connection.root().unwrap();
     let ledger = root.database_budget("app").unwrap().unwrap();
     let refill = UploadRequest {
         request_id: "refill".into(),
@@ -823,7 +811,7 @@ async fn database_budget_metadata_reuses_staging_and_bounds_stale_comparisons() 
         if malformed {
             let before = provider.read().await.unwrap();
             let mut info = before.info.clone();
-            info.insert("durable-db-format".into(), "owned-candidate-21".into());
+            info.insert("durable-db-format".into(), "owned-candidate-22".into());
             provider.replace(&before, info).await.unwrap().unwrap();
         } else {
             let captured = provider.history.lock().unwrap().len() - 1;
@@ -857,7 +845,7 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
         })
         .await
         .unwrap();
-    let root = connection.root(ManualClock::default(), profile()).unwrap();
+    let root = connection.root().unwrap();
     let ledger = root.database_budget("app").unwrap().unwrap();
     ledger.initialize_database().await.unwrap();
     let collector = root.collection();
@@ -944,7 +932,7 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
 async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing_spent_credit() {
     use crate::upload_budget::Allocator;
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -953,10 +941,10 @@ async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing
         })
         .await
         .unwrap();
-    let _ = attempt(&connection, &clock).await;
-    let (mut root, outcome) = attempt(&connection, &clock).await;
+    let _ = attempt(&connection).await;
+    let (mut root, outcome) = attempt(&connection).await;
     assert!(matches!(outcome, Outcome::Confirmed));
-    clock.set(23);
+
     validate(&mut root).await;
     activate(&mut root).await;
     let origin = root.recovery_record().unwrap();
@@ -1054,9 +1042,9 @@ async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing
     );
     // Restart creates no admission rights, but the unissued reserve survives.
     // A new owner fences the old claimant, even if it uses a fresh observation.
-    let (mut replacement, outcome) = attempt(&connection, &clock).await;
+    let (mut replacement, outcome) = attempt(&connection).await;
     assert!(matches!(outcome, Outcome::Confirmed));
-    clock.set(46);
+
     validate(&mut replacement).await;
     activate(&mut replacement).await;
     let replacement_origin = replacement.recovery_record().unwrap();
@@ -1160,7 +1148,7 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
         transactions::live::{CatalogResult, Limits},
     };
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -1169,12 +1157,12 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
         })
         .await
         .unwrap();
-    let (mut root, mut outcome) = attempt(&connection, &clock).await;
+    let (mut root, mut outcome) = attempt(&connection).await;
     if matches!(outcome, Outcome::Conflict) {
-        (root, outcome) = attempt(&connection, &clock).await;
+        (root, outcome) = attempt(&connection).await;
     }
     assert!(matches!(outcome, Outcome::Confirmed));
-    clock.set(23);
+
     validate(&mut root).await;
     activate(&mut root).await;
     for (name, attempts) in [
@@ -1216,7 +1204,7 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
         .unwrap();
     assert!(refused.upload.is_none());
     assert!(matches!(
-        owner.catalog_result(&refused),
+        owner.catalog_result(&refused).await,
         Err(crate::Error::Limit(_))
     ));
     assert_eq!(
@@ -1241,7 +1229,7 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
         .unwrap();
     assert!(refused.upload.is_none());
     assert!(matches!(
-        owner.catalog_result(&refused),
+        owner.catalog_result(&refused).await,
         Err(crate::Error::Limit(_))
     ));
     assert_eq!(
@@ -1279,7 +1267,7 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
             .unwrap();
         let replay = owner.prepare_creation(name, &create, &admin).await.unwrap();
         assert!(
-            matches!(owner.catalog_result(&replay).unwrap(), Some(CatalogResult::Created(r)) if r.replayed)
+            matches!(owner.catalog_result(&replay).await.unwrap(), Some(CatalogResult::Created(r)) if r.replayed)
         );
         assert_eq!(
             ledger.status().await.unwrap(),
@@ -1318,7 +1306,7 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
         .unwrap();
     let replay = owner.prepare_policy("a", &rotate, &admin).await.unwrap();
     assert!(
-        matches!(owner.catalog_result(&replay).unwrap(), Some(CatalogResult::Policy(r)) if r.replayed)
+        matches!(owner.catalog_result(&replay).await.unwrap(), Some(CatalogResult::Policy(r)) if r.replayed)
     );
     assert_eq!(a.status().await.unwrap(), a_status);
     assert_eq!(owner.policy_info("a", &admin).await.unwrap().revision, 2);

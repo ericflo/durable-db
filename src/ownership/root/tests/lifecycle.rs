@@ -20,12 +20,7 @@ fn write() -> CommitRequest {
     )
     .unwrap()
 }
-async fn credential(
-    owner: &Owner<ManualClock>,
-    db: &str,
-    auth: &Auth,
-    write: bool,
-) -> (Access, String) {
+async fn credential(owner: &Owner, db: &str, auth: &Auth, write: bool) -> (Access, String) {
     let policy = owner.policy_info(db, &Access::Administrator).await.unwrap();
     let (token, id) = auth
         .issue_for_policy(
@@ -42,9 +37,9 @@ async fn credential(
 #[tokio::test]
 async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_internal_catalog() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut owner = open(
-        active(&provider, &clock).await,
+        active(&provider).await,
         live::Limits {
             checkpoint_frames: 1,
             ..Default::default()
@@ -57,7 +52,7 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         .prepare_creation("app", &request, &admin)
         .await
         .unwrap();
-    assert!(owner.catalog_result(&creation).unwrap().is_none());
+    assert!(owner.catalog_result(&creation).await.unwrap().is_none());
     assert!(matches!(
         owner.policy_info("app", &admin).await,
         Err(Error::NotFound)
@@ -71,7 +66,7 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         .await
         .unwrap();
     assert!(duplicate.upload.is_none());
-    assert!(owner.catalog_result(&duplicate).unwrap().is_none());
+    assert!(owner.catalog_result(&duplicate).await.unwrap().is_none());
     assert!(matches!(
         owner
             .prepare_creation("app", &create("different"), &admin)
@@ -82,11 +77,13 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         .complete(creation.upload.take().unwrap().send().await)
         .await
         .unwrap();
-    let CatalogResult::Created(first) = owner.catalog_result(&creation).unwrap().unwrap() else {
+    let CatalogResult::Created(first) = owner.catalog_result(&creation).await.unwrap().unwrap()
+    else {
         panic!("wrong result kind")
     };
     assert!(!first.replayed);
-    let CatalogResult::Created(retry) = owner.catalog_result(&duplicate).unwrap().unwrap() else {
+    let CatalogResult::Created(retry) = owner.catalog_result(&duplicate).await.unwrap().unwrap()
+    else {
         panic!("wrong result kind")
     };
     assert!(retry.replayed);
@@ -202,17 +199,18 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         vec![None]
     );
     // Reopen from a new owner: policy and permanent creation receipt share recovery.
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
-    assert!(owner.catalog_result(&creation).is_err());
+    assert!(owner.catalog_result(&creation).await.is_err());
     let mut owner = open(root, live::Limits::default()).await;
     let retry = owner
         .prepare_creation("app", &request, &admin)
         .await
         .unwrap();
     assert!(retry.upload.is_none());
-    let CatalogResult::Created(result) = owner.catalog_result(&retry).unwrap().unwrap() else {
+    let CatalogResult::Created(result) = owner.catalog_result(&retry).await.unwrap().unwrap()
+    else {
         panic!("wrong result kind")
     };
     assert!(result.replayed);
@@ -238,9 +236,9 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
 #[tokio::test]
 async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocation_fences_replays() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut owner = open(
-        active(&provider, &clock).await,
+        active(&provider).await,
         live::Limits {
             checkpoint_frames: 3,
             ..Default::default()
@@ -281,7 +279,7 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         .complete(change.upload.take().unwrap().send().await)
         .await
         .unwrap();
-    assert!(owner.catalog_result(&change).unwrap().is_none());
+    assert!(owner.catalog_result(&change).await.unwrap().is_none());
     assert_eq!(
         owner
             .read_authorized("app", &ReadRequest::default(), &writer)
@@ -294,8 +292,8 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
-    assert!(owner.catalog_result(&change).unwrap().is_some());
-    assert!(owner.catalog_result(&duplicate).unwrap().is_some());
+    assert!(owner.catalog_result(&change).await.unwrap().is_some());
+    assert!(owner.catalog_result(&duplicate).await.unwrap().is_some());
     assert!(matches!(
         owner
             .read_authorized("app", &ReadRequest::default(), &writer)
@@ -351,12 +349,13 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
     );
     // Old policy retries return their original policy result, not current state.
     let replay = owner.prepare_policy("app", &revoke, &admin).await.unwrap();
-    let CatalogResult::Policy(result) = owner.catalog_result(&replay).unwrap().unwrap() else {
+    let CatalogResult::Policy(result) = owner.catalog_result(&replay).await.unwrap().unwrap()
+    else {
         panic!("wrong result kind")
     };
     assert!(result.replayed);
     assert_eq!(result.policy.revision, 2);
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let owner = open(root, live::Limits::default()).await;
@@ -393,7 +392,7 @@ fn quota_write(revision: u64, id: &str, writes: &[(&str, Option<&[u8]>)]) -> Com
     .unwrap()
 }
 async fn apply_quota_write(
-    owner: &mut Owner<ManualClock>,
+    owner: &mut Owner,
     request: &CommitRequest,
 ) -> crate::Result<crate::engine::CommitResult> {
     let prepared = owner
@@ -412,12 +411,12 @@ async fn apply_quota_write(
 async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_takeover() {
     for checkpoint_frames in [1, 256] {
         let provider = Provider::new();
-        let clock = ManualClock::default();
+
         let limits = live::Limits {
             checkpoint_frames,
             ..Default::default()
         };
-        let mut owner = open(active(&provider, &clock).await, limits).await;
+        let mut owner = open(active(&provider).await, limits).await;
         let admin = Access::Administrator;
         for db in ["app", "neighbor"] {
             let mut request = create(db);
@@ -509,7 +508,7 @@ async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_
                 i as u64 + 2
             );
         }
-        let mut root = successor(&provider, &clock).await;
+        let mut root = successor(&provider).await;
         let journal = scan(&mut root).await;
         seal(&mut root, journal).await;
         let mut owner = open(root, limits).await;
@@ -568,11 +567,11 @@ async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_
 }
 
 #[tokio::test]
-async fn native_renewal_waits_for_checkpoint_without_abandoning_its_invocation() {
+async fn native_validation_waits_for_checkpoint_without_abandoning_its_invocation() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut owner = open(
-        active(&provider, &clock).await,
+        active(&provider).await,
         live::Limits {
             checkpoint_frames: 1,
             ..Default::default()
@@ -592,7 +591,7 @@ async fn native_renewal_waits_for_checkpoint_without_abandoning_its_invocation()
     });
     provider.entered.notified().await;
     let calls = provider.calls.load(Ordering::SeqCst);
-    let mut renew = tokio::spawn(async move { control.renew().await.unwrap() });
+    let mut renew = tokio::spawn(async move { control.refresh().await.unwrap() });
     assert!(
         tokio::time::timeout(Duration::from_millis(10), &mut renew)
             .await
@@ -603,7 +602,7 @@ async fn native_renewal_waits_for_checkpoint_without_abandoning_its_invocation()
     let owner = finish.await.unwrap();
     assert!(matches!(renew.await.unwrap(), Outcome::Confirmed));
     assert!(provider.record().checkpoint.is_some());
-    assert!(owner.catalog_result(&creation).unwrap().is_some());
+    assert!(owner.catalog_result(&creation).await.unwrap().is_some());
     assert_eq!(
         owner
             .info_authorized("app", &Access::Administrator)
@@ -615,10 +614,10 @@ async fn native_renewal_waits_for_checkpoint_without_abandoning_its_invocation()
 }
 
 #[tokio::test]
-async fn native_cancelled_renewal_keeps_reads_live_and_does_not_strand_the_control_gate() {
+async fn native_cancelled_validation_keeps_reads_live_and_does_not_strand_the_control_gate() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+
+    let mut owner = open(active(&provider).await, live::Limits::default()).await;
     let mut creation = owner
         .prepare_creation("app", &create("create"), &Access::Administrator)
         .await
@@ -630,7 +629,7 @@ async fn native_cancelled_renewal_keeps_reads_live_and_does_not_strand_the_contr
     let control = owner.control();
     let stalled = control.clone();
     provider.pause.store(true, Ordering::SeqCst);
-    let renewal = tokio::spawn(async move { stalled.renew().await });
+    let renewal = tokio::spawn(async move { stalled.refresh().await });
     provider.entered.notified().await;
     // Waiting on network holds no permission mutex or owner/data borrow.
     assert_eq!(
@@ -645,74 +644,12 @@ async fn native_cancelled_renewal_keeps_reads_live_and_does_not_strand_the_contr
     assert!(matches!(renewal.await, Err(error) if error.is_cancelled()));
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(matches!(
-        control.renew().await.unwrap(),
+        control.refresh().await.unwrap(),
         Outcome::Uncertain(_)
     ));
-    assert!(matches!(control.renew().await.unwrap(), Outcome::Confirmed));
-    assert!(owner.catalog_result(&creation).unwrap().is_some());
-}
-
-#[tokio::test(start_paused = true)]
-async fn native_renewal_scheduler_bounds_timeouts_skips_missed_ticks_and_stops_on_drop() {
-    let provider = Provider::new();
-    let clock = ManualClock::default();
-    let owner = open(active(&provider, &clock).await, live::Limits::default()).await;
-    let control = owner.control();
-    assert!(
-        control
-            .keep_alive(Duration::ZERO, Duration::from_secs(1))
-            .is_err()
-    );
-    provider.pause.store(true, Ordering::SeqCst);
-    let renewal = control
-        .keep_alive(Duration::from_millis(10), Duration::from_millis(5))
-        .unwrap();
-    provider.entered.notified().await;
-    let calls = provider.calls.load(Ordering::SeqCst);
-    tokio::time::advance(Duration::from_millis(6)).await;
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(10)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        provider.calls.load(Ordering::SeqCst),
-        calls + 1,
-        "timeout must release the control gate"
-    );
-    assert!(
-        owner
-            .read_request(
-                crate::transactions::record::Database {
-                    name: "app",
-                    generation: Uuid::from_u128(9)
-                },
-                &ReadRequest::default()
-            )
-            .await
-            .is_ok()
-    );
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        provider.calls.load(Ordering::SeqCst),
-        calls + 2,
-        "missed ticks cannot cause a renewal burst"
-    );
-    drop(renewal);
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 2);
-    clock.set(100);
-    assert!(
-        owner
-            .read_request(
-                crate::transactions::record::Database {
-                    name: "app",
-                    generation: Uuid::from_u128(9)
-                },
-                &ReadRequest::default()
-            )
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        control.refresh().await.unwrap(),
+        Outcome::Confirmed
+    ));
+    assert!(owner.catalog_result(&creation).await.unwrap().is_some());
 }

@@ -25,7 +25,7 @@ fn database(name: &str) -> Database<'_> {
         generation: Uuid::from_u128(if name == "a" { 10 } else { 20 }),
     }
 }
-async fn write(root: &mut Root<ManualClock>, frames: &[Vec<Bytes>]) {
+async fn write(root: &mut Root, frames: &[Vec<Bytes>]) {
     let mut writer = root.take_journal(QueueLimits::default()).unwrap();
     for records in frames {
         let upload = writer.prepare(records).unwrap();
@@ -37,8 +37,8 @@ async fn write(root: &mut Root<ManualClock>, frames: &[Vec<Bytes>]) {
 #[tokio::test]
 async fn selected_history_restores_values_and_receipts_across_owners_without_reexecution() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut first = active(&provider, &clock).await;
+
+    let mut first = active(&provider).await;
     let mut writer = first.take_journal(QueueLimits::default()).unwrap();
     let upload = writer
         .prepare(&[
@@ -75,7 +75,7 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
             }],
         )])
         .unwrap();
-    let mut middle = successor(&provider, &clock).await;
+    let mut middle = successor(&provider).await;
     let journal = scan(&mut middle).await;
     seal(&mut middle, journal).await;
     write(
@@ -108,7 +108,7 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
         ]],
     )
     .await;
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let _late = late.send().await;
@@ -116,7 +116,7 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
     drop(middle);
     drop(writer);
     let replay = root.replay().unwrap();
-    clock.set(clock.now.load(Ordering::SeqCst) + 10);
+
     let view = recovery::restore(replay, Projection::new(IndexLimits::default()).unwrap())
         .await
         .unwrap();
@@ -196,14 +196,15 @@ async fn selected_history_restores_values_and_receipts_across_owners_without_ree
     assert_eq!(scan.next().await.unwrap().unwrap().key.as_ref(), b"x");
     assert_eq!(scan.next().await.unwrap().unwrap().key.as_ref(), b"y");
     assert!(scan.next().await.unwrap().is_none());
-    assert!(root.permission().unwrap().is_none());
+    provider.revoke_current().await;
+    assert!(root.permission().await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn failed_or_partial_projection_is_discarded_and_never_resumed() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     write(
         &mut old,
         &[
@@ -228,7 +229,7 @@ async fn failed_or_partial_projection_is_discarded_and_never_resumed() {
         ],
     )
     .await;
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     for fail_at in [1, 2] {
@@ -287,8 +288,8 @@ async fn a_selected_but_invalid_transaction_cannot_return_an_earlier_partial_vie
         record(database("a"), 2, "first", &[]),
     ] {
         let provider = Provider::new();
-        let clock = ManualClock::default();
-        let mut old = active(&provider, &clock).await;
+
+        let mut old = active(&provider).await;
         write(
             &mut old,
             &[vec![
@@ -305,7 +306,7 @@ async fn a_selected_but_invalid_transaction_cannot_return_an_earlier_partial_vie
             ]],
         )
         .await;
-        let mut root = successor(&provider, &clock).await;
+        let mut root = successor(&provider).await;
         let journal = scan(&mut root).await;
         seal(&mut root, journal).await;
         let target = Memory::default();
@@ -341,8 +342,8 @@ async fn cancellation_drops_the_private_target_after_partial_application() {
         }
     }
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     write(
         &mut old,
         &[vec![record(
@@ -356,7 +357,7 @@ async fn cancellation_drops_the_private_target_after_partial_application() {
         )]],
     )
     .await;
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let memory = Memory::default();
@@ -380,8 +381,8 @@ async fn cancellation_drops_the_private_target_after_partial_application() {
 #[tokio::test]
 async fn native_recovery_bounds_are_aggregate_and_do_not_alias_database_generations() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     let original = database("a");
     let recreated = Database {
         name: "a",
@@ -411,7 +412,7 @@ async fn native_recovery_bounds_are_aggregate_and_do_not_alias_database_generati
         ]],
     )
     .await;
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let defaults = IndexLimits::default();
@@ -468,8 +469,8 @@ async fn native_recovery_bounds_are_aggregate_and_do_not_alias_database_generati
 #[tokio::test]
 async fn native_recovery_receipt_eviction_releases_only_receipt_capacity() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     let frames: Vec<_> = (1..=3)
         .map(|revision| {
             vec![
@@ -490,7 +491,7 @@ async fn native_recovery_receipt_eviction_releases_only_receipt_capacity() {
         })
         .collect();
     write(&mut old, &frames).await;
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let limits = IndexLimits {
@@ -521,8 +522,8 @@ async fn native_recovery_receipt_eviction_releases_only_receipt_capacity() {
 async fn native_selected_recovery_handles_ten_thousand_database_generations() {
     const DATABASES: usize = 10_005;
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     let records: Vec<_> = (0..DATABASES)
         .map(|n| {
             record(
@@ -544,7 +545,7 @@ async fn native_selected_recovery_handles_ten_thousand_database_generations() {
         .map(<[_]>::to_vec)
         .collect();
     write(&mut old, &frames).await;
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let recovered = recovery::restore(

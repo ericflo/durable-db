@@ -33,7 +33,7 @@ impl Maintenance {
         }
     }
 }
-impl<C: Clock> Owner<C> {
+impl Owner {
     pub(crate) fn files(&self) -> Arc<dyn Storage> {
         self.maintenance.files.clone()
     }
@@ -63,7 +63,7 @@ impl<C: Clock> Owner<C> {
     /// Called by admission and completion; a runtime can also drive this after
     /// a failed/cancelled call. Returns false while an upload is still pending.
     /// Checkpoint construction pauses data mutation during I/O. Independent
-    /// control renewal must continue; immutable objects are never deleted here.
+    /// control operations remain separate; immutable objects are never deleted here.
     pub async fn maintain(&mut self) -> anyhow::Result<bool> {
         self.check()?;
         if !self.checkpoint_due() || self.writer.pending_batches() != 0 {
@@ -95,6 +95,9 @@ impl<C: Clock> Owner<C> {
                     (prior * 2).min(Duration::from_secs(30))
                 });
             self.maintenance.retry = Some((now + delay, delay));
+            // Avoid spending maintenance credit for a permanently revoked owner.
+            // Publication still requires its exact conditional comparison.
+            self.validate().await?;
             let origin = {
                 let _request = self.control.request.lock().await;
                 self.control.lock()?.recovery_record()?
@@ -142,7 +145,7 @@ impl<C: Clock> Owner<C> {
                     // Collection/takeover can invalidate the captured origin.
                     // Refresh control before the paced retry; do not upload or
                     // reconstruct any rights from an uncertain funding reply.
-                    let _ = self.control.renew().await;
+                    let _ = self.control.refresh().await;
                     return Err(error);
                 }
                 files = crate::upload_budget::Attempt::bounded(files, total);
@@ -190,7 +193,7 @@ impl<C: Clock> Owner<C> {
                 .ok()
                 .is_some_and(|r| r.checkpoint == Some(pending.staged.reference));
             if !published {
-                let _outcome = self.control.renew_locked().await?;
+                let _outcome = self.control.refresh_locked().await?;
                 let record = self.control.lock()?.recovery_record()?;
                 if record.checkpoint != Some(pending.staged.reference) {
                     if record.collection != pending.staged.origin.collection {

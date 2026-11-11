@@ -8,7 +8,7 @@ use crate::{
     storage::Storage,
 };
 
-async fn publish(root: &mut Root<ManualClock>) {
+async fn publish(root: &mut Root) {
     let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
         .await
         .unwrap()
@@ -31,12 +31,12 @@ fn snapshot(provider: &Arc<Provider>, retained: RetainedCheckpoint) -> Snapshot 
         retained.reference(),
     )
 }
-async fn initial(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
-    let mut first = active(provider, clock).await;
+async fn initial(provider: &Arc<Provider>) -> Root {
+    let mut first = active(provider).await;
     assert!(matches!(first.retain_checkpoint(), Err(Error::NotReady)));
     let mut writer = first.take_journal(QueueLimits::default()).unwrap();
     append(&mut writer, 1, Some(b"before")).await;
-    let mut root = selected(provider, clock).await;
+    let mut root = selected(provider).await;
     publish(&mut root).await;
     root
 }
@@ -45,8 +45,8 @@ async fn initial(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualCl
 async fn retained_checkpoint_survives_lost_reply_takeover_collection_and_identity_checked_release()
 {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = initial(&provider, &clock).await;
+
+    let mut root = initial(&provider).await;
     let (retained, prepared) = root.retain_checkpoint().unwrap();
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(matches!(
@@ -64,7 +64,7 @@ async fn retained_checkpoint_survives_lost_reply_takeover_collection_and_identit
     append(&mut writer, 2, None).await;
     append(&mut writer, 3, Some(b"after")).await;
     drop(root);
-    let mut root = selected(&provider, &clock).await;
+    let mut root = selected(&provider).await;
     publish(&mut root).await;
     assert!(root.retained_checkpoint().unwrap() == Some(retained));
     let collector = root.collection();
@@ -153,12 +153,12 @@ async fn retained_checkpoint_survives_lost_reply_takeover_collection_and_identit
 #[tokio::test]
 async fn late_retention_cannot_resurrect_an_image_collected_after_a_new_checkpoint() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = initial(&provider, &clock).await;
+
+    let mut root = initial(&provider).await;
     let mut writer = root.take_journal(QueueLimits::default()).unwrap();
     append(&mut writer, 2, Some(b"after")).await;
     let (retained, prepared) = root.retain_checkpoint().unwrap();
-    let mut successor = selected(&provider, &clock).await;
+    let mut successor = selected(&provider).await;
     publish(&mut successor).await;
     assert!(successor.collection().collect().await.unwrap() > 0);
     assert!(
@@ -177,8 +177,8 @@ async fn late_retention_cannot_resurrect_an_image_collected_after_a_new_checkpoi
 #[tokio::test]
 async fn invalid_retention_metadata_stops_collection_before_deletion() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = initial(&provider, &clock).await;
+
+    let mut root = initial(&provider).await;
     let (_, prepared) = root.retain_checkpoint().unwrap();
     assert!(matches!(
         root.finish(prepared.execute().await).unwrap(),
@@ -228,8 +228,8 @@ async fn invalid_retention_metadata_stops_collection_before_deletion() {
 async fn backup_slot_changes_rebase_staged_checkpoints_without_losing_retention() {
     for keep in [false, true] {
         let provider = Provider::new();
-        let clock = ManualClock::default();
-        let mut root = initial(&provider, &clock).await;
+
+        let mut root = initial(&provider).await;
         let (retained, prepared) = root.retain_checkpoint().unwrap();
         assert!(matches!(
             root.finish(prepared.execute().await).unwrap(),
@@ -237,7 +237,7 @@ async fn backup_slot_changes_rebase_staged_checkpoints_without_losing_retention(
         ));
         let mut writer = root.take_journal(QueueLimits::default()).unwrap();
         append(&mut writer, 2, Some(b"after")).await;
-        let mut root = selected(&provider, &clock).await;
+        let mut root = selected(&provider).await;
         let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
             .await
             .unwrap()

@@ -16,7 +16,7 @@ fn database(name: &str) -> Database<'_> {
         generation: Uuid::from_u128(10),
     }
 }
-pub(super) async fn open(root: Root<ManualClock>, limits: live::Limits) -> Owner<ManualClock> {
+pub(super) async fn open(root: Root, limits: live::Limits) -> Owner {
     Opening::new(
         root,
         limits,
@@ -44,8 +44,8 @@ fn request<'a>(
 #[tokio::test]
 async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+
+    let mut owner = open(active(&provider).await, live::Limits::default()).await;
     let calls = provider.calls.load(Ordering::SeqCst);
     let a = owner.snapshot(database("a")).await.unwrap();
     let b = owner.snapshot(database("b")).await.unwrap();
@@ -63,7 +63,7 @@ async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries
         .await
         .unwrap();
     for ticket in &first.tickets {
-        assert_eq!(owner.outcome(*ticket).unwrap(), Result::Pending);
+        assert_eq!(owner.outcome(*ticket).await.unwrap(), Result::Pending);
     }
     assert!(owner.get(&a, "x").await.unwrap().is_none());
     let next = owner
@@ -82,21 +82,24 @@ async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries
         .complete(next.upload.unwrap().send().await)
         .await
         .unwrap();
-    assert_eq!(owner.outcome(next.tickets[0]).unwrap(), Result::Pending);
+    assert_eq!(
+        owner.outcome(next.tickets[0]).await.unwrap(),
+        Result::Pending
+    );
     assert!(owner.get(&a, "x").await.unwrap().is_none());
     owner
         .complete(first.upload.unwrap().send().await)
         .await
         .unwrap();
     for ticket in &first.tickets[..2] {
-        assert_eq!(owner.outcome(*ticket).unwrap(), Result::Committed(1));
+        assert_eq!(owner.outcome(*ticket).await.unwrap(), Result::Committed(1));
     }
     assert_eq!(
-        owner.outcome(first.tickets[2]).unwrap(),
+        owner.outcome(first.tickets[2]).await.unwrap(),
         Result::Rejected(Rejection::Validation(validation::Error::Conflict))
     );
     assert_eq!(
-        owner.outcome(next.tickets[0]).unwrap(),
+        owner.outcome(next.tickets[0]).await.unwrap(),
         Result::Committed(2)
     );
     let current = owner.snapshot(database("a")).await.unwrap();
@@ -124,7 +127,7 @@ async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries
         .unwrap();
     assert!(retry.upload.is_none());
     assert_eq!(
-        owner.outcome(retry.tickets[0]).unwrap(),
+        owner.outcome(retry.tickets[0]).await.unwrap(),
         Result::Committed(1)
     );
     assert_eq!(
@@ -132,16 +135,17 @@ async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries
         calls,
         "no control updates for data operations"
     );
-    clock.set(33);
+
+    provider.revoke_current().await;
     assert!(owner.get(&current, "x").await.is_err());
-    assert!(owner.outcome(next.tickets[0]).is_err());
+    assert!(owner.outcome(next.tickets[0]).await.is_err());
 }
 
 #[tokio::test]
 async fn live_reopen_preserves_values_receipts_generations_and_excludes_a_late_suffix() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+
+    let mut owner = open(active(&provider).await, live::Limits::default()).await;
     let old = owner.snapshot(database("a")).await.unwrap();
     let writes = [Mutation {
         key: "x",
@@ -167,11 +171,11 @@ async fn live_reopen_preserves_values_receipts_generations_and_excludes_a_late_s
         )])
         .await
         .unwrap();
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let _late = late.upload.unwrap().send().await;
-    assert!(owner.outcome(first.tickets[0]).is_err());
+    assert!(owner.outcome(first.tickets[0]).await.is_err());
     drop(owner);
     let mut owner = open(root, live::Limits::default()).await;
     let snapshot = owner.snapshot(database("a")).await.unwrap();
@@ -192,7 +196,7 @@ async fn live_reopen_preserves_values_receipts_generations_and_excludes_a_late_s
         .unwrap();
     assert!(retry.upload.is_none());
     assert_eq!(
-        owner.outcome(retry.tickets[0]).unwrap(),
+        owner.outcome(retry.tickets[0]).await.unwrap(),
         Result::Committed(1)
     );
     assert!(owner.get(&old, "x").await.is_err());
@@ -202,7 +206,7 @@ async fn live_reopen_preserves_values_receipts_generations_and_excludes_a_late_s
         .unwrap();
     assert!(uncommitted.upload.is_none());
     assert_eq!(
-        owner.outcome(uncommitted.tickets[0]).unwrap(),
+        owner.outcome(uncommitted.tickets[0]).await.unwrap(),
         Result::Rejected(Rejection::Validation(validation::Error::SnapshotExpired))
     );
     let other = owner
@@ -219,7 +223,7 @@ async fn live_reopen_preserves_values_receipts_generations_and_excludes_a_late_s
 #[tokio::test]
 async fn live_admission_reserves_index_and_queue_before_acceptance() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let limits = live::Limits {
         index: crate::index::recovery::Limits {
             versions: 1,
@@ -228,7 +232,7 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         journal: QueueLimits::new(1, 4096).unwrap(),
         ..Default::default()
     };
-    let mut owner = open(active(&provider, &clock).await, limits).await;
+    let mut owner = open(active(&provider).await, limits).await;
     let snapshot = owner.snapshot(database("a")).await.unwrap();
     let writes = [Mutation {
         key: "x",
@@ -252,7 +256,7 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         .await
         .unwrap();
     assert_eq!(
-        owner.outcome(first.tickets[1]).unwrap(),
+        owner.outcome(first.tickets[1]).await.unwrap(),
         Result::Rejected(Rejection::Capacity)
     );
     // Capacity pressure now checkpoints the completed frame and expires its
@@ -268,7 +272,7 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         .await
         .unwrap();
     assert_eq!(
-        owner.outcome(second.tickets[0]).unwrap(),
+        owner.outcome(second.tickets[0]).await.unwrap(),
         Result::Committed(2)
     );
     assert_eq!(owner.usage().versions, 0);
@@ -277,9 +281,9 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
 #[tokio::test]
 async fn live_receipt_expiry_is_durable_and_pending_request_ids_cannot_be_reused() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut owner = open(
-        active(&provider, &clock).await,
+        active(&provider).await,
         live::Limits {
             receipt_window: 1,
             ..Default::default()
@@ -296,13 +300,16 @@ async fn live_receipt_expiry_is_durable_and_pending_request_ids_cannot_be_reused
         .await
         .unwrap();
     assert!(changed.upload.is_none());
-    assert_eq!(owner.outcome(changed.tickets[0]).unwrap(), Result::Pending);
+    assert_eq!(
+        owner.outcome(changed.tickets[0]).await.unwrap(),
+        Result::Pending
+    );
     owner
         .complete(first.upload.unwrap().send().await)
         .await
         .unwrap();
     assert_eq!(
-        owner.outcome(changed.tickets[0]).unwrap(),
+        owner.outcome(changed.tickets[0]).await.unwrap(),
         Result::Rejected(Rejection::IdentityReused)
     );
     let fresh = owner.snapshot(database("a")).await.unwrap();
@@ -320,7 +327,7 @@ async fn live_receipt_expiry_is_durable_and_pending_request_ids_cannot_be_reused
         .unwrap();
     assert!(expired.upload.is_none());
     assert_eq!(
-        owner.outcome(expired.tickets[0]).unwrap(),
+        owner.outcome(expired.tickets[0]).await.unwrap(),
         Result::Rejected(Rejection::ReceiptExpired)
     );
     assert_eq!(owner.usage().receipts, 1);
@@ -330,13 +337,13 @@ async fn live_receipt_expiry_is_durable_and_pending_request_ids_cannot_be_reused
 async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_suffix() {
     use crate::storage::Storage;
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let limits = live::Limits {
         checkpoint_frames: 2,
         receipt_window: 4,
         ..Default::default()
     };
-    let mut owner = open(active(&provider, &clock).await, limits).await;
+    let mut owner = open(active(&provider).await, limits).await;
     // Merely reading an empty generation must not encode revision-zero rows.
     let _empty = owner.snapshot(database("empty")).await.unwrap();
     for n in 1..=7 {
@@ -358,7 +365,7 @@ async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_s
             .await
             .unwrap();
         assert_eq!(
-            owner.outcome(prepared.tickets[0]).unwrap(),
+            owner.outcome(prepared.tickets[0]).await.unwrap(),
             Result::Committed(n as u64)
         );
         assert_eq!(owner.usage().versions, n as usize % 2);
@@ -370,7 +377,7 @@ async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_s
     for key in &keys[..6] {
         provider.files.delete(key).await.unwrap();
     }
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let mut recovery = root.recovery().unwrap();
     let mut journal = recovery.next().await.unwrap().unwrap();
     assert!(!journal.is_selected());
@@ -436,9 +443,9 @@ async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_s
 #[tokio::test]
 async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut owner = open(
-        active(&provider, &clock).await,
+        active(&provider).await,
         live::Limits {
             checkpoint_frames: 1,
             ..Default::default()
@@ -477,7 +484,7 @@ async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
         .unwrap();
     assert!(retry.upload.is_none());
     assert_eq!(
-        owner.outcome(retry.tickets[0]).unwrap(),
+        owner.outcome(retry.tickets[0]).await.unwrap(),
         Result::Committed(1)
     );
     let fresh = owner.snapshot(database("a")).await.unwrap();
@@ -491,7 +498,7 @@ async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
         .await
         .unwrap();
     assert_eq!(
-        owner.outcome(third.tickets[0]).unwrap(),
+        owner.outcome(third.tickets[0]).await.unwrap(),
         Result::Committed(3)
     );
 }
@@ -502,7 +509,6 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
     use bytes::Bytes;
     struct Paused {
         provider: Arc<Provider>,
-        clock: ManualClock,
         pause: AtomicBool,
         pause_upload: AtomicBool,
         fail_upload: AtomicBool,
@@ -546,7 +552,7 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         ) -> anyhow::Result<Bytes> {
             let bytes = self.provider.files.get_range(key, range, size).await?;
             if self.expire.swap(false, Ordering::SeqCst) {
-                self.clock.set(33);
+                self.provider.revoke_current().await;
             }
             Ok(bytes)
         }
@@ -578,10 +584,9 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         }
     }
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let paused = Arc::new(Paused {
         provider: provider.clone(),
-        clock: clock.clone(),
         pause: AtomicBool::new(false),
         pause_upload: AtomicBool::new(false),
         fail_upload: AtomicBool::new(false),
@@ -596,7 +601,7 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         })
         .await
         .unwrap();
-    let root = super::checkpoint::budgeted_active(&connection, &clock).await;
+    let root = super::checkpoint::budgeted_active(&connection).await;
     let budget = root.database_budget("durable-catalog").unwrap().unwrap();
     budget.initialize_database().await.unwrap();
     let mut owner = Opening::new(
@@ -685,7 +690,7 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         "resolve the exact staged image without uploading another copy"
     );
     assert_eq!(
-        owner.outcome(prepared.tickets[0]).unwrap(),
+        owner.outcome(prepared.tickets[0]).await.unwrap(),
         Result::Committed(1)
     );
     // Success resets pacing. The next ordinary checkpoint starts immediately.
@@ -725,9 +730,9 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
     use crate::engine::{CommitRequest, Engine, ReadRequest, Write};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut owner = open(
-        active(&provider, &clock).await,
+        active(&provider).await,
         live::Limits {
             checkpoint_frames: 2,
             ..Default::default()
@@ -901,16 +906,22 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
 async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_expiry() {
     use crate::{Error, engine::CommitRequest};
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let limits = live::Limits {
         checkpoint_frames: 2,
         receipt_window: 2,
         ..Default::default()
     };
-    let mut owner = open(active(&provider, &clock).await, limits).await;
+    let mut owner = open(active(&provider).await, limits).await;
     let first: CommitRequest = serde_json::from_str(r#"{"expected_revision":0,"request_id":"first","checks":[{"key":"a","value":null}],"writes":[{"key":"b","value":""},{"key":"a","value":""},{"key":"a","value":"b25l"}]}"#).unwrap();
     let prepared = owner.prepare_request(database("a"), &first).await.unwrap();
-    assert!(owner.commit_result(prepared.tickets[0]).unwrap().is_none());
+    assert!(
+        owner
+            .commit_result(prepared.tickets[0])
+            .await
+            .unwrap()
+            .is_none()
+    );
     let duplicate = owner.prepare_request(database("a"), &first).await.unwrap();
     assert!(duplicate.upload.is_none());
     let mut changed = first.clone();
@@ -925,28 +936,33 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
     let conflict = owner.prepare_request(database("a"), &stale).await.unwrap();
     assert!(conflict.upload.is_none());
     for ticket in [duplicate.tickets[0], reused.tickets[0], conflict.tickets[0]] {
-        assert!(owner.commit_result(ticket).unwrap().is_none());
+        assert!(owner.commit_result(ticket).await.unwrap().is_none());
     }
     owner
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
-    let result = owner.commit_result(prepared.tickets[0]).unwrap().unwrap();
+    let result = owner
+        .commit_result(prepared.tickets[0])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result.revision, 1);
     assert!(!result.replayed);
     assert!(
         owner
             .commit_result(duplicate.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .replayed
     );
     assert!(matches!(
-        owner.commit_result(reused.tickets[0]),
+        owner.commit_result(reused.tickets[0]).await,
         Err(Error::Invalid(_))
     ));
     assert!(matches!(
-        owner.commit_result(conflict.tickets[0]),
+        owner.commit_result(conflict.tickets[0]).await,
         Err(Error::Conflict)
     ));
     // A committed retry resolves before its now-false value/revision checks.
@@ -955,6 +971,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
     assert!(
         owner
             .commit_result(retry.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .replayed
@@ -964,7 +981,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         let conflict = owner.prepare_request(database("a"), &stale).await.unwrap();
         assert!(conflict.upload.is_none());
         assert!(matches!(
-            owner.commit_result(conflict.tickets[0]),
+            owner.commit_result(conflict.tickets[0]).await,
             Err(Error::Conflict)
         ));
     }
@@ -980,15 +997,16 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
     assert_eq!(
         owner
             .commit_result(retry.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .revision,
         1
     );
-    let mut root = successor(&provider, &clock).await;
+    let mut root = successor(&provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
-    assert!(owner.commit_result(retry.tickets[0]).is_err());
+    assert!(owner.commit_result(retry.tickets[0]).await.is_err());
     drop(owner);
     let mut owner = open(root, limits).await;
     let retry = owner.prepare_request(database("a"), &first).await.unwrap();
@@ -996,6 +1014,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
     assert!(
         owner
             .commit_result(retry.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .replayed
@@ -1005,7 +1024,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         .await
         .unwrap();
     assert!(matches!(
-        owner.commit_result(reused.tickets[0]),
+        owner.commit_result(reused.tickets[0]).await,
         Err(Error::Invalid(_))
     ));
     // Same ID and request in another generation cannot see this receipt.
@@ -1021,6 +1040,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
     assert!(
         !owner
             .commit_result(separate.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .replayed
@@ -1034,11 +1054,11 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
     let expired = owner.prepare_request(database("a"), &first).await.unwrap();
     assert!(expired.upload.is_none());
     assert!(matches!(
-        owner.commit_result(expired.tickets[0]),
+        owner.commit_result(expired.tickets[0]).await,
         Err(Error::ReceiptExpired)
     ));
-    clock.failed.store(true, Ordering::SeqCst);
-    assert!(owner.commit_result(prepared.tickets[0]).is_err());
+    provider.revoke_current().await;
+    assert!(owner.commit_result(prepared.tickets[0]).await.is_err());
     // Validation precedes even the permission check, which currently fails.
     for (key, value) in [("", Some("eA==")), ("a", Some("%%%")), ("a\0b", None)] {
         let mut invalid = third.clone();
@@ -1055,8 +1075,8 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
 async fn live_wire_batches_group_independent_databases_and_validate_before_admission() {
     use crate::{Error, engine::CommitRequest};
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut owner = open(active(&provider, &clock).await, live::Limits::default()).await;
+
+    let mut owner = open(active(&provider).await, live::Limits::default()).await;
     let write: CommitRequest = serde_json::from_str(
         r#"{"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":""}]}"#,
     )
@@ -1097,15 +1117,19 @@ async fn live_wire_batches_group_independent_databases_and_validate_before_admis
     );
     assert_eq!(prepared.tickets.len(), 4);
     for ticket in &prepared.tickets {
-        assert!(owner.commit_result(*ticket).unwrap().is_none());
+        assert!(owner.commit_result(*ticket).await.unwrap().is_none());
     }
     owner.complete(upload.send().await).await.unwrap();
     for (i, replayed) in [(0, false), (1, true), (3, false)] {
-        let result = owner.commit_result(prepared.tickets[i]).unwrap().unwrap();
+        let result = owner
+            .commit_result(prepared.tickets[i])
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!((result.revision, result.replayed), (1, replayed));
     }
     assert!(matches!(
-        owner.commit_result(prepared.tickets[2]),
+        owner.commit_result(prepared.tickets[2]).await,
         Err(Error::Conflict)
     ));
     let mixed = owner
@@ -1119,21 +1143,29 @@ async fn live_wire_batches_group_independent_databases_and_validate_before_admis
     assert!(
         owner
             .commit_result(mixed.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .replayed
     );
     assert!(matches!(
-        owner.commit_result(mixed.tickets[1]),
+        owner.commit_result(mixed.tickets[1]).await,
         Err(Error::Conflict)
     ));
-    assert!(owner.commit_result(mixed.tickets[2]).unwrap().is_none());
+    assert!(
+        owner
+            .commit_result(mixed.tickets[2])
+            .await
+            .unwrap()
+            .is_none()
+    );
     let upload = mixed.upload.unwrap();
     assert_eq!(upload.position(), 2);
     owner.complete(upload.send().await).await.unwrap();
     assert!(
         !owner
             .commit_result(mixed.tickets[2])
+            .await
             .unwrap()
             .unwrap()
             .replayed
@@ -1169,10 +1201,10 @@ async fn live_wire_batches_group_independent_databases_and_validate_before_admis
 async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapshot() {
     use crate::storage::Storage;
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let mut limits = live::Limits::default();
     limits.index.databases = 2; // warming one generation reaches the soft threshold
-    let mut owner = open(active(&provider, &clock).await, limits).await;
+    let mut owner = open(active(&provider).await, limits).await;
     let write = serde_json::from_str(
         r#"{"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":""}]}"#,
     )
@@ -1185,6 +1217,7 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
     assert_eq!(
         owner
             .commit_result(prepared.tickets[0])
+            .await
             .unwrap()
             .unwrap()
             .revision,
@@ -1212,7 +1245,7 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
             .await
             .unwrap();
         assert!(retry.upload.is_none());
-        let result = owner.commit_result(retry.tickets[0]);
+        let result = owner.commit_result(retry.tickets[0]).await;
         if stale {
             assert!(result.is_err());
         } else {
@@ -1239,7 +1272,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
     use crate::{storage::Storage, upload_budget::UploadLimits};
     let provider = Provider::new();
     let files = provider.files.clone();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -1248,7 +1281,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         })
         .await
         .unwrap();
-    let root = super::checkpoint::budgeted_active(&connection, &clock).await;
+    let root = super::checkpoint::budgeted_active(&connection).await;
     let collector = root.collection();
     let mut owner = open(
         root,
@@ -1313,7 +1346,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
     let retained = files.list("tables/", None, 128).await.unwrap();
     assert_eq!(retained.len(), 3);
     assert_eq!(
-        owner.outcome(batch.tickets[0]).unwrap(),
+        owner.outcome(batch.tickets[0]).await.unwrap(),
         Result::Committed(1)
     );
     // A corrupt/missing manifest must stop collection before any data deletion.
@@ -1344,7 +1377,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
     }
     for _ in 0..3 {
         connection
-            .root(clock.clone(), profile())
+            .root()
             .unwrap()
             .collection()
             .collect()
@@ -1363,7 +1396,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         generation,
         "a sweep with no obsolete table does not invalidate checkpoint staging"
     );
-    let mut root = super::checkpoint::budgeted_active(&connection, &clock).await;
+    let mut root = super::checkpoint::budgeted_active(&connection).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let mut recovered = open(root, live::Limits::default()).await;
@@ -1392,7 +1425,7 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         .unwrap();
     assert!(retry.upload.is_none());
     assert_eq!(
-        recovered.outcome(retry.tickets[0]).unwrap(),
+        recovered.outcome(retry.tickets[0]).await.unwrap(),
         Result::Committed(1)
     );
 }

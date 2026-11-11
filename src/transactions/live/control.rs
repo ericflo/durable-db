@@ -1,12 +1,12 @@
 //! One local control request at a time; never hold permission state across I/O.
 use super::*;
-use std::{sync::Mutex, time::Duration};
+use std::sync::Mutex;
 
-pub struct Control<C> {
-    root: Arc<Mutex<Root<C>>>,
+pub struct Control {
+    root: Arc<Mutex<Root>>,
     pub(super) request: Arc<tokio::sync::Mutex<()>>,
 }
-impl<C> Clone for Control<C> {
+impl Clone for Control {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
@@ -14,26 +14,26 @@ impl<C> Clone for Control<C> {
         }
     }
 }
-impl<C: Clock> Control<C> {
-    pub(super) fn new(root: Root<C>) -> Self {
+impl Control {
+    pub(super) fn new(root: Root) -> Self {
         Self {
             root: Arc::new(Mutex::new(root)),
             request: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
-    pub(super) fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Root<C>>> {
+    pub(super) fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Root>> {
         self.root
             .lock()
             .map_err(|_| anyhow::anyhow!("owner control retired"))
     }
     /// Cancelled/unknown requests are abandoned before a fresh exact validation.
-    /// The old interval is never extended by the act of abandoning a request.
-    pub async fn renew(&self) -> anyhow::Result<root::Outcome> {
+    /// This confirms metadata only; it does not grant response permission.
+    pub async fn refresh(&self) -> anyhow::Result<root::Outcome> {
         let _request = self.request.lock().await;
-        self.renew_locked().await
+        self.refresh_locked().await
     }
     /// Administrator-only namespace backup slot. Validate and serialize with
-    /// renewal/checkpoint publication; never hold permission state across I/O.
+    /// control/checkpoint publication; never hold permission state across I/O.
     /// A returned identity remains tentative unless the outcome is Confirmed.
     pub async fn retain_checkpoint(
         &self,
@@ -63,15 +63,15 @@ impl<C: Clock> Control<C> {
     }
     async fn confirm_locked(&self) -> anyhow::Result<()> {
         ensure!(
-            matches!(self.renew_locked().await?, root::Outcome::Confirmed),
+            matches!(self.refresh_locked().await?, root::Outcome::Confirmed),
             "ownership validation did not confirm; retry from a fresh observation"
         );
         Ok(())
     }
     // The request gate spans I/O, but permission checks take only the short
     // root mutex. Abandon can therefore affect only a cancelled prior request,
-    // never another live caller's checkpoint or renewal.
-    pub(super) async fn renew_locked(&self) -> anyhow::Result<root::Outcome> {
+    // never another live caller's checkpoint or update.
+    pub(super) async fn refresh_locked(&self) -> anyhow::Result<root::Outcome> {
         let observation = self.lock()?.observe();
         let observed = observation.await?;
         let prepared = {
@@ -84,42 +84,18 @@ impl<C: Clock> Control<C> {
     }
     pub(super) fn check(&self, identity: root::Identity) -> anyhow::Result<()> {
         ensure!(
-            self.lock()?.permission()? == Some(identity),
+            self.lock()?.identity()? == Some(identity),
             "owner has no serving permission"
         );
         Ok(())
     }
-}
-
-/// Own this guard for as long as recovery/serving needs renewal. Dropping it
-/// cancels the task; a remote operation may still apply and grants no local
-/// permission until an exact confirmation. It never replaces an incarnation.
-pub struct Renewal(tokio::task::JoinHandle<()>);
-impl Drop for Renewal {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-impl<C: Clock + Send + 'static> Control<C> {
-    /// Keep at most one renewal in flight, including time waiting for another
-    /// control operation. Timers only schedule work: request-start deadlines and
-    /// final permission checks remain authoritative. Missed ticks never burst.
-    /// Choose cadence/timeout for the qualified profile and provider latency;
-    /// these settings cannot extend an expired grant or qualify a system clock.
-    pub fn keep_alive(&self, period: Duration, timeout: Duration) -> anyhow::Result<Renewal> {
-        let valid = Duration::from_millis(1)..=Duration::from_secs(3600);
-        ensure!(
-            valid.contains(&period) && valid.contains(&timeout),
-            "renewal period and timeout must be 1 ms..1 hour"
-        );
-        let control = self.clone();
-        Ok(Renewal(tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(period);
-            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                ticks.tick().await;
-                let _ = tokio::time::timeout(timeout, control.renew()).await;
-            }
-        })))
+    /// The caller has already sealed the complete result, including errors.
+    pub(super) async fn validate(&self, identity: root::Identity) -> anyhow::Result<()> {
+        let permission = self.lock()?.permission();
+        if permission.await? != Some(identity) {
+            self.lock()?.retire();
+            anyhow::bail!("owner permit is absent");
+        }
+        Ok(())
     }
 }

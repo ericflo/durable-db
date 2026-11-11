@@ -5,11 +5,21 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-impl<C: Clock> Owner<C> {
+impl Owner {
+    pub async fn read_request(
+        &self,
+        database: Database<'_>,
+        request: &ReadRequest,
+    ) -> Result<ReadResult> {
+        let result = self.read_request_unvalidated(database, request).await;
+        self.validate().await?;
+        result
+    }
+
     /// Evaluate the public read contract against one committed view. Database
     /// existence and access must already be established by the caller. Reading
     /// a cold generation does not load its receipt window or create a validator.
-    pub async fn read_request(
+    pub(crate) async fn read_request_unvalidated(
         &self,
         database: Database<'_>,
         request: &ReadRequest,

@@ -9,7 +9,13 @@ enum Evaluation {
     Reply(Ticket),
 }
 
-impl<C: Clock> Owner<C> {
+impl Owner {
+    pub async fn commit_result(&self, ticket: Ticket) -> Result<Option<CommitResult>> {
+        let result = self.commit_result_unvalidated(ticket);
+        self.validate().await?;
+        result
+    }
+
     /// Evaluate the existing wire contract. The caller must authorize this
     /// database generation. Uploads and acknowledgements use the same queue
     /// and tickets as native transaction admission.
@@ -238,8 +244,8 @@ impl<C: Clock> Owner<C> {
     }
     /// None means the caller must wait for contiguous journal durability.
     /// Every returned result rechecks ownership, including replayed receipts.
-    pub fn commit_result(&self, ticket: Ticket) -> Result<Option<CommitResult>> {
-        match self.outcome(ticket)? {
+    pub(crate) fn commit_result_unvalidated(&self, ticket: Ticket) -> Result<Option<CommitResult>> {
+        match self.outcome_unvalidated(ticket)? {
             Outcome::Pending => Ok(None),
             Outcome::Committed(revision) => Ok(Some(CommitResult {
                 revision,

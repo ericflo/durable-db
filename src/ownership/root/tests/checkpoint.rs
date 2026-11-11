@@ -29,8 +29,8 @@ pub(super) async fn append(writer: &mut Writer, revision: u64, value: Option<&[u
     writer.complete(upload.send().await).unwrap();
     assert!(writer.pop_durable().unwrap().is_some());
 }
-pub(super) async fn selected(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
-    let mut root = successor(provider, clock).await;
+pub(super) async fn selected(provider: &Arc<Provider>) -> Root {
+    let mut root = successor(provider).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     root
@@ -46,8 +46,8 @@ async fn finish(mut recovery: Recovering) -> crate::index::recovery::Projection 
 async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generations_and_receipts() {
     use crate::{cache::Cache, transactions::record::Commit};
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut first = active(&provider, &clock).await;
+
+    let mut first = active(&provider).await;
     let mut writer = first.take_journal(QueueLimits::default()).unwrap();
     let neighbor = Database {
         name: "app",
@@ -135,7 +135,7 @@ async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generatio
         writer.complete(upload.send().await).unwrap();
         writer.pop_durable().unwrap().unwrap();
     }
-    let mut root = selected(&provider, &clock).await;
+    let mut root = selected(&provider).await;
     let initial = Recovering::begin(root.replay().unwrap(), Limits::default())
         .await
         .unwrap()
@@ -346,11 +346,11 @@ async fn lazy_overlay_and_checkpoint_rewrite_preserve_untouched_values_generatio
 async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_orders() {
     for checkpoint_first in [true, false] {
         let provider = Provider::new();
-        let clock = ManualClock::default();
-        let mut old = active(&provider, &clock).await;
+
+        let mut old = active(&provider).await;
         let mut writer = old.take_journal(QueueLimits::default()).unwrap();
         append(&mut writer, 1, Some(b"one")).await;
-        let mut root = selected(&provider, &clock).await;
+        let mut root = selected(&provider).await;
         let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
             .await
             .unwrap()
@@ -360,7 +360,7 @@ async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_order
         let staged = recovery.checkpoint().await.unwrap();
         let publication = root.publish_checkpoint(staged).unwrap();
         root.abandon();
-        let mut next = provider.root(&clock);
+        let mut next = provider.root();
         let observed = next.observe().await.unwrap();
         let claim_request = next.claim(observed).unwrap();
         if checkpoint_first {
@@ -372,7 +372,7 @@ async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_order
                 next.finish(claim_request.execute().await).unwrap(),
                 Outcome::Conflict
             ));
-            next = provider.root(&clock);
+            next = provider.root();
             claim(&mut next).await;
         } else {
             assert!(matches!(
@@ -385,7 +385,7 @@ async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_order
             ));
         }
         assert_eq!(provider.record().checkpoint.is_some(), checkpoint_first);
-        clock.set(clock.now.load(Ordering::SeqCst) + 23);
+
         validate(&mut next).await;
         activate(&mut next).await;
         let journal = scan(&mut next).await;
@@ -403,13 +403,13 @@ async fn checkpoint_publication_and_successor_claim_are_serialized_in_both_order
 #[tokio::test]
 async fn stale_checkpoint_cannot_replace_a_newer_cut_and_snapshot_floor_advances() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     let mut writer = old.take_journal(QueueLimits::default()).unwrap();
     for revision in 1..=3 {
         append(&mut writer, revision, Some(b"v")).await;
     }
-    let mut root = selected(&provider, &clock).await;
+    let mut root = selected(&provider).await;
     let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
         .await
         .unwrap()
@@ -459,13 +459,13 @@ async fn stale_checkpoint_cannot_replace_a_newer_cut_and_snapshot_floor_advances
 #[tokio::test]
 async fn repeated_checkpoints_bound_recovery_versions_while_preserving_receipts() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     let mut writer = old.take_journal(QueueLimits::default()).unwrap();
     for revision in 1..=140 {
         append(&mut writer, revision, Some(b"v")).await;
     }
-    let mut root = selected(&provider, &clock).await;
+    let mut root = selected(&provider).await;
     let limits = Limits {
         versions: 2,
         ..Limits::default()
@@ -519,8 +519,8 @@ async fn repeated_checkpoints_bound_recovery_versions_while_preserving_receipts(
 #[tokio::test]
 async fn checkpoints_page_ten_thousand_generations_in_shared_tables() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut old = active(&provider, &clock).await;
+
+    let mut old = active(&provider).await;
     let mut writer = old.take_journal(QueueLimits::default()).unwrap();
     for batch in 0..20 {
         let records: Vec<_> = (batch * 512..((batch + 1) * 512).min(10005))
@@ -543,7 +543,7 @@ async fn checkpoints_page_ten_thousand_generations_in_shared_tables() {
         writer.complete(upload.send().await).unwrap();
         assert!(writer.pop_durable().unwrap().is_some());
     }
-    let mut root = selected(&provider, &clock).await;
+    let mut root = selected(&provider).await;
     let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
         .await
         .unwrap()
@@ -603,14 +603,14 @@ async fn checkpoints_page_ten_thousand_generations_in_shared_tables() {
 #[tokio::test]
 async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered_owners() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut first = active(&provider, &clock).await;
+
+    let mut first = active(&provider).await;
     let mut writer = first.take_journal(QueueLimits::default()).unwrap();
     append(&mut writer, 1, Some(b"before")).await;
-    let mut second = selected(&provider, &clock).await;
+    let mut second = selected(&provider).await;
     let mut writer = second.take_journal(QueueLimits::default()).unwrap();
     append(&mut writer, 2, Some(b"after")).await;
-    let mut third = selected(&provider, &clock).await;
+    let mut third = selected(&provider).await;
     let recovery = Recovering::begin(third.replay().unwrap(), Limits::default())
         .await
         .unwrap()
@@ -633,7 +633,7 @@ async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered
     for key in provider.files.list("journal/", None, 10).await.unwrap() {
         provider.files.delete(&key).await.unwrap();
     }
-    let mut fourth = selected(&provider, &clock).await;
+    let mut fourth = selected(&provider).await;
     let mut ancestry = fourth.recovery().unwrap();
     let mut last = ancestry.next().await.unwrap().unwrap();
     assert_eq!(last.registration().identity().epoch, 3);
@@ -661,14 +661,10 @@ async fn recovery_ancestry_stops_at_the_checkpoint_instead_of_traversing_covered
     );
 }
 
-pub(super) async fn budgeted_active(
-    connection: &Connection,
-    clock: &ManualClock,
-) -> Root<ManualClock> {
+pub(super) async fn budgeted_active(connection: &Connection) -> Root {
     for _ in 0..2 {
-        let (mut root, outcome) = super::budget::attempt(connection, clock).await;
+        let (mut root, outcome) = super::budget::attempt(connection).await;
         if matches!(outcome, Outcome::Confirmed) {
-            clock.set(clock.now.load(Ordering::SeqCst) + 23);
             validate(&mut root).await;
             activate(&mut root).await;
             return root;
@@ -682,7 +678,7 @@ pub(super) async fn budgeted_active(
 async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suffix() {
     use crate::{index::recovery::checkpoint::Staged, upload_budget::UploadLimits};
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -691,13 +687,13 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
         })
         .await
         .unwrap();
-    let mut old = budgeted_active(&connection, &clock).await;
+    let mut old = budgeted_active(&connection).await;
     let mut writer = old.take_journal(QueueLimits::default()).unwrap();
     append(&mut writer, 1, Some(b"one")).await;
     append(&mut writer, 2, None).await;
     append(&mut writer, 3, Some(b"")).await;
     let original = provider.files.list("journal/", None, 10).await.unwrap();
-    let mut root = budgeted_active(&connection, &clock).await;
+    let mut root = budgeted_active(&connection).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
     let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
@@ -731,7 +727,7 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
     let mut info = metadata::encode(
         &provider.history.lock().unwrap().last().unwrap().info,
         "test",
-        profile(),
+        encoding(),
         record,
         true,
     )
@@ -767,10 +763,7 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
             .await
             .is_err()
     );
-    let collector = exhausted
-        .root(clock.clone(), profile())
-        .unwrap()
-        .collection();
+    let collector = exhausted.root().unwrap().collection();
     let allowance = exhausted.objects().upload_budget().await.unwrap().unwrap();
     let request = root.publish_checkpoint(staged).unwrap();
     provider.pause.store(true, Ordering::SeqCst);
@@ -871,7 +864,7 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
     validate(&mut root).await;
     let mut current = root.take_journal(QueueLimits::default()).unwrap();
     append(&mut current, 4, Some(b"next-owner")).await;
-    let mut successor = budgeted_active(&connection, &clock).await;
+    let mut successor = budgeted_active(&connection).await;
     let journal = scan(&mut successor).await;
     seal(&mut successor, journal).await;
     let projection = finish(
@@ -906,7 +899,7 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
 #[tokio::test]
 async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
     use crate::upload_budget::UploadLimits;
-    async fn checkpoint(root: &mut Root<ManualClock>) {
+    async fn checkpoint(root: &mut Root) {
         let mut recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
             .await
             .unwrap();
@@ -922,7 +915,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
         ));
     }
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let connection = provider
         .connection("test")
         .with_upload_budget(UploadLimits {
@@ -931,7 +924,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
         })
         .await
         .unwrap();
-    let mut first = budgeted_active(&connection, &clock).await;
+    let mut first = budgeted_active(&connection).await;
     let mut writer = first.take_journal(QueueLimits::default()).unwrap();
     for revision in 1..=130 {
         append(&mut writer, revision, Some(b"first")).await;
@@ -939,16 +932,13 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
     let late = writer
         .prepare(&[Bytes::from_static(b"unselected old tail")])
         .unwrap();
-    let mut second = budgeted_active(&connection, &clock).await;
+    let mut second = budgeted_active(&connection).await;
     let journal = scan(&mut second).await;
     seal(&mut second, journal).await;
     checkpoint(&mut second).await;
     // A new collector instance resumes the durable cursor after each page.
     for remaining in [2, 0] {
-        let collector = connection
-            .root(clock.clone(), profile())
-            .unwrap()
-            .collection();
+        let collector = connection.root().unwrap().collection();
         collector.collect().await.unwrap();
         assert_eq!(
             provider
@@ -962,7 +952,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
     }
     let mut current = second.take_journal(QueueLimits::default()).unwrap();
     append(&mut current, 131, Some(b"second")).await;
-    let mut third = budgeted_active(&connection, &clock).await;
+    let mut third = budgeted_active(&connection).await;
     let journal = scan(&mut third).await;
     seal(&mut third, journal).await;
     checkpoint(&mut third).await;
@@ -981,7 +971,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
             incarnation: writer.log().epoch(),
         }),
     )
-    .prepare(provider.files.clone(), "test", profile())
+    .prepare(provider.files.clone(), "test", encoding())
     .execute()
     .await
     .unwrap();
@@ -1036,7 +1026,7 @@ async fn journal_collection_pages_closed_epochs_and_preserves_other_journals() {
     assert_eq!(remaining, protected);
     // Discovery stops at the new checkpoint; it never reads the reclaimed old
     // epochs or adopts the delayed tail, peer incarnation or foreign partition.
-    let mut fourth = budgeted_active(&connection, &clock).await;
+    let mut fourth = budgeted_active(&connection).await;
     let journal = scan(&mut fourth).await;
     seal(&mut fourth, journal).await;
     let projection = finish(

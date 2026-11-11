@@ -3,10 +3,7 @@
 use super::{Backend, Native};
 use crate::{
     cache::Cache,
-    ownership::{
-        root::{Outcome, Profile},
-        timing::Clock,
-    },
+    ownership::root::Outcome,
     providers::Connection,
     publication::{Authority, Bucket},
     storage::{Local, Storage, Version},
@@ -16,15 +13,7 @@ use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use object_store::UpdateVersion;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 struct Register(Arc<Local>);
 #[async_trait]
@@ -72,20 +61,6 @@ impl Authority for Register {
     }
 }
 
-// Private logical adapter, not a physical-clock claim. Keeping the directory
-// alive retains exclusion even when the HTTP caller or worker is cancelled.
-struct Exclusive {
-    _directory: Arc<Local>,
-    startup: Arc<AtomicU64>,
-    pid: u32,
-}
-impl Clock for Exclusive {
-    fn read(&self) -> Option<Duration> {
-        (std::process::id() == self.pid)
-            .then(|| Duration::from_nanos(self.startup.load(Ordering::Acquire)))
-    }
-}
-
 /// Open a fresh or native local directory exclusively. Earlier local formats
 /// require export with their original binary and restore into a new directory.
 /// The directory must live on one host with working exclusive locks and fsync;
@@ -115,30 +90,12 @@ pub async fn open(
         Arc::new(Register(directory.clone())),
         "local-exclusive",
     );
-    let startup = Arc::new(AtomicU64::new(0));
-    let clock = Exclusive {
-        _directory: directory,
-        startup: startup.clone(),
-        pid: std::process::id(),
-    };
-    let mut root = connection.root(
-        clock,
-        Profile::new(Duration::from_nanos(1), Duration::ZERO)?,
-    )?;
+    let mut root = connection.exclusive_root(directory)?;
     let observed = root.observe().await?;
     let claim = root.claim(observed)?;
     ensure!(
         matches!(root.finish(claim.execute().await)?, Outcome::Confirmed),
         "local claim not confirmed"
-    );
-    // Acquiring the OS lock already excludes the predecessor and all its work.
-    // Advance only the controller's startup sequence; serving never reads a physical clock.
-    startup.store(2, Ordering::Release);
-    let observed = root.observe().await?;
-    let validate = root.validate(observed)?;
-    ensure!(
-        matches!(root.finish(validate.execute().await)?, Outcome::Confirmed),
-        "local validation not confirmed"
     );
     let activate = root.activate()?;
     ensure!(
@@ -165,36 +122,5 @@ pub async fn open(
     let owner = Opening::new(root, Limits::default(), cache)?
         .recover()
         .await?;
-    Ok(Native::start(owner, capacity, None, maintenance)?)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    #[test]
-    fn exclusive_local_clock_refuses_forked_handles() {
-        use std::{io, os::unix::process::CommandExt, process::Command};
-        let directory = tempfile::tempdir().unwrap();
-        let clock = Exclusive {
-            _directory: Arc::new(Local::open(directory.path().into()).unwrap()),
-            startup: Arc::new(AtomicU64::new(2)),
-            pid: std::process::id(),
-        };
-        assert_eq!(clock.read(), Some(Duration::from_nanos(2)));
-        let mut child = Command::new("/bin/true");
-        // SAFETY: the mismatched PID path performs no allocation, I/O or locking.
-        unsafe {
-            child.pre_exec(move || {
-                if clock.read().is_none() {
-                    Err(io::Error::from_raw_os_error(1))
-                } else {
-                    Ok(())
-                }
-            });
-        }
-        assert_eq!(
-            child.spawn().unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied
-        );
-    }
+    Ok(Native::start(owner, capacity, maintenance)?)
 }

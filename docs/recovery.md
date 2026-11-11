@@ -32,7 +32,7 @@ This produces the same bounded, checksummed archive as HTTP export below. Use th
 
 ## Local format upgrades
 
-Unreleased `main` uses budgeted native `owned-candidate-22` to require target-tenant admission for creation. It refuses format 21 writers and requires a fresh experimental native namespace; this is not an in-place upgrade from v0.18.1. Local `owned-candidate-15` and the released cloud CLI format are unchanged.
+Unreleased `main` uses budgeted native `owned-candidate-23` to require target-tenant admission for creation. It refuses format 21 writers and requires a fresh experimental native namespace; this is not an in-place upgrade from v0.18.1. Local `owned-candidate-15` and the released cloud CLI format are unchanged.
 
 v0.18.1 retains v0.18.0’s formats. Local `owned-candidate-15` is unchanged: local directories from v0.9.0 onward reopen directly, preserving values, revisions and receipts. No export is required between these local versions. Budgeted native serving retains `owned-candidate-21` for durable maintenance funding and remains compatible with v0.18.0. It refuses earlier accounting policies, including v0.17.0. Moving from those older policies requires a fresh namespace; there is no in-place budgeted-native migration. This does not change the cloud CLI publication format.
 

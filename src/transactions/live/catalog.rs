@@ -144,7 +144,46 @@ fn intent(kind: &[u8], db: &str, digest: &str) -> [u8; 32] {
     hash.update(digest.as_bytes());
     hash.finalize().into()
 }
-impl<C: Clock> Owner<C> {
+impl Owner {
+    pub async fn authorized_result(
+        &self,
+        ticket: &AuthorizedTicket,
+        caller: &Access,
+    ) -> Result<Option<CommitResult>> {
+        let result = self.authorized_result_unvalidated(ticket, caller).await;
+        self.validate().await?;
+        result
+    }
+
+    pub async fn read_authorized(
+        &self,
+        db: &str,
+        request: &ReadRequest,
+        caller: &Access,
+    ) -> Result<ReadResult> {
+        let result = self.read_authorized_unvalidated(db, request, caller).await;
+        self.validate().await?;
+        result
+    }
+
+    pub async fn policy_info(&self, db: &str, caller: &Access) -> Result<PolicyInfo> {
+        let result = self.policy_info_unvalidated(db, caller).await;
+        self.validate().await?;
+        result
+    }
+
+    pub async fn info_authorized(&self, db: &str, caller: &Access) -> Result<engine::Info> {
+        let result = self.info_authorized_unvalidated(db, caller).await;
+        self.validate().await?;
+        result
+    }
+
+    pub async fn catalog_result(&self, change: &CatalogChange) -> Result<Option<CatalogResult>> {
+        let result = self.catalog_result_unvalidated(change);
+        self.validate().await?;
+        result
+    }
+
     async fn catalog_entry(&self, db: &str) -> Result<Option<Entry>> {
         engine::validate_db(db)?;
         self.check()?;
@@ -202,7 +241,7 @@ impl<C: Clock> Owner<C> {
         }
         entry.validate()?;
         let value = Bytes::from(serde_json::to_vec(&entry).context("encode native catalog row")?);
-        let snapshot = self.snapshot(CATALOG).await?;
+        let snapshot = self.snapshot_unvalidated(CATALOG).await?;
         let prepared = self
             .prepare_hashed(
                 &[Request {
@@ -300,12 +339,19 @@ impl<C: Clock> Owner<C> {
         self.prepare_catalog(db, entry, identity, CatalogResult::Policy(result))
             .await
     }
-    pub fn catalog_result(&self, change: &CatalogChange) -> Result<Option<CatalogResult>> {
+    pub(crate) fn catalog_result_unvalidated(
+        &self,
+        change: &CatalogChange,
+    ) -> Result<Option<CatalogResult>> {
         Ok(self
-            .commit_result(change.ticket)?
+            .commit_result_unvalidated(change.ticket)?
             .map(|_| change.result.clone()))
     }
-    pub async fn info_authorized(&self, db: &str, caller: &Access) -> Result<engine::Info> {
+    pub(crate) async fn info_authorized_unvalidated(
+        &self,
+        db: &str,
+        caller: &Access,
+    ) -> Result<engine::Info> {
         caller.check_scope(db, false)?;
         let entry = self.catalog_entry(db).await?.ok_or(Error::NotFound)?;
         entry.authorize(db, caller, false)?;
@@ -330,14 +376,18 @@ impl<C: Clock> Owner<C> {
         self.check()?;
         Ok(info)
     }
-    pub async fn policy_info(&self, db: &str, caller: &Access) -> Result<PolicyInfo> {
+    pub(crate) async fn policy_info_unvalidated(
+        &self,
+        db: &str,
+        caller: &Access,
+    ) -> Result<PolicyInfo> {
         caller.check_scope(db, false)?;
         let entry = self.catalog_entry(db).await?.ok_or(Error::NotFound)?;
         entry.authorize(db, caller, false)?;
         self.check()?;
         Ok(entry.policy.info())
     }
-    pub async fn read_authorized(
+    pub(crate) async fn read_authorized_unvalidated(
         &self,
         db: &str,
         request: &ReadRequest,
@@ -347,7 +397,7 @@ impl<C: Clock> Owner<C> {
         let entry = self.catalog_entry(db).await?.ok_or(Error::NotFound)?;
         entry.authorize(db, caller, false)?;
         let result = self
-            .read_request(
+            .read_request_unvalidated(
                 Database {
                     name: db,
                     generation: entry.generation()?,
@@ -402,7 +452,7 @@ impl<C: Clock> Owner<C> {
             tickets,
         })
     }
-    pub async fn authorized_result(
+    pub(crate) async fn authorized_result_unvalidated(
         &self,
         ticket: &AuthorizedTicket,
         caller: &Access,
@@ -411,7 +461,7 @@ impl<C: Clock> Owner<C> {
         // A pending ticket has no response to authorize yet. Avoid cold catalog
         // reads on every worker event while its upload is outstanding. Check
         // policy/generation again before releasing either success or rejection.
-        if self.outcome(ticket.ticket)? == Outcome::Pending {
+        if self.outcome_unvalidated(ticket.ticket)? == Outcome::Pending {
             return Ok(None);
         }
         let entry = self
@@ -422,6 +472,6 @@ impl<C: Clock> Owner<C> {
         if entry.generation()? != ticket.generation {
             return Err(Error::Unauthorized);
         }
-        self.commit_result(ticket.ticket)
+        self.commit_result_unvalidated(ticket.ticket)
     }
 }

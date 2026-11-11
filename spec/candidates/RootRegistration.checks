@@ -5,3 +5,4 @@ unsafe RootRegistrationUnsafeParent.cfg root-registration-parent 512m Acknowledg
 unsafe RootRegistrationRecovered.cfg root-registration-recovered 768m NotThreeRegistrations
 unsafe RootRegistrationUnsafeImmediate.cfg root-registration-immediate 768m AllEarlierPermitsRevoked
 unsafe RootRegistrationInterrupted.cfg root-registration-interrupted 768m NotInterruptedRevocation
+unsafe RootRegistrationUnsafeCheckpoint.cfg root-registration-checkpoint 768m AllEarlierPermitsRevoked

@@ -19,7 +19,9 @@ mod transport;
 // Deletion is restricted to the namespaces with implemented collectors. Native
 // journal names additionally bind a canonical incarnation and frame position.
 pub(crate) fn collection_key(key: &str) -> anyhow::Result<()> {
-    if key.starts_with("journal/") {
+    if key.starts_with("permits/") {
+        crate::ownership::root::permit_key(key)?;
+    } else if key.starts_with("journal/") {
         crate::journal::LogId::parse_key(key)?;
     } else if key.starts_with("tables/") {
         crate::storage::immutable::Blob::validate_key(key)?;
@@ -94,21 +96,29 @@ impl Connection {
         control::Session::new(self.authority())
     }
 
-    /// Create a candidate root controller under an explicitly supplied clock
-    /// contract. This can initialize a fresh experimental ownership format;
-    /// it rejects the existing engine's format and does not serve database data.
-    pub fn root<C: crate::ownership::timing::Clock>(
-        &self,
-        clock: C,
-        profile: crate::ownership::root::Profile,
-    ) -> Result<crate::ownership::root::Root<C>, crate::ownership::root::Error> {
+    /// Construct a fresh clock-independent native candidate. Claim, activation
+    /// and selected journal recovery must complete before serving.
+    pub fn root(&self) -> Result<crate::ownership::root::Root, crate::ownership::root::Error> {
         crate::ownership::root::Root::new(
             self.objects(),
             self.control(),
             &self.prefix,
-            clock,
-            profile,
+            crate::ownership::root::Encoding::REMOTE,
             self.budgeted,
+            None,
+        )
+    }
+    pub(crate) fn exclusive_root(
+        &self,
+        directory: Arc<crate::storage::Local>,
+    ) -> Result<crate::ownership::root::Root, crate::ownership::root::Error> {
+        crate::ownership::root::Root::new(
+            self.objects(),
+            self.control(),
+            &self.prefix,
+            crate::ownership::root::Encoding::LOCAL,
+            false,
+            Some(directory),
         )
     }
 
@@ -120,29 +130,14 @@ impl Connection {
 
 #[cfg(test)]
 async fn check_native_budget(connection: Connection) {
-    use crate::ownership::{
-        root::{Outcome, Profile},
-        timing::Clock,
-    };
-    use std::time::Duration;
-    struct Fixed;
-    impl Clock for Fixed {
-        fn read(&self) -> Option<Duration> {
-            Some(Duration::ZERO)
-        }
-    }
+    use crate::ownership::root::Outcome;
     let limits = UploadLimits {
         bytes: 4096,
-        attempts: 2,
+        attempts: 4,
     };
     let connection = connection.with_upload_budget(limits).await.unwrap();
     for confirmed in [false, true] {
-        let mut root = connection
-            .root(
-                Fixed,
-                Profile::new(Duration::from_secs(10), Duration::from_millis(1)).unwrap(),
-            )
-            .unwrap();
+        let mut root = connection.root().unwrap();
         let observed = root.observe().await.unwrap();
         let claim = root.claim(observed).unwrap();
         let outcome = root.finish(claim.execute().await).unwrap();
@@ -174,12 +169,7 @@ async fn check_native_budget(connection: Connection) {
         })
         .await
         .unwrap();
-    let root = connection
-        .root(
-            Fixed,
-            Profile::new(Duration::from_secs(10), Duration::from_millis(1)).unwrap(),
-        )
-        .unwrap();
+    let root = connection.root().unwrap();
     for name in ["a", "b"] {
         let ledger = root.database_budget(name).unwrap().unwrap();
         ledger

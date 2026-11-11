@@ -90,13 +90,7 @@ impl Storage for Files {
         panic!("serving never deletes physical history")
     }
 }
-type Fixture = (
-    axum::Router,
-    Arc<Provider>,
-    ManualClock,
-    Arc<Faults>,
-    String,
-);
+type Fixture = (axum::Router, Arc<Provider>, Arc<Faults>, String);
 async fn fixture(capacity: usize, checkpoints: u64) -> Fixture {
     fixture_budget(
         capacity,
@@ -114,7 +108,7 @@ async fn fixture_budget(
     limits: crate::upload_budget::UploadLimits,
 ) -> Fixture {
     let provider = Provider::new();
-    let clock = ManualClock::default();
+
     let faults = Arc::new(Faults::default());
     let files = Arc::new(Files {
         inner: provider.files.clone(),
@@ -126,16 +120,16 @@ async fn fixture_budget(
         .unwrap();
     // The first credit grant changes the captured comparison. Its registration
     // remains charged; a fresh incarnation uses the already confirmed credit.
-    let mut root = connection.root(clock.clone(), profile()).unwrap();
+    let mut root = connection.root().unwrap();
     let observed = root.observe().await.unwrap();
     let claim = root.claim(observed).unwrap();
     assert!(matches!(
         root.finish(claim.execute().await).unwrap(),
         Outcome::Conflict
     ));
-    let mut root = connection.root(clock.clone(), profile()).unwrap();
+    let mut root = connection.root().unwrap();
     super::claim(&mut root).await;
-    clock.set(23);
+
     validate(&mut root).await;
     activate(&mut root).await;
     let owner = Opening::new(
@@ -161,7 +155,7 @@ async fn fixture_budget(
         64,
         RateLimits::new(20_000, 20_000).unwrap(),
     );
-    (api::router(Arc::new(app)), provider, clock, faults, token)
+    (api::router(Arc::new(app)), provider, faults, token)
 }
 fn request(method: &str, path: &str, token: &str, body: Value) -> Request<Body> {
     Request::builder()
@@ -213,7 +207,7 @@ async fn create(router: &axum::Router, token: &str, db: &str) {
 
 #[tokio::test]
 async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp() {
-    let (router, provider, clock, _, token) = fixture(8, 2).await;
+    let (router, provider, _, token) = fixture(8, 2).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -403,7 +397,8 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
         assert_eq!(result.replayed, replayed);
         assert_eq!(result.status.allocated, status.allocated);
     }
-    clock.set(100);
+
+    provider.revoke_current().await;
     assert_eq!(
         client
             .get(format!("{base}/health/ready"))
@@ -438,7 +433,7 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
 
 #[tokio::test]
 async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during_uploads() {
-    let (router, provider, _, faults, token) = fixture(2, 5).await;
+    let (router, provider, faults, token) = fixture(2, 5).await;
     create(&router, &token, "a").await;
     create(&router, &token, "b").await;
     // Allocate local tenant grants before pausing a journal PUT. Checkpoint
@@ -571,7 +566,7 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
 
 #[tokio::test]
 async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold_admission() {
-    let (router, provider, _, faults, token) = fixture(2, 2).await;
+    let (router, provider, faults, token) = fixture(2, 2).await;
     create(&router, &token, "app").await;
     let started = tokio::time::Instant::now();
     faults.fail_checkpoint.store(true, Ordering::SeqCst);
@@ -695,8 +690,8 @@ async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold
 }
 
 #[tokio::test]
-async fn native_http_expired_owner_cannot_acknowledge_a_pending_upload() {
-    let (router, _, clock, faults, token) = fixture(2, 256).await;
+async fn native_http_revoked_owner_cannot_acknowledge_a_pending_upload() {
+    let (router, provider, faults, token) = fixture(2, 256).await;
     create(&router, &token, "app").await;
     faults.pause.store(true, Ordering::SeqCst);
     let attempt = tokio::spawn(router.clone().oneshot(request(
@@ -708,7 +703,8 @@ async fn native_http_expired_owner_cannot_acknowledge_a_pending_upload() {
     tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
         .await
         .unwrap();
-    clock.set(100);
+
+    provider.revoke_current().await;
     faults.release.notify_one();
     let response = tokio::time::timeout(Duration::from_secs(2), attempt)
         .await
@@ -740,7 +736,7 @@ async fn native_http_expired_owner_cannot_acknowledge_a_pending_upload() {
 #[ignore = "requires built clients/javascript and installed Node dependencies; run by Woodpecker client checks"]
 async fn native_http_javascript_contract() {
     use std::io::Write;
-    let (router, _, _, _, token) = fixture(32, 64).await;
+    let (router, _, _, token) = fixture(32, 64).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -774,44 +770,28 @@ async fn native_http_javascript_contract() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn native_http_stops_renewal_when_the_serving_worker_retires() {
+async fn native_http_validates_without_renewal_and_refuses_revoked_owner() {
     use crate::api::Backend;
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let owner = super::live::open(active(&provider, &clock).await, live::Limits::default()).await;
+    let owner = super::live::open(active(&provider).await, live::Limits::default()).await;
     let before = provider.calls.load(Ordering::SeqCst);
-    let backend = Native::renewing(
-        owner,
-        2,
-        Duration::from_millis(10),
-        Duration::from_millis(5),
-    )
-    .unwrap();
-    tokio::task::yield_now().await;
-    assert!(provider.calls.load(Ordering::SeqCst) > before);
+    let backend = Native::new(owner, 2).unwrap();
     assert!(backend.ready().await);
-    clock.failed.store(true, Ordering::SeqCst);
-    tokio::time::advance(Duration::from_millis(200)).await;
-    tokio::task::yield_now().await;
-    assert!(!backend.ready().await);
-    let reads = provider.reads.load(Ordering::SeqCst);
     tokio::time::advance(Duration::from_secs(10)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(
-        provider.reads.load(Ordering::SeqCst),
-        reads,
-        "a retired serving worker must not keep its renewal task running"
-    );
+    assert!(backend.ready().await);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+    provider.revoke_current().await;
+    assert!(!backend.ready().await);
 }
 
 #[tokio::test]
 async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner() {
-    let (router, _, _, faults, token) = fixture_budget(
+    let (router, _, faults, token) = fixture_budget(
         8,
         64,
         crate::upload_budget::UploadLimits {
             bytes: 8192,
-            attempts: 6,
+            attempts: 8,
         },
     )
     .await;
@@ -827,8 +807,8 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert!(!waiting.is_finished());
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
-        6,
-        "only registrations, ledger initialization and the tenant grant reached storage"
+        8,
+        "only registrations, permits, ledger initialization and the tenant grant reached storage"
     );
     let (status, body) = call(
         &router,
@@ -847,7 +827,7 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
-        7,
+        9,
         "the admitted journal frame is uploaded once"
     );
     let (status, _) = call(&router, "GET", "/v1/databases/app", &token, json!({})).await;
@@ -906,7 +886,7 @@ async fn tcp_call(
 
 #[tokio::test]
 async fn native_http_database_budget_refuses_before_journal_and_preserves_neighbors() {
-    let (router, provider, _, faults, token) = fixture(8, 2).await;
+    let (router, provider, faults, token) = fixture(8, 2).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -1066,7 +1046,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 
 #[tokio::test(start_paused = true)]
 async fn native_http_collects_checkpointed_journals() {
-    let (router, provider, _, _, token) = fixture(8, 2).await;
+    let (router, provider, _, token) = fixture(8, 2).await;
     let budget = "/v1/databases/a/upload-budget";
     let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":131072 + 18592,"attempts":2}});
     for _ in 0..2 {
@@ -1129,7 +1109,7 @@ async fn native_http_collects_checkpointed_journals() {
 
 #[tokio::test(start_paused = true)]
 async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
-    let (router, provider, _, _, token) = fixture(8, 64).await;
+    let (router, provider, _, token) = fixture(8, 64).await;
     tokio::task::yield_now().await; // Start the worker before advancing virtual time.
     // Control history accumulates even before tenant metadata exists.
     tokio::time::advance(Duration::from_secs(61)).await;
@@ -1219,8 +1199,8 @@ async fn native_tcp_retained_export_restores_after_source_removal() {
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let root = active(&provider, &clock).await;
+
+    let root = active(&provider).await;
     let collector = root.collection();
     let owner = Opening::new(
         root,
@@ -1504,7 +1484,7 @@ async fn native_tcp_retained_export_restores_after_source_removal() {
                 .is_empty()
         );
     }
-    let (destination, _, _, _, destination_token) = fixture(8, 256).await;
+    let (destination, _, _, destination_token) = fixture(8, 256).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, destination).await.unwrap() });

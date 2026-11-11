@@ -255,7 +255,6 @@ impl Authority for S3 {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
-    mod timing;
     use super::*;
     use axum::{body::Body, extract::State, http::HeaderMap, response::Response, routing::get};
     use std::sync::Mutex;
@@ -507,7 +506,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_same_root_controller_recovers_creation_and_fences_late_s3_updates() {
-        use crate::ownership::root::{Outcome, Profile};
+        use crate::ownership::root::Outcome;
         use crate::transactions::{
             record::{Database, Mutation},
             recovery::{
@@ -515,21 +514,9 @@ mod tests {
                 tests::{Memory, record},
             },
         };
-        use std::{
-            sync::atomic::{AtomicU64, Ordering},
-            time::Duration,
-        };
-        #[derive(Clone)]
-        struct Clock(Arc<AtomicU64>);
-        impl crate::ownership::timing::Clock for Clock {
-            fn read(&self) -> Option<Duration> {
-                Some(Duration::from_secs(self.0.load(Ordering::SeqCst)))
-            }
-        }
         let (connection, state, task) = fixture(503, true).await;
-        let clock = Clock(Arc::new(AtomicU64::new(0)));
-        let profile = Profile::new(Duration::from_secs(10), Duration::from_secs(1)).unwrap();
-        let mut old = connection.root(clock.clone(), profile).unwrap();
+
+        let mut old = connection.root().unwrap();
         let observed = old.observe().await.unwrap();
         let request = old.claim(observed).unwrap();
         assert!(matches!(
@@ -537,16 +524,16 @@ mod tests {
             Outcome::Uncertain(_)
         ));
         assert_eq!(state.lock().unwrap().puts, 1);
-        assert!(old.permission().unwrap().is_none());
+        assert!(old.permission().await.unwrap().is_none());
         state.lock().unwrap().acknowledgement = 200;
-        clock.0.store(3, Ordering::SeqCst);
+
         let observed = old.observe().await.unwrap();
         let request = old.validate(observed).unwrap();
         assert!(matches!(
             old.finish(request.execute().await).unwrap(),
             Outcome::Confirmed
         ));
-        clock.0.store(26, Ordering::SeqCst);
+
         let observed = old.observe().await.unwrap();
         let request = old.validate(observed).unwrap();
         assert!(matches!(
@@ -558,7 +545,7 @@ mod tests {
             old.finish(request.execute().await).unwrap(),
             Outcome::Confirmed
         ));
-        assert_eq!(old.permission().unwrap().unwrap().epoch, 1);
+        assert_eq!(old.permission().await.unwrap().unwrap().epoch, 1);
         let mut writer = old
             .take_journal(crate::journal::QueueLimits::default())
             .unwrap();
@@ -590,11 +577,10 @@ mod tests {
             )])
             .unwrap();
 
-        clock.0.store(27, Ordering::SeqCst);
         let observed = old.observe().await.unwrap();
         let delayed = old.validate(observed).unwrap();
         old.abandon();
-        let mut successor = connection.root(clock.clone(), profile).unwrap();
+        let mut successor = connection.root().unwrap();
         let observed = successor.observe().await.unwrap();
         let request = successor.claim(observed).unwrap();
         assert!(matches!(
@@ -606,7 +592,7 @@ mod tests {
             Outcome::Ignored
         ));
         assert_eq!(state.lock().unwrap().bucket.revision, 5);
-        clock.0.store(50, Ordering::SeqCst);
+
         let observed = successor.observe().await.unwrap();
         let request = successor.validate(observed).unwrap();
         assert!(matches!(
@@ -618,8 +604,8 @@ mod tests {
             successor.finish(request.execute().await).unwrap(),
             Outcome::Confirmed
         ));
-        assert_eq!(successor.permission().unwrap().unwrap().epoch, 2);
-        assert!(old.permission().unwrap().is_none());
+        assert_eq!(successor.permission().await.unwrap().unwrap().epoch, 2);
+        assert!(old.permission().await.unwrap().is_none());
         assert_eq!(state.lock().unwrap().puts, 8);
         assert_eq!(state.lock().unwrap().registration_puts, 2);
         let mut registrations = successor.registrations().unwrap();
@@ -702,38 +688,22 @@ mod tests {
     async fn live_transactions_resolve_lost_http_replies_without_control_updates() {
         use crate::{
             cache::Cache,
-            ownership::root::{Outcome, Profile},
+            ownership::root::Outcome,
             transactions::{
                 live::{self, Opening, Request},
                 record::{Database, Mutation},
             },
         };
-        use std::{
-            sync::atomic::{AtomicU64, Ordering},
-            time::Duration,
-        };
-        #[derive(Clone)]
-        struct Clock(Arc<AtomicU64>);
-        impl crate::ownership::timing::Clock for Clock {
-            fn read(&self) -> Option<Duration> {
-                Some(Duration::from_secs(self.0.load(Ordering::SeqCst)))
-            }
-        }
         let (connection, state, task) = fixture(200, true).await;
-        let clock = Clock(Arc::new(AtomicU64::new(0)));
-        let mut root = connection
-            .root(
-                clock.clone(),
-                Profile::new(Duration::from_secs(10), Duration::from_secs(1)).unwrap(),
-            )
-            .unwrap();
+
+        let mut root = connection.root().unwrap();
         let observed = root.observe().await.unwrap();
         let prepared = root.claim(observed).unwrap();
         assert!(matches!(
             root.finish(prepared.execute().await).unwrap(),
             Outcome::Confirmed
         ));
-        clock.0.store(23, Ordering::SeqCst);
+
         let observed = root.observe().await.unwrap();
         let prepared = root.validate(observed).unwrap();
         assert!(matches!(
@@ -782,9 +752,15 @@ mod tests {
             puts + 1,
             "both databases share one immutable PUT"
         );
-        assert!(owner.commit_result(first.tickets[1]).unwrap().is_none());
+        assert!(
+            owner
+                .commit_result(first.tickets[1])
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
-            owner.outcome(first.tickets[0]).unwrap(),
+            owner.outcome(first.tickets[0]).await.unwrap(),
             live::Outcome::Pending
         );
         let duplicate = owner
@@ -792,7 +768,13 @@ mod tests {
             .await
             .unwrap();
         assert!(duplicate.upload.is_none());
-        assert!(owner.commit_result(duplicate.tickets[0]).unwrap().is_none());
+        assert!(
+            owner
+                .commit_result(duplicate.tickets[0])
+                .await
+                .unwrap()
+                .is_none()
+        );
         state.lock().unwrap().acknowledgement = 200;
         let next = owner
             .prepare(&[Request {
@@ -811,7 +793,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            owner.outcome(next.tickets[0]).unwrap(),
+            owner.outcome(next.tickets[0]).await.unwrap(),
             live::Outcome::Pending
         );
         assert!(owner.get(&snapshot, "note").await.unwrap().is_none());
@@ -822,22 +804,24 @@ mod tests {
         assert_eq!(
             owner
                 .commit_result(first.tickets[1])
+                .await
                 .unwrap()
                 .unwrap()
                 .revision,
             1
         );
         assert_eq!(
-            owner.outcome(first.tickets[0]).unwrap(),
+            owner.outcome(first.tickets[0]).await.unwrap(),
             live::Outcome::Committed(1)
         );
         assert_eq!(
-            owner.outcome(next.tickets[0]).unwrap(),
+            owner.outcome(next.tickets[0]).await.unwrap(),
             live::Outcome::Committed(2)
         );
         assert!(
             owner
                 .commit_result(duplicate.tickets[0])
+                .await
                 .unwrap()
                 .unwrap()
                 .replayed
@@ -845,6 +829,7 @@ mod tests {
         assert!(
             !owner
                 .commit_result(first.tickets[0])
+                .await
                 .unwrap()
                 .unwrap()
                 .replayed
@@ -878,7 +863,7 @@ mod tests {
         state.lock().unwrap().lose_next_control_reply = true;
         owner.complete(completion).await.unwrap();
         assert_eq!(
-            owner.outcome(third.tickets[0]).unwrap(),
+            owner.outcome(third.tickets[0]).await.unwrap(),
             live::Outcome::Committed(3)
         );
         assert_eq!(owner.usage().versions, 0);
@@ -907,6 +892,7 @@ mod tests {
         assert!(
             owner
                 .commit_result(retry.tickets[0])
+                .await
                 .unwrap()
                 .unwrap()
                 .replayed
@@ -933,7 +919,7 @@ mod tests {
         let position = upload.position();
         state.lock().unwrap().acknowledgement = 503;
         owner.complete(upload.send().await).await.unwrap();
-        assert!(owner.catalog_result(&creation).unwrap().is_none());
+        assert!(owner.catalog_result(&creation).await.unwrap().is_none());
         assert!(matches!(
             owner.policy_info("tenant", &admin).await,
             Err(Error::NotFound)
@@ -945,7 +931,7 @@ mod tests {
         assert!(duplicate.upload.is_none());
         state.lock().unwrap().acknowledgement = 200;
         owner.resolve_upload(position).await.unwrap();
-        assert!(owner.catalog_result(&duplicate).unwrap().is_some());
+        assert!(owner.catalog_result(&duplicate).await.unwrap().is_some());
         let policy = owner.policy_info("tenant", &admin).await.unwrap();
         let auth = Auth::new(&"41".repeat(32)).unwrap();
         let (token, id) = auth
@@ -1015,7 +1001,7 @@ mod tests {
         ));
         state.lock().unwrap().acknowledgement = 200;
         owner.resolve_upload(position).await.unwrap();
-        assert!(owner.catalog_result(&revoke).unwrap().is_some());
+        assert!(owner.catalog_result(&revoke).await.unwrap().is_some());
         assert!(matches!(
             owner
                 .read_authorized("tenant", &ReadRequest::default(), &caller)

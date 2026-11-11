@@ -1,11 +1,11 @@
-//! Native serving under an injected ownership contract. The owner is exclusively
+//! Native serving with fresh permit validation after response preparation. The owner is exclusively
 //! borrowed for admission/publication; immutable reads can run concurrently.
-//! Uploads and control renewal own their I/O and do not hold that borrow.
+//! Uploads and control updates own their I/O and do not hold that borrow.
 //! The HTTP adapter uses catalog-authorized methods. Low-level generation APIs
-//! require caller authorization. Physical timing/placement remains external.
+//! require caller authorization. Placement remains external.
 mod catalog;
 mod control;
-pub use control::{Control, Renewal};
+pub use control::Control;
 mod checkpoint;
 pub(crate) use catalog::checkpoint_database;
 pub use catalog::{AuthorizedBatch, AuthorizedTicket, CatalogChange, CatalogResult};
@@ -23,10 +23,7 @@ use crate::{
         table::Entry,
     },
     journal,
-    ownership::{
-        root::{self, Root},
-        timing::Clock,
-    },
+    ownership::root::{self, Root},
 };
 use anyhow::{Context, ensure};
 use sha2::{Digest, Sha256};
@@ -111,16 +108,16 @@ pub struct Prepared {
     pub upload: Option<journal::PreparedUpload>,
 }
 
-/// Recovery is private. Keep `control()` running while storage I/O is pending.
+/// Recovery is private and validated before it becomes visible.
 /// Prior journal selection must be complete before constructing this opening.
-pub struct Opening<C> {
-    control: Control<C>,
+pub struct Opening {
+    control: Control,
     replay: root::Replay,
     limits: Limits,
     cache: Arc<Cache>,
 }
-impl<C: Clock> Opening<C> {
-    pub fn new(mut root: Root<C>, limits: Limits, cache: Arc<Cache>) -> anyhow::Result<Self> {
+impl Opening {
+    pub fn new(mut root: Root, limits: Limits, cache: Arc<Cache>) -> anyhow::Result<Self> {
         Validator::new(0, limits.validation)?;
         ensure!(limits.checkpoint_frames > 0, "invalid checkpoint interval");
         ensure!(
@@ -136,10 +133,10 @@ impl<C: Clock> Opening<C> {
             cache,
         })
     }
-    pub fn control(&self) -> Control<C> {
+    pub fn control(&self) -> Control {
         self.control.clone()
     }
-    pub async fn recover(self) -> anyhow::Result<Owner<C>> {
+    pub async fn recover(self) -> anyhow::Result<Owner> {
         let files = self.replay.files();
         let mut recovered =
             Recovering::begin_cached(self.replay, self.limits.index, self.cache.clone()).await?;
@@ -156,6 +153,7 @@ impl<C: Clock> Opening<C> {
             );
             root.take_journal(self.limits.journal)?
         };
+        self.control.validate(origin.identity).await?;
         Ok(Owner {
             control: self.control,
             identity: origin.identity,
@@ -182,8 +180,8 @@ struct Pending {
     ticket: Ticket,
 }
 type RequestKey = (Arc<str>, Uuid, Arc<str>);
-pub struct Owner<C> {
-    control: Control<C>,
+pub struct Owner {
+    control: Control,
     identity: root::Identity,
     projection: Projection,
     writer: journal::Writer,
@@ -198,8 +196,26 @@ pub struct Owner<C> {
     failed: bool,
     maintenance: checkpoint::Maintenance,
 }
-impl<C: Clock> Owner<C> {
-    pub fn control(&self) -> Control<C> {
+impl Owner {
+    pub async fn outcome(&self, ticket: Ticket) -> anyhow::Result<Outcome> {
+        let result = self.outcome_unvalidated(ticket);
+        self.validate().await?;
+        result
+    }
+
+    pub async fn get(&self, snapshot: &Snapshot, key: &str) -> anyhow::Result<Option<Entry>> {
+        let result = self.get_unvalidated(snapshot, key).await;
+        self.validate().await?;
+        result
+    }
+
+    pub async fn snapshot(&mut self, database: Database<'_>) -> anyhow::Result<Snapshot> {
+        let result = self.snapshot_unvalidated(database).await;
+        self.validate().await?;
+        result
+    }
+
+    pub fn control(&self) -> Control {
         self.control.clone()
     }
     pub(crate) fn collection(&self) -> anyhow::Result<crate::ownership::root::Collection> {
@@ -264,6 +280,10 @@ impl<C: Clock> Owner<C> {
     pub fn usage(&self) -> recovery::Usage {
         self.projection.usage()
     }
+    pub(crate) async fn validate(&self) -> anyhow::Result<()> {
+        self.check()?;
+        self.control.validate(self.identity).await
+    }
     pub(crate) fn check(&self) -> anyhow::Result<()> {
         ensure!(!self.failed, "owner retired after incomplete publication");
         self.control.check(self.identity)
@@ -289,7 +309,10 @@ impl<C: Clock> Owner<C> {
         }
         Ok(())
     }
-    pub async fn snapshot(&mut self, database: Database<'_>) -> anyhow::Result<Snapshot> {
+    pub(crate) async fn snapshot_unvalidated(
+        &mut self,
+        database: Database<'_>,
+    ) -> anyhow::Result<Snapshot> {
         self.check()?;
         self.maintain().await?;
         self.warm(database).await?;
@@ -315,7 +338,11 @@ impl<C: Clock> Owner<C> {
         );
         Ok(())
     }
-    pub async fn get(&self, snapshot: &Snapshot, key: &str) -> anyhow::Result<Option<Entry>> {
+    pub(crate) async fn get_unvalidated(
+        &self,
+        snapshot: &Snapshot,
+        key: &str,
+    ) -> anyhow::Result<Option<Entry>> {
         self.check_snapshot(snapshot)?;
         let view = self
             .projection
@@ -625,7 +652,7 @@ impl<C: Clock> Owner<C> {
         self.failed = false;
         Ok(())
     }
-    pub fn outcome(&self, ticket: Ticket) -> anyhow::Result<Outcome> {
+    pub(crate) fn outcome_unvalidated(&self, ticket: Ticket) -> anyhow::Result<Outcome> {
         ensure!(
             ticket.owner == self.identity,
             "ticket belongs to another owner; resolve its original request"

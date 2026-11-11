@@ -10,7 +10,7 @@ pub(super) struct Faults {
     inner: Arc<Remote>,
     mode: AtomicU64,
     fail_prefix: Option<&'static str>,
-    puts: AtomicU64,
+    pub(super) puts: AtomicU64,
     delayed: Mutex<Option<(String, Bytes)>>,
 }
 impl Faults {
@@ -78,23 +78,26 @@ async fn unknown_registration_requires_a_positive_read_before_root_publication()
         let provider = Provider::new();
         let files = Faults::new(provider.files.clone(), mode);
         let connection = Connection::new(files.clone(), provider.clone(), "test");
-        let clock = ManualClock::default();
-        let mut root = connection.root(clock.clone(), profile()).unwrap();
+
+        let mut root = connection.root().unwrap();
         let observed = root.observe().await.unwrap();
         let request = root.claim(observed).unwrap();
         let outcome = root.finish(request.execute().await).unwrap();
-        assert_eq!(files.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            files.puts.load(Ordering::SeqCst),
+            if mode == 1 { 2 } else { 1 }
+        );
         if mode == 1 {
             assert!(matches!(outcome, Outcome::Confirmed));
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         } else {
             assert!(matches!(outcome, Outcome::Uncertain(_)));
             assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-            let mut successor = connection.root(clock, profile()).unwrap();
+            let mut successor = connection.root().unwrap();
             claim(&mut successor).await;
             let delayed = files.delayed.lock().unwrap().take().unwrap();
             files.inner.put(&delayed.0, delayed.1).await.unwrap();
-            assert!(root.permission().unwrap().is_none());
+            assert!(root.permission().await.unwrap().is_none());
             assert_eq!(
                 provider.record().identity.incarnation,
                 successor.incarnation
@@ -113,15 +116,15 @@ async fn cold_recovery_discovers_every_registered_journal_without_process_memory
     let provider = Provider::new();
     let files = Faults::new(provider.files.clone(), 0);
     let connection = Connection::new(files.clone(), provider.clone(), "test");
-    let clock = ManualClock::default();
+
     for epoch in 1..=3 {
-        let mut root = connection.root(clock.clone(), profile()).unwrap();
+        let mut root = connection.root().unwrap();
         assert!(matches!(
             root.take_journal(QueueLimits::default()),
             Err(Error::NotReady)
         ));
         claim(&mut root).await;
-        clock.set(epoch * 23);
+
         validate(&mut root).await;
         activate(&mut root).await;
         let mut writer = root.take_journal(QueueLimits::default()).unwrap();
@@ -139,14 +142,13 @@ async fn cold_recovery_discovers_every_registered_journal_without_process_memory
         assert!(writer.pop_durable().unwrap().is_some());
         // Root, writer, reader and all local log identities are dropped here.
     }
-    drop(clock);
     // The provider keeps only its current register, not an old metadata cache.
     let current = provider.history.lock().unwrap().last().unwrap().clone();
     *provider.history.lock().unwrap() = vec![current];
-    let clock = ManualClock::default();
-    let mut replacement = connection.root(clock.clone(), profile()).unwrap();
+
+    let mut replacement = connection.root().unwrap();
     claim(&mut replacement).await;
-    clock.set(23);
+
     validate(&mut replacement).await;
     activate(&mut replacement).await;
     let mut registrations = replacement.registrations().unwrap();
@@ -182,7 +184,7 @@ async fn registration_encoding_accepts_both_namespace_size_boundaries() {
     for length in [1, 128] {
         let provider = Provider::new();
         let connection = provider.connection(&"p".repeat(length));
-        let mut root = connection.root(ManualClock::default(), profile()).unwrap();
+        let mut root = connection.root().unwrap();
         claim(&mut root).await;
         let key = provider
             .files
@@ -211,8 +213,8 @@ async fn registration_encoding_accepts_both_namespace_size_boundaries() {
 #[tokio::test]
 async fn missing_corrupt_or_incompatible_registrations_never_truncate_recovery() {
     let provider = Provider::new();
-    let clock = ManualClock::default();
-    let mut root = provider.root(&clock);
+
+    let mut root = provider.root();
     claim(&mut root).await;
     let key = provider
         .files
@@ -232,7 +234,7 @@ async fn missing_corrupt_or_incompatible_registrations_never_truncate_recovery()
         assert!(chain.next().await.is_err(), "unchecked byte {offset}");
     }
     // Recomputed checksums must not bypass semantic binding: version, identity,
-    // predecessor, timing profile, prefix length and namespace are independently checked.
+    // predecessor, reserved encoding fields, prefix length and namespace are independently checked.
     for offset in [0, 8, 16, 32, 40, 56, 64, 72, 74] {
         let mut invalid = original.to_vec();
         invalid[offset] ^= 1;
