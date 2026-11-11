@@ -170,6 +170,31 @@ async fn collected(connection: &Connection, expected: [usize; 3]) -> (f64, usize
     (start.elapsed().as_secs_f64() * 1000.0, remaining[3])
 }
 
+// A durable journal response does not promise that asynchronous checkpoint
+// retries already published. Observe the completed cut before pricing its files.
+async fn wait_checkpoint(connection: &Connection, previous: Option<&str>) -> String {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let observed = connection.authority().read().await.unwrap();
+            let root: Value =
+                serde_json::from_str(&observed.info["durable-db-owned-root"]).unwrap();
+            if let Some(current) = root["checkpoint"].as_str()
+                && Some(current) != previous
+            {
+                return current.to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "checkpoint did not publish within 30 seconds; {}",
+            REGISTRY.render()
+        )
+    })
+}
+
 async fn checkpoint_copy_allowances(
     files: &dyn durable_db::storage::Storage,
 ) -> std::collections::BTreeMap<String, u64> {
@@ -236,6 +261,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             .await;
     }
     let commit = "/v1/databases/a/commit";
+    let initial_checkpoint = wait_checkpoint(&connection, None).await;
     let initial_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
     let initial_copies = initial_tables.values().sum::<u64>();
@@ -274,6 +300,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         server.ok("POST", "/v1/databases/b/commit", &write(0)).await["revision"],
         1
     );
+    wait_checkpoint(&connection, Some(&initial_checkpoint)).await;
     let current_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     let replaced: Vec<_> = current_tables
         .iter()
