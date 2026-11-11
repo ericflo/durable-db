@@ -69,7 +69,7 @@ A confirmed control update is historical evidence, not reusable permission. Acti
 
 `providers::Connection::control()` implements the request lifecycle in Rust, including invocation matching, bounded metadata and explicit uncertainty. It uses the same nonce-stamped conditional register for B2 and S3. Its real HTTP tests keep provider processing alive after caller cancellation. It does not interpret root intervals or placement, and confirmed metadata records a historical successful comparison rather than continuing permission.
 
-The [verification record](verification.md#control-request-session) separates this implementation from the [root request model](verification.md#candidate-root-requests-and-revalidation), [placement uncertainty](verification.md#candidate-placement-requests-and-uncertain-replies), [placement during takeover](verification.md#candidate-placement-requests-across-root-replacement) and [late application coverage](verification.md#candidate-delayed-control-application). These components must still be composed with journal selection, physical timing and the serving engine.
+The [request session](verification.md#control-request-session), [exact acquisition](verification.md#candidate-root-acquisition), [durable ancestry](verification.md#durable-root-registrations) and [permit checks](verification.md#candidate-revocable-writer-permits) describe the current boundaries. They still need a complete composition with journal selection, placement and the serving engine. Earlier timed placement/request models remain historical fallback evidence.
 
 ## Transaction concurrency
 
