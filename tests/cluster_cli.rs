@@ -289,16 +289,8 @@ async fn native_cloud_cli_recovers_exhausted_admission_and_preserves_data() {
     drop(first); // SIGKILL strands all unspent process-local namespace credit.
     let mut second = Server::start(dir.path(), &provider, &bucket, &prefix, 2).await;
     second.health("/health/live").await;
-    assert_eq!(
-        second
-            .client
-            .get(format!("{}/health/ready", second.url))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    // A Service must expose administrative recovery before owners have credit.
+    second.health("/health/ready").await;
     assert_eq!(
         second
             .call("GET", "/v1/storage/upload-budget", Value::Null)
@@ -370,7 +362,7 @@ async fn native_cloud_cli_recovers_exhausted_admission_and_preserves_data() {
     std::fs::write(report, serde_json::to_vec_pretty(&json!({
         "seconds":started.elapsed().as_secs_f64(), "partitions":2, "cold_processes":3,
         "binary_sha256":hex::encode(Sha256::digest(std::fs::read(binary()).unwrap())),
-        "native_cloud_cli":true,"admin_bootstrap_from_zero_credit":true,"admin_refill_available_before_owner_readiness":true,
+        "native_cloud_cli":true,"admin_bootstrap_from_zero_credit":true,"admin_refill_available_before_owner_recovery":true,
         "exhausted_credit_preserved_on_restart":true,"refill_idempotent":true,
         "replenished_limits_preserved_on_restart":true,"values_and_exact_receipts_recovered":true,
         "incompatible_layout_refused":true,
@@ -405,20 +397,31 @@ async fn native_default_cli_starts_sixteen_partitions() {
     let started = Instant::now();
     // Preserve safe, fixed-stage diagnostics even if the startup deadline fails.
     let ready = tokio::time::timeout(Duration::from_secs(240), async {
-        loop {
-            assert!(server.child.try_wait().unwrap().is_none());
-            if server
-                .client
-                .get(format!("{}/health/ready", server.url))
-                .send()
-                .await
-                .unwrap()
-                .status()
-                == StatusCode::OK
-            {
-                break;
+        let layout = durable_db::providers::partitions::Layout::new(16).unwrap();
+        for partition in 0..16 {
+            let name = (0..1000)
+                .map(|n| format!("probe-{n}"))
+                .find(|name| layout.partition(name).unwrap() == partition)
+                .unwrap();
+            loop {
+                assert!(server.child.try_wait().unwrap().is_none());
+                let status = server
+                    .client
+                    .get(format!("{}/v1/databases/{name}", server.url))
+                    .bearer_auth(&server.token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+                if status == StatusCode::NOT_FOUND {
+                    break;
+                }
+                assert!(matches!(
+                    status,
+                    StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+                ));
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     })
     .await
@@ -431,6 +434,7 @@ async fn native_default_cli_starts_sixteen_partitions() {
     .unwrap();
     std::fs::write(report, serde_json::to_vec_pretty(&json!({
         "native_default_cli_ready":ready, "partitions":16,
+        "startup_check":"Authenticated absent-database response from every recovered partition, not HTTP readiness alone",
         "startup_seconds":started.elapsed().as_secs_f64(),
         "scope":"One debug process, default partition count and resident allowance, automatic maintenance, 1 GiB / 100,000 PUT ceiling; startup only, not Kubernetes or a throughput/RSS claim."
     })).unwrap()).unwrap();

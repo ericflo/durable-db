@@ -151,6 +151,12 @@ impl Cluster {
                 let Some(cluster) = weak.upgrade() else {
                     return;
                 };
+                // This process can route and administer while partitions
+                // recover. Readiness never grants data-serving permission.
+                cluster.ready.store(
+                    membership(&peers).is_ok() && peers.contains(&cluster.config.address),
+                    Ordering::Release,
+                );
                 // Individual provider calls are bounded. A whole recovery may
                 // legitimately take longer; restarting it on a fixed timer can
                 // prevent progress forever. Changed placement still cancels it.
@@ -178,11 +184,9 @@ impl Cluster {
                     Some(Ok(true)) => retry.reset_immediately(),
                     Some(Ok(false)) => (),
                     Some(Err(_)) => {
-                        cluster.ready.store(false, Ordering::Release);
                         tracing::warn!("native placement incomplete; retrying");
                     }
                     None => {
-                        cluster.ready.store(false, Ordering::Release);
                         retry.reset_immediately();
                         if members.has_changed().is_err() {
                             break;
@@ -205,15 +209,10 @@ impl Cluster {
     }
     async fn reconcile(&self, peers: &[SocketAddr], cursor: &mut usize) -> anyhow::Result<bool> {
         let peers = membership(peers)?;
-        let present = peers.contains(&self.config.address);
-        if !present {
-            self.ready.store(false, Ordering::Release);
-        }
         let desired: Vec<_> = (0..self.partitions.len())
             .map(|id| preferred(id as u32, &peers) == Some(self.config.address))
             .collect();
-        // Retire removed placements before I/O. A routine health sweep keeps
-        // readiness until an actual loss; it must not flap on every retry tick.
+        // Retire removed placements before I/O.
         for (partition, wanted) in self.partitions.iter().zip(&desired) {
             if !wanted {
                 partition.local.write().await.take();
@@ -236,7 +235,6 @@ impl Cluster {
                 None => false,
             };
             if !healthy {
-                self.ready.store(false, Ordering::Release);
                 partition.local.write().await.take();
                 acquisitions.push(async move {
                     let local = self.acquire(id as u32, &partition.connection).await?;
@@ -265,13 +263,6 @@ impl Cluster {
         if let Some(error) = failure {
             return Err(error);
         }
-        let mut complete = present;
-        for (partition, wanted) in self.partitions.iter().zip(desired) {
-            if wanted && partition.local.read().await.is_none() {
-                complete = false;
-            }
-        }
-        self.ready.store(complete, Ordering::Release);
         Ok(acquired)
     }
     async fn acquire(&self, id: u32, connection: &Connection) -> anyhow::Result<Native> {

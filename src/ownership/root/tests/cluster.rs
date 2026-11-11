@@ -292,7 +292,26 @@ async fn unconfirmed_acquisition_stays_unserved_and_recovers_without_a_new_claim
         .store(true, Ordering::SeqCst);
     node.members(&[node.address]);
     provider.entered.notified().await;
-    assert!(!node.cluster.ready().await);
+    assert!(
+        node.cluster.ready().await,
+        "routing stays reachable during recovery"
+    );
+    assert_eq!(
+        reqwest::get(format!("{}/health/ready", node.server.url))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let token = auth().administrator_token(600).unwrap();
+    assert_eq!(
+        node.server
+            .call("GET", "/v1/databases/app", &token, Value::Null)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "HTTP readiness must not authorize an unconfirmed owner"
+    );
     for db in names() {
         assert!(
             node.cluster
@@ -336,7 +355,6 @@ async fn unconfirmed_acquisition_stays_unserved_and_recovers_without_a_new_claim
             Some(record.identity.incarnation)
         );
     }
-    let token = auth().administrator_token(600).unwrap();
     node.server
         .ok(
             "PUT",
@@ -622,7 +640,10 @@ async fn retired_backend_references_keep_the_process_budget_until_released() {
     let calls = provider.calls.load(Ordering::SeqCst);
     node.members(&[address]);
     tokio::time::sleep(Duration::from_millis(40)).await;
-    assert!(!node.cluster.ready().await);
+    assert!(
+        node.cluster.ready().await,
+        "full residency does not hide routing or administration"
+    );
     for name in names() {
         assert!(
             node.cluster
@@ -664,8 +685,8 @@ async fn retired_backend_references_keep_the_process_budget_until_released() {
     .await
     .unwrap();
     assert!(
-        !node.cluster.ready().await,
-        "one old reference still occupies a slot"
+        node.cluster.ready().await,
+        "routing remains available while one old reference occupies a slot"
     );
     drop(held);
     node.members(&[address]);
@@ -687,7 +708,21 @@ async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
     let address = listener.local_addr().unwrap();
     let node = Node::start(directory, listener, vec![address]).await;
     let token = auth().administrator_token(600).unwrap();
-    assert!(!node.cluster.ready().await);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !node.cluster.ready().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        reqwest::get(format!("{}/health/ready", node.server.url))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "Kubernetes must expose the administrator refill endpoint with zero credit"
+    );
     let status = node
         .server
         .ok("GET", "/v1/storage/upload-budget", &token, Value::Null)
@@ -757,7 +792,10 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change(
     })
     .await
     .expect("a paused partition cannot block another acquisition");
-    assert!(!node.cluster.ready().await);
+    assert!(
+        node.cluster.ready().await,
+        "one paused partition cannot hide the HTTP router"
+    );
     let calls = provider.calls.load(Ordering::SeqCst);
     tokio::time::advance(Duration::from_secs(40)).await;
     // Repeated identical membership must not abort useful acquisition either.

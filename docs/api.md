@@ -10,7 +10,7 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 
 The shared router can also serve a recovered native owner through `api::Native::new(owner, capacity)` and `App::new`. This library path supports protected creation, info, reads, commits, tokens, and access-policy changes with the same authentication and request budgets. Its bounded server-owned worker continues accepted writes after a caller disconnects, pipelines immutable uploads outside the owner lock, resolves unknown PUT outcomes by exact GET, and retries checkpoint maintenance. Capacity bounds queued, executing and pending replies, including duplicate requests. Each HTTP commit currently occupies one journal frame; cross-request batching remains open.
 
-Native readiness and responses validate current ownership. Local serving retains the directory lock; remote native serving uses `api::Native::new(owner, capacity)` with a recovered owner and no clock or renewal task. Results are prepared before a fresh uncached permit GET; one validation can release a sealed group of durable replies. Missing/corrupt permission and provider errors refuse service. Cloud election, routing and placement use the native controller and DNS membership. Native legacy POST creation and `/gc` return `501 unsupported_operation`; use protected PUT creation and automatic maintenance. Namespace upload ceilings and per-database admission are implemented. Maintenance collects obsolete budget/catalog metadata, covered journals, table/manifest objects and abandoned permits. Complete tenant cost attribution remains open. This is still experimental.
+Cloud readiness keeps routing and administration reachable during partition recovery. It grants no permission to serve database responses. Leaf native backends validate current ownership. Local serving retains the directory lock; remote native serving uses `api::Native::new(owner, capacity)` with a recovered owner and no clock or renewal task. Results are prepared before a fresh uncached permit GET; one validation can release a sealed group of durable replies. Missing/corrupt permission and provider errors refuse service. Cloud election, routing and placement use the native controller and DNS membership. Native legacy POST creation and `/gc` return `501 unsupported_operation`; use protected PUT creation and automatic maintenance. Namespace upload ceilings and per-database admission are implemented. Maintenance collects obsolete budget/catalog metadata, covered journals, table/manifest objects and abandoned permits. Complete tenant cost attribution remains open. This is still experimental.
 
 ## Endpoints
 
@@ -30,7 +30,7 @@ Native readiness and responses validate current ownership. Local serving retains
 | `POST /v1/databases/{db}/upload-budget` | Admin, native backend: preprovision or increase the database admission/reserve allowance |
 | `GET /metrics` | Administrator or metrics-only credential: bounded Prometheus latency, outcomes, provider, cache, admission, and maintenance metrics; see [observability](observability.md) |
 | `GET /health/live` | Process is serving HTTP |
-| `GET /health/ready` | Startup completed and server is not draining |
+| `GET /health/ready` | HTTP routing/administration is available and server is not draining; individual cloud partitions may still be recovering |
 
 Database info reports logical usage. The experimental `pages` field has been removed: native tables are shared across databases, so a per-database physical page count is not a useful API contract.
 

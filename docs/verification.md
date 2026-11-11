@@ -667,7 +667,7 @@ At `00637a4`, the native HTTP partition fixture passes on B2 in 52.98 seconds an
 
 `Root::advertise` binds an optional socket address to a fresh ownership incarnation in its existing control record. An open observation is a route hint, never serving permission. `api::Forward` caches one route for an explicitly selected partition and sends one authenticated HTTP attempt. The receiving backend checks the incarnation before dispatch; ordinary policy checks and fresh writer-permit validation remain mandatory. Tenant claims keep their expiry, policy generation and revocation identity. Administrator forwarding uses a signed 60-second token, never the signing-key bearer. The forwarder refuses redirects, disables transport retries/proxy inheritance, bounds concurrency and bytes, and clears only the failed cache instance. Readiness indicates the forwarding process's admission state, not owner availability. Deployment still needs a trusted private peer network or transport mesh and a shared signing-key ring.
 
-`OwnerRouting` now has **55 distinct states, 90 generated, depth 7**. It checks address reuse, stale discovery, destination identity and one transport attempt; four negative controls detect an omitted identity check, a repeated attempt after a lost reply, selecting another backend after admission and retaining a route rejected before identity validation. Run `scripts/check-model.sh OwnerRouting`. The existing `RevocableOwner` argument supplies response/permit ordering. This small model does not establish election, database mapping, placement, liveness or Rust refinement.
+`OwnerRouting` now has **110 distinct states, 289 generated, depth 8**. Arbitrary HTTP readiness changes cannot grant response authority. It checks address reuse, stale discovery, destination identity and one transport attempt; Five negative controls detect an omitted identity check, a repeated attempt after a lost reply, selecting another backend after admission, retaining a route rejected before identity validation and substituting HTTP readiness for response permission. Run `scripts/check-model.sh OwnerRouting`. The existing `RevocableOwner` argument supplies response/permit ordering. This small model does not establish election, database mapping, placement, liveness or Rust refinement.
 
 Four TCP/root regressions complete in 0.10 seconds after compilation. They cover live takeover, exact receipt replay after a lost response, wrong-partition address reuse, token revocation, cached discovery, delayed failures racing cache replacement, redirect refusal, overload and oversized responses. Two deliberate Rust faults omit the destination check or clear a refreshed route on a late old failure; both are detected. An authentication regression checks unchanged tenant claims across signing-key rotation and rejects expired claims. The common journal-selection loop replaces duplicate local-startup and cloud-fixture implementations.
 
@@ -806,3 +806,26 @@ acknowledgements/readbacks. Successful sampled acquisitions span 12–86 seconds
 The run does not reach final history verification or later fault phases; its
 namespace, bucket, key and 611 physical versions were removed. See the
 [configuration and bounded timing evidence](evidence/native-recovery-2026-11-11.json).
+
+
+## HTTP readiness during partition recovery
+
+An observed scale-up marked every pod unready together because readiness required
+all local placements to finish recovery. That removed the client Service's
+endpoints, including administrative refill and routes to healthy partitions.
+The controller now advertises routing readiness while it belongs to valid
+membership, and withdraws it on removal or shutdown. Recovery and capacity
+failures stay local to affected partitions; they do not hide the HTTP router.
+No owner is admitted before recovery and every data response retains its fresh
+permit check. The all-partitions readiness scan and recovery-driven flag resets
+were deleted.
+
+The existing TCP regression observes HTTP 200 from the probe while a claim is
+paused, HTTP 503 for the unconfirmed database, then service on the original
+confirmed identity. The zero-credit regression requires the ready administrator
+endpoint before refill. Membership closure, paused recovery and resident-budget
+checks remain. `OwnerRouting` includes independent readiness changes and a
+negative control granting a response from readiness alone. The disposable CLI
+startup fixture now requires authenticated absent-database responses from all
+sixteen partitions, so the broader probe cannot make that check pass early.
+Cloud rollout qualification of this change remains open.
