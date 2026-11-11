@@ -51,9 +51,9 @@ Takeover first revokes every unresolved predecessor permit, then discovers and d
 
 The small `RevocableOwner` model checks one handoff without clocks, including delayed replies and uploads. Seven deliberately broken variants expose why creation-before-publication, one physical PUT, fresh reads, sealed groups, contiguous durability and revoke-before-scan are necessary. [Bounds and assumptions](verification.md#candidate-revocable-writer-permits) are explicit. This is a candidate, not the current runtime or a proof of repeated placement and cleanup.
 
-This removes bucket-wide conditional updates from the proposed ordinary data path, **not all provider I/O**: a read group costs a GET; a write group costs its durable upload plus a GET. Independent writers can validate independently. Batching amortizes calls but adds waiting. Real B2 latency and concurrency measurements must decide whether this meets the performance brief; zero-network cached reads are not promised by this mechanism.
+This removes bucket-wide conditional updates from the proposed ordinary data path, **not all provider I/O**: a read group costs a GET; a write group costs its durable upload plus a GET. Independent writers can validate independently. Batching amortizes calls but adds waiting. The first B2 experiment measures 32–67 ms median GET latency and about 200 validations/second at concurrency 16, with a one-second outlier in the sequential phase. These short raw-provider phases are not database performance qualification; zero-network cached reads are not promised by this mechanism.
 
-The provider must never return old positive permit bytes to a GET started after confirmed revocation. Real tests cannot prove that consistency contract. Version deletion, lost replies, independent connections and transport caching need explicit qualification on B2 and S3. No hardware timing guarantee is substituted for this obligation.
+The provider must never return old positive permit bytes to a GET started after confirmed revocation. Real tests cannot prove that consistency contract. The [first B2/MinIO deletion experiment](verification.md#permit-provider-experiment) passes; provider consistency, lost replies, transport caching and AWS deployment still need explicit qualification. No hardware timing guarantee is substituted for this obligation.
 
 ### Renewal without a provider call per partition
 
@@ -93,9 +93,9 @@ A preceding finite model and adversarial Rust tests cover read dependencies, pha
 
 Assign each batch a fresh identity from its partition, unique writer epoch and never-reused sequence position. Encode accepted transactions, request identities, resulting database revisions and the preceding log digest. The process sends at most one PUT for that identity. An unknown PUT outcome stalls that sequence; it may be resolved by reading and checking the exact object. It must not allocate a replacement transaction identity or send different bytes under the same name.
 
-Uploads may be pipelined, but acknowledgement advances only through a contiguous durable prefix. A completed upload at position three cannot justify acknowledging it while position two is unresolved. Before acknowledgement, the writer must also verify its serving permission. Merely having started the upload while permission was valid is insufficient. If permission expires after a PUT might have landed, the response is uncertain, not a definite conflict or rollback: recovery may still retain that batch.
+Uploads may be pipelined, but acknowledgement advances only through a contiguous durable prefix. A completed upload at position three cannot justify acknowledging it while position two is unresolved. Before acknowledgement, the writer must also verify its serving permission. Merely having started the upload while permission was valid is insufficient. If validation fails after a PUT might have landed, the response is uncertain, not a definite conflict or rollback: recovery may still retain that batch.
 
-This creates a possible one-immutable-PUT path per batch, with no shared authority update per transaction. The journal implements the immutable byte path, hash-chain validation and prefix replay. Request receipts, transaction evaluation and ownership must compose with it before this becomes a serving engine.
+This creates a proposed one-immutable-PUT plus permit-GET path per batch, with no shared authority update per transaction. The journal implements the immutable byte path, hash-chain validation and prefix replay. Request receipts, transaction evaluation and ownership must compose with it before this becomes a serving engine.
 
 ### Journal implementation boundary
 
@@ -113,7 +113,7 @@ The B2 and S3 bindings now return the same `providers::Connection` without initi
 
 A successor must:
 
-1. Fence new grants to the old incarnation and establish that all old acknowledgement permission has ended.
+1. Revoke the old incarnation’s permit. No newly issued validation may succeed; already sealed groups with earlier successful validation may finish, and their durable prefixes must be recovered.
 2. Recover the old log's contiguous durable prefix. Deterministic epoch/sequence names permit ordered point reads; discovery need not rely on one atomic snapshot of a paginated listing.
 3. Durably publish an immutable handoff decision containing that exact prefix before serving or appending a successor epoch.
 4. On restart, recover the existing decision. Never extend an already accepted old prefix merely because another old upload appeared later.
@@ -220,7 +220,7 @@ This demonstrates useful provider concurrency and supports investigating batched
 
 ## Next implementation gate
 
-First qualify the revocable-permit primitive and its provider cost. Then compose exact conditional acquisition with durable predecessor discovery: even a successor that crashes before revocation must leave all possibly live ancestors discoverable. Selection and activation must remain immutable under repeated takeover, abandoned control calls and concurrent collection. Failed creation must not leak a publishable identity, and permit collection must not race publication or resurrect permission. Keep these checks small and adversarial.
+The first provider experiment passes, with a significant measured GET latency floor. Next compose exact conditional acquisition with durable predecessor discovery: even a successor that crashes before revocation must leave all possibly live ancestors discoverable. Selection and activation must remain immutable under repeated takeover, abandoned control calls and concurrent collection. Failed creation must not leak a publishable identity, and permit collection must not race publication or resurrect permission. Keep these checks small and adversarial.
 
 Integrate that boundary into the existing native journal, index, transaction and HTTP path, replace timed cluster ownership, and add placement and routing in the same binary. Exercise warm reads, independent databases, group commit, a resumed stale owner, return to one node and recovery after total compute loss on the existing hosts. Qualify actual B2 and AWS S3 behavior and performance before switching the cloud CLI. Tenant isolation, bounded physical growth, retention and backups remain the [other production gates](production-readiness.md#remaining-production-gates-in-order).
 
