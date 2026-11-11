@@ -41,7 +41,7 @@ The upload transport now disables SDK retries and uses a shared HTTP connector t
 
 ## Native serving
 
-The following describes current `main`. Creation admission and budgeted format `owned-candidate-23` are unreleased; v0.18.1 uses format 21 and exempts catalog admission. Local format 15 and the cloud CLI format are unchanged.
+v0.19.0 uses budgeted format `owned-candidate-23` for creation admission and clock-independent ownership. v0.18.1 uses format 21 and exempts catalog admission. Local format 15 and the cloud CLI format are unchanged.
 
 `Connection::with_upload_budget(limits)` initializes a fresh native namespace before its first immutable registration. Reopen retains the durable ceilings and cumulative allocation regardless of supplied startup values. The incompatible `owned-candidate-23` marker and required enforcement mode prevent an unbudgeted connection or older controller from claiming it. Existing unbudgeted namespaces cannot enable this in place. A zero ceiling refuses all PUTs while status and administrative replenishment remain available through the connection's object interface.
 
