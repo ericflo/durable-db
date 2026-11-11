@@ -1,5 +1,13 @@
 # Verification results
 
+## v0.18.1 metadata retry reuse (2026-11-10)
+
+Tenant ledger initialization, replenishment, grants and checkpoint funding now share one conditional publication path. Ordinary control updates reuse staged metadata; competing ledger updates and collection require rebuilding. Lost replies never grant another attempt, malformed formats fail closed, and eight unsuccessful comparisons against unchanged scope stop without further uploads.
+
+The focused budget group passes in 0.68 seconds. Paused initialization, refill and grant updates retain exactly six metadata objects across three control conflicts. A deliberate reupload variant fails the first case with four objects instead of two. Three additional Rust negative controls detect missing directory, collection-fence and format checks. The existing 44,354-state publication-retry model and its unsafe control pass; no new model or dependency was added. The separate single-record retry path was removed.
+
+Storage formats and admission policy are unchanged from v0.18.0. This reduces administrative retry amplification; complete tenant attribution, scheduled backups and qualified cluster timing remain open. [Milestone evidence](evidence/metadata-retry-2026-11-10.json).
+
 ## v0.18.0 durable maintenance funding (2026-11-10)
 
 [v0.18.0](https://github.com/ericflo/durable-db/releases/tag/v0.18.0) packages `8f0b282`, verified by [Woodpecker #172](https://ci.eflorenzano.com/repos/18/pipeline/172/1). The independently downloaded static executable passes standalone transactions, ordered reads, backup/restore and forced-stop recovery. The public default installer installs the identical checked binary; the tag pipeline also passes. Both 99-test client contracts pass in Woodpecker; the optimized 10,005-database check passes in 201.18 seconds. The independent website redesign is preserved, and the publisher now rebases and preserves separate site edits.

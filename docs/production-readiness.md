@@ -1,6 +1,6 @@
 # Production readiness
 
-**Release decision: not ready for production.** v0.18.0 is an experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
+**Release decision: not ready for production.** v0.18.1 is an experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
 
 The production release must retain one installable executable, directory-backed laptop development, and Kubernetes deployments that scale down to one node. Cluster data stays authoritative in B2 or S3 through one common storage algorithm, with bounded disposable caches and automatic maintenance. Performance, tenant protection and correctness are joint acceptance criteria.
 

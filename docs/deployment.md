@@ -2,7 +2,7 @@
 
 The service is experimental. Initial real-B2, S3-compatible, and Kubernetes replica-transition tests pass; they are not a production readiness certification.
 
-The [v0.18.0 release](https://github.com/ericflo/durable-db/releases/tag/v0.18.0) provides a static Linux x86_64 binary. While the repository is private, `gh` must be authenticated with repository access. Install without root or a Rust toolchain:
+The [v0.18.1 release](https://github.com/ericflo/durable-db/releases/tag/v0.18.1) provides a static Linux x86_64 binary. While the repository is private, `gh` must be authenticated with repository access. Install without root or a Rust toolchain:
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -39,7 +39,7 @@ Use a registry address reachable by the **nodes' container runtime**, not just b
 
 ## Request budgets
 
-v0.18.0 exposes two per-principal, per-pod overload settings:
+v0.18.1 exposes two per-principal, per-pod overload settings:
 
 | Flag | Environment variable | Default | Accepted range |
 | --- | --- | --- | --- |
@@ -54,7 +54,7 @@ Choose these settings alongside concurrency, memory and measured provider capaci
 
 ## Signing-key changes
 
-v0.18.0 reads either the original hex key file or a bounded JSON keyring through the same `--admin-key-file` setting. Follow the [expansion, promotion, and retirement procedure](design-signing-rotation.md). Key files are loaded at startup: update the Secret and complete the corresponding rolling restart, including the template used by new autoscaled pods. A still-serving process outside the current control-plane view must be fenced from clients or included in the completion check. Keep the old key trusted during an availability rollback; a compromised or deliberately retired key must not be reintroduced by restoring an old Secret.
+v0.18.1 reads either the original hex key file or a bounded JSON keyring through the same `--admin-key-file` setting. Follow the [expansion, promotion, and retirement procedure](design-signing-rotation.md). Key files are loaded at startup: update the Secret and complete the corresponding rolling restart, including the template used by new autoscaled pods. A still-serving process outside the current control-plane view must be fenced from clients or included in the completion check. Keep the old key trusted during an availability rollback; a compromised or deliberately retired key must not be reintroduced by restoring an old Secret.
 
 For isolated qualification on an existing cluster, `scripts/qualify-multinode.py` creates a fresh namespace with explicit CPU/memory/pod quotas, private fixture Secrets, an authenticated control channel, and only namespace-scoped faults. It never drains or reboots nodes. Supply a dedicated disposable provider configuration and an image reference supported by the nodes' container runtime, pinned by digest; a registry address usable inside pods may not be a valid host pull address. The script deletes its own namespace on exit; its caller must remove the disposable provider bucket and key. `scripts/check-autoscaling-history.py` checks its resulting append history.
 
