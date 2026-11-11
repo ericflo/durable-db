@@ -37,6 +37,7 @@ struct Provider {
     pause_read: AtomicBool,
     maintenance: AtomicU64,
     lose_reply: AtomicBool,
+    fail_replacements: AtomicU64,
     lose_publication_reply: AtomicBool,
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
@@ -63,6 +64,7 @@ impl Provider {
             pause_read: AtomicBool::new(false),
             maintenance: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
+            fail_replacements: AtomicU64::new(0),
             lose_publication_reply: AtomicBool::new(false),
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
@@ -117,6 +119,15 @@ impl Authority for Provider {
         info: BTreeMap<String, String>,
     ) -> anyhow::Result<Option<Bucket>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_replacements
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            anyhow::bail!("injected failure before comparison");
+        }
         if self.pause.swap(false, Ordering::SeqCst)
             || (old.info.get("durable-db-root") != info.get("durable-db-root")
                 && self.pause_publication.swap(false, Ordering::SeqCst))
@@ -483,4 +494,80 @@ async fn metadata_limits_and_epoch_exhaustion_do_not_send_or_bind_a_claim() {
     assert!(matches!(fresh.claim(observed), Err(Error::Exhausted)));
     assert!(fresh.epoch.is_none());
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn uncertain_claim_and_activation_keep_the_same_identity() {
+    for (lost_claim, activation_applied) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let provider = Provider::new();
+        let mut root = provider.root();
+        let observed = root.observe().await.unwrap();
+        let claim = root.claim(observed).unwrap();
+        provider.lose_reply.store(lost_claim, Ordering::SeqCst);
+        let result = root.finish(claim.execute().await).unwrap();
+        let identity = provider.record().identity;
+        let mut validations = 4;
+        root.confirm_outcome(result, &mut validations)
+            .await
+            .unwrap();
+        assert!(root.permission().await.unwrap().is_none());
+        if activation_applied {
+            provider.lose_reply.store(true, Ordering::SeqCst);
+        } else {
+            provider.fail_replacements.store(1, Ordering::SeqCst);
+        }
+        let calls = provider.calls.load(Ordering::SeqCst);
+        root.activate_confirmed(&mut validations).await.unwrap();
+        assert_eq!(root.permission().await.unwrap(), Some(identity));
+        assert_eq!(provider.record().identity, identity);
+        assert_eq!(identity.epoch, 1);
+        assert_eq!(validations, 3 - u8::from(lost_claim));
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst) - calls,
+            if activation_applied { 2 } else { 3 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn uncertain_activation_refuses_takeover_and_bounds_validation_work() {
+    for applied in [false, true] {
+        let provider = Provider::new();
+        let mut root = provider.root();
+        claim(&mut root).await;
+        if applied {
+            provider.lose_reply.store(true, Ordering::SeqCst);
+        } else {
+            provider.fail_replacements.store(1, Ordering::SeqCst);
+        }
+        provider.pause_read.store(true, Ordering::SeqCst);
+        let activation = tokio::spawn(async move {
+            let mut validations = 4;
+            let result = root.activate_confirmed(&mut validations).await;
+            (root, result)
+        });
+        tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+            .await
+            .unwrap();
+        let _next = catalog::successor(&provider).await;
+        let calls = provider.calls.load(Ordering::SeqCst);
+        provider.release.notify_one();
+        let (root, result) = activation.await.unwrap();
+        assert!(matches!(result, Err(Error::NotOwner)));
+        assert!(root.permission().await.unwrap().is_none());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    }
+    let provider = Provider::new();
+    let mut root = provider.root();
+    claim(&mut root).await;
+    let calls = provider.calls.load(Ordering::SeqCst);
+    provider.fail_replacements.store(5, Ordering::SeqCst);
+    let mut validations = 4;
+    assert!(root.activate_confirmed(&mut validations).await.is_err());
+    assert_eq!(validations, 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst) - calls, 5);
+    assert_eq!(provider.record().identity.epoch, 1);
+    assert!(root.permission().await.unwrap().is_none());
 }

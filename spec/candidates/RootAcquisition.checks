@@ -4,3 +4,5 @@ unsafe RootAcquisitionUnsafeCompare.cfg root-acquisition-compare 512m UniqueWinn
 unsafe RootAcquisitionUnsafeRetarget.cfg root-acquisition-retarget 512m ClaimBinding
 unsafe RootAcquisitionCompeting.cfg root-acquisition-competing 512m NotCompetingWinners
 unsafe RootAcquisitionRecovered.cfg root-acquisition-recovered 512m NotRecoveredClaim
+unsafe RootAcquisitionActivationRecovered.cfg root-acquisition-activation-recovered 512m NotRecoveredActivation
+unsafe RootAcquisitionUnsafeValidate.cfg root-acquisition-validate 512m OpenWasActivated

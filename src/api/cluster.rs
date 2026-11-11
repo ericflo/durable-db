@@ -286,31 +286,24 @@ impl Cluster {
             connection
                 .initialize_upload_budget(self.config.upload_limits)
                 .await?;
-            // A bootstrap upload grant can invalidate a captured comparison. Only
-            // definite conflicts get a fresh attempt here; uncertainty returns.
+            // Definite claim conflicts use a fresh candidate. Resolve unknown
+            // outcomes on the same identity, without replaying its claim PUTs.
+            let mut validations = 4;
             for _ in 0..4 {
                 let mut root = connection.root()?.advertise(self.config.address)?;
                 stage = "observe";
                 let observed = root.observe().await?;
                 stage = "claim";
                 let claim = root.claim(observed)?;
-                match root.finish(claim.execute().await)? {
-                    Outcome::Confirmed => (),
-                    Outcome::Conflict => continue,
-                    Outcome::Uncertain(error) => {
-                        return Err(error.context("ownership claim unconfirmed"));
-                    }
-                    _ => anyhow::bail!("ownership claim ignored"),
+                let outcome = root.finish(claim.execute().await)?;
+                if matches!(outcome, Outcome::Conflict) {
+                    continue;
                 }
+                root.confirm_outcome(outcome, &mut validations)
+                    .await
+                    .context("ownership claim unconfirmed")?;
                 stage = "activate";
-                let activate = root.activate()?;
-                match root.finish(activate.execute().await)? {
-                    Outcome::Confirmed => (),
-                    Outcome::Uncertain(error) => {
-                        return Err(error.context("ownership activation unconfirmed"));
-                    }
-                    _ => anyhow::bail!("ownership activation conflicted or ignored"),
-                }
+                root.activate_confirmed(&mut validations).await?;
                 stage = "select_journals";
                 root.select_journals().await?;
                 stage = "recover";
@@ -338,7 +331,6 @@ impl Cluster {
                 "partition changed after publication; outcome uncertain",
                 "published manifest changed repeatedly or is unavailable",
                 "activation permit revoked",
-                "ownership activation conflicted or ignored",
             ]
             .into_iter()
             .find(|message| error.chain().any(|cause| cause.to_string() == *message))

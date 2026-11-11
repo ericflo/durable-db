@@ -396,9 +396,9 @@ The real HTTP fixtures reproduce B2's no-op acceptance and verify automatic iden
 
 `RootAcquisition.tla` starts with an empty register and unordered candidate identities. A candidate binds once to one predecessor and the next epoch. Requests retain their captured comparisons after timeout; any historical metadata may be observed. Successful generations are contiguous, one identity wins each generation, and a winning identity cannot be reused in a later generation. Only the current invocation's successful response confirms local state.
 
-Two unrestricted instances allow two or three candidates and four invocations, checking **89,685** and **697,663** distinct states to depth 17. Disabling comparison fails `UniqueWinner`; allowing retargeting fails `ClaimBinding`. Two mandatory reachability controls find competing captures of one predecessor and recovery by validation after a timed-out claim actually applies. No symmetry reduction or guided constraint is used. Run `scripts/check-candidate.sh RootAcquisition`.
+The model includes fenced/open activation and phase-preserving validation. Two unrestricted instances check **117,741** distinct states with two candidates/four invocations (depth 17), and **30,349** with three candidates/three invocations (depth 13). Four invocations retain the claim/activation/takeover/stale-validation sequence; three suffice for the separate competing-candidate case. Disabling comparison fails `UniqueWinner`; retargeting fails `ClaimBinding`; inventing activation during validation fails `OpenWasActivated`. Three reachability controls find competing captures of one predecessor and recovery after a lost claim or activation response. No symmetry reduction or guided constraint is used. Run `scripts/check-candidate.sh RootAcquisition` (about twelve seconds locally including all controls).
 
-This checks the acquisition discipline behind ordered winning epochs; it is not a refinement theorem connecting it to `RootRequests`. It excludes serving permission, drains, physical clocks, journals, scheduling, liveness and a proof of the implementation.
+This checks the acquisition discipline behind ordered winning epochs; it is not a refinement theorem connecting it to `RootRequests`. Activation abstracts completed predecessor revocation, checked separately by `RootRegistration`. This model excludes response permission, physical clocks, journals, scheduling, liveness and a proof of the implementation.
 
 Historical host/VM qualification used the removed timed owner at commit `6688d47`. Process `SIGSTOP` passed on the development host and three existing Kubernetes hosts; freezing its clock was an unsafe control. That did not qualify VM time. A 3-second QMP pause advanced `kvm-clock` by only about 7 ms; restoring saved memory similarly defeated elapsed-time expiry. Short guest suspend also violated the assumed rate bounds with `tsc`: 120.2445 ms on the host corresponded to 335.391747 ms of guest boottime.
 
@@ -774,6 +774,23 @@ final recovered-history verification was reached. Scale-up took longer, so this
 is not evidence of a cloud speedup. Both attempts retain the same configuration
 and deadline. The second namespace, bucket, scoped key, 482 physical versions and
 temporary image manifest were removed. All 322 enabled Rust checks, formatting
-and strict clippy pass locally. The next recovery work is resolving uncertain
-claim/activation outcomes in place, then measuring whole handoff latency; the
-full rollout and later phases remain open.
+and strict clippy pass locally. The follow-up below resolves uncertain claim/activation outcomes in place;
+measuring whole handoff latency, the full rollout and later phases remain open.
+
+
+## Same-owner acquisition recovery
+
+The native controller now validates an uncertain claim or activation on its
+original identity. An exact successful comparison can confirm an open owner;
+a confirmed fence requires fresh activation against that comparison. A raw
+observation grants neither. Four extra validation attempts are shared across
+claim and activation; a successor or exhausted budget stops acquisition. This
+reuses journal selection's validation loop and never repeats claim registration
+or permit creation. A definite claim conflict still allows a fresh candidate.
+
+Rust fault tests cover lost responses before/after activation applies, claim
+response loss, successor takeover during observation and persistent failure.
+The existing real HTTP controller regression also requires epoch one after the
+lost claim response: serving cannot silently switch to a new owner. The updated
+acquisition model and the inherited registration checks retain every negative
+control. These are component safety/recovery checks, not a cloud progress result.

@@ -369,7 +369,7 @@ impl Root {
     /// unconfirmed publication by exact validation of this same incarnation,
     /// then restart discovery from the confirmed catalog. Never replay its PUTs.
     pub async fn select_journals(&mut self) -> Result<(), Error> {
-        let mut validations = 0;
+        let mut validations = 4;
         loop {
             let mut recovery = self.recovery()?;
             let mut pending = None;
@@ -384,25 +384,48 @@ impl Root {
                 return Ok(());
             };
             let select = self.select_prefix(journal)?;
-            let mut outcome = self.finish(select.execute().await)?;
-            while !matches!(outcome, Outcome::Confirmed) {
-                // Bound extra control work across the entire recovery, even if
-                // collection keeps racing selection or validation loses replies.
-                if validations == 4 {
-                    let error = match outcome {
-                        Outcome::Uncertain(error) => error,
-                        _ => anyhow::anyhow!("journal selection validation remained contended"),
-                    };
-                    return Err(Error::Provider(
-                        error.context("journal selection unconfirmed"),
-                    ));
-                }
-                validations += 1;
-                let observed = self.observe().await?;
-                let validate = self.validate(observed)?;
-                outcome = self.finish(validate.execute().await)?;
-            }
+            let outcome = self.finish(select.execute().await)?;
+            self.confirm_outcome(outcome, &mut validations).await?;
         }
+    }
+
+    /// Confirm this same bound identity by exact comparison, within a caller's
+    /// shared validation budget. Observation alone never confirms an outcome.
+    pub(crate) async fn confirm_outcome(
+        &mut self,
+        mut outcome: Outcome,
+        validations: &mut u8,
+    ) -> Result<(), Error> {
+        while !matches!(outcome, Outcome::Confirmed) {
+            if matches!(outcome, Outcome::Ignored) {
+                return Err(Error::NotReady);
+            }
+            if *validations == 0 {
+                let error = match outcome {
+                    Outcome::Uncertain(error) => error,
+                    _ => anyhow::anyhow!("root publication validation remained contended"),
+                };
+                return Err(Error::Provider(
+                    error.context("root publication unconfirmed"),
+                ));
+            }
+            *validations -= 1;
+            let observed = self.observe().await?;
+            let validate = self.validate(observed)?;
+            outcome = self.finish(validate.execute().await)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn activate_confirmed(&mut self, validations: &mut u8) -> Result<(), Error> {
+        while self.identity()?.is_none() {
+            let activate = self.activate()?;
+            let outcome = self.finish(activate.execute().await)?;
+            self.confirm_outcome(outcome, validations).await?;
+            // Validation may confirm only the fence. Retry activation against
+            // that fresh comparison; never replay the claim's immutable PUTs.
+        }
+        Ok(())
     }
 
     /// Abandon local interest; the remote operation may still apply. This grants

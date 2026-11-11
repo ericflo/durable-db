@@ -281,10 +281,11 @@ async fn membership_scales_one_two_one_then_recovers_without_compute() {
 }
 
 #[tokio::test]
-async fn unconfirmed_acquisition_never_enters_the_serving_map_and_retry_recovers() {
+async fn unconfirmed_acquisition_stays_unserved_and_recovers_without_a_new_claim() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let node = Node::start(directory(&provider).await, listener, vec![]).await;
+    let directory = directory(&provider).await;
+    let node = Node::start(directory.clone(), listener, vec![]).await;
     provider.pause_publication.store(true, Ordering::SeqCst);
     provider
         .lose_publication_reply
@@ -313,6 +314,28 @@ async fn unconfirmed_acquisition_never_enters_the_serving_map_and_retry_recovers
     .unwrap();
     node.members(&[node.address]);
     settled(&[&node], &[node.address]).await;
+    for (id, name) in names().iter().enumerate() {
+        let record = directory
+            .lazy_partition(id as u32)
+            .unwrap()
+            .root()
+            .unwrap()
+            .observe()
+            .await
+            .unwrap()
+            .record
+            .unwrap();
+        assert_eq!(record.identity.epoch, 1, "lost reply added another owner");
+        assert_eq!(
+            node.cluster
+                .resolve(name)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation(),
+            Some(record.identity.incarnation)
+        );
+    }
     let token = auth().administrator_token(600).unwrap();
     node.server
         .ok(

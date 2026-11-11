@@ -142,7 +142,7 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-Native B2/Kubernetes qualification has reached six pods and recovered from forced pod loss. Rolling replacement still misses its deadline; provider interruption, scale-down and cold replacement remain unqualified. v0.23.1 removes unnecessary recovery restarts and checkpoints inherited idle history. Performance and failure qualification remain open.
+Native B2/Kubernetes qualification has reached six pods and recovered from forced pod loss. Rolling replacement still misses its deadline; provider interruption, scale-down and cold replacement remain unqualified. Recovery preserves pending work, checkpoints inherited idle history and validates uncertain claims/activation on the same owner. Performance and failure qualification remain open.
 
 The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) lists the remaining gates, their rough size and what can wait until after 1.0. [Verification results](docs/verification-results.md) record each release and its evidence; [backup and restore](docs/recovery.md#local-format-upgrades) covers format compatibility and upgrades.
 
