@@ -63,7 +63,7 @@ the recovery-history check or qualify the release image.
 Native Kubernetes scaling and the production operating envelope remain under
 qualification. MinIO results do not
 qualify AWS S3; component budgets do not establish an RSS bound. The old cloud CLI
-serving/maintenance branch and six obsolete qualification scripts (827 lines)
+serving/maintenance branch and seven obsolete qualification scripts (1,294 lines)
 were removed, along with an orphaned publication working-design document. Historical evidence keeps its original engine and deployment scope.
 
 ## v0.22.0 membership-driven native placement (2026-11-11)

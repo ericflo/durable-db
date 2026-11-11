@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the sequential append histories emitted by qualify-autoscaling.py.
+"""Check sequential append histories from the Kubernetes qualification harness.
 
 This checks the fixture's identities, invocation order, hashes and recovered
 counts. It is not a general concurrent-object linearizability checker.
