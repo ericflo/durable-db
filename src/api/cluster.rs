@@ -159,7 +159,16 @@ impl Cluster {
                     tokio::select! {
                         result = &mut work => break Some(result),
                         update = members.changed() => {
-                            if update.is_err() || *members.borrow() != peers {
+                            let same_placement = membership(&members.borrow()).is_ok_and(|next| {
+                                next.contains(&cluster.config.address) == peers.contains(&cluster.config.address)
+                                    && (0..cluster.partitions.len()).all(|id| {
+                                        let ours = |peers: &[SocketAddr]| {
+                                            preferred(id as u32, peers) == Some(cluster.config.address)
+                                        };
+                                        ours(&next) == ours(&peers)
+                                    })
+                            });
+                            if update.is_err() || !same_placement {
                                 break None;
                             }
                         }

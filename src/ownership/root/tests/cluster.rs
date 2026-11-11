@@ -508,6 +508,7 @@ async fn a_failed_partition_does_not_starve_later_acquisitions() {
 struct PausedPermit {
     inner: Arc<Remote>,
     pause: AtomicBool,
+    blocked: tokio::sync::Mutex<()>,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -515,6 +516,7 @@ struct PausedPermit {
 impl crate::storage::Storage for PausedPermit {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<crate::storage::Object>> {
         if key.contains("/permits/") && self.pause.swap(false, Ordering::SeqCst) {
+            let _blocked = self.blocked.lock().await;
             self.entered.notify_one();
             self.release.notified().await;
         }
@@ -557,6 +559,7 @@ async fn routine_health_validation_does_not_clear_readiness() {
     let files = Arc::new(PausedPermit {
         inner: provider.files.clone(),
         pause: AtomicBool::new(false),
+        blocked: Default::default(),
         entered: Default::default(),
         release: Default::default(),
     });
@@ -701,11 +704,12 @@ async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change() {
+async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change() {
     let provider = Provider::new();
     let files = Arc::new(PausedPermit {
         inner: provider.files.clone(),
         pause: AtomicBool::new(true),
+        blocked: Default::default(),
         entered: Default::default(),
         release: Default::default(),
     });
@@ -738,6 +742,19 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change
     for _ in 0..4 {
         tokio::task::yield_now().await;
     }
+    // A new peer that owns neither local partition must not restart recovery.
+    let peer = (1..=u16::MAX)
+        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+        .find(|peer| {
+            *peer != node.address
+                && (0..2).all(|id| preferred(id, &[node.address, *peer]) == node.address)
+        })
+        .unwrap();
+    node.members(&[peer, node.address]);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(files.blocked.try_lock().is_err(), "recovery was canceled");
     tokio::time::advance(Duration::from_secs(10)).await;
     for _ in 0..4 {
         tokio::task::yield_now().await;
@@ -745,7 +762,7 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_membership_change
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
         calls,
-        "elapsed time restarted the paused operation"
+        "elapsed time or unchanged local placement restarted the paused operation"
     );
     node.members(&[]);
     // Let the controller observe removal before restoring the same address;
