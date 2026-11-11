@@ -365,10 +365,11 @@ impl Root {
         })
     }
 
-    /// Discover and select ancestral journals after activation. An unconfirmed
-    /// publication is an error with a potentially committed outcome: revalidate
-    /// this exact incarnation before continuing recovery.
+    /// Discover and select ancestral journals after activation. Resolve an
+    /// unconfirmed publication by exact validation of this same incarnation,
+    /// then restart discovery from the confirmed catalog. Never replay its PUTs.
     pub async fn select_journals(&mut self) -> Result<(), Error> {
+        let mut validations = 0;
         loop {
             let mut recovery = self.recovery()?;
             let mut pending = None;
@@ -383,10 +384,23 @@ impl Root {
                 return Ok(());
             };
             let select = self.select_prefix(journal)?;
-            if !matches!(self.finish(select.execute().await)?, Outcome::Confirmed) {
-                return Err(Error::Provider(anyhow::anyhow!(
-                    "journal selection unconfirmed; revalidate before recovery"
-                )));
+            let mut outcome = self.finish(select.execute().await)?;
+            while !matches!(outcome, Outcome::Confirmed) {
+                // Bound extra control work across the entire recovery, even if
+                // collection keeps racing selection or validation loses replies.
+                if validations == 4 {
+                    let error = match outcome {
+                        Outcome::Uncertain(error) => error,
+                        _ => anyhow::anyhow!("journal selection validation remained contended"),
+                    };
+                    return Err(Error::Provider(
+                        error.context("journal selection unconfirmed"),
+                    ));
+                }
+                validations += 1;
+                let observed = self.observe().await?;
+                let validate = self.validate(observed)?;
+                outcome = self.finish(validate.execute().await)?;
             }
         }
     }

@@ -73,8 +73,10 @@ StartFence(p, a, source) ==
     /\ entered' = entered \cup {p} /\ sent' = sent \cup {a}
     /\ UNCHANGED <<history, active, objects, acknowledged, scans,
                    uploaded, known, timedOut, lateApplied>>
-\* Renewals may run while a scan waits for I/O. Refreshing the captured
-\* comparison is safe only when the confirmed catalog snapshot is unchanged.
+\* Exact validation (historically called renewal) can confirm the same owner
+\* after an uncertain seal. Restart discovery from that confirmed catalog:
+\* an adopted selection is never extended by a late old journal upload.
+\* Refreshing a scan's comparison requires an unchanged catalog snapshot.
 StartRenew(p, a, source) ==
     /\ NextId(a) /\ pending[p] = 0 /\ source.owner = p
     /\ requests' = [requests EXCEPT ![a] =

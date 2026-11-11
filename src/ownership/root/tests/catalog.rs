@@ -94,6 +94,46 @@ async fn lost_selection_reply_and_complete_reopen_never_extend_a_selected_prefix
 }
 
 #[tokio::test]
+async fn selection_revalidates_the_same_owner_and_refuses_a_successor() {
+    for takeover in [false, true] {
+        let provider = Provider::new();
+        let (_old, late) = source(&provider).await;
+        let mut root = successor(&provider).await;
+        let identity = root.identity().unwrap().unwrap();
+        provider.lose_reply.store(true, Ordering::SeqCst);
+        provider.pause_read.store(true, Ordering::SeqCst);
+        let selecting = tokio::spawn(async move {
+            let result = root.select_journals().await;
+            (root, result)
+        });
+        tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+            .await
+            .expect("uncertain selection must revalidate without a new claim");
+        assert_eq!(provider.record().identity, identity);
+        assert!(provider.record().catalog.is_some());
+        let _completion = late.send().await;
+        if takeover {
+            let _next = successor(&provider).await;
+        }
+        let calls = provider.calls.load(Ordering::SeqCst);
+        provider.release.notify_one();
+        let (mut root, result) = selecting.await.unwrap();
+        if takeover {
+            assert!(matches!(result, Err(Error::NotOwner)));
+            assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+            assert!(root.permission().await.unwrap().is_none());
+        } else {
+            result.unwrap();
+            assert_eq!(provider.record().identity, identity);
+            let journal = scan(&mut root).await;
+            assert!(journal.is_selected());
+            assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn abandoned_selection_and_successor_claim_are_serialized_in_both_orders() {
     for selection_first in [true, false] {
         let provider = Provider::new();

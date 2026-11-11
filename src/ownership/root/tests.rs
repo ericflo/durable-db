@@ -34,6 +34,7 @@ struct Provider {
     stale: Mutex<Option<usize>>,
     calls: AtomicU64,
     reads: AtomicU64,
+    pause_read: AtomicBool,
     maintenance: AtomicU64,
     lose_reply: AtomicBool,
     lose_publication_reply: AtomicBool,
@@ -59,6 +60,7 @@ impl Provider {
             stale: Mutex::new(None),
             calls: AtomicU64::new(0),
             reads: AtomicU64::new(0),
+            pause_read: AtomicBool::new(false),
             maintenance: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
             lose_publication_reply: AtomicBool::new(false),
@@ -102,6 +104,10 @@ impl Provider {
 impl Authority for Provider {
     async fn read(&self) -> anyhow::Result<Bucket> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.pause_read.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         let history = self.history.lock().unwrap();
         Ok(history[self.stale.lock().unwrap().unwrap_or(history.len() - 1)].clone())
     }
