@@ -2,7 +2,14 @@
 \* Native tenant-ledger metadata uses this protocol too: its publisher rebuilds
 \* fresh objects after ANY failed exact comparison, and collection lists before
 \* a nonce-changing comparison. Directory membership supplies protected objects. `live` is the union of ALL
-\* roots in the captured authority, including budget and recovery directories.
+\* roots in the captured authority, including budget and recovery directories
+\* and the explicit retained checkpoint. Retaining a published checkpoint is
+\* Prepare with fresh = {}, keeping its currently live objects; publication
+\* compares the captured authority, including its collection generation. Release
+\* removes only that reference; live still includes the current checkpoint.
+\* A failed comparison cannot refresh the origin of a delayed retain request.
+\* Identity-checked release/idempotency is an implementation obligation; this
+\* abstraction permits removing any roots and checks reachability of the rest.
 \* Native checkpoint tables use the same protocol. `fence` is the persisted
 \* collection generation captured BEFORE staging. Ordinary control renewal can
 \* change the provider nonce but cannot adopt a newer collection generation.

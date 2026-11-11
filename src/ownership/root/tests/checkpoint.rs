@@ -11,13 +11,13 @@ use crate::{
     },
 };
 use bytes::Bytes;
-fn db() -> Database<'static> {
+pub(super) fn db() -> Database<'static> {
     Database {
         name: "app",
         generation: Uuid::from_u128(77),
     }
 }
-async fn append(writer: &mut Writer, revision: u64, value: Option<&[u8]>) {
+pub(super) async fn append(writer: &mut Writer, revision: u64, value: Option<&[u8]>) {
     let upload = writer
         .prepare(&[record(
             db(),
@@ -29,7 +29,7 @@ async fn append(writer: &mut Writer, revision: u64, value: Option<&[u8]>) {
     writer.complete(upload.send().await).unwrap();
     assert!(writer.pop_durable().unwrap().is_some());
 }
-async fn selected(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
+pub(super) async fn selected(provider: &Arc<Provider>, clock: &ManualClock) -> Root<ManualClock> {
     let mut root = successor(provider, clock).await;
     let journal = scan(&mut root).await;
     seal(&mut root, journal).await;
@@ -724,6 +724,10 @@ async fn journal_collection_requires_a_published_checkpoint_and_recovers_the_suf
     let mut record = provider.record();
     record.identity.epoch = u64::MAX;
     record.checkpoint = Some(maximum);
+    record.retained = Some(RetainedCheckpoint {
+        id: Uuid::new_v4(),
+        reference: maximum,
+    });
     let mut info = metadata::encode(
         &provider.history.lock().unwrap().last().unwrap().info,
         "test",

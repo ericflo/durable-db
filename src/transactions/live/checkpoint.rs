@@ -142,7 +142,10 @@ impl<C: Clock> Owner<C> {
                         self.maintenance.publishing = None;
                         return Ok(false);
                     }
-                    ensure!(record == pending.staged.origin, "checkpoint origin changed");
+                    ensure!(
+                        record.same_recovery(pending.staged.origin),
+                        "checkpoint origin changed"
+                    );
                     // Exact validation changed the nonce: the old captured CAS
                     // cannot still apply. Reuse bytes and retry once in this call,
                     // so routine budget changes need not fail the next admission.

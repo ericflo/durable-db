@@ -32,6 +32,42 @@ impl<C: Clock> Control<C> {
         let _request = self.request.lock().await;
         self.renew_locked().await
     }
+    /// Administrator-only namespace backup slot. Validate and serialize with
+    /// renewal/checkpoint publication; never hold permission state across I/O.
+    /// A returned identity remains tentative unless the outcome is Confirmed.
+    pub async fn retain_checkpoint(
+        &self,
+    ) -> anyhow::Result<(root::RetainedCheckpoint, root::Outcome)> {
+        let _request = self.request.lock().await;
+        self.confirm_locked().await?;
+        let (retained, prepared) = self.lock()?.retain_checkpoint()?;
+        let completed = prepared.execute().await;
+        Ok((retained, self.lock()?.finish(completed)?))
+    }
+    /// Confirm the durable slot after restart or an ambiguous retention reply.
+    /// An administrator must coordinate release with all backup readers.
+    pub async fn retained_checkpoint(&self) -> anyhow::Result<Option<root::RetainedCheckpoint>> {
+        let _request = self.request.lock().await;
+        self.confirm_locked().await?;
+        Ok(self.lock()?.retained_checkpoint()?)
+    }
+    /// Release only the specified identity, or confirm that the slot is empty.
+    /// Unknown replies require revalidation; a different retained identity is
+    /// never removed by a retry of an older release.
+    pub async fn release_checkpoint(&self, id: uuid::Uuid) -> anyhow::Result<root::Outcome> {
+        let _request = self.request.lock().await;
+        self.confirm_locked().await?;
+        let prepared = self.lock()?.release_checkpoint(id)?;
+        let completed = prepared.execute().await;
+        Ok(self.lock()?.finish(completed)?)
+    }
+    async fn confirm_locked(&self) -> anyhow::Result<()> {
+        ensure!(
+            matches!(self.renew_locked().await?, root::Outcome::Confirmed),
+            "ownership validation did not confirm; retry from a fresh observation"
+        );
+        Ok(())
+    }
     // The request gate spans I/O, but permission checks take only the short
     // root mutex. Abandon can therefore affect only a cancelled prior request,
     // never another live caller's checkpoint or renewal.

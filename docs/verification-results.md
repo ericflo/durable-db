@@ -1,5 +1,11 @@
 # Verification results
 
+## Native checkpoint retention (2026-11-10)
+
+The native Rust operator API now retains one published namespace checkpoint through ownership takeover and collection, with explicit identity-checked release. It adds no immutable uploads or clock-dependent expiry. The collector protects the current and retained images; publication preserves backup-slot changes without relaxing the collection-generation check. Older binaries refuse an occupied slot. This is an in-process operator primitive; public retention routes, scheduled backups, multiple restore points and retained-image restore remain open.
+
+All 294 local Rust tests pass, along with formatting and strict clippy. Four focused retention regressions take 0.02 seconds and the real TCP write/read/retention test takes 0.03 seconds. Omitting retained-root protection makes cold readback fail. The unchanged publication model passes 175,546 states and four negative controls; its abstract TLAPS proof passes 35 obligations and the negative fence control. The current-checkpoint-only collector branch and the obsolete retention-plan paragraph were replaced. [Milestone evidence](evidence/checkpoint-retention-2026-11-10.json) records the checked scope.
+
 ## v0.11.0 checkpoint encoding admission (2026-11-10)
 
 [v0.11.0](https://github.com/ericflo/durable-db/releases/tag/v0.11.0) packages `e94ea95`, verified by [Woodpecker #143](https://ci.eflorenzano.com/repos/18/pipeline/143/1). The exact downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery without a toolchain; the public default installer installs that same verified binary. The optimized musl 10,005-database regression passes in 199.10 seconds, and the local/native client contract checks each pass all 99 enabled tests.

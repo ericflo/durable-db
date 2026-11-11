@@ -7,6 +7,7 @@ mod lifecycle;
 mod live;
 mod registration;
 mod replay;
+mod retention;
 mod transactions;
 use crate::{
     providers::Connection,

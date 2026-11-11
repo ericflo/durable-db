@@ -1103,3 +1103,131 @@ async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
         "eA=="
     );
 }
+
+#[tokio::test]
+async fn native_tcp_writes_continue_while_an_administrator_retains_a_checkpoint() {
+    use crate::{
+        index::recovery::{Limits, checkpoint::Snapshot},
+        transactions::record::Database,
+    };
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let root = active(&provider, &clock).await;
+    let collector = root.collection();
+    let owner = Opening::new(
+        root,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+        Arc::new(Cache::new(0, None).unwrap()),
+    )
+    .unwrap()
+    .recover()
+    .await
+    .unwrap();
+    let control = owner.control();
+    let auth = Auth::new(&"31".repeat(32)).unwrap();
+    let token = auth.admin_token();
+    let app = Arc::new(App::with_rate_limits(
+        Arc::new(Native::new(owner, 8).unwrap()),
+        auth,
+        64,
+        RateLimits::new(20000, 20000).unwrap(),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/databases/app", listener.local_addr().unwrap());
+    let server =
+        tokio::spawn(async move { axum::serve(listener, api::router(app)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let (status, created) = tcp_call(
+        &client,
+        "PUT",
+        &url,
+        &token,
+        json!({"request_id":"create","limits":{"max_keys":1000,"max_bytes":1048576}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tcp_call(&client, "POST", &format!("{url}/commit"), &token, commit())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (retained, outcome) = control.retain_checkpoint().await.unwrap();
+    assert!(matches!(outcome, Outcome::Confirmed));
+    let old_tables = provider.files.list("tables/", None, 128).await.unwrap();
+    let mut changed = commit();
+    changed["request_id"] = json!("second");
+    changed["expected_revision"] = json!(1);
+    changed["writes"][0]["value"] = json!("bmV3");
+    assert_eq!(
+        tcp_call(&client, "POST", &format!("{url}/commit"), &token, changed)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    collector.collect().await.unwrap();
+    assert!(control.retained_checkpoint().await.unwrap() == Some(retained));
+    let retained_image = Snapshot::new(
+        provider.files.clone(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        retained.reference(),
+    );
+    retained_image.verify(Limits::default()).await.unwrap();
+    let database = Database {
+        name: "app",
+        generation: Uuid::parse_str(created["info"]["policy"]["incarnation"].as_str().unwrap())
+            .unwrap(),
+    };
+    assert_eq!(
+        retained_image
+            .database(database)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision(),
+        1
+    );
+    let (status, read) = tcp_call(
+        &client,
+        "POST",
+        &format!("{url}/read"),
+        &token,
+        json!({"keys":["x"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["revision"], 2);
+    assert!(matches!(
+        control.release_checkpoint(retained.id()).await.unwrap(),
+        Outcome::Confirmed
+    ));
+    collector.collect().await.unwrap();
+    let remaining = provider.files.list("tables/", None, 128).await.unwrap();
+    assert!(old_tables.iter().any(|key| !remaining.contains(key)));
+    assert!(
+        Snapshot::new(
+            provider.files.clone(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            retained.reference()
+        )
+        .verify(Limits::default())
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        tcp_call(
+            &client,
+            "POST",
+            &format!("{url}/read"),
+            &token,
+            json!({"keys":["x"]})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    server.abort();
+}

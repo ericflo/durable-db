@@ -4,11 +4,19 @@ The binary provides `durable-db backup export`, `inspect`, and `restore`. An exp
 
 This is an operator-driven recovery tool. Scheduled retained snapshots, point-in-time recovery, independent backup storage, and recurring restore drills remain production gates.
 
-The next native retention increment is an administrator-owned durable reference to a fully published checkpoint, including its exact journal cut. Registration must capture the existing collection generation and compare the authoritative root; a failed comparison cannot bless a stale image. Collection must protect the union of the current checkpoint and every retained reference. Release must be explicit and idempotent, with no clock-dependent expiry in the first increment. The existing `PublicationSafety` protocol supplies the publication/collection boundary; retention metadata, authorization, resource bounds, lost replies and cold recovery still need implementation and qualification. Shared checkpoints contain multiple databases, so this initial scope is namespace backup retention, not tenant-isolated snapshots or point-in-time recovery. Raw snapshot handles remain unpinned today.
+## Native checkpoint retention
+
+The native Rust operator API now provides one durable backup slot per namespace through `Control::retain_checkpoint`, `retained_checkpoint` and `release_checkpoint(id)`. Retaining pins the already published checkpoint and its exact journal cut; it does not force a checkpoint or include newer journal entries. Use the returned reference with `checkpoint::Snapshot` for immutable readback. The slot covers every database in the shared checkpoint and requires an administrator-owned control handle. Tenant HTTP tokens cannot create, inspect or release it; there is no public HTTP or CLI retention endpoint yet.
+
+Retain succeeds only after `Outcome::Confirmed`. On an uncertain reply, validate with `retained_checkpoint()` and compare its identity with the tentative result. Do not blindly recreate a request. Release compares the identity, refuses a different slot, and is idempotent when the slot is empty. Administrators must coordinate release with backup readers: retaining a descriptor in memory does not extend protection after release. There is no automatic expiry or clock dependency.
+
+The collector protects both the current checkpoint and the retained checkpoint. Retention survives ownership takeover and cold reopening; publication preserves a concurrently changed slot without adopting a newer collection generation. Released objects become eligible for ordinary automatic collection. The slot uses at most 1 KiB of authority metadata and no immutable uploads, and cannot accumulate arbitrary historical images. It is a namespace backup primitive, not tenant-isolated snapshots, a backup archive, multiple restore points, scheduled retention or point-in-time recovery. Copies outside the namespace and recurring restore drills remain necessary production work.
+
+Older binaries reject the added authority field while a slot is occupied, preventing an older collector from deleting the image. Release it with the new runtime before downgrading. Namespaces without an occupied slot retain their existing format. [Verification](verification.md#native-checkpoint-retention) records the protocol mapping and tests.
 
 ## Local format upgrades
 
-v0.11.0 retains the local storage format used by v0.9.0 and v0.10.0. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions.
+v0.12.0 retains the local storage format used by v0.9.0, v0.10.0 and v0.11.0. These directories reopen directly, preserving values, revisions and receipts. No export is required between these versions.
 
 v0.9.0 switched local serving to the native journal and index. It refuses an older directory instead of interpreting it as an empty native store. The cloud CLI format is unchanged.
 

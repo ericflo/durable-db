@@ -49,6 +49,8 @@ pub enum Error {
     JournalOpened,
     #[error("the confirmed recovery catalog changed; restart from a fresh snapshot")]
     StaleRecovery,
+    #[error("the namespace already retains a different checkpoint; release it explicitly first")]
+    RetentionOccupied,
     #[error("control provider observation failed")]
     Provider(#[from] anyhow::Error),
     #[error(transparent)]
@@ -79,6 +81,23 @@ impl Profile {
 pub struct Identity {
     pub epoch: u64,
     pub incarnation: Uuid,
+}
+
+/// A namespace backup reference protected from collection until explicitly
+/// released. It includes only the exact checkpoint cut, not subsequent writes.
+/// This is an administrator-owned descriptor; never expose it to a tenant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RetainedCheckpoint {
+    id: Uuid,
+    reference: crate::index::recovery::checkpoint::Reference,
+}
+impl RetainedCheckpoint {
+    pub fn id(self) -> Uuid {
+        self.id
+    }
+    pub fn reference(self) -> crate::index::recovery::checkpoint::Reference {
+        self.reference
+    }
 }
 
 /// A raw provider observation. It never establishes permission.
@@ -221,6 +240,7 @@ impl<C: Clock> Root<C> {
             phase: Phase::Fenced,
             catalog: observed.record.and_then(|r| r.catalog),
             checkpoint: observed.record.and_then(|r| r.checkpoint),
+            retained: observed.record.and_then(|r| r.retained),
         };
         let registration = Registration::new(record.identity, observed.record.map(|r| r.identity));
         let mut prepared = self.begin(observed.raw, record, Kind::Claim)?;
@@ -447,6 +467,44 @@ impl<C: Clock> Root<C> {
         Ok(self.recovery_record()?.checkpoint)
     }
 
+    /// Read the last confirmed backup slot. After a lost reply or a restart,
+    /// first validate current ownership. The descriptor is not a read lease:
+    /// administrators must coordinate release with their backup readers.
+    pub fn retained_checkpoint(&mut self) -> Result<Option<RetainedCheckpoint>, Error> {
+        Ok(self.recovery_record()?.retained)
+    }
+
+    /// Retain the currently published checkpoint in the one namespace backup
+    /// slot. The returned identity is tentative until finish confirms the CAS.
+    /// A conflict requires a fresh operation; an uncertain reply requires
+    /// validation and checking the retained identity, never blind recreation.
+    pub fn retain_checkpoint(&mut self) -> Result<(RetainedCheckpoint, Prepared), Error> {
+        let mut record = self.recovery_record()?;
+        if record.retained.is_some() {
+            return Err(Error::RetentionOccupied);
+        }
+        let retained = RetainedCheckpoint {
+            id: Uuid::new_v4(),
+            reference: record.checkpoint.ok_or(Error::NotReady)?,
+        };
+        record.retained = Some(retained);
+        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
+        Ok((retained, self.begin(raw, record, Kind::Checkpoint)?))
+    }
+
+    /// Explicit, identity-checked release. An empty slot is an idempotent
+    /// success only after the comparison confirms; another identity is refused.
+    /// This does not release the current checkpoint's own collection protection.
+    pub fn release_checkpoint(&mut self, id: Uuid) -> Result<Prepared, Error> {
+        let mut record = self.recovery_record()?;
+        if record.retained.is_some_and(|r| r.id != id) {
+            return Err(Error::RetentionOccupied);
+        }
+        record.retained = None;
+        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
+        self.begin(raw, record, Kind::Checkpoint)
+    }
+
     /// Atomically publish a fully uploaded native checkpoint built from this
     /// exact recovery snapshot. Unknown results require exact revalidation; a
     /// late request cannot overwrite a successor's claim or newer checkpoint.
@@ -458,7 +516,7 @@ impl<C: Clock> Root<C> {
         if record.identity != staged.origin.identity {
             return Err(Error::NotOwner);
         }
-        if record != staged.origin {
+        if !record.same_recovery(staged.origin) {
             return Err(Error::StaleRecovery);
         }
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
@@ -495,12 +553,12 @@ impl<C: Clock> Root<C> {
         let confirmed =
             metadata::decode(raw.metadata(), &self.prefix, self.profile, self.budgeted)?
                 .ok_or(Error::NotReady)?;
-        if confirmed != recovered.record {
+        if !confirmed.same_recovery(recovered.record) {
             return Err(Error::StaleRecovery);
         }
         let id = Uuid::new_v4();
         let catalog = recovered.publication(self.files.clone(), id)?;
-        let mut record = recovered.record;
+        let mut record = confirmed;
         record.catalog = Some(id);
         let mut prepared = self.begin(raw, record, Kind::Select)?;
         prepared.catalog = Some(catalog);

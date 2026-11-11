@@ -162,12 +162,18 @@ impl Collection {
             None
         };
         let mut obsolete: BTreeSet<_> = tables.iter().cloned().collect();
-        if let Some(checkpoint) = record.and_then(|r| r.checkpoint)
-            && !obsolete.is_empty()
+        for checkpoint in [
+            record.and_then(|r| r.checkpoint),
+            record.and_then(|r| r.retained).map(|r| r.reference()),
+        ]
+        .into_iter()
+        .flatten()
         {
-            checkpoint
-                .protect(self.files.clone(), &mut obsolete)
-                .await?;
+            if !obsolete.is_empty() {
+                checkpoint
+                    .protect(self.files.clone(), &mut obsolete)
+                    .await?;
+            }
         }
         let cursor = Cursor {
             generation: generation(&observed.info)?

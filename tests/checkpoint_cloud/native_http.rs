@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use tokio::{sync::oneshot, task::JoinHandle};
 
 struct Server {
+    control: live::Control<TestClock>,
     url: String,
     token: String,
     client: reqwest::Client,
@@ -36,6 +37,7 @@ impl Server {
         .await
         .unwrap_or_else(|_| panic!("HTTP owner recovery failed"));
         let auth = Auth::new(&"42".repeat(32)).unwrap();
+        let control = owner.control();
         let token = auth.admin_token();
         let app = App::with_rate_limits(
             Arc::new(api::Native::new(owner, 16).unwrap()),
@@ -55,6 +57,7 @@ impl Server {
                 .unwrap();
         });
         Self {
+            control,
             url,
             token,
             client: reqwest::Client::builder()
@@ -141,7 +144,16 @@ async fn collected(connection: &Connection, expected: [usize; 3]) -> (f64, usize
             assert_eq!(checkpoint["height"], 0);
             let tables = checkpoint["tables"].as_u64().unwrap() as usize;
             assert!(tables > 0);
-            if remaining == [expected[0], expected[1], expected[2], 2 * tables + 1]
+            let table_count = if authority
+                .info
+                .contains_key("durable-db-retained-checkpoint")
+            {
+                remaining[3] > 2 * tables
+            } else {
+                remaining[3] == 2 * tables + 1
+            };
+            if remaining[..3] == expected
+                && table_count
                 && files.get(&markers[0], 1).await.unwrap().is_none()
                 && files.get(&markers[1], 1).await.unwrap().is_none()
                 && files.get(&markers[2], 1).await.unwrap().is_none()
@@ -299,6 +311,10 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "the current checkpoint retains data, an index and a manifest"
     );
     let setup_seconds = started.elapsed().as_secs_f64();
+    let puts = calls("object_put");
+    let (retained, outcome) = server.control.retain_checkpoint().await.unwrap();
+    assert!(matches!(outcome, Outcome::Confirmed));
+    assert_eq!(calls("object_put"), puts, "retention uploads no objects");
     let (cleanup_ms, retained_tables) = collected(&connection, [2, 1, 1]).await;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     server.stop().await;
@@ -312,6 +328,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .unwrap_or_else(|_| panic!("native reopen failed"));
     let server = Server::start(&connection).await;
     let recovery_ms = recovery.elapsed().as_secs_f64() * 1000.0;
+    assert!(server.control.retained_checkpoint().await.unwrap() == Some(retained));
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
     assert_eq!(server.ok("POST", commit, &write(1)).await["replayed"], true);
     assert_eq!(
@@ -370,7 +387,51 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     // Wait for both metadata loops and all covered journals after takeover.
     // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
+    let (_, protected_tables) = collected(&connection, [3, 2, 0]).await;
+    let retained_image = Snapshot::new(
+        connection.objects(),
+        Arc::new(Cache::new(0, None).unwrap()),
+        retained.reference(),
+    );
+    retained_image.verify(Limits::default()).await.unwrap();
+    for name in ["a", "b"] {
+        let info = server
+            .ok("GET", &format!("/v1/databases/{name}"), &json!({}))
+            .await;
+        let database = Database {
+            name,
+            generation: Uuid::parse_str(info["policy"]["incarnation"].as_str().unwrap()).unwrap(),
+        };
+        let old = retained_image.database(database).await.unwrap().unwrap();
+        assert_eq!(old.revision(), 1);
+        assert_eq!(
+            old.get("x").await.unwrap().unwrap().value.as_deref(),
+            Some(b"one".as_slice())
+        );
+    }
+    assert!(matches!(
+        server
+            .control
+            .release_checkpoint(retained.id())
+            .await
+            .unwrap(),
+        Outcome::Confirmed
+    ));
     let (_, takeover_tables) = collected(&connection, [3, 2, 0]).await;
+    assert!(
+        protected_tables > takeover_tables,
+        "released checkpoint objects are reclaimed"
+    );
+    assert!(
+        Snapshot::new(
+            connection.objects(),
+            Arc::new(Cache::new(0, None).unwrap()),
+            retained.reference()
+        )
+        .verify(Limits::default())
+        .await
+        .is_err()
+    );
     server.stop().await;
     drop((connection, files));
     let connection = connect(&provider, &bucket, &namespace)
@@ -379,6 +440,14 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .await
         .unwrap();
     let server = Server::start(&connection).await;
+    assert!(
+        server
+            .control
+            .retained_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
     let namespace_budget = connection.objects().upload_budget().await.unwrap().unwrap();
     assert_eq!(namespace_budget.limits.bytes, 32 * 1024 * 1024);
     assert_eq!(namespace_budget.allocated.bytes, 24 * 1024 * 1024);
@@ -407,6 +476,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
         "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":0,"warm_read_paths":["checkpoint","recovered_suffix"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
+        "retention":{"cold_reopen_and_collection":true,"exact_cut_values":true,"release_reclaimed_old_checkpoint":true,"immutable_puts":0},
         "automatic_table_and_manifest_collection":true,"checkpoint_objects_after_first_sweep":retained_tables,"checkpoint_objects_after_takeover_sweep":takeover_tables,
         "inline_checkpoint_descriptors":true,"checkpoint_objects_before_first_sweep":checkpoint_objects,
         "journal_objects_before":journals_before,"journal_objects_after_first_sweep":1,

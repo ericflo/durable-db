@@ -6,6 +6,7 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
+const RETAINED: &str = "durable-db-retained-checkpoint";
 pub(crate) const VERSION: &str = "owned-candidate-17";
 const PROBE: &str = "durable-db-probe";
 const LEGACY_PROBE: &str = "durable-db-read-fence";
@@ -34,6 +35,28 @@ pub(crate) struct Record {
     pub phase: Phase,
     pub catalog: Option<Uuid>,
     pub checkpoint: Option<crate::index::recovery::checkpoint::Reference>,
+    pub retained: Option<super::RetainedCheckpoint>,
+}
+impl Record {
+    /// Backup-slot changes do not invalidate a staged recovery. Publication
+    /// preserves the confirmed slot and still compares every recovery field,
+    /// including the collection generation captured before staging.
+    pub(crate) fn same_recovery(self, other: Self) -> bool {
+        Self {
+            retained: None,
+            ..self
+        } == Self {
+            retained: None,
+            ..other
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedWire {
+    id: String,
+    checkpoint: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +96,7 @@ pub(super) fn decode(
                     FORMAT,
                     PREFIX,
                     ROOT,
+                    RETAINED,
                     PROBE,
                     LEGACY_PROBE,
                     crate::upload_budget::FIELD,
@@ -88,7 +112,7 @@ pub(super) fn decode(
         crate::upload_budget::validate_info(info).map_err(|_| Error::Incompatible)?;
         // Budget bootstrap must precede the first registration upload. No
         // ownership identity or permission exists until the ordinary claim.
-        if !info.contains_key(ROOT) {
+        if !info.contains_key(ROOT) && !info.contains_key(RETAINED) {
             return Ok(None);
         }
     }
@@ -131,6 +155,27 @@ pub(super) fn decode(
                     .map_err(|_| Error::Incompatible)
             })
             .transpose()?,
+        retained: info
+            .get(RETAINED)
+            .map(|encoded| {
+                if encoded.len() > 1024 {
+                    return Err(Error::Incompatible);
+                }
+                let wire: RetainedWire =
+                    serde_json::from_str(encoded).map_err(|_| Error::Incompatible)?;
+                let id = Uuid::parse_str(&wire.id).map_err(|_| Error::Incompatible)?;
+                if id.is_nil() || id.to_string() != wire.id {
+                    return Err(Error::Incompatible);
+                }
+                Ok(super::RetainedCheckpoint {
+                    id,
+                    reference: crate::index::recovery::checkpoint::Reference::decode(
+                        &wire.checkpoint,
+                    )
+                    .map_err(|_| Error::Incompatible)?,
+                })
+            })
+            .transpose()?,
     }))
 }
 
@@ -147,6 +192,22 @@ pub(super) fn encode(
     let mut info = observed.clone();
     info.insert(FORMAT.into(), version(budgeted).into());
     info.insert(PREFIX.into(), prefix.into());
+    if let Some(retained) = record.retained {
+        let encoded = serde_json::to_string(&RetainedWire {
+            id: retained.id.to_string(),
+            checkpoint: retained
+                .reference
+                .encode()
+                .map_err(|_| Error::Incompatible)?,
+        })
+        .map_err(|_| Error::Incompatible)?;
+        if encoded.len() > 1024 {
+            return Err(Error::Incompatible);
+        }
+        info.insert(RETAINED.into(), encoded);
+    } else {
+        info.remove(RETAINED);
+    }
     info.insert(
         ROOT.into(),
         serde_json::to_string(&Wire {
@@ -176,6 +237,7 @@ pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
     let mut reserved = info.clone();
     for (field, bytes) in [
         (ROOT, 1024),
+        (RETAINED, if info.contains_key(RETAINED) { 1024 } else { 0 }),
         (
             super::collection::FIELD,
             if info.contains_key(crate::upload_budget::FIELD) {
