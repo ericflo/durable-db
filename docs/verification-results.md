@@ -1,5 +1,36 @@
 # Verification results
 
+## v0.23.2 same-owner acquisition recovery (2026-11-11)
+
+[v0.23.2](https://github.com/ericflo/durable-db/releases/tag/v0.23.2) packages
+`49615c5`, verified by [Woodpecker #217](https://ci.eflorenzano.com/repos/18/pipeline/217/1)
+and the tag pipeline. Lost claim/activation responses now trigger bounded exact
+validation of the same owner. A confirmed fence still requires activation; a
+successor stops recovery. No registration or permit creation is replayed. The
+existing journal-selection validation loop is shared, and wire/storage formats
+are unchanged.
+
+All 324 enabled Rust checks pass, including the real HTTP regression requiring
+epoch one after a lost claim reply. The activation-aware acquisition model passes
+both bounded instances and six mandatory controls; registration checks still
+pass. The independently downloaded static binary passes toolchain-free
+installation, transactions, ordered reads, export/restore and forced-stop recovery.
+
+The fresh B2/Kubernetes debug campaign again passes 1→3→6, the steady phase and
+forced pod loss, but fails the same 240-second rolling deadline. It captures
+1,044 acknowledgements/readbacks and two client retry-deadline failures; final
+recovered-history verification and later phases are not reached. Bounded timing
+samples show completed acquisitions between 12 and 86 seconds. This does not
+establish a cloud speedup or production availability.
+[Configuration, timing scope and cleanup](evidence/native-recovery-2026-11-11.json).
+
+The namespace, bucket, scoped key and 611 physical versions were removed. An
+image-address error was corrected before the workload started in a separate
+empty fixture. Cleanup also removed an obsolete three-node local kind cluster,
+its credentials, temporary contexts and the duplicated validation/reporting code.
+The next experiment varies replacement headroom within the same fixed quota;
+the production gates remain open.
+
 ## v0.23.1 recovery progress fixes (2026-11-11)
 
 [v0.23.1](https://github.com/ericflo/durable-db/releases/tag/v0.23.1) packages

@@ -799,3 +799,10 @@ Acquisition logs include fixed stage names and elapsed milliseconds from each
 attempt; these diagnostics never grant ownership. The existing Kubernetes
 harness captures bounded, allowlisted samples at phase boundaries and on failure,
 so rolling deletion does not erase every earlier successful handoff measurement.
+
+The new B2/Kubernetes campaign (`a275944`, debug image) still misses the
+240-second rolling deadline and two client retry deadlines after 1,044 observed
+acknowledgements/readbacks. Successful sampled acquisitions span 12–86 seconds.
+The run does not reach final history verification or later fault phases; its
+namespace, bucket, key and 611 physical versions were removed. See the
+[configuration and bounded timing evidence](evidence/native-recovery-2026-11-11.json).
