@@ -1,5 +1,13 @@
 # Verification results
 
+## v0.21.0 native owner forwarding (2026-11-11)
+
+The native library now discovers an advertised owner and forwards one bounded HTTP attempt to its exact incarnation. Live takeover, stale routes, address reuse, lost acknowledgements and token revocation are checked. An uncertain write returns to the caller for an identical retry; it is never silently replayed by the forwarder. Normal tenant policy and fresh permit validation remain on the owner.
+
+All 300 enabled Rust checks, strict clippy and formatting pass. The focused TCP/root group takes 0.10 seconds. The 35-state routing model and two negative controls pass; two deliberately broken Rust variants are detected. Real B2 (51.42 seconds) and versioned MinIO (1.48 seconds) pass the expanded four-server/two-partition fixture at `80841e5`. Both disposable buckets, all 88 remaining physical versions, the temporary B2 key and MinIO container were removed. [Evidence](evidence/owner-routing-2026-11-11.json).
+
+Duplicate journal-selection loops were removed, and the existing cloud HTTP fixture now shares server setup with its gateway. No new dependency, collector or storage algorithm was added. Automatic election, database mapping, placement and cloud CLI cutover remain the next integration gate; this is an experimental library milestone.
+
 ## v0.20.0 independent partition control (2026-11-11)
 
 [v0.20.0](https://github.com/ericflo/durable-db/releases/tag/v0.20.0) packages `00637a4`, verified by [Woodpecker #193](https://ci.eflorenzano.com/repos/18/pipeline/193/1). The independently downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer downloads the identical binary. Both 99-test JavaScript/Pi contracts and the optimized 10,005-database regression (195.89 seconds) pass. The release tag pipeline also passes.

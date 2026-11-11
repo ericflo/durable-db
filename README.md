@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.20.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.21.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
