@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 mod batch;
+pub(crate) use batch::MAX_UPDATES;
 
 const FANOUT: usize = 64;
 const MAX_NODE_BYTES: usize = 64 * 1024;

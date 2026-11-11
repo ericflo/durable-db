@@ -23,6 +23,10 @@ const PAGE: usize = 128;
 #[serde(deny_unknown_fields)]
 struct Cursor {
     generation: u64,
+    // Budgeted metadata publishers may rebase across ordinary control updates,
+    // but never a sweep, even when its table generation/cursors are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ledger_fence: Option<u64>,
     manifests: Option<String>,
     indexes: Option<String>,
     journal: Option<String>,
@@ -64,6 +68,9 @@ pub(crate) struct Collection {
     budgeted: bool,
 }
 impl Collection {
+    pub(crate) fn same_metadata_fence(a: &Bucket, b: &Bucket) -> bool {
+        a.info.get(FIELD) == b.info.get(FIELD)
+    }
     pub(crate) fn new(
         authority: Arc<dyn Authority>,
         files: Arc<dyn Storage>,
@@ -176,6 +183,17 @@ impl Collection {
             }
         }
         let cursor = Cursor {
+            ledger_fence: if self.budgeted {
+                Some(
+                    Cursor::read(&observed.info)?
+                        .ledger_fence
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("metadata fence exhausted"))?,
+                )
+            } else {
+                None
+            },
             generation: generation(&observed.info)?
                 // Metadata/journal-only sweeps cannot invalidate staged tables.
                 .checked_add(u64::from(!obsolete.is_empty()))

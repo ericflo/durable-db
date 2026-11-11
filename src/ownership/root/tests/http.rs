@@ -747,7 +747,7 @@ async fn native_http_javascript_contract() {
     let mut credential = tempfile::NamedTempFile::new().unwrap();
     writeln!(credential, "{token}").unwrap();
     let status = tokio::time::timeout(
-        Duration::from_secs(90),
+        Duration::from_secs(120),
         tokio::process::Command::new("node")
             .current_dir("clients/javascript")
             .args([

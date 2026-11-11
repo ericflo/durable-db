@@ -15,7 +15,7 @@ scripts/check-model.sh
 scripts/check-proof.sh
 ```
 
-Native client contract checks explicitly provision 512 MiB per database with `DURABLE_DB_TEST_ADMISSION_BYTES=536870912`; the long document-tail and receipt-eviction cases exceed the default 64 MiB under conservative shared-table pricing. The common JavaScript fixture uses the existing administrator budget endpoint. Runtime defaults and dedicated refusal tests are unchanged. Run this contract locally after admission-pricing changes, before waiting for the release build.
+Native client contract checks explicitly provision 1 GiB per database with `DURABLE_DB_TEST_ADMISSION_BYTES=1073741824`; half funds admission and half prepays durable maintenance. The long document-tail and receipt-eviction cases exceed the default 64 MiB under conservative shared-table pricing; the fixture retains the previous 512 MiB admission allowance. The common JavaScript fixture uses the existing administrator budget endpoint. Runtime defaults and dedicated refusal tests are unchanged. Run this contract locally after admission-pricing changes, before waiting for the release build.
 
 The backup recovery fixture uses a larger bounded request budget so its 16,641-key interrupted restore tests recovery rather than waiting for the default four-commit-per-second allowance. Admission tests retain default-policy coverage and use a controlled clock for exact refill and eviction checks.
 
@@ -61,7 +61,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |
 | SDK or web-app example | `scripts/test-client.sh sdk.test.mjs` |
 | Local native CLI / exclusion | `cargo test --locked --test local_cli`; `cargo test --locked --lib cancelled_local_cas`; `scripts/check-model.sh LocalExclusive` |
-| Native HTTP and client contract | `cargo test --locked --lib root::tests::http`; after `npm --prefix clients/javascript ci`, run `DURABLE_DB_TEST_ADMISSION_BYTES=536870912 cargo test --locked --lib native_http_javascript_contract -- --ignored --nocapture` |
+| Native HTTP and client contract | `cargo test --locked --lib root::tests::http`; after `npm --prefix clients/javascript ci`, run `DURABLE_DB_TEST_ADMISSION_BYTES=1073741824 cargo test --locked --lib native_http_javascript_contract -- --ignored --nocapture` |
 | Native provider qualification | `cargo test --locked --test checkpoint_cloud -- --ignored --exact native_http::native_http_budgets_cleanup_and_cold_recovery --nocapture` |
 | Pi adapter or HTTP client transport | `scripts/test-client.sh` |
 | Public documentation | `npm --prefix site ci` and `node site/build.mjs` |

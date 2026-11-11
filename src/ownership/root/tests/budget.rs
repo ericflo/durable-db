@@ -1006,4 +1006,38 @@ async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing
         fresh_a.charge(1).await.is_err(),
         "a refill for recovery cannot recreate admission rights"
     );
+
+    // Larger groups cross the physical allocator's 32-PUT grant boundary.
+    // Its own authority updates must not make complete funding impossible.
+    let mut many = Vec::new();
+    for n in 0..70 {
+        let budget = replacement
+            .database_budget(&format!("many-{n:03}"))
+            .unwrap()
+            .unwrap();
+        budget.initialize_database().await.unwrap();
+        budget.charge(1).await.unwrap();
+        many.push((budget, 1));
+    }
+    Allocator::fund_maintenance(&many, check).await.unwrap();
+    provider.pause_budget.store(true, Ordering::SeqCst);
+    let funding = Allocator::fund_maintenance(&many, check);
+    tokio::pin!(funding);
+    tokio::select! {
+        result = &mut funding => panic!("funding did not pause: {}", result.is_ok()),
+        _ = provider.entered.notified() => (),
+    }
+    let collector = replacement.collection();
+    let generation = provider.record().collection;
+    for _ in 0..4 {
+        collector.collect().await.unwrap();
+    }
+    assert_eq!(provider.record().collection, generation);
+    provider.release.notify_one();
+    funding.await.unwrap();
+    for (budget, _) in &many {
+        let reserve = budget.status().await.unwrap().maintenance.unwrap();
+        assert_eq!(reserve.allocated.bytes, 2);
+        assert_eq!(reserve.allocated.attempts, 2);
+    }
 }

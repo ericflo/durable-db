@@ -1,7 +1,8 @@
 ----------------------- MODULE PublicationSafety -----------------------
-\* Native tenant-ledger metadata uses this protocol too: its publisher rebuilds
-\* fresh objects after ANY failed exact comparison, and collection lists before
-\* a nonce-changing comparison. Directory membership supplies protected objects. `live` is the union of ALL
+\* Native tenant-ledger metadata uses this protocol too: funding can rebase over
+\* ordinary control changes only while its directory and metadata fence match.
+\* Every budgeted metadata sweep advances that fence, even without table GC.
+\* Directory membership supplies protected objects. `live` is the union of ALL
 \* roots in the captured authority, including budget and recovery directories
 \* and the explicit retained checkpoint. Retaining a published checkpoint is
 \* Prepare with fresh = {}, keeping its currently live objects; publication

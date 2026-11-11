@@ -51,6 +51,7 @@ struct Provider {
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
     pause_root: AtomicBool,
+    pause_budget: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -73,6 +74,7 @@ impl Provider {
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
             pause_root: AtomicBool::new(false),
+            pause_budget: AtomicBool::new(false),
             entered: Default::default(),
             release: Default::default(),
         })
@@ -114,6 +116,9 @@ impl Authority for Provider {
         if self.pause.swap(false, Ordering::SeqCst)
             || (old.info.get("durable-db-owned-root") != info.get("durable-db-owned-root")
                 && self.pause_root.swap(false, Ordering::SeqCst))
+            || (info.get(crate::upload_budget::DATABASE_FIELD)
+                != old.info.get(crate::upload_budget::DATABASE_FIELD)
+                && self.pause_budget.swap(false, Ordering::SeqCst))
         {
             self.entered.notify_one();
             self.release.notified().await;

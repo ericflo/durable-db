@@ -76,24 +76,28 @@ impl Ledger {
     ) -> anyhow::Result<String> {
         // These metadata uploads pass through the namespace allocator. Its CAS
         // can invalidate `before`; a retry rebuilds from the new directory root.
-        let mut pointers = BTreeMap::new();
-        for (name, record) in records {
-            let key = format!("manifests/{}.{}", name, Uuid::new_v4());
-            let bytes = Bytes::from(serde_json::to_vec(
-                &serde_json::json!({"database": name, "record": record}),
-            )?);
-            ensure!(bytes.len() <= 4096, "database upload ledger too large");
-            let pointer = Pointer {
-                key: key.clone(),
-                sha256: hex::encode(Sha256::digest(&bytes)),
-            };
-            files.put(&key, bytes).await?;
-            pointers.insert((*name).to_owned(), pointer);
+        let directory = Directory::new(files.clone());
+        let mut next = root(before)?;
+        for batch in records.chunks(crate::directory::MAX_UPDATES) {
+            let mut pointers = BTreeMap::new();
+            for (name, record) in batch {
+                let key = format!("manifests/{}.{}", name, Uuid::new_v4());
+                let bytes = Bytes::from(serde_json::to_vec(
+                    &serde_json::json!({"database": name, "record": record}),
+                )?);
+                ensure!(bytes.len() <= 4096, "database upload ledger too large");
+                let pointer = Pointer {
+                    key: key.clone(),
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                };
+                files.put(&key, bytes).await?;
+                pointers.insert((*name).to_owned(), pointer);
+            }
+            next = Some(directory.insert_many(next.as_ref(), &pointers).await?);
         }
-        let root = Directory::new(files)
-            .insert_many(root(before)?.as_ref(), &pointers)
-            .await?;
-        Ok(serde_json::to_string(&root)?)
+        Ok(serde_json::to_string(
+            &next.context("empty ledger update")?,
+        )?)
     }
 }
 impl Allocator {
@@ -197,11 +201,26 @@ impl Allocator {
                 &records,
             )
             .await?;
-            let mut info = before.info.clone();
-            info.insert(FIELD.into(), directory);
-            crate::publication::budget(&info)?;
-            if first.authority.replace(&before, info).await?.is_some() {
-                return Ok(());
+            let mut comparison = before.clone();
+            for _ in 0..8 {
+                let mut info = comparison.info.clone();
+                info.insert(FIELD.into(), directory.clone());
+                crate::publication::budget(&info)?;
+                if first.authority.replace(&comparison, info).await?.is_some() {
+                    return Ok(());
+                }
+                comparison = first.authority.read().await?;
+                check(&comparison)?;
+                // Bulk ledger uploads can allocate namespace grants. Reuse
+                // staging across those/renewals, never a ledger change or sweep.
+                if comparison.info.get(FIELD) != before.info.get(FIELD)
+                    || !crate::ownership::root::Collection::same_metadata_fence(
+                        &before,
+                        &comparison,
+                    )
+                {
+                    break;
+                }
             }
         }
         bail!("maintenance funding contention budget exceeded")

@@ -202,7 +202,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-tenantadmission
-COPY spec/UploadCredits.tla spec/TenantAdmission.tla spec/TenantAdmission.checks spec/TenantAdmission*.cfg spec/
+COPY spec/TenantAdmission.tla spec/TenantAdmission.checks spec/TenantAdmission*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh TenantAdmission && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
@@ -458,7 +458,7 @@ COPY scripts/test-client.sh scripts/test-client.sh
 COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
 COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
 RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
-    && DURABLE_DB_TEST_ADMISSION_BYTES=536870912 /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
+    && DURABLE_DB_TEST_ADMISSION_BYTES=1073741824 /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
     && mkdir -p /checks && touch /checks/javascript.passed
 
 FROM build AS assembled
