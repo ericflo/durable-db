@@ -1,5 +1,41 @@
 # Verification results
 
+## v0.23.1 recovery progress fixes (2026-11-11)
+
+[v0.23.1](https://github.com/ericflo/durable-db/releases/tag/v0.23.1) packages
+`664ee9b`, verified by [Woodpecker #214](https://ci.eflorenzano.com/repos/18/pipeline/214/1).
+Journal selection resolves uncertainty by validating the same incarnation rather
+than immediately adding a new owner. Peer changes that leave local placement
+unchanged preserve pending recovery. Recovered idle partitions schedule a normal
+checkpoint, including zero-frame cuts, so later healthy handoffs stop at a recent
+owner. Foreground reads do not require this opportunistic checkpoint. Wire and
+storage formats are unchanged. The independently downloaded static binary passes
+installation with an empty toolchain PATH, transactions, ordered reads,
+export/restore and forced-stop recovery. The release tag pipeline also passes.
+
+All 322 enabled Rust checks, strict clippy and formatting pass. Focused regressions
+cover lost replies, late uploads, takeover during selection, paused acquisitions
+and seven idle handoffs. The original restart rules fail their regressions. The
+existing catalog, registration, placement and resident-budget models retain their
+negative controls; these remain bounded component checks, not a composed proof of
+Rust or all deployments.
+
+Two fresh B2/Kubernetes campaigns use the same sixteen-partition layout, four
+writers, sixty-second collection interval and deadlines. Both reach one, three
+and six ready pods, complete the short steady phase and recover from forced pod
+loss. Both fail the 240-second rolling-replacement gate. The first captures
+1,067 acknowledgements and 1,064 readbacks; the second captures 1,107 of each,
+plus one client's 180-second identical-retry failure. Neither reaches final
+recovered-history verification, provider interruption, scale-down or cold recovery.
+These are debug-image qualification runs, not release-performance evidence.
+Scale-up was slower in the second run; no cloud speedup is claimed.
+[Exact configurations, hashes, failures and cleanup](evidence/native-recovery-2026-11-11.json).
+
+Both namespaces, buckets, scoped keys, 1,357 physical versions and temporary
+image manifests were removed. Two obsolete recovery restart paths and the
+site's misleading older-engine fault-test badge were replaced. Clustered
+availability and the other [production gates](production-readiness.md) remain open.
+
 ## v0.23.0 native cloud CLI (2026-11-11)
 
 [v0.23.0](https://github.com/ericflo/durable-db/releases/tag/v0.23.0) packages

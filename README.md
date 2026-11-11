@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.23.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.23.1. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,7 +142,9 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) identifies the remaining work, its rough size and what can wait until after 1.0. The cloud CLI maps databases to fixed partitions and automatically acquires, recovers and places them from DNS membership, using clock-independent permits. Resident limits follow owners through retirement. Native qualification has reached six pods and recovered from pod loss, but rolling replacement still exceeds its test deadline. Current main revalidates uncertain journal selection without a new owner, preserves recovery when local placement is unchanged, and checkpoints inherited idle history to shorten later handoffs. Repeating the rollout with collection enabled is the next check; deployment, failure and performance qualification remain open. Each gate closes only with reproducible evidence. Release-by-release changes and their evidence are in [verification results](docs/verification-results.md); format compatibility and upgrades are in [backup and restore](docs/recovery.md#local-format-upgrades).
+Native B2/Kubernetes qualification has reached six pods and recovered from forced pod loss. Rolling replacement still misses its deadline; provider interruption, scale-down and cold replacement remain unqualified. v0.23.1 removes unnecessary recovery restarts and checkpoints inherited idle history. Performance and failure qualification remain open.
+
+The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) lists the remaining gates, their rough size and what can wait until after 1.0. [Verification results](docs/verification-results.md) record each release and its evidence; [backup and restore](docs/recovery.md#local-format-upgrades) covers format compatibility and upgrades.
 
 ## Verification
 

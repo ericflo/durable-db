@@ -765,3 +765,15 @@ was a temporary debug image and did not reach final recovered-history verificati
 provider interruption, scale-down or cold replacement. The namespace, bucket,
 scoped key, 875 physical versions and temporary image manifest were removed.
 [Configuration and exact scope](evidence/native-recovery-2026-11-11.json).
+
+With idle checkpoints (`664ee9b`), a second fresh B2/Kubernetes campaign again
+passed one/three/six readiness, the steady phase and forced pod loss, but failed
+rolling replacement's 240-second deadline and one client's 180-second identical
+retry deadline. Its final snapshot has 1,107 acknowledgements and readbacks; no
+final recovered-history verification was reached. Scale-up took longer, so this
+is not evidence of a cloud speedup. Both attempts retain the same configuration
+and deadline. The second namespace, bucket, scoped key, 482 physical versions and
+temporary image manifest were removed. All 322 enabled Rust checks, formatting
+and strict clippy pass locally. The next recovery work is resolving uncertain
+claim/activation outcomes in place, then measuring whole handoff latency; the
+full rollout and later phases remain open.
