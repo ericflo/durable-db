@@ -3,3 +3,5 @@ safe RootRegistrationThree.cfg root-registration-three 768m -
 unsafe RootRegistrationUnsafeEarly.cfg root-registration-early 512m RegistrationAvailable
 unsafe RootRegistrationUnsafeParent.cfg root-registration-parent 512m AcknowledgedDiscoverable
 unsafe RootRegistrationRecovered.cfg root-registration-recovered 768m NotThreeRegistrations
+unsafe RootRegistrationUnsafeImmediate.cfg root-registration-immediate 768m AllEarlierPermitsRevoked
+unsafe RootRegistrationInterrupted.cfg root-registration-interrupted 768m NotInterruptedRevocation
