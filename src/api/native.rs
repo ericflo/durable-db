@@ -217,7 +217,14 @@ impl Backend for Native {
         files.replenish_upload_budget(request).await
     }
     async fn ready(&self) -> bool {
-        self.check().is_ok() && self.owner.read().await.validate().await.is_ok()
+        // Health schedules recovery, never authorizes responses. A transient
+        // provider error must not discard an idle owner. Nor may a checkpoint
+        // holding this lock stall reconciliation of unrelated partitions.
+        self.check().is_ok()
+            && self
+                .owner
+                .try_read()
+                .map_or(true, |owner| owner.check().is_ok())
     }
     async fn memory_bytes(&self) -> usize {
         self.cache.memory_bytes().await

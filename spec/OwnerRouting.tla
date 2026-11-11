@@ -11,6 +11,8 @@ Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
              ready |-> FALSE, authorized |-> FALSE]
 \* HTTP readiness keeps routing and administration reachable during recovery.
 \* It is independent of response authority, including for direct peer requests.
+\* Local worker health can remain ready during provider errors or maintenance;
+\* neither condition authorizes a response without the fresh permit check.
 Readiness == s' = [s EXCEPT !.ready = ~@]
 \* Routing observations are hints, including stale ones after takeover.
 Lookup == /\ s.cached = "none" /\ s.phase # "busy"

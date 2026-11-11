@@ -595,36 +595,6 @@ impl crate::storage::Storage for PausedPermit {
     }
 }
 #[tokio::test]
-async fn routine_health_validation_does_not_clear_readiness() {
-    let provider = Provider::new();
-    let files = Arc::new(PausedPermit {
-        inner: provider.files.clone(),
-        pause: AtomicBool::new(false),
-        blocked: Default::default(),
-        entered: Default::default(),
-        release: Default::default(),
-    });
-    let directory = Connection::new(files.clone(), provider, "test")
-        .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
-        .await
-        .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let node = Node::start(directory, listener, vec![address]).await;
-    settled(&[&node], &[address]).await;
-    files.pause.store(true, Ordering::SeqCst);
-    node.members(&[address]);
-    tokio::time::timeout(Duration::from_secs(2), files.entered.notified())
-        .await
-        .unwrap();
-    assert!(
-        node.cluster.ready().await,
-        "a routine permit probe is not a placement loss"
-    );
-    files.release.notify_one();
-}
-
-#[tokio::test]
 async fn retired_backend_references_keep_the_process_budget_until_released() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -874,6 +844,57 @@ async fn shared_maintenance_runs_once_and_moves_with_membership() {
         tokio::task::yield_now().await;
     }
     assert_eq!(provider.maintenance.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unavailable_permit_reads_preserve_idle_owners_but_refuse_data() {
+    let provider = Provider::new();
+    let faults = Arc::new(super::http::Faults::default());
+    let files = Arc::new(super::http::Files {
+        inner: provider.files.clone(),
+        faults: faults.clone(),
+    });
+    let directory = Connection::new(files, provider.clone(), "test")
+        .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let node = Node::start(directory, listener, vec![address]).await;
+    settled(&[&node], &[address]).await;
+    let old = node.cluster.resolve("app").await.unwrap().unwrap();
+    let token = auth().administrator_token(600).unwrap();
+    let calls = provider.calls.load(Ordering::SeqCst);
+    faults.fail_permit.store(true, Ordering::SeqCst);
+    assert_eq!(
+        node.server
+            .call("GET", "/v1/databases/app", &token, json!(null))
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+    // Reconcile unchanged placement while the provider remains unavailable.
+    node.members(&[address]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(old.ready().await, "a failed observation is not revocation");
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    faults.fail_permit.store(false, Ordering::SeqCst);
+    assert_eq!(
+        node.cluster
+            .resolve("app")
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation(),
+        old.owner_incarnation(),
+    );
+    assert_eq!(
+        node.server
+            .call("GET", "/v1/databases/app", &token, json!(null))
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+    );
 }
 
 #[tokio::test]

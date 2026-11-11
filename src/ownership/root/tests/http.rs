@@ -23,6 +23,7 @@ pub(super) struct Faults {
     pause_read_at: AtomicU64,
     corrupt_read: AtomicBool,
     fail_checkpoint: AtomicBool,
+    pub(super) fail_permit: AtomicBool,
     pub(super) fail_journal: AtomicBool,
     pub(super) late_upload: Mutex<Option<(String, Bytes)>>,
     checkpoint_failures: AtomicU64,
@@ -38,6 +39,11 @@ pub(super) struct Files {
 #[async_trait]
 impl Storage for Files {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
+        if key.split('/').any(|part| part == "permits")
+            && self.faults.fail_permit.load(Ordering::SeqCst)
+        {
+            anyhow::bail!("permit read temporarily unavailable");
+        }
         self.inner.get(key, max).await
     }
     async fn get_range(
@@ -409,7 +415,8 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
     provider.revoke_current().await;
     assert_eq!(
         client
-            .get(format!("{base}/health/ready"))
+            .get(&url)
+            .bearer_auth(reader)
             .send()
             .await
             .unwrap()
@@ -418,8 +425,7 @@ async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp(
     );
     assert_eq!(
         client
-            .get(&url)
-            .bearer_auth(reader)
+            .get(format!("{base}/health/ready"))
             .send()
             .await
             .unwrap()
@@ -686,6 +692,19 @@ async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold
     tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
         .await
         .unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            router
+                .clone()
+                .oneshot(request("GET", "/health/ready", &token, Value::Null)),
+        )
+        .await
+        .expect("local health must not wait behind the paused owner lock")
+        .unwrap()
+        .status(),
+        StatusCode::OK,
+    );
     attempt.abort();
     let _ = attempt.await;
     faults.release.notify_one();
@@ -778,8 +797,9 @@ async fn native_http_javascript_contract() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn native_http_validates_without_renewal_and_refuses_revoked_owner() {
+async fn native_http_health_is_local_but_responses_refuse_revoked_owner() {
     use crate::api::Backend;
+    use crate::auth::Access;
     let provider = Provider::new();
     let owner = super::live::open(active(&provider).await, live::Limits::default()).await;
     let before = provider.calls.load(Ordering::SeqCst);
@@ -789,6 +809,11 @@ async fn native_http_validates_without_renewal_and_refuses_revoked_owner() {
     assert!(backend.ready().await);
     assert_eq!(provider.calls.load(Ordering::SeqCst), before);
     provider.revoke_current().await;
+    assert!(backend.ready().await);
+    assert!(matches!(
+        backend.info("app", &Access::Administrator).await,
+        Err(crate::Error::Storage(_)),
+    ));
     assert!(!backend.ready().await);
 }
 
