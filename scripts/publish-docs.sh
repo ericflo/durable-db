@@ -15,18 +15,26 @@ export GIT_CONFIG_NOSYSTEM=1
 # GitHub's published Ed25519 host key is checked into the project.
 cp scripts/github_known_hosts "$tmp/known_hosts"
 export GIT_SSH_COMMAND="ssh -i $tmp/key -o BatchMode=yes -o ConnectTimeout=15 -o IdentitiesOnly=yes -o UserKnownHostsFile=$tmp/known_hosts -o StrictHostKeyChecking=yes"
-git clone --depth 1 ssh://git@ssh.github.com:443/ericflo/durable-db-site.git "$tmp/site"
-# Generated docs-only checkout: replace its tracked public files, never source or private plans.
-git -C "$tmp/site" rm -r --ignore-unmatch . >/dev/null
-cp -a "$source_dir/." "$tmp/site/"
-# Pages can reject a deployment after its source push succeeds. This public
-# marker binds delivery to the exact source that passed Woodpecker's checks.
-printf '{"source_commit":"%s"}\n' "$CI_COMMIT_SHA" > "$tmp/site/deployment.json"
-git -C "$tmp/site" add .
-if ! git -C "$tmp/site" diff --cached --quiet; then
-  git -C "$tmp/site" -c user.name=durable-db-ci -c user.email=durable-db-ci@users.noreply.github.com commit -m "Publish docs for $CI_COMMIT_SHA"
-  git -C "$tmp/site" push origin main
-fi
+git clone --depth 64 ssh://git@ssh.github.com:443/ericflo/durable-db-site.git "$tmp/site"
+pushed=false
+for attempt in 1 2 3; do
+  # This is our disposable checkout. Rebuild the patch against the newest site
+  # after a push race; never overwrite an editor's branch or force a push.
+  git -C "$tmp/site" fetch origin main
+  git -C "$tmp/site" reset --hard origin/main
+  python3 scripts/merge-docs.py "$source_dir" "$tmp/site" "$CI_COMMIT_SHA"
+  git -C "$tmp/site" add .
+  if ! git -C "$tmp/site" diff --cached --quiet; then
+    git -C "$tmp/site" -c user.name=durable-db-ci -c user.email=durable-db-ci@users.noreply.github.com commit -m "Publish docs for $CI_COMMIT_SHA"
+  fi
+  if git -C "$tmp/site" -c user.name=durable-db-ci -c user.email=durable-db-ci@users.noreply.github.com pull --rebase origin main \
+      && git -C "$tmp/site" push origin main; then
+    pushed=true
+    break
+  fi
+  git -C "$tmp/site" rebase --abort 2>/dev/null || true
+done
+[ "$pushed" = true ] || { echo 'Site kept changing; publication preserved the remote edits.' >&2; exit 1; }
 deadline=$(($(date +%s) + 600))
 inspect_after=$(($(date +%s) + 60))
 retried=false
@@ -72,6 +80,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
       }
       git -C "$tmp/site" -c user.name=durable-db-ci -c user.email=durable-db-ci@users.noreply.github.com \
         commit --allow-empty -m "Retry Pages delivery for $CI_COMMIT_SHA"
+      git -C "$tmp/site" -c user.name=durable-db-ci -c user.email=durable-db-ci@users.noreply.github.com pull --rebase origin main
       git -C "$tmp/site" push origin main
       retried=true
       echo 'Retrying failed Pages deployment once with the identical site tree.'

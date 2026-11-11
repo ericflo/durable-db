@@ -471,7 +471,7 @@ COPY site site
 COPY docs docs
 COPY deploy/prometheus deploy/prometheus
 COPY scripts/install.sh scripts/install.sh
-COPY scripts/publish-docs.sh scripts/test-publish-docs.mjs scripts/github_known_hosts scripts/
+COPY scripts/publish-docs.sh scripts/merge-docs.py scripts/test-publish-docs.mjs scripts/github_known_hosts scripts/
 COPY scripts/check-release.mjs scripts/check-release.mjs
 COPY LICENSE README.md ./
 RUN node --test scripts/test-publish-docs.mjs \
