@@ -496,7 +496,7 @@ async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_authority_after_io() {
     use crate::storage::{Object, Storage, Version};
     use bytes::Bytes;
@@ -504,6 +504,9 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         provider: Arc<Provider>,
         clock: ManualClock,
         pause: AtomicBool,
+        pause_upload: AtomicBool,
+        fail_upload: AtomicBool,
+        table_puts: AtomicU64,
         expire: AtomicBool,
         entered: tokio::sync::Notify,
     }
@@ -546,7 +549,16 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
             Ok(bytes)
         }
         async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
-            self.provider.files.put(key, bytes).await
+            self.provider.files.put(key, bytes).await?;
+            if key.starts_with("tables/") {
+                self.table_puts.fetch_add(1, Ordering::SeqCst);
+                if self.pause_upload.swap(false, Ordering::SeqCst) {
+                    self.entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                anyhow::ensure!(!self.fail_upload.load(Ordering::SeqCst), "lost table reply");
+            }
+            Ok(())
         }
         async fn cas(&self, _: &str, _: Option<&Version>, _: Bytes) -> anyhow::Result<bool> {
             unreachable!()
@@ -569,6 +581,9 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         provider: provider.clone(),
         clock: clock.clone(),
         pause: AtomicBool::new(false),
+        pause_upload: AtomicBool::new(false),
+        fail_upload: AtomicBool::new(false),
+        table_puts: AtomicU64::new(0),
         expire: AtomicBool::new(false),
         entered: tokio::sync::Notify::new(),
     });
@@ -605,9 +620,29 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         .await
         .unwrap();
     let completion = prepared.upload.unwrap().send().await;
+    paused.pause_upload.store(true, Ordering::SeqCst);
+    tokio::select! {
+        result = owner.complete(completion) => panic!("table upload was not paused: {result:?}"),
+        _ = paused.entered.notified() => (),
+    }
+    paused.fail_upload.store(true, Ordering::SeqCst);
+    for delay in [1, 2, 4, 8, 16, 30, 30] {
+        let puts = paused.table_puts.load(Ordering::SeqCst);
+        for _ in 0..100 {
+            assert!(!owner.maintain().await.unwrap());
+        }
+        tokio::time::advance(Duration::from_secs(delay) - Duration::from_nanos(1)).await;
+        assert!(!owner.maintain().await.unwrap());
+        assert_eq!(paused.table_puts.load(Ordering::SeqCst), puts);
+        tokio::time::advance(Duration::from_nanos(1)).await;
+        assert!(owner.maintain().await.is_err());
+        assert_eq!(paused.table_puts.load(Ordering::SeqCst), puts + 1);
+    }
+    paused.fail_upload.store(false, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(30)).await;
     paused.pause.store(true, Ordering::SeqCst);
     tokio::select! {
-        result = owner.complete(completion) => panic!("publication was not paused: {result:?}"),
+        result = owner.maintain() => panic!("publication was not paused: {result:?}"),
         _ = paused.entered.notified() => (),
     }
     let objects = provider.files.list("tables/", None, 100).await.unwrap();
@@ -622,6 +657,19 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         owner.outcome(prepared.tickets[0]).unwrap(),
         Result::Committed(1)
     );
+    // Success resets pacing. The next ordinary checkpoint starts immediately.
+    let next = owner.snapshot(database("a")).await.unwrap();
+    let batch = owner
+        .prepare(&[request(&next, "second", &[], &[])])
+        .await
+        .unwrap();
+    let puts = paused.table_puts.load(Ordering::SeqCst);
+    owner
+        .complete(batch.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert!(!owner.checkpoint_due());
+    assert!(paused.table_puts.load(Ordering::SeqCst) > puts);
     let snapshot = owner.snapshot(database("a")).await.unwrap();
     paused.expire.store(true, Ordering::SeqCst);
     assert!(
@@ -1155,7 +1203,7 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery() {
     use crate::{storage::Storage, upload_budget::UploadLimits};
     let provider = Provider::new();
@@ -1212,6 +1260,11 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         !owner.maintain().await.unwrap(),
         "discard collected staging after exact revalidation"
     );
+    assert!(
+        !owner.maintain().await.unwrap(),
+        "collection does not bypass pacing"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
     assert!(owner.maintain().await.unwrap());
     let retained = files.list("tables/", None, 128).await.unwrap();
     assert_eq!(retained.len(), 3);

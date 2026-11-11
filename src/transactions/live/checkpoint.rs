@@ -3,6 +3,8 @@ use crate::{
     index::recovery::checkpoint::{self, Staged},
     storage::Storage,
 };
+use std::time::Duration;
+use tokio::time::Instant;
 
 struct Publishing {
     staged: Staged,
@@ -13,6 +15,7 @@ pub(super) struct Maintenance {
     files: Arc<dyn Storage>,
     cache: Arc<Cache>,
     publishing: Option<Publishing>,
+    retry: Option<(Instant, Duration)>,
     covered: u64,
     recovered: u64,
     pub requested: bool,
@@ -24,6 +27,7 @@ impl Maintenance {
             cache,
             recovered,
             publishing: None,
+            retry: None,
             covered: 0,
             requested: false,
         }
@@ -78,6 +82,19 @@ impl<C: Clock> Owner<C> {
             return Ok(true);
         }
         if self.maintenance.publishing.is_none() {
+            // Set the gate before any await: cancellation and request-driven
+            // maintenance must not bypass pacing or multiply charged uploads.
+            let now = Instant::now();
+            if self.maintenance.retry.is_some_and(|(at, _)| now < at) {
+                return Ok(false);
+            }
+            let delay = self
+                .maintenance
+                .retry
+                .map_or(Duration::from_secs(1), |(_, prior)| {
+                    (prior * 2).min(Duration::from_secs(30))
+                });
+            self.maintenance.retry = Some((now + delay, delay));
             let origin = {
                 let _request = self.control.request.lock().await;
                 self.control.lock()?.recovery_record()?
@@ -167,6 +184,7 @@ impl<C: Clock> Owner<C> {
         self.maintenance.covered = self.writer.durable_prefix().position();
         self.maintenance.recovered = 0;
         self.maintenance.requested = false;
+        self.maintenance.retry = None;
         Ok(true)
     }
 }

@@ -21,6 +21,7 @@ struct Faults {
     pause: AtomicBool,
     pause_read: AtomicBool,
     fail_checkpoint: AtomicBool,
+    checkpoint_failures: AtomicU64,
     entered: Notify,
     release: Notify,
     puts: AtomicU64,
@@ -54,6 +55,9 @@ impl Storage for Files {
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.faults.puts.fetch_add(1, Ordering::SeqCst);
         if key.starts_with("tables/") && self.faults.fail_checkpoint.load(Ordering::SeqCst) {
+            self.faults
+                .checkpoint_failures
+                .fetch_add(1, Ordering::SeqCst);
             anyhow::bail!("checkpoint uploads unavailable");
         }
         if self.faults.pause.swap(false, Ordering::SeqCst) {
@@ -559,6 +563,7 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
 async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold_admission() {
     let (router, provider, _, faults, token) = fixture(2, 2).await;
     create(&router, &token, "app").await;
+    let started = tokio::time::Instant::now();
     faults.fail_checkpoint.store(true, Ordering::SeqCst);
     assert_eq!(
         call(
@@ -573,9 +578,57 @@ async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold
         StatusCode::OK
     );
     assert!(provider.record().checkpoint.is_none());
+    let before = call(
+        &router,
+        "GET",
+        "/v1/databases/app/upload-budget",
+        &token,
+        Value::Null,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/v1/databases/app/commit",
+        listener.local_addr().unwrap()
+    );
+    let tcp_router = router.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, tcp_router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let mut pressure = commit();
+    pressure["expected_revision"] = json!(1);
+    pressure["request_id"] = json!("pressure");
+    for _ in 0..32 {
+        assert_eq!(
+            tcp_call(&client, "POST", &url, &token, pressure.clone())
+                .await
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let retry = tcp_call(&client, "POST", &url, &token, commit()).await;
+        assert_eq!(retry.0, StatusCode::OK);
+        assert_eq!(retry.1["replayed"], true);
+    }
+    assert_eq!(
+        call(
+            &router,
+            "GET",
+            "/v1/databases/app/upload-budget",
+            &token,
+            Value::Null
+        )
+        .await,
+        before
+    );
+    let failures = faults.checkpoint_failures.load(Ordering::SeqCst);
+    assert!(
+        failures > 0 && failures <= 1 + started.elapsed().as_secs(),
+        "client traffic bypassed checkpoint retry pacing"
+    );
+    server.abort();
+    let _ = server.await;
     // No next request is needed to recover maintenance after the provider heals.
     faults.fail_checkpoint.store(false, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(35), async {
         while provider.record().checkpoint.is_none() {
             tokio::task::yield_now().await;
         }

@@ -1,5 +1,15 @@
 # Verification results
 
+## v0.16.1 checkpoint retry pacing (2026-11-10)
+
+Failed or cancelled native checkpoint construction now waits 1, 2, 4, 8, 16, then 30 seconds between attempt starts. The owner arms the gate before I/O, so incoming requests and collection-invalidated staging cannot accelerate new uploads. Exact validation of an already staged publication still proceeds without uploading again. Confirmed publication resets pacing; the next ordinary checkpoint starts immediately. The change adds 18 runtime Rust lines, no persisted fields or dependencies, and preserves both v0.16.0 formats and admission prices.
+
+The expanded cancellation regression checks seven failed attempts at exact virtual-time boundaries and 700 immediate calls, applied PUT cancellation, publication cancellation and successful reset. The collection race still rebuilds and cold-recovers correctly. A real TCP burst refuses 32 new writes while resolving 32 exact retries with unchanged tenant allocation; idle maintenance resumes after the provider heals. Four unsafe Rust variants fail, including a separate TCP failure when pacing is removed. The focused four-test group takes 0.01 seconds and the TCP test 1.11 seconds after compilation.
+
+All 299 local Rust tests, formatting, strict clippy and both 99-test client contracts pass. The unchanged 65,664-state checkpoint model and nine controls pass; waiting is a stuttering restriction, not a proof of runtime retry rates or the Rust implementation. The unpaced path and stale current test-count/timing claims were removed; existing fixtures were extended instead of duplicating tests or models. [Milestone evidence](evidence/checkpoint-retry-pacing-2026-11-10.json).
+
+This limits retry amplification within one owner; restart discards pacing state while retaining cumulative upload allocation. Every attempted PUT still consumes namespace credit. Per-tenant retry/recovery attribution, retained-image export/restore, scheduled backups, physical timing and broader production qualification remain open.
+
 ## v0.16.0 manifest encoding and split admission (2026-11-10)
 
 [v0.16.0](https://github.com/ericflo/durable-db/releases/tag/v0.16.0) packages `3e1bb26`, verified by [Woodpecker #159](https://ci.eflorenzano.com/repos/18/pipeline/159/1). The independently downloaded static binary passes transactions/retries, ordered reads, export/restore and forced-stop recovery. The public default installer installs that exact binary. The optimized 10,005-database capacity check passes in 197.34 seconds.

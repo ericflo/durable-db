@@ -4,6 +4,12 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 \* `bytes` abstracts its complete immutable table/manifest image, not a separate
 \* header object. Inlining the descriptor removes header uploads and garbage;
 \* data must still be uploaded before publication, including after a lost reply.
+\* Runtime reconstruction retries are paced before any I/O: 1, 2, 4, 8, 16,
+\* then 30 seconds between starts, including cancellation and collected staging.
+\* Waiting only removes Build/Upload opportunities (stuttering); it grants no
+\* ownership or upload credit. Restart may discard the local pacing state, but
+\* every new PUT still needs nonrefundable namespace credit (UploadCredits).
+\* Timing/rate bounds and tenant retry attribution are not proved by this model.
 CONSTANTS UnsafeEarly, UnsafeCut, UnsafeReceipt, UnsafeCompare, UnsafeExpose, UnsafeValue, UnsafeFloor
 Rows == {[key |-> k,value |-> v]:k \in {1,2},v \in {0,1,2}}
 VARIABLES History, owner, register, built, pending, bytes, published, start, cursor, view, done, selected, frames
