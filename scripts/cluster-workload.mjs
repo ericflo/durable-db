@@ -35,7 +35,7 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
         ]).get(error.message)??'resource_limit';
       } else if(response.status===409) {
         const error=await response.json();
-        refusal=['conflict','receipt_expired'].includes(error.code)?error.code:'unclassified_conflict';
+        refusal=['conflict','receipt_expired'].includes(error.error)?error.error:'unclassified_conflict';
       } else await response.body?.cancel();
     } catch { code='transport_or_decode_error'; }
     status.http_attempt_statuses[code]=(status.http_attempt_statuses[code]??0)+1;
