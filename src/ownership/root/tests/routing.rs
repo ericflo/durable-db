@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
 
-fn auth() -> Auth {
+pub(super) fn auth() -> Auth {
     Auth::new(&"91".repeat(32)).unwrap()
 }
 #[derive(Default)]
@@ -39,8 +39,8 @@ async fn lose_reply(State(faults): State<Arc<Faults>>, request: Request, next: N
         result
     }
 }
-struct Server {
-    url: String,
+pub(super) struct Server {
+    pub(super) url: String,
     task: JoinHandle<()>,
     client: reqwest::Client,
 }
@@ -50,7 +50,7 @@ impl Drop for Server {
     }
 }
 impl Server {
-    fn serve(listener: TcpListener, router: Router) -> Self {
+    pub(super) fn serve(listener: TcpListener, router: Router) -> Self {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
@@ -64,7 +64,7 @@ impl Server {
                 .unwrap(),
         }
     }
-    async fn call(
+    pub(super) async fn call(
         &self,
         method: &str,
         path: &str,
@@ -82,13 +82,13 @@ impl Server {
         let status = reply.status();
         (status, reply.json().await.unwrap())
     }
-    async fn ok(&self, method: &str, path: &str, token: &str, body: Value) -> Value {
+    pub(super) async fn ok(&self, method: &str, path: &str, token: &str, body: Value) -> Value {
         let (status, value) = self.call(method, path, token, body).await;
         assert_eq!(status, StatusCode::OK, "{value}");
         value
     }
 }
-fn app(backend: Arc<dyn Backend>) -> Router {
+pub(super) fn app(backend: Arc<dyn Backend>) -> Router {
     api::router(Arc::new(api::App::with_rate_limits(
         backend,
         auth(),

@@ -68,3 +68,41 @@ network confidentiality requires a trusted private network or transport mesh.
 `OwnerRouting` checks address reuse, stale hints, incarnation checks and the
 single-attempt contract. `RevocableOwner` supplies the serving-order argument.
 Neither proves membership, election, placement policy or eventual progress.
+
+## Stable mapping and membership-driven placement
+
+Before any partition entry exists, an exact conditional update installs a
+versioned layout inside the existing directory-root envelope. Its partition
+count is immutable. An incompatible opener fails; there is no implicit
+conversion of manually populated directories. Every later root rewrite keeps
+the layout from its successful comparison, including rebase after installation.
+Older decoders refuse the new envelope field. No extra metadata slot is needed.
+SHA-256 over a domain-separated database name chooses a stable partition;
+membership never participates in this calculation. `ClusterLayout` checks this
+boundary with two configurations and changing membership, plus erase/remap faults.
+
+Rendezvous ranking of canonical peer addresses chooses a preferred node for each
+partition. Membership is only a scheduling hint and may disagree, pause, omit
+live nodes or be empty. It grants no authority. Each acquisition uses a fresh
+root incarnation and the existing claim, revocation, journal selection and
+private recovery path. Only a recovered owner enters the serving map. Unknown
+control outcomes stop that attempt; a later attempt uses a new incarnation and
+therefore discovers/revokes any abandoned winner through its registration chain.
+These are the existing `RootAcquisition`, `RootRegistration`, `RevocableOwner`
+and replay obligations, not a second ownership protocol.
+
+Reconciliation is serialized per process and bounded by the configured partition
+count. Membership updates and a retry timer trigger it. Timers affect progress
+only. Removing a local placement drops its serving-map entry; already admitted
+requests retain the exact backend they selected and still validate its permit.
+An expected-incarnation header must be checked against that same pinned backend,
+never one selected again after the check. The HTTP contract and tenant scopes
+remain unchanged. All partition caches share one bounded byte cache; projection
+and journal allowances are per partition and must be budgeted across the count.
+
+Safety does not require membership agreement. Eventual progress does: peers must
+eventually receive the same healthy membership, provider operations must make
+progress, upload credit must remain available, and the preferred node must keep
+retrying. Permanent partitions and unlimited placement churn have no availability
+promise. Membership discovery, Kubernetes qualification and CLI migration are
+separate integration work; the library accepts explicit membership snapshots.

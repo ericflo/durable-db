@@ -3,6 +3,7 @@ use std::time::Duration;
 mod budget;
 mod catalog;
 mod checkpoint;
+mod cluster;
 mod http;
 mod lifecycle;
 mod live;
@@ -39,6 +40,7 @@ struct Provider {
     corrupt_reply: AtomicBool,
     pause: AtomicBool,
     pause_root: AtomicBool,
+    pause_publication: AtomicBool,
     pause_budget: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -63,6 +65,7 @@ impl Provider {
             corrupt_reply: AtomicBool::new(false),
             pause: AtomicBool::new(false),
             pause_root: AtomicBool::new(false),
+            pause_publication: AtomicBool::new(false),
             pause_budget: AtomicBool::new(false),
             entered: Default::default(),
             release: Default::default(),
@@ -109,6 +112,8 @@ impl Authority for Provider {
     ) -> anyhow::Result<Option<Bucket>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.pause.swap(false, Ordering::SeqCst)
+            || (old.info.get("durable-db-root") != info.get("durable-db-root")
+                && self.pause_publication.swap(false, Ordering::SeqCst))
             || (old.info.get("durable-db-owned-root") != info.get("durable-db-owned-root")
                 && self.pause_root.swap(false, Ordering::SeqCst))
             || (info.get(crate::upload_budget::DATABASE_FIELD)

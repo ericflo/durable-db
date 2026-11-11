@@ -1,6 +1,6 @@
 # Architecture
 
-Local serving uses the native journal, sorted-table index, checkpoints and collection described in the [owned-partition design](design-owned-partitions.md#exclusive-local-serving). A lifetime OS lock supplies single-host exclusion, so reads need no conditional publication or physical clock. The remaining sections describe the shared cloud engine; the native library now has clock-independent ownership and separate partition control records and owner forwarding, while automatic election/placement and the cloud CLI cutover remain open.
+Local serving uses the native journal, sorted-table index, checkpoints and collection described in the [owned-partition design](design-owned-partitions.md#exclusive-local-serving). A lifetime OS lock supplies single-host exclusion, so reads need no conditional publication or physical clock. The remaining sections describe the shared cloud engine; the native library now has clock-independent ownership, fixed database mapping, membership-driven placement and owner forwarding. Kubernetes membership discovery and the cloud CLI cutover remain open.
 
 ## Authority and transaction boundary
 

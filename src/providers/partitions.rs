@@ -14,6 +14,47 @@ use std::{collections::BTreeMap, sync::Arc};
 
 const MAX_RECORD: usize = 16 * 1024;
 
+/// Immutable database mapping. The number of partitions does not limit the
+/// number of databases, and never changes when processes join or leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layout {
+    format: u8,
+    partitions: u32,
+}
+impl Layout {
+    pub fn new(partitions: u32) -> anyhow::Result<Self> {
+        let layout = Self {
+            format: 1,
+            partitions,
+        };
+        layout.validate()?;
+        Ok(layout)
+    }
+    pub(crate) fn validate(self) -> anyhow::Result<()> {
+        ensure!(
+            self.format == 1 && (1..=1024).contains(&self.partitions),
+            "invalid cluster layout"
+        );
+        Ok(())
+    }
+    pub fn partitions(self) -> u32 {
+        self.partitions
+    }
+    pub fn partition(self, database: &str) -> crate::Result<u32> {
+        use sha2::{Digest, Sha256};
+        self.validate()?;
+        crate::engine::validate_db(database)?;
+        let mut hash = Sha256::new();
+        hash.update(b"durable-db.partition.v1\0");
+        hash.update(database.as_bytes());
+        Ok(
+            u32::from_be_bytes(hash.finalize()[..4].try_into().expect("digest prefix"))
+                % self.partitions,
+        )
+    }
+}
+
 /// Shared control directory. Database-to-partition mapping and placement remain
 /// the caller's responsibility; changing either requires a transfer protocol.
 /// Clones share only bounded caches and transport, never ownership permission.
@@ -60,6 +101,12 @@ impl Partitions {
         // this virtual register/object scope again would inflate cost metrics.
         connection.measured = true;
         connection.with_upload_budget(limits).await
+    }
+
+    /// Install a mapping only in an empty directory, or verify the existing
+    /// mapping. A different count requires explicit migration to a new namespace.
+    pub async fn configure(&self, layout: Layout) -> anyhow::Result<()> {
+        self.directory.configure_layout(layout).await
     }
 
     pub async fn upload_budget(&self) -> anyhow::Result<UploadStatus> {

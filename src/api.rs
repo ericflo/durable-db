@@ -1,4 +1,6 @@
 mod backend;
+mod cluster;
+pub use cluster::{Cluster, ClusterConfig};
 mod forward;
 pub use forward::Forward;
 mod local;
@@ -16,7 +18,7 @@ use crate::{
     metrics::{self as telemetry, Operation},
 };
 use axum::{
-    Json, Router,
+    Extension, Json, RequestExt, Router,
     extract::{DefaultBodyLimit, Path, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -47,7 +49,7 @@ enum Principal {
 }
 pub struct App {
     pub backend: Arc<dyn Backend>,
-    pub auth: Auth,
+    pub auth: Arc<Auth>,
     pub ready: AtomicBool,
     pub permits: Arc<Semaphore>,
     rates: Mutex<HashMap<Principal, Bucket>>,
@@ -57,7 +59,7 @@ pub struct App {
     pub rejected: AtomicU64,
 }
 impl App {
-    pub fn new(backend: Arc<dyn Backend>, auth: Auth, concurrency: usize) -> Self {
+    pub fn new(backend: Arc<dyn Backend>, auth: impl Into<Arc<Auth>>, concurrency: usize) -> Self {
         Self::with_rate_limits(backend, auth, concurrency, RateLimits::default())
     }
 
@@ -65,13 +67,13 @@ impl App {
     /// Concurrency limits and database quotas remain independent of this budget.
     pub fn with_rate_limits(
         backend: Arc<dyn Backend>,
-        auth: Auth,
+        auth: impl Into<Arc<Auth>>,
         concurrency: usize,
         rate_limits: RateLimits,
     ) -> Self {
         Self {
             backend,
-            auth,
+            auth: auth.into(),
             ready: AtomicBool::new(true),
             permits: Arc::new(Semaphore::new(concurrency)),
             rates: Mutex::new(HashMap::new()),
@@ -214,6 +216,33 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
         app.rejected.fetch_add(1, Ordering::Relaxed);
         return Error::Busy.into_response();
     };
+    // Include partition selection and body processing in the same deadline.
+    match tokio::time::timeout(Duration::from_secs(30), dispatch(app, request, next)).await {
+        Ok(response) => response,
+        Err(_) => Error::Storage(anyhow::anyhow!("request deadline exceeded")).into_response(),
+    }
+}
+async fn dispatch(app: Arc<App>, mut request: Request, next: Next) -> Response {
+    let mut backend = app.backend.clone();
+    if request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|path| path.as_str().starts_with("/v1/databases/"))
+    {
+        let Path(db) = match request.extract_parts::<Path<String>>().await {
+            Ok(path) => path,
+            Err(error) => return error.into_response(),
+        };
+        let scope = bearer(request.headers()).and_then(|token| app.auth.access(token, &db, false));
+        if let Err(error) = scope {
+            return error.into_response();
+        }
+        match backend.resolve(&db).await {
+            Ok(Some(selected)) => backend = selected,
+            Ok(None) => (),
+            Err(error) => return error.into_response(),
+        }
+    }
     // A forwarded request may arrive after its address has been reused. This
     // is a destination check only; all normal auth and permit checks still run.
     if let Some(expected) = request.headers().get(forward::OWNER_HEADER)
@@ -222,17 +251,15 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
             .ok()
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
             .filter(|id| !id.is_nil())
-            .is_none_or(|id| app.backend.owner_incarnation() != Some(id))
+            .is_none_or(|id| backend.owner_incarnation() != Some(id))
     {
         return Error::Storage(anyhow::anyhow!("owner route changed")).into_response();
     }
+    request.extensions_mut().insert(backend);
     app.requests.fetch_add(1, Ordering::Relaxed);
-    // Timeouts can have ambiguous write outcomes. Identical retries use receipts/revision guards.
-    match tokio::time::timeout(Duration::from_secs(30), next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => Error::Storage(anyhow::anyhow!("request deadline exceeded")).into_response(),
-    }
+    next.run(request).await
 }
+
 async fn ready(State(app): State<Arc<App>>) -> StatusCode {
     if app.ready.load(Ordering::Relaxed) && app.backend.ready().await {
         StatusCode::OK
@@ -254,6 +281,7 @@ async fn metrics(State(app): State<Arc<App>>, headers: HeaderMap) -> Result<Stri
 }
 async fn create(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
     Json(limits): Json<Limits>,
@@ -261,10 +289,11 @@ async fn create(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.backend.create(&db, limits).await?))
+    Ok(Json(backend.create(&db, limits).await?))
 }
 async fn database_upload_budget(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<crate::upload_budget::UploadStatus>> {
@@ -272,10 +301,11 @@ async fn database_upload_budget(
         return Err(Error::Unauthorized);
     }
     crate::engine::validate_db(&db)?;
-    Ok(Json(app.backend.database_upload_budget(&db).await?))
+    Ok(Json(backend.database_upload_budget(&db).await?))
 }
 async fn replenish_database_upload_budget(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
     Json(request): Json<crate::upload_budget::UploadRequest>,
@@ -285,32 +315,35 @@ async fn replenish_database_upload_budget(
     }
     crate::engine::validate_db(&db)?;
     Ok(Json(
-        app.backend
+        backend
             .replenish_database_upload_budget(&db, &request)
             .await?,
     ))
 }
 async fn upload_budget(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     headers: HeaderMap,
 ) -> Result<Json<Option<crate::upload_budget::UploadStatus>>> {
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.backend.upload_budget().await?))
+    Ok(Json(backend.upload_budget().await?))
 }
 async fn replenish_upload_budget(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     headers: HeaderMap,
     Json(request): Json<crate::upload_budget::UploadRequest>,
 ) -> Result<Json<crate::upload_budget::UploadResult>> {
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.backend.replenish_upload_budget(&request).await?))
+    Ok(Json(backend.replenish_upload_budget(&request).await?))
 }
 async fn create_protected(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
     Json(request): Json<crate::engine::CreateRequest>,
@@ -318,36 +351,40 @@ async fn create_protected(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.backend.create_protected(db, request).await?))
+    Ok(Json(backend.create_protected(db, request).await?))
 }
 async fn info(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<crate::engine::Info>> {
     let access = app.auth.access(bearer(&headers)?, &db, false)?;
-    Ok(Json(app.backend.info(&db, &access).await?))
+    Ok(Json(backend.info(&db, &access).await?))
 }
 async fn read(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
     Json(request): Json<ReadRequest>,
 ) -> Result<Json<crate::engine::ReadResult>> {
     let access = app.auth.access(bearer(&headers)?, &db, false)?;
-    Ok(Json(app.backend.read(&db, &request, &access).await?))
+    Ok(Json(backend.read(&db, &request, &access).await?))
 }
 async fn commit(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
     Json(request): Json<CommitRequest>,
 ) -> Result<Json<crate::engine::CommitResult>> {
     let access = app.auth.access(bearer(&headers)?, &db, true)?;
-    Ok(Json(app.backend.commit(db, request, access).await?))
+    Ok(Json(backend.commit(db, request, access).await?))
 }
 async fn access(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
     Json(request): Json<PolicyRequest>,
@@ -355,17 +392,18 @@ async fn access(
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.backend.change_policy(db, request).await?))
+    Ok(Json(backend.change_policy(db, request).await?))
 }
 async fn gc(
     State(app): State<Arc<App>>,
+    Extension(backend): Extension<Arc<dyn Backend>>,
     Path(db): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<crate::engine::GcResult>> {
     if !app.auth.is_admin(bearer(&headers)?) {
         return Err(Error::Unauthorized);
     }
-    Ok(Json(app.backend.gc(&db).await?))
+    Ok(Json(backend.gc(&db).await?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

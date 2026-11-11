@@ -136,6 +136,19 @@ cargo test --locked --test native_tables -- --ignored --exact native_tables_use_
 
 This uploads four immutable objects for 3,072 history rows and 1,025 newer rows, checks one-block point reads, bounded caching, merged ordered scans with deletion markers and cache-free reopening. It does not initialize a serving engine or publish a manifest. Remove all four objects' physical versions and the dedicated bucket, and revoke its temporary key after either outcome. The native index uses the existing Rust toolchain and kache configuration.
 
+For native cluster integration, `api::Cluster::open` takes a `Partitions` directory,
+`ClusterConfig`, one shared cache, an `Arc<Auth>` keyring and a Tokio watch receiver
+of peer socket addresses. Bind the listener before advertising its address. The
+caller supplies membership; the controller performs acquisition, recovery,
+placement and retry scheduling. Serve it through the ordinary `App`/`router`.
+Keep the layout fixed across restarts and membership changes. A peer list is a
+scheduling hint, never ownership authority. Reproduce the focused checks with
+`cargo test --locked --lib cluster::` and `cargo test --locked --lib layout_`.
+The disposable-provider controller fixture is
+`cargo test --locked --test checkpoint_cloud -- --ignored --exact native_http::membership_places_partitions_and_recovers_over_http`;
+use the provider environment and cleanup rules below. It accepts supplied local
+membership snapshots and does not qualify Kubernetes discovery.
+
 ## CI and publication
 
 The [release verification record](verification-results.md) links source commits, Woodpecker builds, artifact hashes, standalone checks and actual public-installer downloads.

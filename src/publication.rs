@@ -179,6 +179,7 @@ impl Published {
                     serde_json::to_string(&BudgetRoot {
                         upload_format: if partitioned { 6 } else { 5 },
                         directory: None,
+                        layout: None,
                     })?,
                 );
             }
@@ -189,6 +190,43 @@ impl Published {
         }
         bail!("publication directory initialization is contended; retry startup")
     }
+    pub(crate) async fn configure_layout(
+        &self,
+        layout: crate::providers::partitions::Layout,
+    ) -> anyhow::Result<()> {
+        layout.validate()?;
+        for _ in 0..8 {
+            let old = self.authority.read_fresh().await?;
+            anyhow::ensure!(
+                budgeted_format(&old.info) == Some(6),
+                "layout requires a partition directory"
+            );
+            root(&old.info)?;
+            let mut envelope: BudgetRoot =
+                serde_json::from_str(old.info.get(HEAD).context("missing partition root")?)?;
+            if let Some(existing) = envelope.layout {
+                anyhow::ensure!(
+                    existing == layout,
+                    "cluster layout differs; migration is required"
+                );
+                return Ok(());
+            }
+            anyhow::ensure!(
+                envelope.directory.is_none(),
+                "cluster layout requires an empty directory"
+            );
+            envelope.layout = Some(layout);
+            let mut info = old.info.clone();
+            info.insert(HEAD.into(), serde_json::to_string(&envelope)?);
+            info.insert("durable-db-probe".into(), Uuid::new_v4().to_string());
+            budget(&info)?;
+            if self.authority.replace(&old, info).await?.is_some() {
+                return Ok(());
+            }
+        }
+        bail!("cluster layout initialization is contended; retry startup")
+    }
+
     fn initialized(
         mut files: Arc<dyn Storage>,
         authority: Arc<dyn Authority>,
@@ -282,6 +320,8 @@ fn slot(key: &str) -> anyhow::Result<String> {
 struct BudgetRoot {
     upload_format: u8,
     directory: Option<Root>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<crate::providers::partitions::Layout>,
 }
 fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
     if let Some(format) = budgeted_format(info) {
@@ -291,6 +331,10 @@ fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
             envelope.upload_format == format,
             "unsupported budgeted root"
         );
+        if let Some(layout) = envelope.layout {
+            anyhow::ensure!(format == 6, "layout requires a partition directory");
+            layout.validate()?;
+        }
         if let Some(root) = &envelope.directory {
             root.validate()?;
         }
@@ -306,10 +350,14 @@ fn root(info: &BTreeMap<String, String>) -> anyhow::Result<Option<Root>> {
 }
 fn write_root(info: &mut BTreeMap<String, String>, root: Root) -> anyhow::Result<()> {
     let encoded = if let Some(format) = budgeted_format(info) {
-        serde_json::to_string(&BudgetRoot {
-            upload_format: format,
-            directory: Some(root),
-        })?
+        let mut envelope: BudgetRoot =
+            serde_json::from_str(info.get(HEAD).context("missing budgeted root")?)?;
+        anyhow::ensure!(
+            envelope.upload_format == format,
+            "unsupported budgeted root"
+        );
+        envelope.directory = Some(root);
+        serde_json::to_string(&envelope)?
     } else {
         serde_json::to_string(&root)?
     };

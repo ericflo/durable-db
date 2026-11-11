@@ -51,6 +51,20 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    pub(crate) fn validate(self) -> anyhow::Result<()> {
+        Projection::new(self.index)?;
+        Validator::new(0, self.validation)?;
+        ensure!(self.checkpoint_frames > 0, "invalid checkpoint interval");
+        ensure!(
+            (1..=super::record::MAX_RECEIPTS).contains(&self.receipt_window)
+                && self.receipt_window < self.index.receipts as u64,
+            "invalid live receipt window"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct Snapshot {
     name: Arc<str>,
@@ -118,13 +132,7 @@ pub struct Opening {
 }
 impl Opening {
     pub fn new(mut root: Root, limits: Limits, cache: Arc<Cache>) -> anyhow::Result<Self> {
-        Validator::new(0, limits.validation)?;
-        ensure!(limits.checkpoint_frames > 0, "invalid checkpoint interval");
-        ensure!(
-            (1..=super::record::MAX_RECEIPTS).contains(&limits.receipt_window)
-                && limits.receipt_window < limits.index.receipts as u64,
-            "invalid live receipt window"
-        );
+        limits.validate()?;
         let replay = root.replay()?;
         Ok(Self {
             control: Control::new(root),

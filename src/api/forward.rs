@@ -26,7 +26,7 @@ const MAX_RESPONSE: usize = 1024 * 1024;
 /// A failed attempt is returned to the caller, never automatically replayed.
 pub struct Forward {
     observation: Root,
-    auth: Auth,
+    auth: Arc<Auth>,
     peer: Mutex<Option<Arc<Peer>>>,
     permits: Semaphore,
 }
@@ -35,13 +35,17 @@ struct Peer {
     client: Client,
 }
 impl Forward {
-    pub fn new(connection: &Connection, auth: Auth, capacity: usize) -> Result<Self> {
+    pub fn new(
+        connection: &Connection,
+        auth: impl Into<Arc<Auth>>,
+        capacity: usize,
+    ) -> Result<Self> {
         if !(1..=128).contains(&capacity) {
             return Err(Error::Invalid("forwarding capacity must be 1..128".into()));
         }
         Ok(Self {
             observation: connection.root().map_err(anyhow::Error::from)?,
-            auth,
+            auth: auth.into(),
             peer: Mutex::new(None),
             permits: Semaphore::new(capacity),
         })

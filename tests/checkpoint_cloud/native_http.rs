@@ -55,14 +55,6 @@ impl Server {
     }
 }
 impl Http {
-    async fn forward(connection: &Connection) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        Self::start(
-            listener,
-            Arc::new(api::Forward::new(connection, auth(), 16).unwrap()),
-        )
-        .await
-    }
     async fn start(listener: tokio::net::TcpListener, backend: Arc<dyn api::Backend>) -> Self {
         let auth = auth();
         let token = auth.administrator_token(600).unwrap();
@@ -656,15 +648,115 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     std::fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }
 
+struct Node {
+    http: Http,
+    cluster: Arc<api::Cluster>,
+    address: std::net::SocketAddr,
+    members: tokio::sync::watch::Sender<Vec<std::net::SocketAddr>>,
+}
+impl Node {
+    async fn start(
+        directory: durable_db::providers::partitions::Partitions,
+        listener: tokio::net::TcpListener,
+        peers: Vec<std::net::SocketAddr>,
+        limits: UploadLimits,
+    ) -> Self {
+        let address = listener.local_addr().unwrap();
+        let (members, receiver) = tokio::sync::watch::channel(peers);
+        let cluster = api::Cluster::open(
+            directory,
+            api::ClusterConfig {
+                layout: durable_db::providers::partitions::Layout::new(2).unwrap(),
+                address,
+                limits: live::Limits {
+                    checkpoint_frames: 2,
+                    ..Default::default()
+                },
+                upload_limits: limits,
+                capacity: 16,
+            },
+            Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap()),
+            Arc::new(auth()),
+            receiver,
+        )
+        .await
+        .unwrap();
+        let http = Http::start(listener, cluster.clone()).await;
+        Self {
+            http,
+            cluster,
+            address,
+            members,
+        }
+    }
+    async fn stop(self) {
+        let weak = Arc::downgrade(&self.cluster);
+        self.http.stop().await;
+        drop(self.members);
+        drop(self.cluster);
+        tokio::time::timeout(Duration::from_secs(35), async {
+            while weak.upgrade().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("controller task and native owners stopped");
+    }
+}
+// Choose ephemeral peers which exercise both local and remote placement.
+fn preferred(id: u32, peers: &[std::net::SocketAddr]) -> std::net::SocketAddr {
+    use sha2::{Digest, Sha256};
+    *peers
+        .iter()
+        .max_by_key(|peer| {
+            let mut h = Sha256::new();
+            h.update(b"durable-db.placement.v1\0");
+            h.update(id.to_be_bytes());
+            h.update(peer.to_string().as_bytes());
+            (h.finalize(), **peer)
+        })
+        .unwrap()
+}
+async fn placed(nodes: &[&Node], peers: &[std::net::SocketAddr], names: &[String; 2]) {
+    use api::Backend;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let mut done = true;
+            for node in nodes {
+                done &= node.cluster.ready().await == peers.contains(&node.address);
+                for (id, name) in names.iter().enumerate() {
+                    let local = node
+                        .cluster
+                        .resolve(name)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .owner_incarnation()
+                        .is_some();
+                    done &= local == (preferred(id as u32, peers) == node.address);
+                }
+            }
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("native placement convergence");
+}
+
 #[tokio::test]
 #[ignore = "requires a fresh disposable B2/S3 bucket and report path"]
-async fn independent_partitions_serve_and_recover_over_http() {
+async fn membership_places_partitions_and_recovers_over_http() {
+    use api::Backend;
+    use durable_db::{auth::Access, providers::partitions::Layout};
     assert_eq!(std::env::var("DURABLE_DB_DISPOSABLE").as_deref(), Ok("1"));
     let bucket = std::env::var("DURABLE_DB_TEST_BUCKET").unwrap();
     assert!(bucket.starts_with("durable-db-test-"));
     let provider = std::env::var("DURABLE_DB_TEST_PROVIDER").unwrap();
     let report = std::env::var("DURABLE_DB_NATIVE_HTTP_REPORT").unwrap();
-    let namespace = format!("partitions-{}", Uuid::new_v4());
+    let namespace = format!("placement-{}", Uuid::new_v4());
     let shared = UploadLimits {
         bytes: 256 * 1024 * 1024,
         attempts: 4096,
@@ -674,14 +766,15 @@ async fn independent_partitions_serve_and_recover_over_http() {
         attempts: 512,
     };
     let started = Instant::now();
-    let partitions = connect(&provider, &bucket, &namespace)
+    let directory = connect(&provider, &bucket, &namespace)
         .await
         .into_partitions(shared, Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap()))
         .await
         .unwrap();
-    let a = partitions.partition(7, limits).await.unwrap();
-    let b = partitions.partition(u32::MAX, limits).await.unwrap();
-    // Check physical operation accounting before starting background workers.
+    let layout = Layout::new(2).unwrap();
+    directory.configure(layout).await.unwrap();
+    let a = directory.partition(0, limits).await.unwrap();
+    let b = directory.partition(1, limits).await.unwrap();
     let marker = format!("tables/{}", Uuid::new_v4().simple());
     a.objects()
         .put(&marker, Bytes::from_static(b"scope"))
@@ -692,47 +785,105 @@ async fn independent_partitions_serve_and_recover_over_http() {
         a.objects().get(&marker, 5).await.unwrap().unwrap().bytes,
         b"scope"[..]
     );
-    assert_eq!(
-        calls("object_get") - gets,
-        1,
-        "virtual scope counted a GET twice"
-    );
-    let before_control = controls();
+    assert_eq!(calls("object_get") - gets, 1);
+    let before = controls();
     a.authority().read().await.unwrap();
-    let after_control = controls();
+    let after = controls();
     assert_eq!(
-        std::array::from_fn::<_, 3, _>(|i| after_control[i] - before_control[i]),
-        [1, 1, 1],
-        "virtual control read must count only its underlying read/barrier/replacement"
+        std::array::from_fn::<_, 3, _>(|i| after[i] - before[i]),
+        [1, 1, 1]
     );
-    let first = Server::start(&a).await;
-    let gateway = Http::forward(&a).await;
-    let other = Server::start(&b).await;
-    let create = json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":10000}});
-    let commit = "/v1/databases/a/commit";
-    let read = "/v1/databases/a/read";
-    gateway.ok("PUT", "/v1/databases/a", &create).await;
-    other.ok("PUT", "/v1/databases/a", &create).await;
-    let mut other_write = write(0);
-    other_write["writes"][0]["value"] = json!("b3RoZXI=");
-    let first_write = write(0);
-    let writes = tokio::join!(
-        gateway.ok("POST", commit, &first_write),
-        other.ok("POST", commit, &other_write)
-    );
-    assert_eq!(writes.0["revision"], 1);
-    assert_eq!(writes.1["revision"], 1);
-    let before = gateway.ok("POST", read, &json!({"keys":["x"]})).await;
-    let independent = other.ok("POST", read, &json!({"keys":["x"]})).await;
-    assert_ne!(
-        before, independent,
-        "partitions with identical database names aliased"
-    );
+    let names: [String; 2] = std::array::from_fn(|id| {
+        (0..100)
+            .map(|n| format!("app-{n}"))
+            .find(|name| layout.partition(name).unwrap() == id as u32)
+            .unwrap()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let first = Node::start(directory.clone(), listener, vec![address], limits).await;
+    placed(&[&first], &[address], &names).await;
+    let listener = loop {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peers = [address, listener.local_addr().unwrap()];
+        if preferred(0, &peers) != preferred(1, &peers) {
+            break listener;
+        }
+    };
+    let second = Node::start(directory.clone(), listener, vec![address], limits).await;
+    placed(&[&first, &second], &[address], &names).await;
+    let mut old = Vec::new();
+    let mut values = Vec::new();
+    for name in &names {
+        let path = format!("/v1/databases/{name}");
+        second
+            .http
+            .ok(
+                "PUT",
+                &path,
+                &json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":10000}}),
+            )
+            .await;
+        first
+            .http
+            .ok("POST", &format!("{path}/commit"), &write(0))
+            .await;
+        values.push(
+            second
+                .http
+                .ok("POST", &format!("{path}/read"), &json!({"keys":["x"]}))
+                .await,
+        );
+        old.push(first.cluster.resolve(name).await.unwrap().unwrap());
+    }
     wait_checkpoint(&a, None).await;
     wait_checkpoint(&b, None).await;
-
-    // Fresh transport, cache and local upload credit. The first server stays
-    // alive; it must be fenced while the other partition continues serving.
+    let peers = [first.address, second.address];
+    first.members.send_replace(peers.to_vec());
+    second.members.send_replace(peers.to_vec());
+    placed(&[&first, &second], &peers, &names).await;
+    for (id, name) in names.iter().enumerate() {
+        let node = if preferred(id as u32, &peers) == first.address {
+            &first
+        } else {
+            &second
+        };
+        let current = node.cluster.resolve(name).await.unwrap().unwrap();
+        if node.address == second.address {
+            assert_ne!(current.owner_incarnation(), old[id].owner_incarnation());
+            assert!(old[id].info(name, &Access::Administrator).await.is_err());
+        } else {
+            assert_eq!(current.owner_incarnation(), old[id].owner_incarnation());
+        }
+        let path = format!("/v1/databases/{name}");
+        assert_eq!(
+            node.http
+                .ok("POST", &format!("{path}/read"), &json!({"keys":["x"]}))
+                .await,
+            values[id]
+        );
+        assert_eq!(
+            node.http
+                .ok("POST", &format!("{path}/commit"), &write(0))
+                .await["replayed"],
+            true
+        );
+    }
+    drop(old);
+    first.members.send_replace(vec![second.address]);
+    second.members.send_replace(vec![second.address]);
+    placed(&[&first, &second], &[second.address], &names).await;
+    for name in &names {
+        assert_eq!(
+            second
+                .http
+                .ok("POST", &format!("/v1/databases/{name}/commit"), &write(1))
+                .await["revision"],
+            2
+        );
+    }
+    first.stop().await;
+    second.stop().await;
     let reopened = connect(&provider, &bucket, &namespace)
         .await
         .into_partitions(
@@ -741,73 +892,46 @@ async fn independent_partitions_serve_and_recover_over_http() {
         )
         .await
         .unwrap();
-    let next_a = reopened
-        .partition(7, UploadLimits::default())
-        .await
-        .unwrap();
-    let second = Server::start(&next_a).await;
-    // A stale route fails exactly once. The caller's explicit retry discovers
-    // the successor; forwarding never silently replays a request.
-    assert_eq!(
-        gateway.call("POST", commit, &write(0)).await.0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(
-        gateway.ok("POST", commit, &write(0)).await["replayed"],
-        true
-    );
-    assert_eq!(
-        gateway.ok("POST", read, &json!({"keys":["x"]})).await,
-        before
-    );
-    assert_eq!(
-        first.call("POST", read, &json!({"keys":["x"]})).await.0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(
-        first.call("POST", commit, &write(0)).await.0,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
-    assert_eq!(
-        second.ok("POST", read, &json!({"keys":["x"]})).await,
-        before
-    );
-    assert_eq!(second.ok("POST", commit, &write(0)).await["replayed"], true);
-    assert_eq!(
-        other.ok("POST", read, &json!({"keys":["x"]})).await,
-        independent
-    );
-    assert_eq!(other.ok("POST", commit, &write(1)).await["revision"], 2);
-    next_a.authority().maintenance().await.unwrap();
-    assert_eq!(
-        second.ok("POST", read, &json!({"keys":["x"]})).await,
-        before
-    );
-    assert_eq!(other.ok("POST", commit, &write(1)).await["replayed"], true);
+    assert!(reopened.configure(Layout::new(4).unwrap()).await.is_err());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let cold = Node::start(
+        reopened.clone(),
+        listener,
+        vec![address],
+        UploadLimits::default(),
+    )
+    .await;
+    placed(&[&cold], &[address], &names).await;
+    for name in &names {
+        let path = format!("/v1/databases/{name}");
+        assert_eq!(
+            cold.http
+                .ok("POST", &format!("{path}/read"), &json!({"keys":["x"]}))
+                .await["values"][0],
+            "dHdv"
+        );
+        assert_eq!(
+            cold.http
+                .ok("POST", &format!("{path}/commit"), &write(1))
+                .await["replayed"],
+            true
+        );
+    }
     assert_eq!(reopened.upload_budget().await.unwrap().limits, shared);
+    a.authority().maintenance().await.unwrap();
     assert_eq!(
-        next_a
-            .objects()
-            .upload_budget()
-            .await
-            .unwrap()
-            .unwrap()
-            .limits,
+        a.objects().upload_budget().await.unwrap().unwrap().limits,
         limits
     );
-    let evidence = json!({
-        "seconds": started.elapsed().as_secs_f64(),
-        "partitions": [7, u32::MAX], "simultaneous_http_servers": 4,
-        "cached_forwarding": true, "stale_route_refused": true, "explicit_retry_discovers_successor": true,
-        "independent_values": true, "concurrent_writes": true,
-        "checkpoint_recovery": true, "old_owner_read_and_retry_refused": true,
-        "unmoved_partition_progress": true, "shared_metadata_collection": true,
-        "ceilings_preserved_on_reopen": true, "provider_metrics_count_once": true,
-        "scope": "Explicit Rust placement with owner discovery and one-hop HTTP forwarding; no automatic election, placement, Kubernetes scaling or performance SLO"
-    });
-    gateway.stop().await;
-    first.stop().await;
-    second.stop().await;
-    other.stop().await;
+    let seconds = started.elapsed().as_secs_f64();
+    cold.stop().await;
+    let evidence = json!({"seconds":seconds,"partitions":2,"maximum_live_servers":2,
+        "membership_sequence":[1,2,1,0,1],"automatic_acquisition_and_placement":true,
+        "unmoved_owner_preserved":true,"live_removed_owner_refused":true,
+        "checkpoint_and_cold_recovery":true,
+        "receipts_preserved":true,"layout_mismatch_refused":true,"ceilings_preserved":true,
+        "provider_metrics_count_once":true,"shared_metadata_collection":true,
+        "scope":"Loopback controller with supplied membership snapshots and B2/versioned-MinIO storage. Not Kubernetes discovery, AWS, CLI cutover or a performance SLO."});
     std::fs::write(report, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }

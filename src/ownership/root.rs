@@ -83,7 +83,7 @@ pub struct Route {
     pub identity: Identity,
     pub address: SocketAddr,
 }
-fn valid_address(address: SocketAddr) -> Result<(), Error> {
+pub(crate) fn valid_address(address: SocketAddr) -> Result<(), Error> {
     if address.port() == 0
         || address.ip().is_unspecified()
         || address.ip().is_multicast()

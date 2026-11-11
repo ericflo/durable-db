@@ -221,3 +221,104 @@ async fn partition_stale_comparison_and_lost_publication_reply() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn layout_is_immutable_survives_publication_and_refuses_populated_directories() {
+    use crate::providers::partitions::Layout;
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    assert!(Layout::new(0).is_err());
+    assert!(Layout::new(1025).is_err());
+    let layout = Layout::new(8).unwrap();
+    directory.configure(layout).await.unwrap();
+    directory.configure(layout).await.unwrap();
+    assert!(directory.configure(Layout::new(4).unwrap()).await.is_err());
+    let partition = layout.partition("app").unwrap();
+    assert!(partition < layout.partitions());
+    assert!(layout.partition("../app").is_err());
+    let connection = directory.partition(partition, limits()).await.unwrap();
+    let _owner = acquire(&connection).await;
+    connection.authority().maintenance().await.unwrap();
+    directory.configure(layout).await.unwrap();
+    assert!(directory.configure(Layout::new(4).unwrap()).await.is_err());
+    let fresh = Provider::new();
+    let populated = super::partitions::directory(&fresh).await;
+    populated.partition(0, limits()).await.unwrap();
+    assert!(populated.configure(layout).await.is_err());
+    let wire: serde_json::Value = serde_json::from_str(
+        &provider.history.lock().unwrap().last().unwrap().info["durable-db-root"],
+    )
+    .unwrap();
+    assert_eq!(
+        wire["layout"],
+        serde_json::json!({"format":1,"partitions":8})
+    );
+}
+
+#[tokio::test]
+async fn concurrent_layout_installation_has_one_winner_and_lost_reply_is_recoverable() {
+    use crate::providers::partitions::Layout;
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let a = Layout::new(2).unwrap();
+    let b = Layout::new(4).unwrap();
+    let (a_result, b_result) = tokio::join!(directory.configure(a), directory.configure(b));
+    assert_ne!(a_result.is_ok(), b_result.is_ok());
+    let winner = if a_result.is_ok() { a } else { b };
+    let reopened = provider
+        .connection("test")
+        .into_partitions(
+            UploadLimits::default(),
+            Arc::new(Cache::new(0, None).unwrap()),
+        )
+        .await
+        .unwrap();
+    reopened.configure(winner).await.unwrap();
+    let fresh = Provider::new();
+    let directory = super::partitions::directory(&fresh).await;
+    fresh.lose_publication_reply.store(true, Ordering::SeqCst);
+    assert!(directory.configure(a).await.is_err());
+    directory.configure(a).await.unwrap();
+    assert!(directory.configure(b).await.is_err());
+}
+
+#[tokio::test]
+async fn a_publication_staged_before_layout_installation_preserves_the_winner() {
+    use crate::providers::partitions::Layout;
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    provider.pause_publication.store(true, Ordering::SeqCst);
+    let writer = directory.clone();
+    let pending = tokio::spawn(async move { writer.partition(0, limits()).await });
+    provider.entered.notified().await;
+    let layout = Layout::new(4).unwrap();
+    directory.configure(layout).await.unwrap();
+    provider.release.notify_one();
+    pending.await.unwrap().unwrap();
+    directory.configure(layout).await.unwrap();
+    assert!(directory.configure(Layout::new(2).unwrap()).await.is_err());
+}
+
+#[test]
+fn mapping_vectors_pin_the_persisted_hash_contract() {
+    use crate::providers::partitions::Layout;
+    assert_eq!(Layout::new(1).unwrap().partition("a").unwrap(), 0);
+    assert_eq!(Layout::new(1).unwrap().partition("my-app").unwrap(), 0);
+    assert_eq!(Layout::new(1).unwrap().partition("z_9").unwrap(), 0);
+    assert_eq!(Layout::new(1).unwrap().partition("a-b").unwrap(), 0);
+    assert_eq!(Layout::new(2).unwrap().partition("a").unwrap(), 1);
+    assert_eq!(Layout::new(2).unwrap().partition("my-app").unwrap(), 1);
+    assert_eq!(Layout::new(2).unwrap().partition("z_9").unwrap(), 1);
+    assert_eq!(Layout::new(2).unwrap().partition("a-b").unwrap(), 1);
+    assert_eq!(Layout::new(8).unwrap().partition("a").unwrap(), 5);
+    assert_eq!(Layout::new(8).unwrap().partition("my-app").unwrap(), 1);
+    assert_eq!(Layout::new(8).unwrap().partition("z_9").unwrap(), 7);
+    assert_eq!(Layout::new(8).unwrap().partition("a-b").unwrap(), 1);
+    assert_eq!(Layout::new(1024).unwrap().partition("a").unwrap(), 325);
+    assert_eq!(Layout::new(1024).unwrap().partition("my-app").unwrap(), 913);
+    assert_eq!(Layout::new(1024).unwrap().partition("z_9").unwrap(), 607);
+    assert_eq!(Layout::new(1024).unwrap().partition("a-b").unwrap(), 225);
+    let invalid: Layout = serde_json::from_str(r#"{"format":1,"partitions":0}"#).unwrap();
+    assert!(invalid.partition("a").is_err());
+    assert!(Layout::new(2).unwrap().partition("UPPERCASE").is_err());
+}
