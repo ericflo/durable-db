@@ -90,12 +90,29 @@ def main():
         return state
 
     def phase(name, **details):
+        acquisitions()
         report['phases'].append(dict(name=name,time_utc=utc(),**details))
         save()
         print(json.dumps(report['phases'][-1]),flush=True)
 
     def pods():
         return json.loads(kube('get','pods','-l','app=durable-db','-o','json'))['items']
+
+    def acquisitions():
+        # Preserve bounded progress from earlier pods before rolling deletion.
+        # Fixed fields only; provider messages may contain secrets or data.
+        samples = report.setdefault('acquisition_events', {})
+        for pod in pods():
+            name = pod['metadata']['name']
+            try:
+                log = kube('logs', name, '--tail=256').decode(errors='replace')
+                log = re.sub(r'\x1b\[[0-9;]*m', '', log)
+                samples[name] = [dict(time_utc=stamp, outcome=outcome,
+                    partition=int(partition), stage=stage, elapsed_ms=int(elapsed))
+                    for stamp, outcome, partition, stage, elapsed in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native acquisition (progress|failed).*?partition=(\d+)\s+stage="?(resident|budget|observe|claim|activate|select_journals|recover|serve|ready)"?\b.*?elapsed_ms=(\d+)', log)]
+            except subprocess.SubprocessError:
+                pass  # A disappearing pod must not prevent the failure report.
 
     def wait_replicas(count):
         deadline = time.monotonic()+240
@@ -306,16 +323,7 @@ def main():
             try:
                 current=pods()
                 report['pod_states']=[dict(name=p['metadata']['name'],node=p['spec'].get('nodeName'),phase=p['status']['phase'],conditions=p['status'].get('conditions',[]),containers=[dict(name=c['name'],restart_count=c['restartCount'],state=c['state'],last_state=c.get('lastState')) for c in p['status'].get('containerStatuses',[])]) for p in current]
-                # Fixed acquisition fields only: never persist arbitrary log
-                # messages, provider errors, credentials or application data.
-                report['acquisition_failures']={}
-                for pod in current:
-                    name=pod['metadata']['name']
-                    log=kube('logs',name,'--tail=200').decode(errors='replace')
-                    log=re.sub(r'\x1b\[[0-9;]*m','',log)
-                    report['acquisition_failures'][name]=[
-                        dict(partition=int(partition),stage=stage)
-                        for partition,stage in re.findall(r'native acquisition failed.*?partition=(\d+)\s+stage="?(resident|budget|observe|claim|activate|select_journals|recover|serve)\b',log)]
+                acquisitions()
                 events=json.loads(kube('get','events','-o','json'))['items']
                 report['event_reasons']=[dict(reason=e.get('reason'),message=e.get('message')) for e in events]
             except Exception:pass

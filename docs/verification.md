@@ -794,3 +794,8 @@ The existing real HTTP controller regression also requires epoch one after the
 lost claim response: serving cannot silently switch to a new owner. The updated
 acquisition model and the inherited registration checks retain every negative
 control. These are component safety/recovery checks, not a cloud progress result.
+
+Acquisition logs include fixed stage names and elapsed milliseconds from each
+attempt; these diagnostics never grant ownership. The existing Kubernetes
+harness captures bounded, allowlisted samples at phase boundaries and on failure,
+so rolling deletion does not erase every earlier successful handoff measurement.

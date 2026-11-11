@@ -275,7 +275,17 @@ impl Cluster {
         Ok(acquired)
     }
     async fn acquire(&self, id: u32, connection: &Connection) -> anyhow::Result<Native> {
+        let started = std::time::Instant::now();
+        let progress = |stage: &'static str| {
+            tracing::info!(
+                partition = id,
+                stage,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "native acquisition progress"
+            );
+        };
         let mut stage = "resident";
+        progress(stage);
         let result = async {
             let reservation = self
                 .residents
@@ -283,6 +293,7 @@ impl Cluster {
                 .try_acquire_owned()
                 .context("retired owners still occupy the resident budget")?;
             stage = "budget";
+            progress(stage);
             connection
                 .initialize_upload_budget(self.config.upload_limits)
                 .await?;
@@ -292,8 +303,10 @@ impl Cluster {
             for _ in 0..4 {
                 let mut root = connection.root()?.advertise(self.config.address)?;
                 stage = "observe";
+                progress(stage);
                 let observed = root.observe().await?;
                 stage = "claim";
+                progress(stage);
                 let claim = root.claim(observed)?;
                 let outcome = root.finish(claim.execute().await)?;
                 if matches!(outcome, Outcome::Conflict) {
@@ -303,14 +316,18 @@ impl Cluster {
                     .await
                     .context("ownership claim unconfirmed")?;
                 stage = "activate";
+                progress(stage);
                 root.activate_confirmed(&mut validations).await?;
                 stage = "select_journals";
+                progress(stage);
                 root.select_journals().await?;
                 stage = "recover";
+                progress(stage);
                 let owner = Opening::new(root, self.limits, self.cache.clone())?
                     .recover()
                     .await?;
                 stage = "serve";
+                progress(stage);
                 return Native::start_reserved(
                     owner,
                     self.config.capacity,
@@ -335,7 +352,15 @@ impl Cluster {
             .into_iter()
             .find(|message| error.chain().any(|cause| cause.to_string() == *message))
             .unwrap_or("provider_or_validation");
-            tracing::warn!(partition = id, stage, reason, "native acquisition failed");
+            tracing::warn!(
+                partition = id,
+                stage,
+                reason,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "native acquisition failed"
+            );
+        } else {
+            progress("ready");
         }
         result
     }
