@@ -84,6 +84,12 @@ impl Partitions {
     /// Open a partition without acquiring it. Existing ceilings/counters are
     /// preserved. IDs are stable u32 values, not a bound on database count.
     pub async fn partition(&self, id: u32, limits: UploadLimits) -> anyhow::Result<Connection> {
+        let connection = self.lazy_partition(id)?;
+        connection.initialize_upload_budget(limits).await?;
+        Ok(connection)
+    }
+
+    pub(crate) fn lazy_partition(&self, id: u32) -> anyhow::Result<Connection> {
         let name = format!("{id:08x}");
         let files = Arc::new(Files {
             directory: self.directory.clone(),
@@ -100,7 +106,7 @@ impl Partitions {
         // The shared directory instruments the actual provider calls. Counting
         // this virtual register/object scope again would inflate cost metrics.
         connection.measured = true;
-        connection.with_upload_budget(limits).await
+        connection.with_lazy_upload_budget()
     }
 
     /// Install a mapping only in an empty directory, or verify the existing

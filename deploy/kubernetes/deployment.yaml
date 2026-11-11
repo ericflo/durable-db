@@ -41,6 +41,11 @@ spec:
             - --disk-cache=/cache/pages
             - --disk-cache-mib=128
             - --concurrency=8
+          env:
+            - name: DURABLE_DB_ADVERTISE_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.podIP}
+            - {name: DURABLE_DB_DISCOVERY_SERVICE, value: durable-db-peers}
           envFrom:
             - secretRef: {name: durable-db-storage}
           ports:
@@ -49,7 +54,7 @@ spec:
             requests: {cpu: 250m, memory: 192Mi}
             limits: {cpu: "2", memory: 768Mi}
           startupProbe:
-            httpGet: {path: /health/ready, port: http}
+            httpGet: {path: /health/live, port: http}
             failureThreshold: 30
             periodSeconds: 5
           readinessProbe:

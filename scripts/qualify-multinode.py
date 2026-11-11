@@ -54,7 +54,7 @@ def main():
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   workload_sha256=hashlib.sha256(Path('scripts/cluster-workload.mjs').read_bytes()).hexdigest(),
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
-                                     memory_cache_mib=8, disk_cache=False, maintenance_seconds=60,
+                                     memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      upload_budget=dict(bytes=1073741824, attempts=100000),
                                      steady_seconds=args.steady_seconds, memory_observation=args.observe_memory,
                                      maximum_write_intents=100000),
@@ -159,8 +159,9 @@ def main():
 
     policy = dict(apiVersion='networking.k8s.io/v1',kind='NetworkPolicy',metadata=dict(name='storage-client'),
                   spec=dict(podSelector=dict(matchLabels={'durable-db-role':'storage-client'}),policyTypes=['Ingress','Egress'],
-                            ingress=[dict(**{'from':[dict(podSelector=dict(matchLabels={'app':'durable-db-runner'}))]},ports=[dict(protocol='TCP',port=7654)])],
+                            ingress=[dict(**{'from':[dict(podSelector=dict(matchLabels={'app':'durable-db-runner'})),dict(podSelector=dict(matchLabels={'app':'durable-db'}))]},ports=[dict(protocol='TCP',port=7654)])],
                             egress=[dict(ports=[dict(protocol='UDP',port=53),dict(protocol='TCP',port=53)]),
+                                    dict(to=[dict(podSelector=dict(matchLabels={'app':'durable-db'}))],ports=[dict(protocol='TCP',port=7654)]),
                                     dict(to=[dict(ipBlock=dict(cidr='0.0.0.0/0'))],ports=[dict(protocol='TCP',port=443)])]))
 
     def provider_probe(expect_allowed):
@@ -270,7 +271,7 @@ def main():
         kube('rollout','restart','deployment/durable-db')
         kube('rollout','status','deployment/durable-db','--timeout=240s',timeout=270)
         phase('rolling-replacement',placement=route(wait_replicas(6)),writes_acknowledged=progress())
-        restricted=json.loads(json.dumps(policy));restricted['spec']['egress']=restricted['spec']['egress'][:1]
+        restricted=json.loads(json.dumps(policy));restricted['spec']['egress']=restricted['spec']['egress'][:-1]
         kube('apply','-f','-',body=restricted)
         phase('provider-partition-start',probe=provider_probe(False))
         time.sleep(40)

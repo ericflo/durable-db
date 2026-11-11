@@ -101,16 +101,7 @@ impl Native {
         maintenance: Duration,
         reservation: Option<OwnedSemaphorePermit>,
     ) -> Result<Self> {
-        if !(Duration::from_secs(1)..=Duration::from_secs(86400)).contains(&maintenance) {
-            return Err(Error::Invalid(
-                "maintenance interval must be 1 second..1 day".into(),
-            ));
-        }
-        if !(1..=128).contains(&capacity) {
-            return Err(Error::Invalid(
-                "native request capacity must be 1..128".into(),
-            ));
-        }
+        Self::validate(capacity, maintenance)?;
         owner.check()?;
         let incarnation = owner.identity().incarnation;
         let cache = owner.cache();
@@ -137,6 +128,19 @@ impl Native {
             running,
             worker,
         })
+    }
+    pub(super) fn validate(capacity: usize, maintenance: Duration) -> Result<()> {
+        if !(Duration::from_secs(1)..=Duration::from_secs(86400)).contains(&maintenance) {
+            return Err(Error::Invalid(
+                "maintenance interval must be 1 second..1 day".into(),
+            ));
+        }
+        if !(1..=128).contains(&capacity) {
+            return Err(Error::Invalid(
+                "native request capacity must be 1..128".into(),
+            ));
+        }
+        Ok(())
     }
     fn check(&self) -> Result<()> {
         if self.running.load(Ordering::Acquire) {

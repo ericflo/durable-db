@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.22.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.23.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -77,7 +77,7 @@ your app ──HTTPS──▶ API server (bounded cache) ──┐
                                                         conditional writes
 ```
 
-- **Immutable data, conditional authority.** Commits never overwrite data: new bytes go into fresh, uniquely named objects. Authority changes only through conditional writes (`If-Match` on S3, `ifRevisionIs` on B2). When two commits race from the same revision, one wins and the other gets `409`.
+- **Immutable journals, owned partitions.** Each partition orders transactions and uploads immutable journal frames. Ownership and checkpoints publish through conditional writes (`If-Match` on S3, `ifRevisionIs` on B2). Responses validate a fresh writer permit; competing commits from one database revision cannot both succeed.
 - **Caches can be lost.** Servers keep bounded memory and disk caches and rebuild everything else from object storage. Cached bytes are verified by SHA-256. Losing a cache costs time, never data.
 - **Uncertain writes have an answer.** A stored receipt returns the original result to an identical retry, and the old revision check stops a second application.
 - **No clocks or leases in cleanup.** Garbage collection lists candidates, fences the state with a conditional write, and only then deletes. Pod-local locks, clocks, caches and Kubernetes leases never decide what is safe to delete.
@@ -86,24 +86,28 @@ On a laptop, the same API runs over a local directory held by an exclusive OS lo
 
 ## Run on S3 or B2
 
-Every server gets the same bucket, prefix and administrator signing key. The released cloud CLI needs no peer discovery, quorum, attached volume or distributed lease. Removing every server stops availability but leaves the database in the bucket; starting one restores service.
+Every server gets the same bucket, prefix and administrator signing key. Cloud serving uses native owned partitions. Kubernetes supplies membership through a headless Service; no attached volume, separate coordinator or clock-based lease is required. Removing every server stops availability but leaves the database in the bucket; starting one restores service.
 
 ```sh
 # S3: credentials come from workload identity or the provider's environment.
 export AWS_REGION=us-east-1
-durable-db serve --listen 0.0.0.0:7654 --bucket my-private-bucket \
-  --admin-key-file /run/secrets/admin.key --memory-cache-mib 64
+durable-db serve --bucket my-private-bucket \
+  --admin-key-file /run/secrets/admin.key \
+  --upload-budget-bytes 1073741824 --upload-budget-attempts 100000
 
 # B2: a dedicated bucket and a scoped application key.
 export B2_APPLICATION_KEY_ID=... B2_APPLICATION_KEY=...
-durable-db serve --listen 0.0.0.0:7654 --b2-bucket my-private-bucket \
-  --admin-key-file /run/secrets/admin.key
+durable-db serve --b2-bucket my-private-bucket \
+  --admin-key-file /run/secrets/admin.key \
+  --upload-budget-bytes 1073741824 --upload-budget-attempts 100000
 ```
+
+These commands run one cloud process on loopback. For multiple processes, use the Kubernetes manifests or configure `--discovery-service` and `--advertise-ip`. Keep the partition layout fixed. Earlier cloud formats require export with the previous binary and restore into a fresh namespace.
 
 S3-compatible providers must supply atomic `If-Match`/`If-None-Match` writes, durable immutable uploads and ordered listings. A startup probe refuses providers that accept stale conditional writes, but it cannot establish the whole provider contract. B2 and S3 share one publication implementation. Upgrade every server before enabling protected databases or a new signing keyring.
 
 > [!IMPORTANT]
-> Cluster mode is not fast yet. Its shared publication path serializes writes within a bucket, and the first [B2 contention benchmark](docs/verification-results.md#b2-contention-baseline-release-gate-failed) failed its progress gate. The [owned-partition design](docs/design-owned-partitions.md) replaces it with the native engine already serving local mode.
+> The native cloud path removes bucket-wide conditional publication from ordinary data operations. Reads still require a fresh permit GET. Its production performance and failure envelope remain unqualified; historical shared-engine benchmarks do not describe this replacement.
 
 [Deployment](docs/deployment.md) covers Kubernetes manifests in `deploy/kubernetes/`, request budgets and key rotation. [B2](docs/b2.md) and [upload admission](docs/design-upload-admission.md) cover provider details and durable spending limits.
 
@@ -135,10 +139,10 @@ This is the contract the first production release must qualify:
 | State | Today |
 | --- | --- |
 | **Ready to try** | Local mode on the native engine: one process, one directory, automatic checkpoints, cleanup and crash recovery. The HTTP API with scoped, revocable tokens and per-database quotas. The TypeScript SDK. Consistent export and resumable restore. |
-| **Experimental** | Cluster mode on S3 and B2. It passes fault-injection, real-provider and Kubernetes scaling tests but does not meet its performance targets. Native owned partitions are replacing it. Namespace upload ceilings in cloud CLI mode; per-database admission and maintenance funding in the experimental native library. |
+| **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) identifies the remaining work, its rough size and what can wait until after 1.0. The native library maps databases to fixed partitions and automatically acquires, recovers and places them from membership updates, using clock-independent permits. Kubernetes discovery, process-wide resource budgets and the cloud CLI cutover come next; native end-to-end performance remains unqualified. Each gate closes only with reproducible evidence. Release-by-release changes and their evidence are in [verification results](docs/verification-results.md); format compatibility and upgrades are in [backup and restore](docs/recovery.md#local-format-upgrades).
+The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) identifies the remaining work, its rough size and what can wait until after 1.0. The cloud CLI maps databases to fixed partitions and automatically acquires, recovers and places them from DNS membership, using clock-independent permits. Resident limits follow owners through retirement. Native deployment, failure and performance qualification is the next gate. Each gate closes only with reproducible evidence. Release-by-release changes and their evidence are in [verification results](docs/verification-results.md); format compatibility and upgrades are in [backup and restore](docs/recovery.md#local-format-upgrades).
 
 ## Verification
 

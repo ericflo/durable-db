@@ -40,6 +40,20 @@ pub struct ClusterConfig {
     pub limits: Limits,
     pub upload_limits: UploadLimits,
     pub capacity: usize,
+    pub maintenance: Duration,
+}
+impl ClusterConfig {
+    /// Validate resource/placement settings before connecting to storage.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.layout.validate()?;
+        self.limits
+            .share(self.layout.partitions() as usize)
+            .context("resident allowance is too small for the partition layout")?;
+        self.upload_limits.validate()?;
+        crate::ownership::root::valid_address(self.address)?;
+        Native::validate(self.capacity, self.maintenance)?;
+        Ok(())
+    }
 }
 struct Partition {
     connection: Connection,
@@ -68,19 +82,13 @@ impl Cluster {
         auth: Arc<Auth>,
         mut members: watch::Receiver<Vec<SocketAddr>>,
     ) -> anyhow::Result<Arc<Self>> {
-        config.layout.validate()?;
+        config.validate()?;
         let limits = config.limits.share(config.layout.partitions() as usize)?;
-        config.upload_limits.validate()?;
-        crate::ownership::root::valid_address(config.address)?;
-        ensure!(
-            (1..=128).contains(&config.capacity),
-            "cluster capacity must be 1..128"
-        );
         membership(&members.borrow())?;
         directory.configure(config.layout).await?;
         let mut partitions = Vec::new();
         for id in 0..config.layout.partitions() {
-            let connection = directory.partition(id, config.upload_limits).await?;
+            let connection = directory.lazy_partition(id)?;
             let forward = Arc::new(Forward::new(&connection, auth.clone(), config.capacity)?);
             partitions.push(Partition {
                 connection,
@@ -195,6 +203,9 @@ impl Cluster {
             .clone()
             .try_acquire_owned()
             .context("retired owners still occupy the resident budget")?;
+        connection
+            .initialize_upload_budget(self.config.upload_limits)
+            .await?;
         // A bootstrap upload grant can invalidate a captured comparison. Only
         // definite conflicts get a fresh attempt here; uncertainty returns.
         for _ in 0..4 {
@@ -218,7 +229,7 @@ impl Cluster {
             return Native::start_reserved(
                 owner,
                 self.config.capacity,
-                Duration::from_secs(60),
+                self.config.maintenance,
                 Some(reservation),
             )
             .map_err(anyhow::Error::from);

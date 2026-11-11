@@ -90,16 +90,30 @@ impl Connection {
     /// objects from this connection, including bootstrap registrations, are
     /// charged before PUT. Unused local credit is lost on connection loss.
     /// Existing unbudgeted/legacy namespaces require a separate migration.
-    pub async fn with_upload_budget(mut self, limits: UploadLimits) -> anyhow::Result<Self> {
+    pub async fn with_upload_budget(self, limits: UploadLimits) -> anyhow::Result<Self> {
+        let connection = self.with_lazy_upload_budget()?;
+        connection.initialize_upload_budget(limits).await?;
+        Ok(connection)
+    }
+
+    // A controller must expose administrative refill even when creating the
+    // first partition record is unfunded. Attach admission now, initialize later.
+    pub(crate) fn with_lazy_upload_budget(mut self) -> anyhow::Result<Self> {
         anyhow::ensure!(!self.budgeted, "connection already has an upload budget");
         let authority = self.authority();
-        crate::upload_budget::initialize_native(&authority, &self.prefix, limits).await?;
         self.files = Arc::new(crate::upload_budget::Files {
             inner: self.files,
             allocator: Arc::new(crate::upload_budget::Allocator::new(authority)),
         });
         self.budgeted = true;
         Ok(self)
+    }
+    pub(crate) async fn initialize_upload_budget(
+        &self,
+        limits: UploadLimits,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(self.budgeted, "connection has no upload admission");
+        crate::upload_budget::initialize_native(&self.authority(), &self.prefix, limits).await
     }
 
     /// Raw observations may be stale. A successful replacement is durable, but

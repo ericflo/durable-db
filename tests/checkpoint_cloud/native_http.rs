@@ -674,6 +674,7 @@ impl Node {
                 },
                 upload_limits: limits,
                 capacity: 16,
+                maintenance: Duration::from_secs(60),
             },
             Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap()),
             Arc::new(auth()),

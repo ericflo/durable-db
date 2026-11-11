@@ -1,6 +1,6 @@
 # Owned partitions and durable log batches
 
-**Status: native local CLI serving shipped; cloud cutover and cluster qualification remain open.** Local mode uses exclusive filesystem ownership. Cloud mode still uses the shared publication engine. The native library now uses timing-independent ownership; qualification on the existing Kubernetes hosts remains required, and a restricted compute profile is not an acceptable first-production requirement.
+**Status: native local and cloud CLI serving are integrated; production qualification remains open.** Local mode uses exclusive filesystem ownership. Cloud mode uses clock-independent permits, fixed database mapping, DNS membership, owner forwarding and bounded resident state. Qualification on the existing Kubernetes hosts remains required; a restricted compute profile is not an acceptable first-production requirement.
 
 ## Why the current engine must change
 
@@ -51,7 +51,7 @@ The shared upload ceiling covers both control publication and partition data. Pe
 
 `Root::advertise` publishes an address with a fresh ownership incarnation. `api::Forward` discovers that route, caches it and forwards one bounded request. The destination checks the incarnation, tenant policy and ordinary serving permission; a stale address cannot select another owner. A failed request returns to the caller, whose explicit retry refreshes the route. [Routing checks and limitations](verification.md#owner-discovery-and-forwarding) include live B2/MinIO takeover.
 
-`api::Cluster` accepts membership snapshots and automatically reconciles placement. A fixed layout is installed before any partition entry; SHA-256 maps database names independently of membership. Rendezvous ranking chooses a preferred node. Only the existing conditional claim, revocation and recovery protocol can make it serve. Removing a placement drops its local serving entry; already admitted requests retain their selected backend and still validate its permit. Kubernetes discovery, process resource budgets and cloud CLI cutover remain. See the [partition verification scope](verification.md#independent-partition-control).
+`api::Cluster` accepts membership snapshots and automatically reconciles placement. A fixed layout is installed before any partition entry; SHA-256 maps database names independently of membership. Rendezvous ranking chooses a preferred node. Only the existing conditional claim, revocation and recovery protocol can make it serve. Removing a placement drops its local serving entry; already admitted requests retain their selected backend and still validate its permit. `api::Membership` supplies DNS snapshots to the cloud CLI; resident reservations follow retired owners and I/O. Deployment and performance qualification remain. See the [partition verification scope](verification.md#independent-partition-control).
 
 ### Revocable writer permits
 
@@ -156,7 +156,7 @@ After a confirmed claim, activation follows the durable registration chain and p
 
 The native HTTP adapter prepares consistent reads and contiguous durable results before a fresh uncached permit GET. It releases a sealed group only on matching positive bytes. Root identity alone is a structural admission check, never serving permission. The controller retains the local OS guard instead of creating permits for local directories. PID changes refuse service in both modes.
 
-Remote formats `owned-candidate-23` (budgeted) and `owned-candidate-23-unbudgeted` reject older timed writers. Local format 15 remains compatible. Namespace, epoch, incarnation, phase, catalog and checkpoint remain bound in the same B2-bounded record; reserved former timing fields have fixed encoding values. The clock adapter, interval arithmetic, renewal worker and logical startup clock have been deleted. Owner discovery and single-hop forwarding now reuse that record. The library controller now supplies database mapping and membership-driven election/placement. Kubernetes discovery, sustained provider qualification and full composition remain open.
+Remote formats `owned-candidate-23` (budgeted) and `owned-candidate-23-unbudgeted` reject older timed writers. Local format 15 remains compatible. Namespace, epoch, incarnation, phase, catalog and checkpoint remain bound in the same B2-bounded record; reserved former timing fields have fixed encoding values. The clock adapter, interval arithmetic, renewal worker and logical startup clock have been deleted. Owner discovery and single-hop forwarding now reuse that record. The library controller now supplies database mapping and membership-driven election/placement. DNS discovery and the native cloud CLI are integrated; sustained provider qualification and full composition remain open.
 
 ## Durable journal registration
 
@@ -230,11 +230,11 @@ These are raw object operations from the development host to B2 `us-west-002`, n
 
 This demonstrates useful provider concurrency and supports investigating batched independent publication. It does not establish the throughput of a replacement database. For a lightly loaded database, an individual durable write still waits for object storage; Rust and batching cannot remove that floor. Current native warm reads still require a fresh permit GET, although they avoid the bucket-wide conditional update. Its latency and response grouping must meet the declared workload targets.
 
-## Next implementation gate
+## Next qualification gate
 
-The first provider experiment passes, with a significant measured GET latency floor. The extended registration/acquisition model now checks complete ancestor revocation through three competing claimants, including an intermediate claimant that stops before revocation. Next bind those model boundaries to native serving: even a successor that crashes before revocation must leave all possibly live ancestors discoverable. Selection and activation must remain immutable under repeated takeover, abandoned control calls and concurrent collection. Failed creation must not leak a publishable identity, and permit collection must not race publication or resurrect permission. Keep these checks small and adversarial.
+The controller, DNS membership, resident budgets and cloud CLI are integrated. Qualify warm reads, independent databases, a resumed stale owner, return to one node and recovery after total compute loss on the existing hosts. Verify administrator refill while owner admission is exhausted. Measure actual B2 and AWS S3 behavior, RSS and performance before declaring production readiness.
 
-Connect the native cluster controller to Kubernetes membership discovery and the cloud CLI, with explicit process-wide resource budgets. Exercise warm reads, independent databases, group commit, a resumed stale owner, return to one node and recovery after total compute loss on the existing hosts. Qualify actual B2 and AWS S3 behavior and performance before declaring production readiness. Tenant isolation, bounded physical growth, retention and backups remain the [other production gates](production-readiness.md#remaining-production-gates-in-order).
+The bounded registration/acquisition and response models remain component arguments. Repeated takeover, abandoned control calls and concurrent collection still need composed reasoning and adversarial implementation checks. Tenant isolation, bounded physical growth, retention and backups remain the [other production gates](production-readiness.md#remaining-production-gates-in-order).
 
 ## Reproduce the raw provider experiment
 

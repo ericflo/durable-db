@@ -52,6 +52,29 @@ impl Default for Limits {
 }
 
 impl Limits {
+    /// Configure aggregate resident payload allowances (16 MiB..8 GiB).
+    /// Counts scale with the same budget. Journal bytes retain their 256 MiB
+    /// component ceiling. Cache, scratch, transport and allocator RSS are separate.
+    pub fn resident(bytes: usize) -> anyhow::Result<Self> {
+        ensure!(
+            (16 * 1024 * 1024..=8192usize * 1024 * 1024).contains(&bytes),
+            "resident allowance must be 16 MiB..8 GiB"
+        );
+        let mut limits = Self::default();
+        let scale = |n: usize| n * bytes / (100 * 1024 * 1024);
+        limits.index.databases = scale(limits.index.databases);
+        limits.index.versions = scale(limits.index.versions);
+        limits.index.value_bytes = scale(limits.index.value_bytes);
+        limits.index.receipts = scale(limits.index.receipts);
+        limits.index.receipt_bytes = scale(limits.index.receipt_bytes);
+        limits.validation.transactions = scale(limits.validation.transactions);
+        limits.validation.key_references = scale(limits.validation.key_references);
+        limits.validation.key_bytes = scale(limits.validation.key_bytes);
+        limits.journal =
+            journal::QueueLimits::new(16, scale(16 * 1024 * 1024).min(256 * 1024 * 1024))?;
+        limits.validate()?;
+        Ok(limits)
+    }
     /// Divide aggregate resident payload/count allowances across a fixed layout.
     /// Journal frame count, receipt window and checkpoint thresholds stay local.
     pub(crate) fn share(mut self, partitions: usize) -> anyhow::Result<Self> {

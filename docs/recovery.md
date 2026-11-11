@@ -32,7 +32,7 @@ This produces the same bounded, checksummed archive as HTTP export below. Use th
 
 ## Local format upgrades
 
-Managed native placement installs an immutable version-1 layout inside the format-6 directory root before any partition entry exists. It refuses populated manual directories and mismatched partition counts; there is no implicit resharding or migration. Older binaries reject the added envelope field. Local format 15 and the current legacy cloud CLI remain unchanged. Use a fresh experimental native namespace to adopt managed placement.
+Managed native placement installs an immutable version-1 layout inside the format-6 directory root before any partition entry exists. It refuses populated manual directories and mismatched partition counts; there is no implicit resharding or migration. Older binaries reject the added envelope field. Local format 15 remains unchanged. The native cloud CLI requires a fresh namespace when upgrading from the prior cloud publication engine: export using the prior binary, then restore into the new namespace. It refuses legacy formats rather than converting their authority in place. Back up and verify restore before switching endpoints.
 
 v0.20.0 adds format 6 for the native **partition directory library API**. It requires a fresh directory namespace and refuses legacy publication/native-root formats. It does not convert existing namespaces, change local format 15, or switch the cloud CLI. Each partition retains native format 23 inside its own control record and object scope. Partition IDs must stay stable; changing a database's mapping requires a transfer protocol, which is not yet implemented.
 

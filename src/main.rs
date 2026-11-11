@@ -1,15 +1,13 @@
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use durable_db::{
-    api::{App, RateLimits, router},
+    api::{App, Cluster, ClusterConfig, Membership, RateLimits, router},
     auth::Auth,
     cache::Cache,
-    engine::Engine,
     providers::b2::Native,
-    storage::Storage,
 };
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
     time::Duration,
@@ -32,51 +30,7 @@ enum Command {
         command: BackupCommand,
     },
     /// Start a local development database or a stateless B2/S3-backed server.
-    Serve {
-        #[arg(long, default_value = "127.0.0.1:7654", env = "DURABLE_DB_LISTEN")]
-        listen: SocketAddr,
-        #[arg(long, default_value = "./data", env = "DURABLE_DB_DATA")]
-        data: PathBuf,
-        #[arg(long, env = "DURABLE_DB_BUCKET")]
-        bucket: Option<String>,
-        /// Use B2 native bucket revision publication with B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY.
-        #[arg(long, env = "DURABLE_DB_B2_BUCKET", conflicts_with = "bucket")]
-        b2_bucket: Option<String>,
-        #[arg(long, default_value = "durable-db", env = "DURABLE_DB_PREFIX")]
-        prefix: String,
-        /// Initialize a fresh cloud namespace with this cumulative immutable-upload byte ceiling.
-        #[arg(
-            long,
-            env = "DURABLE_DB_UPLOAD_BUDGET_BYTES",
-            requires = "upload_budget_attempts"
-        )]
-        upload_budget_bytes: Option<u64>,
-        /// Cumulative immutable PUT attempt ceiling; authoritative once initialized.
-        #[arg(
-            long,
-            env = "DURABLE_DB_UPLOAD_BUDGET_ATTEMPTS",
-            requires = "upload_budget_bytes"
-        )]
-        upload_budget_attempts: Option<u64>,
-        #[arg(long, env = "DURABLE_DB_ADMIN_KEY_FILE")]
-        admin_key_file: Option<PathBuf>,
-        #[arg(long, default_value_t = 64, env = "DURABLE_DB_MEMORY_CACHE_MIB")]
-        memory_cache_mib: usize,
-        #[arg(long, env = "DURABLE_DB_DISK_CACHE")]
-        disk_cache: Option<PathBuf>,
-        #[arg(long, default_value_t = 1024, env = "DURABLE_DB_DISK_CACHE_MIB")]
-        disk_cache_mib: usize,
-        #[arg(long, default_value_t = 8, env = "DURABLE_DB_CONCURRENCY")]
-        concurrency: usize,
-        /// Per-principal, per-pod budget refill. A commit costs 5 units; other requests cost 1.
-        #[arg(long, default_value_t = RateLimits::DEFAULT_UNITS_PER_SECOND, env = "DURABLE_DB_REQUEST_UNITS_PER_SECOND")]
-        request_units_per_second: u32,
-        /// Maximum accumulated request units per principal, including the initial burst.
-        #[arg(long, default_value_t = RateLimits::DEFAULT_BURST_UNITS, env = "DURABLE_DB_REQUEST_BURST_UNITS")]
-        request_burst_units: u32,
-        #[arg(long, default_value_t = 60, env = "DURABLE_DB_MAINTENANCE_SECONDS")]
-        maintenance_seconds: u64,
-    },
+    Serve(Box<Serve>),
     /// Mint a scoped token offline. Keep the signing key on the service side.
     Token {
         #[arg(long, default_value = "./data/admin.key")]
@@ -115,6 +69,65 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+}
+
+#[derive(clap::Args)]
+struct Serve {
+    #[arg(long, default_value = "127.0.0.1:7654", env = "DURABLE_DB_LISTEN")]
+    listen: SocketAddr,
+    #[arg(long, default_value = "./data", env = "DURABLE_DB_DATA")]
+    data: PathBuf,
+    #[arg(long, env = "DURABLE_DB_BUCKET")]
+    bucket: Option<String>,
+    /// Use B2 native bucket revision publication with B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY.
+    #[arg(long, env = "DURABLE_DB_B2_BUCKET", conflicts_with = "bucket")]
+    b2_bucket: Option<String>,
+    #[arg(long, default_value = "durable-db", env = "DURABLE_DB_PREFIX")]
+    prefix: String,
+    /// Reachable cloud peer IP; defaults to a specific listen address.
+    #[arg(long, env = "DURABLE_DB_ADVERTISE_IP")]
+    advertise_ip: Option<IpAddr>,
+    /// Headless DNS service; omit only for a single cloud process.
+    #[arg(long, env = "DURABLE_DB_DISCOVERY_SERVICE")]
+    discovery_service: Option<String>,
+    /// Fixed cloud partition count (default 16); cannot change on reopen.
+    #[arg(long, env = "DURABLE_DB_PARTITIONS", value_parser = clap::value_parser!(u32).range(1..=1024))]
+    partitions: Option<u32>,
+    /// Aggregate native resident payload allowance, separate from cache/RSS (default 128 MiB).
+    #[arg(long, env = "DURABLE_DB_RESIDENT_MEMORY_MIB", value_parser = clap::value_parser!(u32).range(16..=8192))]
+    resident_memory_mib: Option<u32>,
+    /// Initialize a fresh cloud namespace with this cumulative immutable-upload byte ceiling.
+    #[arg(
+        long,
+        env = "DURABLE_DB_UPLOAD_BUDGET_BYTES",
+        requires = "upload_budget_attempts"
+    )]
+    upload_budget_bytes: Option<u64>,
+    /// Cumulative immutable PUT attempt ceiling; authoritative once initialized.
+    #[arg(
+        long,
+        env = "DURABLE_DB_UPLOAD_BUDGET_ATTEMPTS",
+        requires = "upload_budget_bytes"
+    )]
+    upload_budget_attempts: Option<u64>,
+    #[arg(long, env = "DURABLE_DB_ADMIN_KEY_FILE")]
+    admin_key_file: Option<PathBuf>,
+    #[arg(long, default_value_t = 64, env = "DURABLE_DB_MEMORY_CACHE_MIB")]
+    memory_cache_mib: usize,
+    #[arg(long, env = "DURABLE_DB_DISK_CACHE")]
+    disk_cache: Option<PathBuf>,
+    #[arg(long, default_value_t = 1024, env = "DURABLE_DB_DISK_CACHE_MIB")]
+    disk_cache_mib: usize,
+    #[arg(long, default_value_t = 8, env = "DURABLE_DB_CONCURRENCY")]
+    concurrency: usize,
+    /// Per-principal, per-pod budget refill. A commit costs 5 units; other requests cost 1.
+    #[arg(long, default_value_t = RateLimits::DEFAULT_UNITS_PER_SECOND, env = "DURABLE_DB_REQUEST_UNITS_PER_SECOND")]
+    request_units_per_second: u32,
+    /// Maximum accumulated request units per principal, including the initial burst.
+    #[arg(long, default_value_t = RateLimits::DEFAULT_BURST_UNITS, env = "DURABLE_DB_REQUEST_BURST_UNITS")]
+    request_burst_units: u32,
+    #[arg(long, default_value_t = 60, env = "DURABLE_DB_MAINTENANCE_SECONDS")]
+    maintenance_seconds: u64,
 }
 
 #[derive(Subcommand)]
@@ -241,40 +254,59 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        Command::Serve {
-            listen,
-            data,
-            bucket,
-            b2_bucket,
-            prefix,
-            upload_budget_bytes,
-            upload_budget_attempts,
-            admin_key_file,
-            memory_cache_mib,
-            disk_cache,
-            disk_cache_mib,
-            concurrency,
-            request_units_per_second,
-            request_burst_units,
-            maintenance_seconds,
-        } => {
+        Command::Serve(args) => {
+            let Serve {
+                listen,
+                data,
+                bucket,
+                b2_bucket,
+                prefix,
+                advertise_ip,
+                discovery_service,
+                partitions,
+                resident_memory_mib,
+                upload_budget_bytes,
+                upload_budget_attempts,
+                admin_key_file,
+                memory_cache_mib,
+                disk_cache,
+                disk_cache_mib,
+                concurrency,
+                request_units_per_second,
+                request_burst_units,
+                maintenance_seconds,
+            } = *args;
             if concurrency == 0
                 || concurrency > 128
                 || memory_cache_mib > 8192
                 || disk_cache_mib > 1024 * 1024
-                || maintenance_seconds == 0
+                || !(1..=86400).contains(&maintenance_seconds)
             {
                 bail!("invalid resource configuration");
             }
             let rate_limits = RateLimits::new(request_units_per_second, request_burst_units)?;
             let cluster = bucket.is_some() || b2_bucket.is_some();
+            if !cluster
+                && (advertise_ip.is_some()
+                    || discovery_service.is_some()
+                    || partitions.is_some()
+                    || resident_memory_mib.is_some())
+            {
+                bail!("native cluster settings require B2/S3 storage");
+            }
+            if discovery_service.is_some() && listen.port() == 0 {
+                bail!("DNS discovery requires a fixed listen port");
+            }
             let upload_limits = match (upload_budget_bytes, upload_budget_attempts) {
                 (Some(bytes), Some(attempts)) if cluster => {
                     let limits = durable_db::upload_budget::UploadLimits { bytes, attempts };
                     limits.validate()?;
                     Some(limits)
                 }
-                (None, None) => None,
+                (None, None) if !cluster => None,
+                (None, None) => bail!(
+                    "cloud serving requires --upload-budget-bytes and --upload-budget-attempts"
+                ),
                 _ => bail!("upload budgets require both ceilings and B2/S3 storage"),
             };
             let key_file = match admin_key_file {
@@ -291,66 +323,103 @@ async fn main() -> anyhow::Result<()> {
                     p
                 }
             };
-            let auth = Auth::new(&read_key_file(&key_file)?)?;
+            let auth = Arc::new(Auth::new(&read_key_file(&key_file)?)?);
             let cache = Arc::new(Cache::new(
                 memory_cache_mib * 1024 * 1024,
                 disk_cache.map(|p| (p, disk_cache_mib * 1024 * 1024)),
             )?);
-            let storage: Option<Arc<dyn Storage>> = if let Some(bucket) = b2_bucket {
-                Some(Arc::new(
-                    Native::connect_with_budget(&bucket, &prefix, upload_limits)
-                        .await
-                        .context("initialize B2 authority")?
-                        .with_cache(cache.clone()),
-                ))
-            } else if let Some(bucket) = bucket {
-                Some(Arc::new(
-                    durable_db::providers::s3::S3::connect_with_budget(
-                        &bucket,
-                        &prefix,
-                        upload_limits,
-                    )
-                    .await?
-                    .with_cache(cache.clone()),
-                ))
-            } else {
-                None
-            };
-            let engine = storage.map(|storage| Arc::new(Engine::new(storage, cache.clone())));
-            let backend: Arc<dyn durable_db::api::Backend> = if let Some(engine) = &engine {
-                engine.clone()
-            } else {
-                Arc::new(
-                    durable_db::api::open_local(
-                        data.join("store"),
+            let listener = tokio::net::TcpListener::bind(listen).await?;
+            let listen = listener.local_addr()?;
+            let (backend, membership): (Arc<dyn durable_db::api::Backend>, Option<Membership>) =
+                if cluster {
+                    let ip = advertise_ip.unwrap_or(listen.ip());
+                    anyhow::ensure!(
+                        !ip.is_unspecified(),
+                        "cloud wildcard listeners require --advertise-ip"
+                    );
+                    anyhow::ensure!(
+                        ip.is_ipv4() == listen.is_ipv4()
+                            && (listen.ip().is_unspecified() || listen.ip() == ip),
+                        "advertised IP must match the listen address/family"
+                    );
+                    let address = SocketAddr::new(ip, listen.port());
+                    let mut limits = durable_db::transactions::live::Limits::resident(
+                        resident_memory_mib.unwrap_or(128) as usize * 1024 * 1024,
+                    )?;
+                    limits.receipt_window = 128;
+                    let config = ClusterConfig {
+                        layout: durable_db::providers::partitions::Layout::new(
+                            partitions.unwrap_or(16),
+                        )?,
+                        address,
+                        limits,
+                        capacity: concurrency,
+                        maintenance: Duration::from_secs(maintenance_seconds),
+                        // Shared namespace admission is the effective operator ceiling.
+                        // Internal partition ledgers must not become unrefillable lower ceilings.
+                        upload_limits: durable_db::upload_budget::UploadLimits {
+                            bytes: (1 << 53) - 1,
+                            attempts: (1 << 53) - 1,
+                        },
+                    };
+                    config.validate()?;
+                    let membership = Membership::start(address, discovery_service)?;
+                    let connection = if let Some(bucket) = b2_bucket {
+                        Native::connect_storage(&bucket, &prefix)
+                            .await
+                            .context("initialize B2 transport")?
+                    } else {
+                        durable_db::providers::s3::S3::connect_storage(
+                            &bucket.expect("cloud provider selected"),
+                            &prefix,
+                        )
+                        .await?
+                    };
+                    let directory = connection
+                        .into_partitions(
+                            upload_limits.expect("cloud ceilings validated"),
+                            cache.clone(),
+                        )
+                        .await?;
+                    let backend = Cluster::open(
+                        directory,
+                        config,
                         cache,
-                        concurrency,
-                        Duration::from_secs(maintenance_seconds),
+                        auth.clone(),
+                        membership.subscribe(),
                     )
-                    .await?,
-                )
-            };
+                    .await?;
+                    (backend, Some(membership))
+                } else {
+                    (
+                        Arc::new(
+                            durable_db::api::open_local(
+                                data.join("store"),
+                                cache,
+                                concurrency,
+                                Duration::from_secs(maintenance_seconds),
+                            )
+                            .await?,
+                        ),
+                        None,
+                    )
+                };
             let app = Arc::new(App::with_rate_limits(
                 backend,
                 auth,
                 concurrency,
                 rate_limits,
             ));
-            let listener = tokio::net::TcpListener::bind(listen).await?;
-            tracing::info!(address = %listener.local_addr()?, cluster, "durable-db ready");
-            let maintenance = engine
-                .map(|engine| tokio::spawn(maintain(app.clone(), engine, maintenance_seconds)));
+            tracing::info!(address = %listen, cluster, "durable-db HTTP listener started");
             let shutdown_app = app.clone();
             axum::serve(listener, router(app))
                 .with_graceful_shutdown(async move {
                     shutdown().await;
                     shutdown_app.ready.store(false, Ordering::Relaxed);
+                    drop(membership);
                     tracing::info!("draining requests");
                 })
                 .await?;
-            if let Some(maintenance) = maintenance {
-                maintenance.abort();
-            }
         }
     }
     Ok(())
@@ -382,52 +451,6 @@ fn write_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
-}
-async fn maintain(app: Arc<App>, engine: Arc<Engine>, seconds: u64) {
-    let mut after = None;
-    loop {
-        // Jitter prevents every replica from fencing the same database simultaneously.
-        tokio::time::sleep(Duration::from_millis(
-            seconds.saturating_mul(1000) + rand::random::<u64>() % 1000,
-        ))
-        .await;
-        if !app.ready.load(Ordering::Relaxed) {
-            return;
-        }
-        let Ok(_permit) = app.permits.clone().try_acquire_owned() else {
-            continue;
-        };
-        if durable_db::metrics::measure(
-            durable_db::metrics::Operation::StorageMaintenance,
-            engine.maintain_storage(),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!("provider maintenance deferred; will retry on a later sweep");
-        }
-        match engine.databases(after.as_deref()).await {
-            Ok(dbs) => {
-                after = if dbs.len() == 64 {
-                    dbs.last().map(|d| format!("heads/{d}.json"))
-                } else {
-                    None
-                };
-                for db in dbs {
-                    if durable_db::metrics::measure(
-                        durable_db::metrics::Operation::DatabaseMaintenance,
-                        engine.maintain_database(&db),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        tracing::warn!("maintenance deferred; will retry on a later sweep");
-                    }
-                }
-            }
-            Err(_) => tracing::warn!("maintenance listing unavailable"),
-        }
-    }
 }
 async fn shutdown() {
     #[cfg(unix)]

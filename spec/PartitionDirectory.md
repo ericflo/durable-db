@@ -133,3 +133,25 @@ may delay placement, but cannot spawn an unbounded sequence of blocking lookups.
 The lookup loop ends with its lifetime handle. Timers, DNS TTLs, omission, stale
 answers and disagreement affect progress only. The existing layout and ownership
 models admit arbitrary membership and empty sets; no DNS lease becomes authority.
+
+## Cloud CLI cutover
+
+The cloud CLI selects this controller for both B2 and S3; local mode keeps its
+single-directory lock. Cloud startup requires a shared upload ceiling, validates
+layout/resource/discovery configuration before provider mutation, and advertises
+a reachable IP with the bound listener port. With DNS omitted it is single
+process only. Kubernetes supplies the pod IP and headless-service name.
+
+Partition connection construction performs no object initialization. The acquisition
+loop initializes each preferred partition only after reserving its resident slot.
+Fresh/partial namespaces at zero credit must still start administrative HTTP.
+
+The shared upload ledger is the effective operator ceiling and remains available
+through the administrative HTTP endpoint before owner readiness. Internal
+partition ceilings use the format maximum so they cannot become lower,
+unrefillable CLI limits; every physical upload still passes shared admission.
+Fresh native directories are required: prior publication-engine namespaces are
+refused, never implicitly rewritten. Export with the prior binary and restore
+into a new namespace. Maintenance uses native owner workers; the old cloud CLI
+serving/maintenance branch is removed. Shutdown closes discovery and drains HTTP;
+correctness does not depend on either action.

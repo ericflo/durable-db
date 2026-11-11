@@ -1,8 +1,8 @@
 # HTTP API
 
-This page describes v0.19.0. Local CLI serving uses the native backend. The cloud CLI retains the shared publication backend; clustered native serving remains an experimental library path gated on automatic election, routing and placement qualification.
+Local and cloud CLI serving use the native backend. Cloud membership, ownership and forwarding are integrated; production deployment and performance qualification remain open.
 
-Native protected creation also charges the target database's admission budget. Exhaustion returns `413 limit_exceeded`; identical retries reuse admission. Policy changes remain namespace-funded so tenant exhaustion cannot prevent credential revocation. This is an experimental native-library change, not a cloud CLI change.
+Native protected creation also charges the target database's admission budget. Exhaustion returns `413 limit_exceeded`; identical retries reuse admission. Policy changes remain namespace-funded so tenant exhaustion cannot prevent credential revocation. This also applies to cloud CLI serving.
 
 Administrator tokens from current `token --admin` are expiring `ddb_control_` capabilities. Token TTL defaults to one hour and is bounded to 30 days. See the [key rollout procedure](design-signing-rotation.md) before migrating control clients or rotating keys.
 
@@ -10,7 +10,7 @@ Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. K
 
 The shared router can also serve a recovered native owner through `api::Native::new(owner, capacity)` and `App::new`. This library path supports protected creation, info, reads, commits, tokens, and access-policy changes with the same authentication and request budgets. Its bounded server-owned worker continues accepted writes after a caller disconnects, pipelines immutable uploads outside the owner lock, resolves unknown PUT outcomes by exact GET, and retries checkpoint maintenance. Capacity bounds queued, executing and pending replies, including duplicate requests. Each HTTP commit currently occupies one journal frame; cross-request batching remains open.
 
-Native readiness and responses validate current ownership. Local serving retains the directory lock; remote native serving uses `api::Native::new(owner, capacity)` with a recovered owner and no clock or renewal task. Results are prepared before a fresh uncached permit GET; one validation can release a sealed group of durable replies. Missing/corrupt permission and provider errors refuse service. Automatic cloud election/routing and placement remain open. Native legacy POST creation and `/gc` return `501 unsupported_operation`; use protected PUT creation and automatic maintenance. Namespace upload ceilings and per-database admission are implemented. Maintenance collects obsolete budget/catalog metadata, covered journals, table/manifest objects and abandoned permits. Complete tenant cost attribution remains open. This is still experimental.
+Native readiness and responses validate current ownership. Local serving retains the directory lock; remote native serving uses `api::Native::new(owner, capacity)` with a recovered owner and no clock or renewal task. Results are prepared before a fresh uncached permit GET; one validation can release a sealed group of durable replies. Missing/corrupt permission and provider errors refuse service. Cloud election, routing and placement use the native controller and DNS membership. Native legacy POST creation and `/gc` return `501 unsupported_operation`; use protected PUT creation and automatic maintenance. Namespace upload ceilings and per-database admission are implemented. Maintenance collects obsolete budget/catalog metadata, covered journals, table/manifest objects and abandoned permits. Complete tenant cost attribution remains open. This is still experimental.
 
 ## Endpoints
 
@@ -21,7 +21,7 @@ Native readiness and responses validate current ownership. Local serving retains
 | `GET /v1/databases/{db}` | Revision, live key/byte usage, access policy, and limits |
 | `POST /v1/databases/{db}/read` | Atomic read of keys and/or ordered scans |
 | `POST /v1/databases/{db}/commit` | Revision-checked atomic writes and optional value checks |
-| `POST /v1/databases/{db}/gc` | Admin: one bounded maintenance sweep |
+| `POST /v1/databases/{db}/gc` | Returns `501`; native maintenance runs automatically |
 | `POST /v1/databases/{db}/access` | Admin: enable durable authorization, revoke a token ID, or rotate its generation |
 | `POST /v1/tokens` | Admin: mint a database-scoped token |
 | `GET /v1/storage/upload-budget` | Admin: authoritative cumulative upload ceilings and allocation, or `null` when unbudgeted |

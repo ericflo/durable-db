@@ -49,10 +49,10 @@
 
 <section class="band" aria-labelledby="status-title">
 <div class="wrap">
-<div class="section-head"><p class="eyebrow">Status</p><h2 id="status-title">Where it stands today</h2><p>Laptop use is the most complete path. Cluster mode works but does not yet meet its performance targets; a native serving path is replacing it. The <a href="production-readiness.html#remaining-production-gates-in-order">ordered production path</a> lists the remaining gates, their rough size and what can wait until after 1.0. The native library maps databases to fixed partitions and automatically acquires, recovers and places them from membership updates, using clock-independent permits and bounded forwarding. Kubernetes discovery, process-wide resource budgets and the cloud CLI cutover come next; native end-to-end performance remains unqualified.</p></div>
+<div class="section-head"><p class="eyebrow">Status</p><h2 id="status-title">Where it stands today</h2><p>Local and cloud serving now use the native engine. Production performance and failure qualification remain open. The <a href="production-readiness.html#remaining-production-gates-in-order">ordered production path</a> lists the remaining gates, their rough size and what can wait until after 1.0. The cloud CLI maps databases to fixed partitions and automatically acquires, recovers and places them from DNS membership, using clock-independent permits and bounded forwarding. Resident limits follow owners through retirement. Deployment, failure and performance qualification is the next gate.</p></div>
 <div class="status-grid">
 <article class="status-card"><h3><span class="dot dot-ready"></span>Ready to try</h3><ul><li>Local mode on the native engine: one process, one directory, automatic checkpoints, cleanup and crash recovery</li><li>The HTTP API with scoped, revocable tokens and per-database quotas</li><li>The TypeScript SDK with automatic conflict retries, linked from source while the repository is private</li><li>Consistent export and resumable restore</li></ul></article>
-<article class="status-card"><h3><span class="dot dot-experimental"></span>Experimental</h3><ul><li>Cluster mode on S3 and B2. It passes fault-injection, real-provider and Kubernetes scaling tests, but its shared publication path is too slow for the target workload</li><li><a href="design-owned-partitions.html">Owned partitions</a>, the native cluster serving path that replaces it</li><li>Namespace upload ceilings in cloud CLI mode; per-database admission and maintenance funding in the experimental native library</li></ul></article>
+<article class="status-card"><h3><span class="dot dot-experimental"></span>Experimental</h3><ul><li>Native clustered serving on S3 and B2; production performance and failure qualification remain open</li><li><a href="design-owned-partitions.html">Owned partitions</a>, DNS discovery, forwarding and bounded resident state</li><li>Namespace upload ceilings, tenant admission and maintenance funding in cloud serving</li></ul></article>
 <article class="status-card"><h3><span class="dot dot-pending"></span>Not yet</h3><ul><li>Production or irreplaceable data</li><li>Public multitenant hosting</li><li>Scheduled backups and point-in-time recovery</li><li>Prebuilt binaries beyond Linux x86_64</li></ul></article>
 </div>
 <div class="milestones"><h3>Recent milestones</h3><ol>{{milestones}}</ol><a class="more" href="verification-results.html">All verification results →</a></div>
@@ -60,7 +60,7 @@
 </section>
 
 <section class="wrap section" aria-labelledby="how-title" id="how-it-works">
-<div class="section-head"><p class="eyebrow">How it works</p><h2 id="how-title">The bucket is the database.<br>Servers are replaceable.</h2><p>In the released cloud CLI every server talks to the same bucket and prefix. There is no peer discovery, quorum or attached volume to manage.</p></div>
+<div class="section-head"><p class="eyebrow">How it works</p><h2 id="how-title">The bucket is the database.<br>Servers are replaceable.</h2><p>Every server uses the same bucket and prefix. DNS membership places native partition owners; object-store permits authorize serving. No attached volume or separate coordinator is required.</p></div>
 <div class="how-grid">
 <figure class="arch">
 <div class="arch-node arch-app"><strong>Your application</strong><span>TypeScript SDK or HTTP · scoped bearer tokens</span></div>
@@ -71,7 +71,7 @@
 <figcaption>Remove every server and the database stays in the bucket. Start one and service resumes from storage alone, with an empty cache.</figcaption>
 </figure>
 <ol class="principles">
-<li><h3>Immutable data, conditional authority</h3><p>Commits never overwrite data: new bytes go into fresh, uniquely named objects. Authority changes only through conditional writes, using <code>If-Match</code> on S3 or <code>ifRevisionIs</code> on B2. When two commits race from the same revision, one wins and the other gets 409.</p></li>
+<li><h3>Immutable journals, owned partitions</h3><p>Each partition orders transactions and uploads immutable journal frames. Ownership and checkpoints publish through conditional writes. Responses validate a fresh writer permit; competing commits from one database revision cannot both succeed.</p></li>
 <li><h3>Caches can be lost</h3><p>Servers keep bounded memory and disk caches and rebuild everything else from object storage. Cached bytes are verified by SHA-256. Losing a cache costs time, never data.</p></li>
 <li><h3>Uncertain writes have an answer</h3><p>If a commit’s response is lost, send the identical request again. A stored receipt returns the original result, and the old revision check stops a second application.</p></li>
 <li><h3>No clocks or leases in cleanup</h3><p>Garbage collection lists candidates, fences the state with a conditional write, and only then deletes. Pod-local locks, clocks, caches and Kubernetes leases never decide what is safe to delete.</p></li>

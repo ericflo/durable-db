@@ -48,6 +48,7 @@ impl Node {
                 limits: Limits::default(),
                 upload_limits: budget(),
                 capacity: 16,
+                maintenance: Duration::from_secs(60),
             },
             Arc::new(Cache::new(1024 * 1024, None).unwrap()),
             Arc::new(auth()),
@@ -416,6 +417,7 @@ async fn invalid_cluster_configuration_cannot_acquire_or_change_the_layout() {
             limits: Limits::default(),
             upload_limits: budget(),
             capacity: 16,
+            maintenance: Duration::from_secs(60),
         };
         let mut peers = vec![address];
         match fault {
@@ -448,10 +450,7 @@ async fn a_failed_partition_does_not_starve_later_acquisitions() {
     let directory = directory(&provider).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let node = Node::start(directory.clone(), listener, vec![]).await;
-    let first = directory
-        .partition(0, UploadLimits::default())
-        .await
-        .unwrap();
+    let first = directory.partition(0, budget()).await.unwrap();
     let original = first.authority().read().await.unwrap();
     let mut damaged = original.info.clone();
     damaged.insert("durable-db-format".into(), "unsupported".into());
@@ -645,4 +644,58 @@ async fn retired_backend_references_keep_the_process_budget_until_released() {
     drop(held);
     node.members(&[address]);
     settled(&[&node], &[address]).await;
+}
+
+#[tokio::test]
+async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
+    let provider = Provider::new();
+    let directory = provider
+        .connection("test")
+        .into_partitions(
+            UploadLimits::default(),
+            Arc::new(Cache::new(0, None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let node = Node::start(directory, listener, vec![address]).await;
+    let token = auth().administrator_token(600).unwrap();
+    assert!(!node.cluster.ready().await);
+    let status = node
+        .server
+        .ok("GET", "/v1/storage/upload-budget", &token, Value::Null)
+        .await;
+    assert_eq!(status["limits"]["bytes"], 0);
+    assert_eq!(status["allocated"]["bytes"], 0);
+    let refill = json!({"request_id":"bootstrap", "expected_configuration_revision":0,
+        "limits":{"bytes":268435456,"attempts":100000}});
+    assert_eq!(
+        node.server
+            .ok("POST", "/v1/storage/upload-budget", &token, refill.clone())
+            .await["replayed"],
+        false
+    );
+    assert_eq!(
+        node.server
+            .ok("POST", "/v1/storage/upload-budget", &token, refill)
+            .await["replayed"],
+        true
+    );
+    node.members(&[address]);
+    settled(&[&node], &[address]).await;
+    node.server
+        .ok(
+            "PUT",
+            "/v1/databases/app",
+            &token,
+            json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
+    assert_eq!(
+        node.server
+            .ok("POST", "/v1/databases/app/commit", &token, commit(0))
+            .await["revision"],
+        1
+    );
 }
