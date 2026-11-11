@@ -810,7 +810,22 @@ async fn membership_places_partitions_and_recovers_over_http() {
             break listener;
         }
     };
-    let second = Node::start(directory.clone(), listener, vec![address], limits).await;
+    // Each node has its own transport, directory observation cache and grants.
+    let peer_directory = connect(&provider, &bucket, &namespace)
+        .await
+        .into_partitions(
+            UploadLimits::default(),
+            Arc::new(Cache::new(4 * 1024 * 1024, None).unwrap()),
+        )
+        .await
+        .unwrap();
+    let second = Node::start(
+        peer_directory,
+        listener,
+        vec![address],
+        UploadLimits::default(),
+    )
+    .await;
     placed(&[&first, &second], &[address], &names).await;
     let mut old = Vec::new();
     let mut values = Vec::new();
@@ -927,7 +942,7 @@ async fn membership_places_partitions_and_recovers_over_http() {
     let seconds = started.elapsed().as_secs_f64();
     cold.stop().await;
     let evidence = json!({"seconds":seconds,"partitions":2,"maximum_live_servers":2,
-        "membership_sequence":[1,2,1,0,1],"automatic_acquisition_and_placement":true,
+        "membership_sequence":[1,2,1,0,1],"automatic_acquisition_and_placement":true,"independent_node_transports_and_caches":true,
         "unmoved_owner_preserved":true,"live_removed_owner_refused":true,
         "checkpoint_and_cold_recovery":true,
         "receipts_preserved":true,"layout_mismatch_refused":true,"ceilings_preserved":true,
