@@ -56,6 +56,7 @@ pub struct Connection {
     authority: Arc<dyn Authority>,
     prefix: String,
     budgeted: bool,
+    measured: bool,
 }
 
 impl Connection {
@@ -69,6 +70,7 @@ impl Connection {
             authority: Arc::new(register::Register(authority)),
             prefix: prefix.into(),
             budgeted: false,
+            measured: false,
         }
     }
 
@@ -76,7 +78,11 @@ impl Connection {
     /// Each PUT has at most one physical attempt. Object CAS is not portable to B2;
     /// use the separate authority for conditional control updates.
     pub fn objects(&self) -> Arc<dyn Storage> {
-        Arc::new(crate::measured::Files(self.files.clone()))
+        if self.measured {
+            self.files.clone()
+        } else {
+            Arc::new(crate::measured::Files(self.files.clone()))
+        }
     }
 
     /// Initialize a fresh native namespace's cumulative upload ceiling, or open
@@ -102,7 +108,11 @@ impl Connection {
     /// field, so repeated logical metadata still requires an exact comparison.
     /// The returned metadata includes that identity. Uncertain writes are not retried.
     pub fn authority(&self) -> Arc<dyn Authority> {
-        Arc::new(crate::measured::Register(self.authority.clone()))
+        if self.measured {
+            self.authority.clone()
+        } else {
+            Arc::new(crate::measured::Register(self.authority.clone()))
+        }
     }
 
     /// Start a fresh control caller with explicit invocation and uncertainty

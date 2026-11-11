@@ -48,16 +48,18 @@ impl Partitions {
             directory: self.directory.clone(),
             prefix: format!("partitions/{name}/"),
         });
-        Connection::new(
+        let mut connection = Connection::new(
             files.clone(),
             Arc::new(Register {
                 files,
                 key: format!("heads/{name}.json"),
             }),
             &name,
-        )
-        .with_upload_budget(limits)
-        .await
+        );
+        // The shared directory instruments the actual provider calls. Counting
+        // this virtual register/object scope again would inflate cost metrics.
+        connection.measured = true;
+        connection.with_upload_budget(limits).await
     }
 
     pub async fn upload_budget(&self) -> anyhow::Result<UploadStatus> {

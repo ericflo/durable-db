@@ -658,6 +658,30 @@ async fn independent_partitions_serve_and_recover_over_http() {
         .unwrap();
     let a = partitions.partition(7, limits).await.unwrap();
     let b = partitions.partition(u32::MAX, limits).await.unwrap();
+    // Check physical operation accounting before starting background workers.
+    let marker = format!("tables/{}", Uuid::new_v4().simple());
+    a.objects()
+        .put(&marker, Bytes::from_static(b"scope"))
+        .await
+        .unwrap();
+    let gets = calls("object_get");
+    assert_eq!(
+        a.objects().get(&marker, 5).await.unwrap().unwrap().bytes,
+        b"scope"[..]
+    );
+    assert_eq!(
+        calls("object_get") - gets,
+        1,
+        "virtual scope counted a GET twice"
+    );
+    let before_control = controls();
+    a.authority().read().await.unwrap();
+    let after_control = controls();
+    assert_eq!(
+        std::array::from_fn::<_, 3, _>(|i| after_control[i] - before_control[i]),
+        [1, 1, 1],
+        "virtual control read must count only its underlying read/barrier/replacement"
+    );
     let first = Server::start(&a).await;
     let other = Server::start(&b).await;
     let create = json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":10000}});
@@ -739,7 +763,7 @@ async fn independent_partitions_serve_and_recover_over_http() {
         "independent_values": true, "concurrent_writes": true,
         "checkpoint_recovery": true, "old_owner_read_and_retry_refused": true,
         "unmoved_partition_progress": true, "shared_metadata_collection": true,
-        "ceilings_preserved_on_reopen": true,
+        "ceilings_preserved_on_reopen": true, "provider_metrics_count_once": true,
         "scope": "Explicit Rust placement; no automatic election, routing, Kubernetes scaling or performance SLO"
     });
     first.stop().await;
