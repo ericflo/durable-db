@@ -54,6 +54,7 @@ def main():
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   workload_sha256=hashlib.sha256(Path('scripts/cluster-workload.mjs').read_bytes()).hexdigest(),
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
+                                     client_origin='http://durable-db:7654',
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      upload_budget=dict(bytes=1073741824, attempts=100000),
                                      tenant_upload_budget=dict(bytes=1073741824, attempts=100000),
@@ -109,8 +110,7 @@ def main():
             time.sleep(2)
         raise RuntimeError('Replica readiness deadline exceeded')
 
-    def route(ready):
-        call('/routes',[f'http://{p["status"]["podIP"]}:7654' for p in ready])
+    def placement(ready):
         return [dict(pod=p['metadata']['name'],node=p['spec']['nodeName'],
                      image_id=p['status']['containerStatuses'][0]['imageID']) for p in ready]
 
@@ -250,12 +250,12 @@ def main():
             except (OSError,ValueError):pass
             time.sleep(2)
         else:raise RuntimeError('Workload readiness deadline exceeded')
-        route(initial);budget('initial-one');call('/resume',{})
+        budget('initial-one');call('/resume',{})
         phase('one-progress',writes_acknowledged=progress())
         for count in (3,6):
             kube('scale','deployment','durable-db',f'--replicas={count}')
-            placement=route(wait_replicas(count));budget(f'scale-{count}')
-            phase(f'scale-{count}',placement=placement,writes_acknowledged=progress())
+            located=placement(wait_replicas(count));budget(f'scale-{count}')
+            phase(f'scale-{count}',placement=located,writes_acknowledged=progress())
         if args.steady_seconds:
             start=time.monotonic();last_progress=start;previous=snapshot()['writes_acknowledged']
             steady_uids={p['metadata']['uid'] for p in pods() if not p['metadata'].get('deletionTimestamp')}
@@ -276,10 +276,10 @@ def main():
             phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=snapshot()['writes_acknowledged'])
         victim=pods()[0]
         kube('delete','pod',victim['metadata']['name'],'--grace-period=0','--force','--wait=false')
-        phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=route(wait_replicas(6)),writes_acknowledged=progress())
+        phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=placement(wait_replicas(6)),writes_acknowledged=progress())
         kube('rollout','restart','deployment/durable-db')
         kube('rollout','status','deployment/durable-db','--timeout=240s',timeout=270)
-        phase('rolling-replacement',placement=route(wait_replicas(6)),writes_acknowledged=progress())
+        phase('rolling-replacement',placement=placement(wait_replicas(6)),writes_acknowledged=progress())
         restricted=json.loads(json.dumps(policy));restricted['spec']['egress']=restricted['spec']['egress'][:-1]
         kube('apply','-f','-',body=restricted)
         phase('provider-partition-start',probe=provider_probe(False))
@@ -287,14 +287,14 @@ def main():
         kube('apply','-f','-',body=policy)
         phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress())
         kube('scale','deployment','durable-db','--replicas=1')
-        phase('scale-one',placement=route(wait_replicas(1)),writes_acknowledged=progress())
+        phase('scale-one',placement=placement(wait_replicas(1)),writes_acknowledged=progress())
         budget('scale-one')
         # Writers remain active: pending mutations resolve after the cold restart.
         kube('scale','deployment','durable-db','--replicas=0');wait_replicas(0)
         phase('zero-api-pods',writes_acknowledged=snapshot()['writes_acknowledged'])
         time.sleep(5)
         kube('scale','deployment','durable-db','--replicas=3')
-        phase('cold-three',placement=route(wait_replicas(3)),writes_acknowledged=progress())
+        phase('cold-three',placement=placement(wait_replicas(3)),writes_acknowledged=progress())
         call('/pause',{});call('/verify',{});budget('cold-three')
         state=call('/status?history=1',timeout=60);history=state.pop('history')
         raw=''.join(json.dumps(record,separators=(',',':'))+'\n' for record in history).encode()

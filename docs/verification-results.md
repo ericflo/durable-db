@@ -1,8 +1,12 @@
 # Verification results
 
-## Native cloud CLI candidate (2026-11-11)
+## v0.23.0 native cloud CLI (2026-11-11)
 
-The v0.23.0 candidate on `main` integrates headless-service DNS discovery, native
+[v0.23.0](https://github.com/ericflo/durable-db/releases/tag/v0.23.0) packages
+`74a6c83`, verified by [Woodpecker #207](https://ci.eflorenzano.com/repos/18/pipeline/207/1).
+The independently downloaded static executable passes installation without a
+toolchain, transactions, ordered reads, export/restore and forced-stop recovery.
+It integrates headless-service DNS discovery, native
 cloud serving for B2 and S3, and aggregate resident index/validation/journal
 budgets. Resident reservations survive retirement and pending I/O. Cloud startup
 requires upload ceilings and preserves administrator access before owners are
@@ -45,11 +49,19 @@ one to three pods after 317 acknowledgements/readbacks; two pods were ready and
 none restarted. Acquisition now runs in batches of at most four under the same
 resident reservations, replacing the serialized loop. The focused paused-time
 regression verifies independent progress and cancellation; a fresh cloud campaign
-is required. All completed disposable runs removed their buckets, keys and containers.
+is required. At `74a6c83`, default sixteen-partition startup measures 78.610
+seconds on B2 and 1.218 seconds on MinIO; these are single functional runs, not
+latency guarantees. All completed disposable runs removed their buckets, keys and containers.
+The temporary debug image then reaches one, three and six ready pods, completes
+a short steady phase and recovers from forced pod loss. Rolling replacement fails
+a client retry deadline after 924 acknowledgements: the fixture still targeted
+original pod IPs as they disappeared. The manual routing endpoint is removed;
+clients now use the stable Kubernetes Service. This failure does not complete
+the recovery-history check or qualify the release image.
 [Evidence](evidence/native-cloud-cli-2026-11-11.json).
 
-This candidate is not yet published as v0.23.0. Native Kubernetes scaling and the
-production operating envelope remain under qualification. MinIO results do not
+Native Kubernetes scaling and the production operating envelope remain under
+qualification. MinIO results do not
 qualify AWS S3; component budgets do not establish an RSS bound. The old cloud CLI
 serving/maintenance branch and six obsolete qualification scripts (827 lines)
 were removed, along with an orphaned publication working-design document. Historical evidence keeps its original engine and deployment scope.

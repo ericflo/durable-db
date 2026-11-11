@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
-let origins=[process.env.DATABASE_URL], route=0;
+const origin=process.env.DATABASE_URL;
 const admin=readFileSync('/run/credentials/admin.token','utf8').trim();
 const control=Buffer.from(readFileSync('/run/credentials/control.token','utf8').trim());
 const prefix=process.env.DATABASE_PREFIX;
@@ -22,7 +22,7 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
   for(;;) {
     let code='transport_or_decode_error', result, refusal;
     try {
-      const response=await fetch(origins[route++ % origins.length]+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
+      const response=await fetch(origin+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
       code=String(response.status);
       if(response.ok) result=await response.json();
       else if(response.status===413) {
@@ -102,12 +102,7 @@ createServer(async(request,response)=>{
   try {
     if(request.method!=='POST')throw new Error('Unsupported command');
     let result;
-    if(request.url==='/routes') {
-      let raw='';for await(const chunk of request){raw+=chunk;if(raw.length>8192)throw new Error('Route input too large');}
-      const addresses=JSON.parse(raw);
-      if(!Array.isArray(addresses)||addresses.length<1||addresses.length>8||addresses.some(value=>!/^http:\/\/(10\.[0-9.]+|192\.168\.[0-9.]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+):7654$/.test(value)))throw new Error('Expected private pod addresses');
-      origins=addresses;status.route_count=origins.length;result={routes:origins.length};
-    } else if(request.url==='/resume') {
+    if(request.url==='/resume') {
       if(status.state!=='paused'||status.failures.length)throw new Error('Workload is not ready');
       running=true;status.state='running';workers=names.map((_,i)=>writer(i));result={running:true};
     } else if(request.url==='/pause'){await pause();result={paused:true};}
