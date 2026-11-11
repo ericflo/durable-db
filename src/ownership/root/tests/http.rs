@@ -811,7 +811,7 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
         64,
         crate::upload_budget::UploadLimits {
             bytes: 8192,
-            attempts: 4,
+            attempts: 6,
         },
     )
     .await;
@@ -827,8 +827,8 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert!(!waiting.is_finished());
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
-        4,
-        "only registrations and database ledger initialization reached storage"
+        6,
+        "only registrations, ledger initialization and the tenant grant reached storage"
     );
     let (status, body) = call(
         &router,
@@ -836,7 +836,7 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
         "/v1/storage/upload-budget",
         &token,
         json!({"request_id":"fund", "expected_configuration_revision":0,
-            "limits":{"bytes":16384,"attempts":10}}),
+            "limits":{"bytes":16384,"attempts":12}}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -847,7 +847,7 @@ async fn native_http_refill_resumes_unsent_journal_without_replacing_the_owner()
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         faults.puts.load(Ordering::SeqCst),
-        5,
+        7,
         "the admitted journal frame is uploaded once"
     );
     let (status, _) = call(&router, "GET", "/v1/databases/app", &token, json!({})).await;
@@ -912,7 +912,9 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let client = reqwest::Client::new();
     let budget = format!("{base}/v1/databases/a/upload-budget");
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":821,"attempts":2}});
+    // Creation prepays 2 * (753 journal + 8,543 catalog construction) bytes.
+    let creation_admission = 18_592;
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":creation_admission,"attempts":3}});
     for replayed in [false, true] {
         let (status, result) = tcp_call(&client, "POST", &budget, &token, fund.clone()).await;
         assert_eq!(status, StatusCode::OK);
@@ -950,7 +952,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let a = format!("{base}/v1/databases/a/commit");
     let initial_tables = checkpoint_copy_allowances(provider.files.as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
-    let first_admission = 2 * (6237 + initial_tables.values().sum::<u64>());
+    let first_admission = creation_admission + 2 * (6237 + initial_tables.values().sum::<u64>());
     // 250 journal + 572 data/index + 5,415 manifest growth/split allowance bytes.
     let puts = faults.puts.load(Ordering::SeqCst);
     assert_eq!(
@@ -959,8 +961,8 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
     let (_, refused) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
-    assert_eq!(refused["allocated"]["bytes"], 0);
-    let exact = json!({"request_id":"rows","expected_configuration_revision":1,"limits":{"bytes":first_admission,"attempts":2}});
+    assert_eq!(refused["allocated"]["bytes"], creation_admission);
+    let exact = json!({"request_id":"rows","expected_configuration_revision":1,"limits":{"bytes":first_admission,"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, exact).await.0,
         StatusCode::OK
@@ -972,7 +974,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     let (status, before) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        before["limits"]["attempts"], 2,
+        before["limits"]["attempts"], 3,
         "creation preserved the administrative ceiling"
     );
     let puts = faults.puts.load(Ordering::SeqCst);
@@ -1021,7 +1023,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     let copies = replaced.iter().map(|(_, size)| **size).sum::<u64>();
     let second_total = first_admission + 2 * (6215 + copies);
-    let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":2}});
+    let refill = json!({"request_id":"more","expected_configuration_revision":2,"limits":{"bytes":second_total - 1,"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
@@ -1036,7 +1038,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     assert_eq!(faults.puts.load(Ordering::SeqCst), puts);
     let (_, refused) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
     assert_eq!(refused["allocated"]["bytes"], first_admission);
-    let refill = json!({"request_id":"copies","expected_configuration_revision":3,"limits":{"bytes":second_total,"attempts":2}});
+    let refill = json!({"request_id":"copies","expected_configuration_revision":3,"limits":{"bytes":second_total,"attempts":3}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
@@ -1047,7 +1049,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
     );
     // A dirty write conservatively pays the same base-copy contribution again.
     // This needs no persistent paid-table set or cross-transaction refund.
-    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 2 * (6237 + copies),"attempts":3}});
+    let refill = json!({"request_id":"dirty","expected_configuration_revision":4,"limits":{"bytes":second_total + 2 * (6237 + copies),"attempts":4}});
     assert_eq!(
         tcp_call(&client, "POST", &budget, &token, refill).await.0,
         StatusCode::OK
@@ -1066,7 +1068,7 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
 async fn native_http_collects_checkpointed_journals() {
     let (router, provider, _, _, token) = fixture(8, 2).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":131072,"attempts":1}});
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":131072 + 18592,"attempts":2}});
     for _ in 0..2 {
         assert_eq!(
             call(&router, "POST", budget, &token, fund.clone()).await.0,
@@ -1078,7 +1080,7 @@ async fn native_http_collects_checkpointed_journals() {
     }
     for (name, revision) in [("a", 0), ("b", 0), ("a", 1)] {
         if revision == 1 {
-            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":262144,"attempts":2}});
+            let refill = json!({"request_id":"more","expected_configuration_revision":1,"limits":{"bytes":262144 + 18592,"attempts":3}});
             assert_eq!(
                 call(&router, "POST", budget, &token, refill).await.0,
                 StatusCode::OK

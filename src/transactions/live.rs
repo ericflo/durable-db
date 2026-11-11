@@ -217,12 +217,15 @@ impl<C: Clock> Owner<C> {
         bytes: usize,
         mutations: &[Mutation<'_>],
     ) -> anyhow::Result<bool> {
-        if database.name == catalog::CATALOG.name
-            && database.generation == catalog::CATALOG.generation
-        {
-            return Ok(true);
-        }
-        let Some(budget) = self.cached_budget(database.name)? else {
+        let payer = if database == catalog::CATALOG {
+            let Some(target) = catalog::admission_target(mutations)? else {
+                return Ok(true);
+            };
+            target
+        } else {
+            database.name
+        };
+        let Some(budget) = self.cached_budget(payer)? else {
             return Ok(true);
         };
         let bytes = (bytes as u64)

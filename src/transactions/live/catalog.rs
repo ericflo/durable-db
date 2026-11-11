@@ -48,6 +48,16 @@ impl Entry {
         access::authorize(Some(&self.policy), db, caller, write)
     }
 }
+/// Creation pays from the tenant's allowance. Policy changes remain operator
+/// funded so tenant exhaustion cannot prevent credential revocation.
+pub(super) fn admission_target<'a>(mutations: &[Mutation<'a>]) -> anyhow::Result<Option<&'a str>> {
+    let [mutation] = mutations else {
+        anyhow::bail!("catalog admission requires one target database");
+    };
+    let entry = Entry::decode(mutation.value.context("missing catalog entry")?)?;
+    Ok((entry.policy.info().revision == 1).then_some(mutation.key))
+}
+
 /// Operator readback: catalog identity/quotas and values come from the same cut.
 pub(crate) async fn checkpoint_database(
     snapshot: &crate::index::recovery::checkpoint::Snapshot,

@@ -2,6 +2,8 @@
 
 This page describes v0.18.1. Local CLI serving uses the native backend. The cloud CLI retains the shared publication backend; clustered native serving remains an experimental library path gated on physical timing and placement qualification.
 
+Unreleased `main` also charges native protected creation to the target database's admission budget. Exhaustion returns `413 limit_exceeded`; identical retries reuse admission. Policy changes remain namespace-funded so tenant exhaustion cannot prevent credential revocation. This is an experimental native-library change, not a v0.18.1 cloud CLI feature.
+
 Administrator tokens from current `token --admin` are expiring `ddb_control_` capabilities. Token TTL defaults to one hour and is bounded to 30 days. See the [key rollout procedure](design-signing-rotation.md) before migrating control clients or rotating keys.
 
 Every data endpoint requires `Authorization: Bearer <token>`. JSON uses UTF-8. Keys are ordered by their UTF-8 bytes, independent of locale. Values are standard base64. `null` means absent in a read/check and delete in a write; an empty string is a present zero-byte value.

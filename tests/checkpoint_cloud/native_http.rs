@@ -221,7 +221,9 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         .unwrap_or_else(|_| panic!("native budget initialization failed"));
     let server = Server::start(&connection).await;
     let budget = "/v1/databases/a/upload-budget";
-    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":833,"attempts":2}});
+    // Creation prepays 2 * (754 journal + 8,544 catalog construction) bytes.
+    let creation_admission = 18_596;
+    let fund = json!({"request_id":"fund","expected_configuration_revision":0,"limits":{"bytes":creation_admission,"attempts":3}});
     for replayed in [false, true] {
         assert_eq!(server.ok("POST", budget, &fund).await["replayed"], replayed);
     }
@@ -238,7 +240,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let initial_tables = checkpoint_copy_allowances(connection.objects().as_ref()).await;
     assert_eq!(initial_tables.len(), 3, "one data/index pair and manifest");
     let initial_copies = initial_tables.values().sum::<u64>();
-    let first_admission = 2 * (6285 + initial_copies);
+    let first_admission = creation_admission + 2 * (6285 + initial_copies);
     // 254 journal + 580 data/index + 5,451 manifest growth/split allowance bytes.
     // Admission must precede every journal PUT.
     let puts = calls("object_put");
@@ -248,13 +250,13 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     );
     assert_eq!(calls("object_put"), puts);
     let refused = server.ok("GET", budget, &json!({})).await;
-    assert_eq!(refused["allocated"]["bytes"], 0);
+    assert_eq!(refused["allocated"]["bytes"], creation_admission);
     server
         .ok(
             "POST",
             budget,
             &json!({"request_id":"rows","expected_configuration_revision":1,
-        "limits":{"bytes":first_admission,"attempts":2}}),
+        "limits":{"bytes":first_admission,"attempts":3}}),
         )
         .await;
     assert_eq!(server.ok("POST", commit, &write(0)).await["revision"], 1);
@@ -286,7 +288,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             "POST",
             budget,
             &json!({"request_id":"more","expected_configuration_revision":2,
-        "limits":{"bytes":first_admission + 2 * 6285,"attempts":2}}),
+        "limits":{"bytes":first_admission + 2 * 6285,"attempts":3}}),
         )
         .await;
     let puts = calls("object_put");
@@ -304,12 +306,12 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
             "POST",
             budget,
             &json!({"request_id":"copies","expected_configuration_revision":3,
-        "limits":{"bytes":first_admission + second_admission,"attempts":2}}),
+        "limits":{"bytes":first_admission + second_admission,"attempts":3}}),
         )
         .await;
     assert_eq!(server.ok("POST", commit, &write(1)).await["revision"], 2);
     let balance = server.ok("GET", budget, &json!({})).await;
-    assert_eq!(balance["allocated"]["attempts"], 2);
+    assert_eq!(balance["allocated"]["attempts"], 3);
     let files = connection.objects();
     let initial = files
         .list("manifests/", None, 128)
@@ -567,7 +569,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     let mut evidence = json!({"provider":provider,"namespace":namespace,
         "tenant_budget":recovered_balance,"namespace_budget":namespace_budget,"exhausted_tenant_did_not_stall_neighbor":true,
         "journal_only_funding_refused":true,"journal_bytes_per_write":254,"checkpoint_row_bytes_per_write":174,
-        "admission_bytes_per_write":[first_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
+        "catalog_admission_bytes":creation_admission,"admission_bytes_per_write":[first_admission-creation_admission,second_admission],"base_table_and_manifest_allowance_per_write":[initial_copies,copies],
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,

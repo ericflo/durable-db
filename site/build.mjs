@@ -150,6 +150,7 @@ for (const file of [
   'retained-export-2026-11-10.json',
   'maintenance-funding-2026-11-10.json',
   'metadata-retry-2026-11-10.json',
+  'catalog-admission-2026-11-10.json',
   'transaction-validation-2026-11-09.json',
   'late-control-candidate-2026-11-09.json',
   'placement-requests-candidate-2026-11-09.json',

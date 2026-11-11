@@ -31,7 +31,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .unwrap();
     assert_eq!(
         cloud.read().await.unwrap().info["durable-db-format"],
-        "owned-candidate-21"
+        "owned-candidate-22"
     );
     let root = connection.root(ManualClock::default(), profile()).unwrap();
     root.observe().await.unwrap();
@@ -42,7 +42,7 @@ async fn admission_version_preserves_unbudgeted_storage_and_refuses_old_budgeted
         .last_mut()
         .unwrap()
         .info
-        .insert("durable-db-format".into(), "owned-candidate-20".into());
+        .insert("durable-db-format".into(), "owned-candidate-21".into());
     let before = cloud.calls.load(Ordering::SeqCst);
     assert!(matches!(root.observe().await, Err(Error::Incompatible)));
     assert!(
@@ -501,7 +501,9 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
         + crate::transactions::record::Commit::encoded_len(database, "first", &mutations).unwrap();
     let rows =
         crate::index::recovery::checkpoint::contribution_bytes(database, "first", &mutations);
-    let admission = 2 * (journal + rows) as u64;
+    // Creation: 753 journal bytes + 8,543 bytes of catalog row/manifest allowance.
+    let creation_admission = 18_592;
+    let admission = creation_admission + 2 * (journal + rows) as u64;
     for name in ["a", "b"] {
         owner
             .database_budget(name)
@@ -516,7 +518,7 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
                     } else {
                         admission
                     },
-                    attempts: 2,
+                    attempts: 3,
                 },
             })
             .await
@@ -537,6 +539,13 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
             .await
             .unwrap();
     }
+    let spent_after_creation = owner
+        .database_budget("a")
+        .unwrap()
+        .unwrap()
+        .status()
+        .await
+        .unwrap();
     let first: CommitRequest = serde_json::from_value(serde_json::json!({"request_id":"first","expected_revision":0,"writes":[{"key":"x","value":"eA=="}]})).unwrap();
     // Journal alone fits, but its checkpoint contribution does not. Refusal
     // must precede both durable credit allocation and shared journal ordering.
@@ -565,14 +574,14 @@ async fn database_budget_mixed_batch_and_retries_need_no_extra_credit() {
         );
     }
     let budget = owner.database_budget("a").unwrap().unwrap();
-    assert_eq!(budget.status().await.unwrap().allocated.bytes, 0);
+    assert_eq!(budget.status().await.unwrap(), spent_after_creation);
     budget
         .replenish(&UploadRequest {
             request_id: "row-credit".into(),
             expected_configuration_revision: 1,
             limits: UploadLimits {
                 bytes: admission,
-                attempts: 2,
+                attempts: 3,
             },
         })
         .await
@@ -814,7 +823,7 @@ async fn database_budget_metadata_reuses_staging_and_bounds_stale_comparisons() 
         if malformed {
             let before = provider.read().await.unwrap();
             let mut info = before.info.clone();
-            info.insert("durable-db-format".into(), "owned-candidate-20".into());
+            info.insert("durable-db-format".into(), "owned-candidate-21".into());
             provider.replace(&before, info).await.unwrap().unwrap();
         } else {
             let captured = provider.history.lock().unwrap().len() - 1;
@@ -1141,4 +1150,250 @@ async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing
         assert_eq!(reserve.allocated.bytes, 2);
         assert_eq!(reserve.allocated.attempts, 2);
     }
+}
+
+#[tokio::test]
+async fn catalog_admission_charges_creation_without_blocking_policy_revocation() {
+    use crate::{
+        auth::Access,
+        engine::{CommitRequest, CreateRequest, PolicyAction, PolicyRequest},
+        transactions::live::{CatalogResult, Limits},
+    };
+    let provider = Provider::new();
+    let clock = ManualClock::default();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 1024 * 1024 * 1024,
+            attempts: 1024,
+        })
+        .await
+        .unwrap();
+    let (mut root, mut outcome) = attempt(&connection, &clock).await;
+    if matches!(outcome, Outcome::Conflict) {
+        (root, outcome) = attempt(&connection, &clock).await;
+    }
+    assert!(matches!(outcome, Outcome::Confirmed));
+    clock.set(23);
+    validate(&mut root).await;
+    activate(&mut root).await;
+    for (name, attempts) in [
+        ("empty", 0),
+        ("lost", 1),
+        ("a", 1),
+        ("b", 2),
+        ("durable-catalog", 2),
+    ] {
+        root.database_budget(name)
+            .unwrap()
+            .unwrap()
+            .replenish(&UploadRequest {
+                request_id: "fund".into(),
+                expected_configuration_revision: 0,
+                limits: UploadLimits {
+                    bytes: 64 * 1024 * 1024,
+                    attempts,
+                },
+            })
+            .await
+            .unwrap();
+    }
+    let mut owner = super::live::open(root, Limits::default()).await;
+    let admin = Access::Administrator;
+    let create = CreateRequest {
+        request_id: "create".into(),
+        limits: Default::default(),
+    };
+    let rotate = PolicyRequest {
+        request_id: "rotate".into(),
+        expected_policy_revision: 1,
+        change: PolicyAction::Rotate,
+    };
+    let before = provider.files.list("journal/", None, 100).await.unwrap();
+    let refused = owner
+        .prepare_creation("empty", &create, &admin)
+        .await
+        .unwrap();
+    assert!(refused.upload.is_none());
+    assert!(matches!(
+        owner.catalog_result(&refused),
+        Err(crate::Error::Limit(_))
+    ));
+    assert_eq!(
+        provider.files.list("journal/", None, 100).await.unwrap(),
+        before
+    );
+    assert!(matches!(
+        owner.info_authorized("empty", &admin).await,
+        Err(crate::Error::NotFound)
+    ));
+
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(
+        owner
+            .prepare_creation("lost", &create, &admin)
+            .await
+            .is_err()
+    );
+    let refused = owner
+        .prepare_creation("lost", &create, &admin)
+        .await
+        .unwrap();
+    assert!(refused.upload.is_none());
+    assert!(matches!(
+        owner.catalog_result(&refused),
+        Err(crate::Error::Limit(_))
+    ));
+    assert_eq!(
+        provider.files.list("journal/", None, 100).await.unwrap(),
+        before,
+        "an uncertain grant never authorizes a catalog upload"
+    );
+    assert_eq!(
+        owner
+            .database_budget("lost")
+            .unwrap()
+            .unwrap()
+            .status()
+            .await
+            .unwrap()
+            .allocated
+            .attempts,
+        1
+    );
+
+    for name in ["a", "b", "durable-catalog"] {
+        let ledger = owner.database_budget(name).unwrap().unwrap();
+        let mut creation = owner.prepare_creation(name, &create, &admin).await.unwrap();
+        let funded = ledger.status().await.unwrap();
+        assert!(funded.allocated.bytes > 0);
+        assert_eq!(
+            funded.maintenance.as_ref().unwrap().funded_bytes * 2,
+            funded.allocated.bytes
+        );
+        let pending = owner.prepare_creation(name, &create, &admin).await.unwrap();
+        assert!(pending.upload.is_none());
+        owner
+            .complete(creation.upload.take().unwrap().send().await)
+            .await
+            .unwrap();
+        let replay = owner.prepare_creation(name, &create, &admin).await.unwrap();
+        assert!(
+            matches!(owner.catalog_result(&replay).unwrap(), Some(CatalogResult::Created(r)) if r.replayed)
+        );
+        assert_eq!(
+            ledger.status().await.unwrap(),
+            funded,
+            "creation retries must not recharge"
+        );
+    }
+    let write: CommitRequest = serde_json::from_value(
+        serde_json::json!({"request_id":"write", "expected_revision":0,
+        "writes":[{"key":"a","value":"eA=="}]}),
+    )
+    .unwrap();
+    let a = owner.database_budget("a").unwrap().unwrap();
+    let a_status = a.status().await.unwrap();
+    let before = provider.files.list("journal/", None, 100).await.unwrap();
+    let refused = owner
+        .prepare_authorized(&[("a", &write, &admin)])
+        .await
+        .unwrap();
+    assert!(refused.upload.is_none());
+    assert!(matches!(
+        owner.authorized_result(&refused.tickets[0], &admin).await,
+        Err(crate::Error::Limit(_))
+    ));
+    assert_eq!(
+        provider.files.list("journal/", None, 100).await.unwrap(),
+        before
+    );
+    // Exhausted tenants cannot prevent an administrator revoking credentials.
+    let mut change = owner.prepare_policy("a", &rotate, &admin).await.unwrap();
+    let pending = owner.prepare_policy("a", &rotate, &admin).await.unwrap();
+    assert!(pending.upload.is_none());
+    owner
+        .complete(change.upload.take().unwrap().send().await)
+        .await
+        .unwrap();
+    let replay = owner.prepare_policy("a", &rotate, &admin).await.unwrap();
+    assert!(
+        matches!(owner.catalog_result(&replay).unwrap(), Some(CatalogResult::Policy(r)) if r.replayed)
+    );
+    assert_eq!(a.status().await.unwrap(), a_status);
+    assert_eq!(owner.policy_info("a", &admin).await.unwrap().revision, 2);
+    // Funded neighbors still commit. A user's catalog-like name and a key
+    // naming another tenant must not redirect this ordinary data charge.
+    for name in ["b", "durable-catalog"] {
+        let ledger = owner.database_budget(name).unwrap().unwrap();
+        let funded = ledger.status().await.unwrap();
+        let prepared = owner
+            .prepare_authorized(&[(name, &write, &admin)])
+            .await
+            .unwrap();
+        assert!(prepared.upload.is_some());
+        owner
+            .complete(prepared.upload.unwrap().send().await)
+            .await
+            .unwrap();
+        assert!(
+            owner
+                .authorized_result(&prepared.tickets[0], &admin)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let replay = owner
+            .prepare_authorized(&[(name, &write, &admin)])
+            .await
+            .unwrap();
+        assert!(replay.upload.is_none());
+        let mut next = write.clone();
+        next.request_id = "again".into();
+        next.expected_revision = 1;
+        let refused = owner
+            .prepare_authorized(&[(name, &next, &admin)])
+            .await
+            .unwrap();
+        assert!(refused.upload.is_none());
+        assert!(matches!(
+            owner.authorized_result(&refused.tickets[0], &admin).await,
+            Err(crate::Error::Limit(_))
+        ));
+        assert_eq!(
+            ledger.status().await.unwrap(),
+            funded,
+            "identical retry must not recharge"
+        );
+    }
+    assert_eq!(
+        a.status().await.unwrap(),
+        a_status,
+        "neighbors must not debit a"
+    );
+    a.replenish(&UploadRequest {
+        request_id: "refill".into(),
+        expected_configuration_revision: 1,
+        limits: UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 2,
+        },
+    })
+    .await
+    .unwrap();
+    let prepared = owner
+        .prepare_authorized(&[("a", &write, &admin)])
+        .await
+        .unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert!(
+        owner
+            .authorized_result(&prepared.tickets[0], &admin)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

@@ -7,6 +7,10 @@ CONSTANTS Tenants, Attempts, UnsafeLateCheck, UnsafeCrossScope, UnsafeCopyOmissi
 \* retry/takeover must claim NEW durable units before I/O; finite credit does
 \* not guarantee progress through unbounded storage failures. UploadCredits
 \* separately checks volatile physical grants and late provider arrivals.
+\* Admission uses the target tenant, including a protected creation stored
+\* in the shared catalog. The catalog storage identity is never its payer.
+\* Operator-funded policy mutations, byte sizing and catalog/ledger retry
+\* funding remain outside this admission abstraction.
 VARIABLES owner, nonce, ceiling, allocated, funded, spent, credit, granted,
           accepted, requested, issued, usable, arrived, stale
 None == [origin |-> 2, version |-> 0, tenants |-> {}]
@@ -28,10 +32,11 @@ Grant(t,ack) ==
     /\ credit' = [credit EXCEPT ![t] = IF ack THEN 2 ELSE 0]
     /\ nonce' = nonce + 1
     /\ UNCHANGED <<owner, ceiling, spent, accepted, requested, issued, usable, arrived, stale>>
-Accept(t) == /\ t \notin accepted /\ credit[t] > 0
-             /\ credit' = [credit EXCEPT ![t] = @ - 1]
-             /\ accepted' = accepted \cup {t}
-             /\ UNCHANGED <<owner, nonce, ceiling, allocated, funded, spent, granted,
+Accept(t) == LET payer == IF UnsafeCrossScope THEN Other(t) ELSE t
+             IN /\ t \notin accepted /\ credit[payer] > 0
+                /\ credit' = [credit EXCEPT ![payer] = @ - 1]
+                /\ accepted' = accepted \cup {t}
+                /\ UNCHANGED <<owner, nonce, ceiling, allocated, funded, spent, granted,
                              requested, issued, usable, arrived, stale>>
 Capture(a,o) == /\ a = 1 + Cardinality({b \in Attempts: issued[b] # {}})
                 /\ issued[a] = {} /\ accepted # {} /\ o \in 0..owner
