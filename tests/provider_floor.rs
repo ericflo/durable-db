@@ -2,8 +2,9 @@
 //! This is a raw object benchmark, not transaction throughput or a serving prototype.
 use bytes::Bytes;
 use durable_db::{
+    journal::{QueueLimits, Reader, Resolution, Writer},
     metrics::REGISTRY,
-    providers::{b2::Native, s3::S3},
+    providers::{Connection, b2::Native, s3::S3},
     storage::Storage,
 };
 use futures::{StreamExt, stream};
@@ -33,16 +34,14 @@ fn control_counts() -> Vec<u64> {
         .collect()
 }
 
-async fn connect(provider: &str, bucket: &str, prefix: &str) -> Arc<dyn Storage> {
+async fn connect(provider: &str, bucket: &str, prefix: &str) -> Connection {
     let result = match provider {
         "b2" => Native::connect_storage(bucket, prefix).await,
         "s3" => S3::connect_storage(bucket, prefix).await,
         _ => panic!("provider must be b2 or s3"),
     };
     // Never put a provider error body or credential-bearing request in the report/log.
-    result
-        .unwrap_or_else(|_| panic!("provider connection failed"))
-        .objects()
+    result.unwrap_or_else(|_| panic!("provider connection failed"))
 }
 
 async fn phase(
@@ -117,7 +116,7 @@ async fn bounded_raw_provider_floor() {
     });
     save(output, &report);
     let start = Instant::now();
-    let storage = connect(&provider, &bucket, &prefix).await;
+    let storage = connect(&provider, &bucket, &prefix).await.objects();
     report["initialization_seconds"] = json!(start.elapsed().as_secs_f64());
     let mut objects = Vec::new();
     for _ in 0..2 {
@@ -145,7 +144,7 @@ async fn bounded_raw_provider_floor() {
         }
     }
     drop(storage);
-    let fresh = connect(&provider, &bucket, &prefix).await;
+    let fresh = connect(&provider, &bucket, &prefix).await.objects();
     let mut listed = BTreeSet::new();
     let mut after = None;
     loop {
@@ -191,4 +190,153 @@ async fn bounded_raw_provider_floor() {
         report["complete"], true,
         "provider floor run has failures; inspect report"
     );
+}
+
+/// One shared transport experiment; these proposal keys are disposable fixture
+/// data, not an adopted permit format or a production ownership controller.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an explicitly disposable provider bucket and a report path"]
+async fn revocable_permit_floor() {
+    assert_eq!(std::env::var("DURABLE_DB_DISPOSABLE").as_deref(), Ok("1"));
+    let bucket = std::env::var("DURABLE_DB_TEST_BUCKET").expect("dedicated bucket");
+    assert!(bucket.starts_with("durable-db-test-"));
+    let provider = std::env::var("DURABLE_DB_TEST_PROVIDER").expect("b2 or s3");
+    let context = std::env::var("DURABLE_DB_TEST_CONTEXT").expect("provider placement");
+    let output = std::env::var("DURABLE_DB_PROVIDER_FLOOR_REPORT").expect("report path");
+    let output = Path::new(&output);
+    let namespace = format!("permit-{}", uuid::Uuid::new_v4());
+    let mut report = json!({
+        "schema": 1, "complete": false, "provider": provider, "context": context,
+        "namespace": namespace, "phases": [], "permits": OPERATIONS,
+        "maximum_put_attempts": OPERATIONS + 2,
+        "limitations": [
+            "Provider primitive, not a serving controller, placement protocol or database benchmark.",
+            "Finite deletion observations do not prove provider linearizability.",
+            "32 samples per phase, one client host, no SLO or sustained-capacity claim.",
+            "The positive reply is retained locally across revocation, not delayed inside the provider.",
+            "No concurrent collector or competing root acquisition; dedicated fixture owns deletion.",
+            "GETs may use bounded SDK retries; PUTs are single attempt.",
+            "S3-compatible MinIO does not qualify AWS S3."
+        ]
+    });
+    save(output, &report);
+    let connection = connect(&provider, &bucket, &namespace).await;
+    let storage = connection.objects();
+    let permits = (0..OPERATIONS)
+        .map(|_| {
+            let id = uuid::Uuid::new_v4();
+            (
+                format!("proposals/permit-{id}"),
+                Bytes::from(id.to_string()),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Each unique permit receives exactly one physical PUT in this fixture.
+    let initialized = phase(storage.clone(), &permits, 4, true).await;
+    report["initialization"] = initialized;
+    save(output, &report);
+    assert_eq!(report["initialization"]["failed"], 0);
+    for concurrency in [1, 4, 16] {
+        let measured = phase(storage.clone(), &permits, concurrency, false).await;
+        assert_eq!(measured["failed"], 0);
+        assert_eq!(measured["authority_calls_during_phase"], json!([0, 0, 0]));
+        report["phases"].as_array_mut().unwrap().push(measured);
+        save(output, &report);
+    }
+
+    let before = control_counts();
+    let mut writer = Writer::new(
+        storage.clone(),
+        uuid::Uuid::new_v4(),
+        QueueLimits::default(),
+    )
+    .unwrap();
+    let upload = writer.prepare(&[Bytes::from(vec![42; 1024])]).unwrap();
+    let completion = upload.send().await;
+    assert_eq!(completion.resolution(), Resolution::Durable);
+    writer.complete(completion).unwrap();
+    drop(
+        writer
+            .pop_durable()
+            .unwrap()
+            .expect("durable before validation"),
+    );
+    let expected = writer.durable_prefix();
+    // This sealed result's successful validation may be consumed after takeover.
+    let (key, bytes) = &permits[0];
+    let held_reply = storage
+        .get(key, bytes.len())
+        .await
+        .unwrap_or_else(|_| panic!("positive permit GET failed"))
+        .expect("live permit");
+    assert_eq!(held_reply.bytes, *bytes);
+    let late = writer
+        .prepare(&[Bytes::from_static(b"late unacknowledged suffix")])
+        .unwrap();
+    let peer = connect(&provider, &bucket, &namespace).await;
+    let started = Instant::now();
+    let revocations = stream::iter(permits.iter())
+        .map(|(key, _)| {
+            let authority = peer.authority();
+            async move { authority.delete_versions(key).await.is_ok() }
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+    report["revoke_all_seconds"] = json!(started.elapsed().as_secs_f64());
+    assert!(
+        revocations.iter().all(|ok| *ok),
+        "physical permit revocation failed"
+    );
+    // Check absence before scanning, through old and independently opened pools.
+    for reader in [storage.clone(), peer.objects()] {
+        for (key, bytes) in &permits {
+            assert!(matches!(reader.get(key, bytes.len()).await, Ok(None)));
+        }
+    }
+    let mut recovery = Reader::discover(peer.objects(), expected.log());
+    while recovery
+        .read_next()
+        .await
+        .unwrap_or_else(|_| panic!("journal recovery failed"))
+        .is_some()
+    {}
+    assert_eq!(recovery.finished_prefix(), Some(expected));
+    // A delayed successful response can acknowledge only the already recovered cut.
+    assert_eq!(held_reply.bytes, permits[0].1);
+    assert_eq!(late.send().await.resolution(), Resolution::Durable);
+    assert!(matches!(
+        storage.get(&permits[0].0, permits[0].1.len()).await,
+        Ok(None)
+    ));
+    assert!(recovery.read_next().await.unwrap().is_none());
+    drop(writer);
+    drop(storage);
+    drop(peer);
+    drop(connection);
+    let reopened = connect(&provider, &bucket, &namespace).await.objects();
+    for (key, bytes) in &permits {
+        assert!(matches!(reopened.get(key, bytes.len()).await, Ok(None)));
+    }
+    let mut replay = Reader::replay(reopened, expected);
+    let recovered = replay.read_next().await.unwrap().expect("selected frame");
+    assert_eq!(
+        recovered.records().collect::<Vec<_>>(),
+        vec![vec![42; 1024].as_slice()]
+    );
+    drop(recovered);
+    assert!(replay.read_next().await.unwrap().is_none());
+    let after = control_counts();
+    let counts = after
+        .iter()
+        .zip(before)
+        .map(|(a, b)| a - b)
+        .collect::<Vec<_>>();
+    assert_eq!(counts, vec![0, 0, 0]);
+    report["control_calls_during_handoff_fixture"] = json!(counts);
+    report["post_revocation_negative_gets"] = json!(OPERATIONS * 3 + 1);
+    report["pre_revocation_prefix_recovered"] = json!(true);
+    report["late_suffix_excluded"] = json!(true);
+    report["complete"] = json!(true);
+    save(output, &report);
 }
