@@ -1,6 +1,6 @@
 # Deployment and operations
 
-The service is experimental. Initial real-B2, S3-compatible, and Kubernetes replica-transition tests pass; they are not a production readiness certification.
+The service is experimental. Native cloud serving is integrated; full Kubernetes fault recovery and performance remain under qualification. The [verification results](verification-results.md) record passing phases, failed deadlines and exact configurations.
 
 The [release](https://github.com/ericflo/durable-db/releases) provides a static Linux x86_64 binary. While the repository is private, `gh` must be authenticated with repository access. Install without root or a Rust toolchain:
 
