@@ -137,63 +137,73 @@ impl Cluster {
                 }
             }
         });
+        let count = cluster.config.layout.partitions() as usize;
         let weak = Arc::downgrade(&cluster);
         let worker = tokio::spawn(async move {
             let mut retry = tokio::time::interval(Duration::from_secs(3));
             retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut pending = vec![false; count];
+            let mut failed = vec![false; count];
+            let mut acquisitions = FuturesUnordered::new();
             let mut cursor = 0;
             loop {
                 tokio::select! {
-                    _ = retry.tick() => (),
-                    update = members.changed() => if update.is_err() { break; },
+                    _ = retry.tick() => failed.fill(false),
+                    update = members.changed() => {
+                        if update.is_err() { break; }
+                        failed.fill(false);
+                    },
+                    Some((id, result)) = acquisitions.next(), if !acquisitions.is_empty() => {
+                        let result: anyhow::Result<()> = result;
+                        pending[id] = false;
+                        failed[id] = result.is_err();
+                        if failed[id] {
+                            tracing::warn!(partition = id, "native placement incomplete; retrying");
+                        }
+                    }
                 }
-                let peers = members.borrow_and_update().clone();
+                let peers = membership(&members.borrow_and_update()).unwrap_or_default();
                 let Some(cluster) = weak.upgrade() else {
                     return;
                 };
-                // This process can route and administer while partitions
-                // recover. Readiness never grants data-serving permission.
-                cluster.ready.store(
-                    membership(&peers).is_ok() && peers.contains(&cluster.config.address),
-                    Ordering::Release,
-                );
-                // Individual provider calls are bounded. A whole recovery may
-                // legitimately take longer; restarting it on a fixed timer can
-                // prevent progress forever. Changed placement still cancels it.
-                let mut work = Box::pin(cluster.reconcile(&peers, &mut cursor));
-                let result = loop {
-                    tokio::select! {
-                        result = &mut work => break Some(result),
-                        update = members.changed() => {
-                            let same_placement = membership(&members.borrow()).is_ok_and(|next| {
-                                next.contains(&cluster.config.address) == peers.contains(&cluster.config.address)
-                                    && (0..cluster.partitions.len()).all(|id| {
-                                        let ours = |peers: &[SocketAddr]| {
-                                            preferred(id as u32, peers) == Some(cluster.config.address)
-                                        };
-                                        ours(&next) == ours(&peers)
-                                    })
-                            });
-                            if update.is_err() || !same_placement {
-                                break None;
-                            }
-                        }
-                    }
-                };
-                match result {
-                    Some(Ok(true)) => retry.reset_immediately(),
-                    Some(Ok(false)) => (),
-                    Some(Err(_)) => {
-                        tracing::warn!("native placement incomplete; retrying");
-                    }
-                    None => {
-                        retry.reset_immediately();
-                        if members.has_changed().is_err() {
-                            break;
-                        }
+                // Readiness keeps routing/administration reachable; membership
+                // schedules work but cannot authorize a data response.
+                cluster
+                    .ready
+                    .store(peers.contains(&cluster.config.address), Ordering::Release);
+                for (id, partition) in cluster.partitions.iter().enumerate() {
+                    if preferred(id as u32, &peers) != Some(cluster.config.address) {
+                        partition.local.write().await.take();
                     }
                 }
+                for _ in 0..count {
+                    if acquisitions.len() == 4 {
+                        break;
+                    }
+                    let id = cursor;
+                    cursor = (id + 1) % count;
+                    if pending[id]
+                        || failed[id]
+                        || preferred(id as u32, &peers) != Some(cluster.config.address)
+                    {
+                        continue;
+                    }
+                    let partition = &cluster.partitions[id];
+                    let local = partition.local.read().await.clone();
+                    if let Some(local) = local
+                        && local.ready().await
+                    {
+                        continue;
+                    }
+                    partition.local.write().await.take();
+                    pending[id] = true;
+                    let cluster = cluster.clone();
+                    let members = members.clone();
+                    acquisitions
+                        .push(async move { (id, cluster.acquire_current(id, members).await) });
+                }
             }
+            drop(acquisitions);
             if let Some(cluster) = weak.upgrade() {
                 cluster.retire().await;
             }
@@ -207,63 +217,33 @@ impl Cluster {
             partition.local.write().await.take();
         }
     }
-    async fn reconcile(&self, peers: &[SocketAddr], cursor: &mut usize) -> anyhow::Result<bool> {
-        let peers = membership(peers)?;
-        let desired: Vec<_> = (0..self.partitions.len())
-            .map(|id| preferred(id as u32, &peers) == Some(self.config.address))
-            .collect();
-        // Retire removed placements before I/O.
-        for (partition, wanted) in self.partitions.iter().zip(&desired) {
-            if !wanted {
-                partition.local.write().await.take();
+    async fn acquire_current(
+        &self,
+        id: usize,
+        mut members: watch::Receiver<Vec<SocketAddr>>,
+    ) -> anyhow::Result<()> {
+        let partition = &self.partitions[id];
+        let wanted = |peers: &[SocketAddr]| {
+            membership(peers)
+                .is_ok_and(|peers| preferred(id as u32, &peers) == Some(self.config.address))
+        };
+        let acquisition = self.acquire(id as u32, &partition.connection);
+        tokio::pin!(acquisition);
+        let local = loop {
+            if !wanted(&members.borrow_and_update()) {
+                return Ok(());
             }
+            tokio::select! {
+                result = &mut acquisition => break result?,
+                update = members.changed() => if update.is_err() { return Ok(()); },
+            }
+        };
+        // A simultaneous membership update may have selected a different peer.
+        // Cancel only this partition; unrelated recovery keeps its progress.
+        if wanted(&members.borrow()) {
+            *partition.local.write().await = Some(Arc::new(local));
         }
-        let mut checked = 0;
-        let mut acquisitions = FuturesUnordered::new();
-        for _ in 0..self.partitions.len() {
-            let id = *cursor;
-            // Advance before I/O, so failure or cancellation cannot starve the
-            // next partition. Limit work even when the provider is healthy.
-            *cursor = (id + 1) % self.partitions.len();
-            if !desired[id] {
-                continue;
-            }
-            let partition = &self.partitions[id];
-            let local = partition.local.read().await.clone();
-            let healthy = match local {
-                Some(local) => local.ready().await,
-                None => false,
-            };
-            if !healthy {
-                partition.local.write().await.take();
-                acquisitions.push(async move {
-                    let local = self.acquire(id as u32, &partition.connection).await?;
-                    *partition.local.write().await = Some(Arc::new(local));
-                    Ok::<_, anyhow::Error>(())
-                });
-                if acquisitions.len() == 4 {
-                    break;
-                }
-                continue;
-            }
-            checked += 1;
-            if checked == 8 {
-                break;
-            }
-        }
-        let acquired = !acquisitions.is_empty();
-        let mut failure = None;
-        // Finish independent acquisitions even if another fails or stalls.
-        // Reservations bound all recovery/serving state through cancellation.
-        while let Some(result) = acquisitions.next().await {
-            if let Err(error) = result {
-                failure = Some(error);
-            }
-        }
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        Ok(acquired)
+        Ok(())
     }
     async fn acquire(&self, id: u32, connection: &Connection) -> anyhow::Result<Native> {
         let started = std::time::Instant::now();

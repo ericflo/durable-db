@@ -38,12 +38,20 @@ struct Node {
 }
 impl Node {
     async fn start(directory: Partitions, listener: TcpListener, peers: Vec<SocketAddr>) -> Self {
+        Self::with_layout(directory, listener, peers, Layout::new(2).unwrap()).await
+    }
+    async fn with_layout(
+        directory: Partitions,
+        listener: TcpListener,
+        peers: Vec<SocketAddr>,
+        layout: Layout,
+    ) -> Self {
         let address = listener.local_addr().unwrap();
         let (membership, receiver) = watch::channel(peers);
         let cluster = Cluster::open(
             directory,
             ClusterConfig {
-                layout: Layout::new(2).unwrap(),
+                layout,
                 address,
                 limits: Limits::default(),
                 upload_limits: budget(),
@@ -732,6 +740,71 @@ async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn paused_acquisition_does_not_block_queued_partitions() {
+    let provider = Provider::new();
+    let files = Arc::new(PausedPermit {
+        inner: provider.files.clone(),
+        pause: AtomicBool::new(true),
+        blocked: Default::default(),
+        entered: Default::default(),
+        release: Default::default(),
+    });
+    let directory = Connection::new(files.clone(), provider, "test")
+        .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let layout = Layout::new(8).unwrap();
+    let node = Node::with_layout(directory, listener, vec![], layout).await;
+    let names: Vec<_> = (0..8)
+        .map(|id| {
+            (0..1000)
+                .map(|n| format!("app-{n}"))
+                .find(|name| layout.partition(name).unwrap() == id)
+                .unwrap()
+        })
+        .collect();
+    node.members(&[node.address]);
+    files.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut serving = 0;
+            for name in &names {
+                serving += usize::from(
+                    node.cluster
+                        .resolve(name)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .owner_incarnation()
+                        .is_some(),
+                );
+            }
+            if serving == 7 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("free acquisition slots must admit queued partitions");
+    assert!(
+        files.blocked.try_lock().is_err(),
+        "slow recovery remains in flight"
+    );
+    let token = auth().administrator_token(600).unwrap();
+    node.server
+        .ok(
+            "PUT",
+            &format!("/v1/databases/{}", names[7]),
+            &token,
+            json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
+    files.release.notify_one();
+}
+
+#[tokio::test(start_paused = true)]
 async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change() {
     let provider = Provider::new();
     let files = Arc::new(PausedPermit {
@@ -794,6 +867,48 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change(
         provider.calls.load(Ordering::SeqCst),
         calls,
         "elapsed time or unchanged local placement restarted the paused operation"
+    );
+    let mut paused = None;
+    for (id, name) in names().iter().enumerate() {
+        if node
+            .cluster
+            .resolve(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation()
+            .is_none()
+        {
+            paused = Some(id as u32);
+        }
+    }
+    let paused = paused.unwrap();
+    let peer = (1..=u16::MAX)
+        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+        .find(|peer| {
+            *peer != node.address
+                && preferred(paused, &[node.address, *peer]) == node.address
+                && preferred(1 - paused, &[node.address, *peer]) == *peer
+        })
+        .unwrap();
+    node.members(&[peer, node.address]);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        files.blocked.try_lock().is_err(),
+        "another partition's move canceled recovery"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    assert!(
+        node.cluster
+            .resolve(&names()[(1 - paused) as usize])
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation()
+            .is_none(),
+        "moved owner must retire without waiting for recovery"
     );
     node.members(&[]);
     // Let the controller observe removal before restoring the same address;
