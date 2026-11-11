@@ -191,6 +191,7 @@ for (const file of [
   'owned-wal-candidate-2026-11-09.json',
   'revocable-owner-2026-11-11.json',
   'native-permits-2026-11-11.json',
+  'partition-directory-2026-11-11.json',
   'provider-floor-2026-11-09.json',
   'wal-handoff-candidate-2026-11-09.json',
   'physical-memory-hour-2026-11-09.json',
