@@ -1,6 +1,6 @@
 # Owned partitions and durable log batches
 
-**Status: native local CLI serving shipped; cloud cutover and cluster qualification remain open.** Local mode uses exclusive filesystem ownership. Cloud mode still uses the shared publication engine. The native library now uses timing-independent ownership on the existing Kubernetes hosts; a restricted compute profile is not an acceptable first-production requirement.
+**Status: native local CLI serving shipped; cloud cutover and cluster qualification remain open.** Local mode uses exclusive filesystem ownership. Cloud mode still uses the shared publication engine. The native library now uses timing-independent ownership; qualification on the existing Kubernetes hosts remains required, and a restricted compute profile is not an acceptable first-production requirement.
 
 ## Why the current engine must change
 
@@ -49,7 +49,9 @@ Control changes use the existing publication/rebase protocol. Ordinary native re
 
 The shared upload ceiling covers both control publication and partition data. Per-partition and per-tenant ceilings remain additional limits. Shared control publication needs upload credit, including partition collection fences; administrators can replenish the shared ceiling directly. Attribution of shared overhead and guaranteed maintenance progress remain production gates.
 
-This library interface supplies independent owners, not an automatic cluster controller. Database mapping, membership, election, route discovery, transfer policy and the CLI cutover remain to be implemented. See the [verification scope](verification.md#independent-partition-control).
+`Root::advertise` publishes an address with a fresh ownership incarnation. `api::Forward` discovers that route, caches it and forwards one bounded request. The destination checks the incarnation, tenant policy and ordinary serving permission; a stale address cannot select another owner. A failed request returns to the caller, whose explicit retry refreshes the route. [Routing checks and limitations](verification.md#owner-discovery-and-forwarding) include live B2/MinIO takeover.
+
+Automatic membership, election, stable database mapping, transfer policy and cloud CLI cutover remain to be implemented. Membership may choose a preferred owner; only the existing conditional claim, revocation and recovery protocol can make it serve. Moving a partition must preserve its ID and object scope. See the [partition verification scope](verification.md#independent-partition-control).
 
 ### Revocable writer permits
 
@@ -232,7 +234,7 @@ This demonstrates useful provider concurrency and supports investigating batched
 
 The first provider experiment passes, with a significant measured GET latency floor. The extended registration/acquisition model now checks complete ancestor revocation through three competing claimants, including an intermediate claimant that stops before revocation. Next bind those model boundaries to native serving: even a successor that crashes before revocation must leave all possibly live ancestors discoverable. Selection and activation must remain immutable under repeated takeover, abandoned control calls and concurrent collection. Failed creation must not leak a publishable identity, and permit collection must not race publication or resurrect permission. Keep these checks small and adversarial.
 
-Integrate that boundary into the existing native journal, index, transaction and HTTP path, replace timed cluster ownership, and add placement and routing in the same binary. Exercise warm reads, independent databases, group commit, a resumed stale owner, return to one node and recovery after total compute loss on the existing hosts. Qualify actual B2 and AWS S3 behavior and performance before switching the cloud CLI. Tenant isolation, bounded physical growth, retention and backups remain the [other production gates](production-readiness.md#remaining-production-gates-in-order).
+Connect the native journal, index, transaction, HTTP and forwarding components to automatic membership, election, stable database mapping and placement in the same binary. Exercise warm reads, independent databases, group commit, a resumed stale owner, return to one node and recovery after total compute loss on the existing hosts. Qualify actual B2 and AWS S3 behavior and performance before switching the cloud CLI. Tenant isolation, bounded physical growth, retention and backups remain the [other production gates](production-readiness.md#remaining-production-gates-in-order).
 
 ## Reproduce the raw provider experiment
 
