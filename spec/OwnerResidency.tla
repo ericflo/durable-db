@@ -1,0 +1,27 @@
+------------------------- MODULE OwnerResidency -------------------------
+EXTENDS Naturals, FiniteSets
+CONSTANT Fault
+ASSUME Fault \in {"None", "Acquire", "Retire"}
+VARIABLE s
+vars == <<s>>
+Owners == {1, 2, 3}
+Capacity == 2
+Init == s = [live |-> {}, reserved |-> {}, retired |-> {}]
+\* Reserve before acquisition/recovery, not just before entering the map.
+Acquire(o) == /\ o \notin s.live
+              /\ (Cardinality(s.reserved) < Capacity \/ Fault = "Acquire")
+              /\ s' = [s EXCEPT !.live = @ \cup {o}, !.reserved = @ \cup {o}]
+\* Routing retirement does not end requests, uploads or private worker state.
+Retire(o) == /\ o \in s.live \ s.retired
+             /\ s' = [s EXCEPT !.retired = @ \cup {o},
+                 !.reserved = IF Fault = "Retire" THEN @ \ {o} ELSE @]
+\* Finish abstracts the last reference, including canceled/finished I/O tasks.
+Finish(o) == /\ o \in s.retired
+             /\ s' = [s EXCEPT !.live = @ \ {o}, !.reserved = @ \ {o},
+                                !.retired = @ \ {o}]
+Next == \E o \in Owners: Acquire(o) \/ Retire(o) \/ Finish(o)
+TypeOK == s \in [live: SUBSET Owners, reserved: SUBSET Owners, retired: SUBSET Owners]
+Bounded == Cardinality(s.live) <= Capacity
+Funded == s.live \subseteq s.reserved
+Spec == Init /\ [][Next]_vars
+=============================================================================

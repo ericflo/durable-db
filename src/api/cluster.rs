@@ -13,7 +13,7 @@ use crate::{
     transactions::live::{Limits, Opening},
     upload_budget::{UploadLimits, UploadRequest, UploadResult, UploadStatus},
 };
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::{
@@ -25,11 +25,12 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{RwLock, watch},
+    sync::{RwLock, Semaphore, watch},
     task::JoinHandle,
 };
 
-/// Projection/journal allowances are per partition; the byte cache is shared.
+/// Index/validation and journal byte allowances are aggregate across residents.
+/// The byte cache is shared; frame/window/checkpoint thresholds stay per partition.
 /// Membership and this process's advertised socket addresses must be canonical.
 pub struct ClusterConfig {
     pub layout: Layout,
@@ -52,6 +53,8 @@ pub struct Cluster {
     config: ClusterConfig,
     cache: Arc<Cache>,
     partitions: Vec<Partition>,
+    limits: Limits,
+    residents: Arc<Semaphore>,
     ready: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -64,7 +67,7 @@ impl Cluster {
         mut members: watch::Receiver<Vec<SocketAddr>>,
     ) -> anyhow::Result<Arc<Self>> {
         config.layout.validate()?;
-        config.limits.validate()?;
+        let limits = config.limits.share(config.layout.partitions() as usize)?;
         config.upload_limits.validate()?;
         crate::ownership::root::valid_address(config.address)?;
         ensure!(
@@ -83,7 +86,10 @@ impl Cluster {
                 local: RwLock::new(None),
             });
         }
+        let residents = Arc::new(Semaphore::new(config.layout.partitions() as usize));
         let cluster = Arc::new(Self {
+            limits,
+            residents,
             directory,
             config,
             cache,
@@ -182,6 +188,11 @@ impl Cluster {
         Ok(())
     }
     async fn acquire(&self, connection: &Connection) -> anyhow::Result<Native> {
+        let reservation = self
+            .residents
+            .clone()
+            .try_acquire_owned()
+            .context("retired owners still occupy the resident budget")?;
         // A bootstrap upload grant can invalidate a captured comparison. Only
         // definite conflicts get a fresh attempt here; uncertainty returns.
         for _ in 0..4 {
@@ -199,10 +210,16 @@ impl Cluster {
                 "ownership activation unconfirmed"
             );
             root.select_journals().await?;
-            let owner = Opening::new(root, self.config.limits, self.cache.clone())?
+            let owner = Opening::new(root, self.limits, self.cache.clone())?
                 .recover()
                 .await?;
-            return Native::new(owner, self.config.capacity).map_err(anyhow::Error::from);
+            return Native::start_reserved(
+                owner,
+                self.config.capacity,
+                Duration::from_secs(60),
+                Some(reservation),
+            )
+            .map_err(anyhow::Error::from);
         }
         anyhow::bail!("ownership claim remained contended")
     }

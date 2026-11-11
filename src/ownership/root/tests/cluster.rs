@@ -409,7 +409,7 @@ async fn invalid_cluster_configuration_cannot_acquire_or_change_the_layout() {
     let address = "127.0.0.1:7654".parse().unwrap();
     let cache = Arc::new(Cache::new(0, None).unwrap());
     let before = provider.calls.load(Ordering::SeqCst);
-    for fault in 0..5 {
+    for fault in 0..6 {
         let mut config = ClusterConfig {
             layout: Layout::new(2).unwrap(),
             address,
@@ -423,7 +423,8 @@ async fn invalid_cluster_configuration_cannot_acquire_or_change_the_layout() {
             1 => config.limits.index.databases = 0,
             2 => config.limits.receipt_window = 0,
             3 => peers.push(address),
-            _ => peers = vec![address; 257],
+            4 => peers = vec![address; 257],
+            _ => config.limits.index.receipts = 2048, // Valid alone, too small when split.
         }
         let (_send, receive) = watch::channel(peers);
         assert!(
@@ -578,4 +579,70 @@ async fn routine_health_validation_does_not_clear_readiness() {
         "a routine permit probe is not a placement loss"
     );
     files.release.notify_one();
+}
+
+#[tokio::test]
+async fn retired_backend_references_keep_the_process_budget_until_released() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let node = Node::start(directory(&provider).await, listener, vec![address]).await;
+    settled(&[&node], &[address]).await;
+    let mut held = Vec::new();
+    for name in names() {
+        held.push(node.cluster.resolve(&name).await.unwrap().unwrap());
+    }
+    node.members(&[]);
+    settled(&[&node], &[]).await;
+    let calls = provider.calls.load(Ordering::SeqCst);
+    node.members(&[address]);
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!node.cluster.ready().await);
+    for name in names() {
+        assert!(
+            node.cluster
+                .resolve(&name)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_none()
+        );
+    }
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        calls,
+        "full process budget refuses before ownership I/O"
+    );
+    drop(held.pop());
+    node.members(&[address]);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let mut count = 0;
+            for name in names() {
+                count += usize::from(
+                    node.cluster
+                        .resolve(&name)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .owner_incarnation()
+                        .is_some(),
+                );
+            }
+            if count == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !node.cluster.ready().await,
+        "one old reference still occupies a slot"
+    );
+    drop(held);
+    node.members(&[address]);
+    settled(&[&node], &[address]).await;
 }

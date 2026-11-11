@@ -1,0 +1,3 @@
+safe OwnerResidency.cfg owner-residency 256m -
+unsafe UnsafeResidentAcquire.cfg resident-acquire 256m Bounded
+unsafe UnsafeResidentRetire.cfg resident-retire 256m Funded

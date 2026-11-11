@@ -99,8 +99,18 @@ only. Removing a local placement drops its serving-map entry; already admitted
 requests retain the exact backend they selected and still validate its permit.
 An expected-incarnation header must be checked against that same pinned backend,
 never one selected again after the check. The HTTP contract and tenant scopes
-remain unchanged. All partition caches share one bounded byte cache; projection
-and journal allowances are per partition and must be budgeted across the count.
+remain unchanged. All partition caches share one bounded byte cache. Aggregate index/validation
+counts and payload bytes, and journal bytes, are divided by the fixed partition
+count. Receipt-window, checkpoint and per-owner frame-count thresholds remain
+per partition. Invalid shares fail before storage mutation. An acquisition first
+reserves one of at most that many resident-owner slots; the reservation follows
+private recovery, the native owner, requests and spawned I/O through retirement.
+A removed map entry does not release it. Completed task results retain it until
+consumed or dropped. Replacement waits if old references occupy all slots.
+`OwnerResidency` checks this lifetime rule with two slots and three contenders,
+including premature release and unchecked-acquisition faults. This bounds these
+components, not allocator, SDK, checkpoint scratch or whole-process RSS; container
+limits and measured peak-memory qualification remain required.
 
 Safety does not require membership agreement. Eventual progress does: peers must
 eventually receive the same healthy membership, provider operations must make

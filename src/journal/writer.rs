@@ -15,6 +15,10 @@ pub struct QueueLimits {
 }
 
 impl QueueLimits {
+    pub(crate) fn share(self, partitions: usize) -> anyhow::Result<Self> {
+        Self::new(self.batches, self.bytes / partitions)
+    }
+
     pub fn new(batches: usize, bytes: usize) -> anyhow::Result<Self> {
         ensure!(
             (1..=64).contains(&batches),

@@ -52,6 +52,23 @@ impl Default for Limits {
 }
 
 impl Limits {
+    /// Divide aggregate resident payload/count allowances across a fixed layout.
+    /// Journal frame count, receipt window and checkpoint thresholds stay local.
+    pub(crate) fn share(mut self, partitions: usize) -> anyhow::Result<Self> {
+        ensure!(partitions > 0, "empty partition layout");
+        self.index.databases /= partitions;
+        self.index.versions /= partitions;
+        self.index.value_bytes /= partitions;
+        self.index.receipts /= partitions;
+        self.index.receipt_bytes /= partitions;
+        self.validation.transactions /= partitions;
+        self.validation.key_references /= partitions;
+        self.validation.key_bytes /= partitions;
+        self.journal = self.journal.share(partitions)?;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub(crate) fn validate(self) -> anyhow::Result<()> {
         Projection::new(self.index)?;
         Validator::new(0, self.validation)?;

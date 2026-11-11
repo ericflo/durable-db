@@ -32,12 +32,23 @@ use tokio::{
 /// Dropping it retires the worker; accepted writes can have unknown outcomes.
 pub struct Native {
     incarnation: uuid::Uuid,
-    owner: Arc<RwLock<Owner>>,
+    owner: Arc<Resident>,
     cache: Arc<Cache>,
     queue: mpsc::Sender<Command>,
     permits: Arc<Semaphore>,
     running: Arc<AtomicBool>,
     worker: JoinHandle<()>,
+}
+// The slot outlives routing retirement and follows every use of this state.
+struct Resident {
+    state: RwLock<Owner>,
+    reservation: Option<Arc<OwnedSemaphorePermit>>,
+}
+impl std::ops::Deref for Resident {
+    type Target = RwLock<Owner>;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
 }
 enum Write {
     Create(String, CreateRequest),
@@ -82,6 +93,14 @@ impl Native {
         Self::start(owner, capacity, Duration::from_secs(60))
     }
     pub(super) fn start(owner: Owner, capacity: usize, maintenance: Duration) -> Result<Self> {
+        Self::start_reserved(owner, capacity, maintenance, None)
+    }
+    pub(super) fn start_reserved(
+        owner: Owner,
+        capacity: usize,
+        maintenance: Duration,
+        reservation: Option<OwnedSemaphorePermit>,
+    ) -> Result<Self> {
         if !(Duration::from_secs(1)..=Duration::from_secs(86400)).contains(&maintenance) {
             return Err(Error::Invalid(
                 "maintenance interval must be 1 second..1 day".into(),
@@ -96,7 +115,10 @@ impl Native {
         let incarnation = owner.identity().incarnation;
         let cache = owner.cache();
         let collection = owner.collection()?;
-        let owner = Arc::new(RwLock::new(owner));
+        let owner = Arc::new(Resident {
+            state: RwLock::new(owner),
+            reservation: reservation.map(Arc::new),
+        });
         let (queue, receive) = mpsc::channel(capacity);
         let running = Arc::new(AtomicBool::new(true));
         let worker = tokio::spawn(run(
@@ -269,7 +291,7 @@ async fn prepare(
 }
 
 async fn run(
-    owner: Arc<RwLock<Owner>>,
+    owner: Arc<Resident>,
     mut queue: mpsc::Receiver<Command>,
     _running: Running,
     collection: crate::ownership::root::Collection,
@@ -294,10 +316,13 @@ async fn run(
         tokio::select! {
             _ = sweep.tick(), if collections.is_empty() => {
                 let collection = collection.clone();
-                collections.spawn(async move { tokio::time::timeout(Duration::from_secs(30), collection.collect()).await });
+                let reservation = owner.reservation.clone();
+                collections.spawn(async move {
+                    (tokio::time::timeout(Duration::from_secs(30), collection.collect()).await, reservation)
+                });
             }
             result = collections.join_next(), if !collections.is_empty() => {
-                if !matches!(result, Some(Ok(Ok(Ok(_))))) { tracing::warn!("native storage collection deferred"); }
+                if !matches!(result, Some(Ok((Ok(Ok(_)), _)))) { tracing::warn!("native storage collection deferred"); }
             }
             command = queue.recv() => {
                 let Some(command) = command else { return };
@@ -308,9 +333,10 @@ async fn run(
                             if let Some(upload) = upload {
                                 // No await between acceptance and handing the upload to
                                 // the server. The owner lock never covers its PUT.
+                                let reservation = owner.reservation.clone();
                                 uploads.spawn(async move {
                                     let position = upload.position();
-                                    (position, upload.send().await)
+                                    (position, upload.send().await, reservation)
                                 });
                             }
                             pending.push(Pending { ticket, response: command.response });
@@ -323,7 +349,7 @@ async fn run(
                 }
             }
             completed = uploads.join_next(), if !uploads.is_empty() => {
-                let Some(Ok((position, mut completion))) = completed else { return };
+                let Some(Ok((position, mut completion, _reservation))) = completed else { return };
                 if let Some(upload) = completion.take_unsent() {
                     unsent.insert(position, upload);
                 } else if completion.resolution() == Resolution::Unknown { unknown.insert(position); }
@@ -335,7 +361,8 @@ async fn run(
                 // At most one admission retry per second, earliest gap first.
                 // No resolving GET or repeated data PUT for an unsent frame.
                 if let Some((position, upload)) = unsent.pop_first() {
-                    uploads.spawn(async move { (position, upload.send().await) });
+                    let reservation = owner.reservation.clone();
+                    uploads.spawn(async move { (position, upload.send().await, reservation) });
                 }
             }
             _ = retry.tick() => {
