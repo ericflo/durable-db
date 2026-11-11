@@ -2,9 +2,13 @@
 
 ## v0.18.1 metadata retry reuse (2026-11-10)
 
+[v0.18.1](https://github.com/ericflo/durable-db/releases/tag/v0.18.1) packages `8382253`, verified by [Woodpecker #176](https://ci.eflorenzano.com/repos/18/pipeline/176/1). The independently downloaded static binary passes standalone transactions, ordered reads, backup/restore and forced-stop recovery; the public default installer installs the identical binary. Both 99-test client contracts and the optimized 10,005-database check pass in Woodpecker. README remains untouched and the independent website redesign is preserved.
+
 Tenant ledger initialization, replenishment, grants and checkpoint funding now share one conditional publication path. Ordinary control updates reuse staged metadata; competing ledger updates and collection require rebuilding. Lost replies never grant another attempt, malformed formats fail closed, and eight unsuccessful comparisons against unchanged scope stop without further uploads.
 
 The focused budget group passes in 0.68 seconds. Paused initialization, refill and grant updates retain exactly six metadata objects across three control conflicts. A deliberate reupload variant fails the first case with four objects instead of two. Three additional Rust negative controls detect missing directory, collection-fence and format checks. The existing 44,354-state publication-retry model and its unsafe control pass; no new model or dependency was added. The separate single-record retry path was removed.
+
+Native HTTP qualification passes on B2 (201.60 seconds) and versioned MinIO (182.27 seconds): tenant refusal and neighbor progress, automatic journal/table/metadata collection, two cold reopens with preserved accounting and receipts, and retained export restored after source collection. Both disposable buckets, all 46 remaining physical versions, the temporary B2 key and the MinIO container were removed. These small-image tests use a logical clock and stopped predecessor servers; they do not qualify physical timing or AWS.
 
 Storage formats and admission policy are unchanged from v0.18.0. This reduces administrative retry amplification; complete tenant attribution, scheduled backups and qualified cluster timing remain open. [Milestone evidence](evidence/metadata-retry-2026-11-10.json).
 
