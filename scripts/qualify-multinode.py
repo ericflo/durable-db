@@ -110,7 +110,7 @@ def main():
     storage = json.loads(args.storage_env_file.read_text())
     if ('DURABLE_DB_BUCKET' in storage) == ('DURABLE_DB_B2_BUCKET' in storage):
         parser.error('Provide exactly one provider for a dedicated disposable namespace')
-    report = dict(schema=1, complete=False, started_at=utc(), context=args.context,
+    report = dict(schema=2, complete=False, started_at=utc(), context=args.context,
                   namespace=namespace, image=args.image, source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   workload_sha256=hashlib.sha256(Path('scripts/cluster-workload.mjs').read_bytes()).hexdigest(),
@@ -339,10 +339,18 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
         raise RuntimeError('Per-writer acknowledged/readback progress deadline exceeded')
 
     def rolling(name):
+        def readback_point():
+            state=snapshot()
+            return dict(seconds=state['monotonic_seconds'],verified=state['verified'])
+        window=dict(name=name,target_seconds=60,start=readback_point())
+        report.setdefault('readback_windows',[]).append(window);save()
         timing=recovery(name)
         kube('rollout','restart','statefulset/durable-db')
         kube('rollout','status','statefulset/durable-db','--timeout=240s',timeout=270)
-        phase(name,placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
+        located=placement(wait_replicas(6))
+        acknowledged=progress(timing)
+        window['end']=readback_point();save()
+        phase(name,placement=located,writes_acknowledged=acknowledged)
 
     def sample_resources():
         sample = dict(time_utc=utc(), pods=[])

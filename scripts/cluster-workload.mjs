@@ -4,12 +4,14 @@ import {readFileSync} from 'node:fs';
 import {createServer} from 'node:http';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
+import {join} from 'node:path';
 const origin=process.env.DATABASE_URL;
 const writerOrigins=process.env.WRITER_ORIGINS?.split(',')??[origin];
-const admin=readFileSync('/run/credentials/admin.token','utf8').trim();
-const control=Buffer.from(readFileSync('/run/credentials/control.token','utf8').trim());
+const credentials=process.env.CREDENTIALS_DIRECTORY??'/run/credentials';
+const admin=readFileSync(join(credentials,'admin.token'),'utf8').trim();
+const control=Buffer.from(readFileSync(join(credentials,'control.token'),'utf8').trim());
 const prefix=process.env.DATABASE_PREFIX;
-const status={schema:1,state:'initializing',writes_acknowledged:0,reads_verified:0,http_attempt_statuses:{},failures:[],history:[],expected:[0,0,0,0],verified:[0,0,0,0]};
+const status={schema:2,state:'initializing',writes_acknowledged:0,reads_verified:0,http_attempt_statuses:{},failures:[],history:[],expected:[0,0,0,0],verified:[0,0,0,0]};
 const names=Array.from({length:4},(_,i)=>`${prefix}-writer-${i}`);
 const tokens=[];
 let running=false, workers=[], commandBusy=false, issued=0;
@@ -61,9 +63,11 @@ async function writer(index) {
       const result=await rpc(`/v1/databases/${names[index]}/commit`,{request_id,expected_revision:revision,writes:[{key,value:value.toString('base64')}]},tokens[index],'POST',endpoint);
       if(result.revision!==revision+1) throw new Error('Acknowledged revision mismatch');
       status.expected[index]=revision+1;status.writes_acknowledged++;
-      status.history.push({database_index:index,request_id,revision:revision+1,start,end:performance.now()/1000,value_sha256:hash(value)});
+      const record={database_index:index,request_id,revision:revision+1,start,end:performance.now()/1000,readback_end:null,value_sha256:hash(value)};
+      status.history.push(record);
       const read=await rpc(`/v1/databases/${names[index]}/read`,{expected_revision:revision+1,keys:[key]},tokens[index],'POST',endpoint);
       if(read.revision!==revision+1||JSON.stringify(read.values)!==JSON.stringify([value.toString('base64')])) throw new Error('Read after acknowledgement mismatch');
+      record.readback_end=performance.now()/1000;
       status.reads_verified++;status.verified[index]=revision+1;
       await sleep(250);
     }
@@ -98,11 +102,11 @@ function authorized(request) {
   const supplied=Buffer.from((request.headers.authorization??'').replace(/^Bearer /,''));
   return supplied.length===control.length&&timingSafeEqual(supplied,control);
 }
-createServer(async(request,response)=>{
+const server=createServer(async(request,response)=>{
   response.setHeader('content-type','application/json');
   if(!authorized(request)){response.writeHead(401).end('{}');return;}
   if(request.method==='GET'&&request.url==='/status'){
-    response.end(JSON.stringify({...status,history:undefined,history_length:status.history.length,write_intents:issued}));return;
+    response.end(JSON.stringify({...status,history:undefined,history_length:status.history.length,write_intents:issued,monotonic_seconds:performance.now()/1000}));return;
   }
   if(request.method==='GET'&&request.url==='/status?history=1'){response.end(JSON.stringify(status));return;}
   if(commandBusy){response.writeHead(409).end('{}');return;}
@@ -121,7 +125,9 @@ createServer(async(request,response)=>{
     response.end(JSON.stringify(result));
   } catch(error){response.writeHead(500).end(JSON.stringify({error:error.message}));}
   finally{commandBusy=false;}
-}).listen(9001,'0.0.0.0');
+}).listen(Number(process.env.CONTROL_PORT??9001),'0.0.0.0',()=>{
+  process.send?.({control_port:server.address().port});
+});
 try {
   for(const name of names) {
     await rpc(`/v1/databases/${name}/upload-budget`,{request_id:'fund-campaign',expected_configuration_revision:0,limits:tenantLimits});

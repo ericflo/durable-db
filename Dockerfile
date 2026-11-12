@@ -1,5 +1,12 @@
 # syntax=docker/dockerfile:1.7
 FROM docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4 AS node
+FROM node AS autoscaling-check
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY scripts/cluster-workload.mjs scripts/check-autoscaling-history.py scripts/test-autoscaling.mjs scripts/qualify-multinode.py scripts/
+RUN node --test scripts/test-autoscaling.mjs \
+    && python3 -m py_compile scripts/qualify-multinode.py \
+    && mkdir -p /checks && touch /checks/autoscaling.passed
 FROM docker.io/prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f AS alert-check
 WORKDIR /rules
 COPY deploy/prometheus .
@@ -382,6 +389,7 @@ RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
     && mkdir -p /checks && touch /checks/javascript.passed
 
 FROM build AS assembled
+COPY --from=autoscaling-check /checks/autoscaling.passed /out/checks/autoscaling.passed
 COPY --from=client-check /checks/javascript.passed /out/checks/javascript.passed
 COPY --from=proof-tools /opt/proof-tools/toolchain.tar.gz /out/verification-tools/tlapm-c8ddc44-linux-x86_64.tar.gz
 COPY --from=proof-tools /opt/proof-tools/tlapm/doc/tlapm/LICENSE /out/verification-tools/LICENSE.tlapm
