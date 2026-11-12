@@ -443,17 +443,23 @@ impl Backend for Cluster {
             let _ = worker.await;
         }
         self.ready.store(false, Ordering::Release);
-        futures::stream::iter(0..self.partitions.len())
-            .map(|id| async move {
+        // Retire every resident before storage I/O can consume the shutdown
+        // budget. In-flight requests may still hold their permitted backend.
+        let mut owned = Vec::new();
+        for (id, partition) in self.partitions.iter().enumerate() {
+            if let Some(local) = partition.local.write().await.take() {
+                owned.push((
+                    id,
+                    local
+                        .backend
+                        .owner_incarnation()
+                        .expect("native owner identity"),
+                ));
+            }
+        }
+        futures::stream::iter(owned)
+            .map(|(id, incarnation)| async move {
                 let partition = &self.partitions[id];
-                let Some(local) = partition.local.write().await.take() else {
-                    return;
-                };
-                let incarnation = local
-                    .backend
-                    .owner_incarnation()
-                    .expect("native owner identity");
-                drop(local);
                 let withdraw = async {
                     let mut root = partition.connection.root()?;
                     let observed = root.observe().await?;

@@ -1723,6 +1723,61 @@ async fn absent_uncertain_journal_reacquires_and_excludes_a_late_old_upload() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn graceful_withdrawal_retires_all_residents_before_storage_io() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let layout = Layout::new(16).unwrap();
+    let node = Node::with_layout(directory(&provider).await, listener, vec![address], layout).await;
+    let names: Vec<_> = (0..16)
+        .map(|id| {
+            (0..1000)
+                .map(|n| format!("app-{n}"))
+                .find(|name| layout.partition(name).unwrap() == id)
+                .unwrap()
+        })
+        .collect();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for name in &names {
+            while node
+                .cluster
+                .resolve(name)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    provider.pause_all_reads.store(true, Ordering::SeqCst);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), node.cluster.drain())
+            .await
+            .is_err()
+    );
+    assert!(!node.cluster.ready().await);
+    for name in names {
+        assert!(
+            node.cluster
+                .resolve(&name)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_none(),
+            "cancelled storage hints must not leave later residents running"
+        );
+    }
+    provider.pause_all_reads.store(false, Ordering::SeqCst);
+}
+
+#[tokio::test(start_paused = true)]
 async fn graceful_withdrawal_skips_challenge_and_preserves_http_receipts() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

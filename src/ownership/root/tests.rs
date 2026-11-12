@@ -36,6 +36,7 @@ struct Provider {
     calls: AtomicU64,
     reads: AtomicU64,
     pause_read: AtomicBool,
+    pause_all_reads: AtomicBool,
     maintenance: AtomicU64,
     lose_reply: AtomicBool,
     fail_replacements: AtomicU64,
@@ -63,6 +64,7 @@ impl Provider {
             calls: AtomicU64::new(0),
             reads: AtomicU64::new(0),
             pause_read: AtomicBool::new(false),
+            pause_all_reads: AtomicBool::new(false),
             maintenance: AtomicU64::new(0),
             lose_reply: AtomicBool::new(false),
             fail_replacements: AtomicU64::new(0),
@@ -107,7 +109,9 @@ impl Provider {
 impl Authority for Provider {
     async fn read(&self) -> anyhow::Result<Bucket> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        if self.pause_read.swap(false, Ordering::SeqCst) {
+        if self.pause_all_reads.load(Ordering::SeqCst)
+            || self.pause_read.swap(false, Ordering::SeqCst)
+        {
             self.entered.notify_one();
             self.release.notified().await;
         }
