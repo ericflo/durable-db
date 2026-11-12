@@ -38,13 +38,18 @@ For the focused network experiment, add `--scenario peer-isolation` to the same
 qualification command. It starts three processes on three hosts, sends writers
 through stable services on both sides of a one-versus-two split, and exercises
 one-way then two-way peer isolation. HTTPS/DNS and workload ingress remain open.
-Long-lived observers check fresh and retained peer connections; every process
+A pinned test helper uses `NET_ADMIN` as root inside each disposable pod’s private
+network namespace, dropping only traffic to peer addresses on TCP port 7654.
+Host networking is refused. Long-lived observers check fresh and retained peer
+connections; every process
 must also complete a fresh provider-backed administrative read. Each split is
 held for thirty seconds after its network checks pass. Per-writer progress during
 the split is recorded separately from recovery after healing. Both scenarios
 share cold replacement, full history verification and namespace cleanup. This
-new scenario is awaiting B2 qualification; it does not yet establish availability
-during a permanent partition.
+new packet-fault scenario is awaiting B2 qualification; it does not yet establish
+availability during a permanent partition. The initial NetworkPolicy attempt
+failed injection validation because established connections remained usable;
+[that behavior is implementation-defined](https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-s-impact-on-existing-connections).
 
 
 Use a registry address reachable by the **nodes' container runtime**, not just by pods. For example, a build may push through a cluster DNS service while the nodes pull the same registry through a configured NodePort alias. The qualification run used this arrangement; it did not modify cluster-wide registry or metrics settings.

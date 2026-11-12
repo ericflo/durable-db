@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run isolated replica-loss and provider-egress faults in a new test namespace.
+"""Run bounded recovery and peer/provider network faults in a new test namespace.
 
 Never drains/reboots hosts or edits cluster-wide objects. Requires an existing
 cluster, immutable database image, dedicated disposable provider namespace,
@@ -19,6 +19,8 @@ import time
 import urllib.request
 import uuid
 import yaml
+
+NETWORK_IMAGE = 'docker.io/nicolaka/netshoot@sha256:47b907d662d139d1e2f22bfe14f4efca1e3f1feed283572f47c970c780c03b61'
 
 NODE_IMAGE = 'docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4'
 
@@ -129,6 +131,8 @@ def main():
                       'Manual replica changes; no CPU-driven HPA claim.',
                       'Only the selected scenario is exercised; no host shutdown, node drain, rack failure or control-plane failure.',
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
+    if args.scenario=='peer-isolation':
+        report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=30)
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
     created = False
@@ -384,6 +388,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
         urls=['http://'+('['+ip+']' if ':' in ip else ip)+':7654' for ip in addresses]
         island=addresses.index(isolated['status']['podIP'])
         observers=[]
+        firewalls=[]
         def identities(items):
             return {p['metadata']['uid']:next(c['restartCount'] for c in p['status']['containerStatuses'] if c['name']=='database') for p in items}
         original=identities(live)
@@ -427,24 +432,28 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             if statuses!=[200]*len(live):raise RuntimeError('A partition side could not read the provider-backed administrative budget')
             return statuses
 
+        def firewall(pod, *command):
+            return kube('exec',pod,'-c','network-fault','--','nft',*command)
+
         def restrict(mode):
-            restricted=json.loads(json.dumps(policy));restricted['spec']['egress'].pop(1)
-            policies=[restricted]
-            for side in ('isolated','majority'):
-                target={'app':'durable-db'}
-                if mode=='symmetric' or side=='isolated':target['fault-side']=side
-                policies.append(dict(apiVersion='networking.k8s.io/v1',kind='NetworkPolicy',metadata=dict(name='peer-'+side),
-                    spec=dict(podSelector=dict(matchLabels={'app':'durable-db','fault-side':side}),policyTypes=['Egress'],
-                        egress=[dict(to=[dict(podSelector=dict(matchLabels=target))],ports=[dict(protocol='TCP',port=7654)])])))
-            kube('apply','-f','-',body=dict(apiVersion='v1',kind='List',items=policies))
+            for source,pod in enumerate(live):
+                name=pod['metadata']['name']
+                firewall(name,'flush','chain','inet','durable_db_test','output')
+                for destination,ip in enumerate(addresses):
+                    if source!=destination and (source==island or mode=='symmetric' and destination==island):
+                        firewall(name,'add','rule','inet','durable_db_test','output',
+                                 'ip6' if ':' in ip else 'ip','daddr',ip,'tcp','dport','7654','drop')
 
         def heal():
-            kube('apply','-f','-',body=policy)
-            kube('delete','networkpolicy','peer-majority','peer-isolated','--ignore-not-found')
+            for pod in firewalls:firewall(pod,'flush','chain','inet','durable_db_test','output')
 
         try:
             config=json.dumps(dict(peers=[url+'/health/live' for url in urls],provider='https://api.backblazeb2.com/'))
             for pod in live:
+                name=pod['metadata']['name']
+                firewall(name,'add','table','inet','durable_db_test')
+                firewalls.append(name)
+                firewall(name,'add','chain','inet','durable_db_test','output','{ type filter hook output priority 0; policy accept; }')
                 observers.append(subprocess.Popen(['kubectl','--context',args.context,'-n',namespace,'exec','-i',pod['metadata']['name'],'-c','fault','--','node','-e',PEER_PROBE,config],
                     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1))
             for mode in ('asymmetric','symmetric'):
@@ -470,7 +479,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                     try:observer.wait(timeout=5)
                     except subprocess.TimeoutExpired:observer.kill();observer.wait()
                 observer.stdin.close();observer.stdout.close()
-            heal()
+            for pod in firewalls:firewall(pod,'delete','table','inet','durable_db_test')
 
     save()
     try:
@@ -493,6 +502,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             if resource['kind']=='Deployment':
                 resource['spec']['replicas']=3 if args.scenario=='peer-isolation' else 1
                 template=resource['spec']['template'];template['metadata']['labels']['durable-db-role']='storage-client'
+                if template['spec'].get('hostNetwork'):raise RuntimeError('Fault injection requires a private pod network namespace')
                 template['spec']['topologySpreadConstraints'][0]['whenUnsatisfiable']='DoNotSchedule'
                 container=template['spec']['containers'][0];container['image']=args.image
                 container['args']=['serve','--listen=0.0.0.0:7654','--admin-key-file=/run/keys/admin.key','--memory-cache-mib=8','--concurrency=4','--maintenance-seconds=60','--upload-budget-bytes=1073741824','--upload-budget-attempts=100000']
@@ -508,6 +518,13 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                     command=['node','-e','setInterval(()=>{},1<<30)'],
                     resources=dict(requests=dict(cpu='1m',memory='8Mi'),limits=dict(cpu='100m',memory=report['configuration']['process_pause']['sidecar_memory_limit'])),
                     securityContext=dict(allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,capabilities=dict(drop=['ALL']))))
+                if args.scenario=='peer-isolation':
+                    template['spec']['containers'].append(dict(name='network-fault',image=NETWORK_IMAGE,
+                        command=['/bin/sleep','infinity'],workingDir='/',
+                        resources=dict(requests=dict(cpu='1m',memory='8Mi'),limits=dict(cpu='50m',memory='64Mi')),
+                        securityContext=dict(runAsUser=0,runAsGroup=0,runAsNonRoot=False,
+                            allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,
+                            capabilities=dict(drop=['ALL'],add=['NET_ADMIN']))))
             resources.append(resource)
         for resource in resources:resource['metadata']['namespace']=namespace
         kube('apply','-f','-',body=dict(apiVersion='v1',kind='List',items=resources))
