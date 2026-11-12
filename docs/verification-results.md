@@ -1,41 +1,71 @@
 # Verification results
 
-## Graceful routing withdrawal (v0.24.2 candidate, 2026-11-12)
+## v0.24.2 graceful routing withdrawal (2026-11-12)
 
-Shutdown closes admission, stops the cluster scheduler, and conditionally removes
-the addresses of its owned partitions within a five-second budget. Replacements
-can skip the 15-second advisory challenge wait after a confirmed withdrawal.
-They still fence old permits and recover selected journals. Crashes or failed
-hints use the existing challenge path. The existing optional address field and
-conditional update implement the hint; no format or object class is added.
+Shutdown closes admission, stops the cluster scheduler, retires every local
+resident, and conditionally removes its routing addresses within a five-second
+budget. A replacement can skip the 15-second advisory challenge after observing
+the withdrawal. It still fences old permits and recovers selected journals.
+Crashes or failed hints retain the ordinary challenge path. The existing optional
+address field and publication code implement the hint; no format, object class
+or background worker is added.
 
-The real HTTP regression retains the old backend, requires replacement within
-five simulated seconds, then checks fencing and exact receipt replay. Suppressing
-the hint fails in 0.10 seconds. Both regressions pass in 0.11 seconds, including
-failed writes, lost replies, stale comparisons and wrong incarnations. The
-updated challenge model checks 14,750 states with six fault controls and three
-reachability checks. The first candidate passes all 351 routine Rust checks,
-formatting and strict clippy. These bounded checks do not prove Rust or production
-latency.
+The real HTTP regression keeps the old backend alive, requires replacement
+within five simulated seconds, and checks fencing and exact receipt replay.
+Suppressing the hint fails in 0.10 seconds. Root checks cover failed writes, lost
+replies, stale comparisons and wrong incarnations. A second shutdown regression
+blocks metadata reads across 16 residents and cancels draining: the previous
+I/O-dependent retirement order fails in 0.11 seconds. Both shutdown regressions
+pass in 0.11 seconds after the fix. All **352 routine Rust checks**, formatting
+and strict clippy pass. The challenge model checks **14,750 states**, six fault
+controls and three reachability controls. These checks do not prove Rust or
+production latency.
 
-The first exact-artifact B2 campaign (`f7ed193`, Woodpecker #282) recovers all 752
-acknowledged writes across four independently checked histories. Scale-to-three
-and scale-to-six pass at 20.11 / 20.52 seconds; two rollouts miss the 60-second
-target at 120.27 / 135.76 seconds. Cold recovery passes at 65.40 seconds. The
-largest acknowledgement gaps in the rollout history slices are 85.35 / 85.12
-seconds. These include intervening diagnostics and are not exact fault windows.
-The namespace, bucket, 1,809 physical versions and scoped key are removed.
-Versioned MinIO passes in 40.58 seconds and removes its bucket, container and 79
-versions.
+[Woodpecker #283](https://ci.eflorenzano.com/repos/18/pipeline/283/1) passes at
+`4246358`, including native JavaScript/Pi contracts and the optimized
+10,005-database regression (200.56 seconds). Versioned MinIO passes
+membership/recovery in 40.55 seconds. The exact static executable recovers **all
+971 acknowledged B2 writes**, independently checked across four histories:
 
-A follow-up removes storage I/O from the local retirement loop: all residents
-retire before any conditional hint starts. A blocked provider can otherwise
-leave later residents running after the shutdown deadline. The focused
-regression reproduces this in 0.11 seconds. Both shutdown regressions pass in
-0.11 seconds after the fix; all 352 routine checks, formatting and strict clippy
-pass. Cloud qualification of the follow-up is pending. The earlier campaign
-does not establish the cause of its remaining
-challenge wait or a repeatable latency improvement.
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 20.77 s | 60 s | Pass |
+| Scale to six | 17.36 s | 60 s | Pass |
+| First rolling replacement | 145.59 s | 60 s | Miss |
+| Second rolling replacement | 162.57 s | 60 s | Miss |
+| Cold API readiness | 65.54 s | 120 s | Pass |
+
+The rollout bounds include rollout/readiness completion and the subsequent
+per-writer readback barrier. Maximum acknowledgement gaps in the recorded
+rollout history slices are **92.96 / 87.96 seconds**; those slices include
+intervening diagnostics and are not exact fault windows or readback latencies.
+The v0.24.1 campaign measured 110.44 / 150.01-second rollout bounds and 73.88 /
+73.64-second gaps. **This run does not establish an overall latency improvement.**
+
+Retained logs show no challenge stage for any of the three busy-partition
+replacements in the first rollout. Two also skip it in the second rollout;
+partition 2 uses the challenge after its predecessor logs a deferred withdrawal.
+A bounded live log follow covers 21 pod UIDs and also captures withdrawal
+deadlines. These samples do not capture every cancellation or attribute every
+delay. One first-rollout acquisition takes 54.54 seconds despite no challenge:
+15.15 seconds in activation, 17.42 selecting journals and 14.18 in recovery.
+Next isolate discovery, catalogue publication and recovery costs, including
+checkpoint coverage, while retaining the bounded memory and authority checks.
+
+The earlier candidate (`f7ed193`, Woodpecker #282) recovered all 752 acknowledged
+writes, but missed both rollouts at 120.27 / 135.76 seconds. That run preceded the
+local retirement-order fix. Its history, 351-check local result, MinIO pass and
+cleanup remain in the same evidence record; it was not separately released.
+
+[v0.24.2](https://github.com/ericflo/durable-db/releases/tag/v0.24.2) ships the
+checked static executable. Installation without a toolchain, transactions,
+backup/restore and forced-stop recovery pass. Both test namespaces, B2 buckets
+and scoped keys are removed, including 1,809 / 1,540 physical versions. Both
+MinIO buckets and containers are removed, with 79 versions each. The superseded
+unpublished artifact directory is removed. [Sources, artifacts, timings and
+diagnostic scope](evidence/native-recovery-2026-11-11.json) retain the evidence.
+Physical-host loss, sustained load, AWS, peak memory, complete cost isolation and
+the production operating envelope remain unqualified.
 
 ## v0.24.1 response validation uncertainty (2026-11-12)
 
