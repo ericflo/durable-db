@@ -331,6 +331,55 @@ async fn storage_challenges_preserve_split_owners_then_recover_without_dns_chang
     ));
 }
 
+#[tokio::test(start_paused = true)]
+async fn uncertain_claim_retry_reuses_only_the_completed_owner_challenge() {
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = first.local_addr().unwrap();
+    let first = Node::with_layout(
+        directory.clone(),
+        first,
+        vec![address],
+        Layout::new(1).unwrap(),
+    )
+    .await;
+    settled(&[&first], &[address]).await;
+    drop(first);
+    tokio::task::yield_now().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let successor = Node::with_layout(
+        directory.clone(),
+        listener,
+        vec![address],
+        Layout::new(1).unwrap(),
+    )
+    .await;
+    let observer = directory
+        .partition(0, budget())
+        .await
+        .unwrap()
+        .root()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while observer.observe().await.unwrap().challenge().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Reject the claim after its wait, then restore the provider. The worker's
+    // next acquisition must not pay another deadline for this same probe.
+    tokio::time::sleep(Duration::from_secs(14)).await;
+    provider.fail_replacements.store(100, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert!(provider.fail_replacements.swap(0, Ordering::SeqCst) < 100);
+    tokio::time::timeout(Duration::from_secs(8), settled(&[&successor], &[address]))
+        .await
+        .expect("a provider error must not restart the unchanged challenge wait");
+}
+
 #[tokio::test]
 async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenced() {
     let provider = Provider::new();

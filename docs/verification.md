@@ -714,7 +714,8 @@ publishes or joins an incarnation-bound random challenge in the existing partiti
 metadata. It waits 15 seconds for that same owner and nonce to remain unanswered;
 only then does it attempt the ordinary exact conditional claim. A response, changed
 incarnation/nonce or uncertain challenge publication defers takeover. A completed
-wait can survive a claim conflict only while the same owner and nonce remain.
+wait survives conflicts, provider errors and cancelled acquisitions only while
+the same owner and nonce remain. One bounded tuple per partition records it.
 Known healthy peers can still rebalance; reuse of this process's address takes the
 normal fenced recovery path directly.
 
@@ -734,8 +735,9 @@ placement requires timely storage responses and scheduling. API pods unable to
 reach a partition's owner may still refuse requests during a permanent peer split.
 
 `OwnerChallenge.tla` checks one incumbent, two challengers, one challenge round and
-four metadata writes: **3,142 distinct states, depth 13**. Four negative controls
-break comparison, coalescing, waiting and owner-only acknowledgement; two coverage
+four metadata writes: **3,518 distinct states, depth 14**. Five negative controls
+break comparison, coalescing, waiting, owner-only acknowledgement and retention
+of a completed wait across retries; two coverage
 controls reach a live answer and replacement after a stop. Captured requests can
 apply after owner death or lost replies. This finite policy check assumes the
 existing exact register/permit protocol; it is neither Rust refinement nor a proof
@@ -746,8 +748,12 @@ The paused-time Rust regression holds two disjoint membership views for a minute
 checks unchanged owner incarnations, stops one controller without a DNS change,
 and verifies recovery and fencing of a retained old backend. Root tests cover
 coalesced/uncertain challenges, stale comparisons, activating-owner responses,
-non-owner metadata work, malformed hints and old-writer preservation. Cloud
-qualification of this change remains pending.
+non-owner metadata work, malformed hints and old-writer preservation. An injected
+provider failure after the wait requires replacement within eight seconds after
+service returns; discarding the completed wait makes this check fail in 0.13
+seconds of real time. The first B2 campaign below preserves acknowledgements and
+avoids claims during peer isolation, but misses the cold-recovery target; retry
+qualification remains open.
 
 ## Membership-driven native placement
 

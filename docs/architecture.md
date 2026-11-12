@@ -8,6 +8,12 @@ An immutable layout maps database names to fixed partitions with domain-separate
 
 Kubernetes supplies peer addresses through a headless Service, including starting pods. Rendezvous ranking chooses a preferred owner for each partition. DNS snapshots can be stale or disagree: they schedule acquisition but grant no serving permission. Each acquisition uses a fresh incarnation, registers it durably, conditionally claims its partition, revokes unresolved predecessor permits and recovers the selected journal history before serving. Confirmed prefix publications retain the immutable ancestry cursor; uncertain outcomes restart discovery after exact validation. Native workers also observe idle permits every three seconds and retire only on confirmed absence, so rejoining owners do not need incoming traffic to discover revocation. These observations never authorize responses.
 
+An excluded incumbent can answer a storage-path challenge to defer replacement
+despite blocked peer HTTP. A completed unanswered wait schedules an ordinary
+conditional claim; it grants no serving authority. Replies use the existing
+partition metadata and introduce no new object class. See the
+[challenge protocol and limits](verification.md#storage-path-owner-challenges).
+
 A permit is a write-once positive object. A successor permanently revokes predecessor permits before choosing their durable journal prefixes. Remote responses are sealed before a fresh, uncached permit GET. There is no lease, bounded-clock assumption or bucket-wide conditional write on the ordinary read path. A fresh object GET still has provider latency; this is not an in-memory latency claim. [Protocol details and assumptions](design-owned-partitions.md#revocable-writer-permits).
 
 Requests arriving elsewhere are forwarded once to an advertised owner incarnation. The receiving API pins that backend through authorization and dispatch; address reuse cannot redirect a request to an unrelated incarnation. Tenant claims and policy checks remain intact. Unknown outcomes return to the caller for an identical retry, without hidden forwarding replay.

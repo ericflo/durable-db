@@ -5,7 +5,7 @@ use crate::{
     Result,
     auth::Auth,
     cache::Cache,
-    ownership::root::Outcome,
+    ownership::root::{Outcome, Route},
     providers::{
         Connection,
         partitions::{Layout, Partitions},
@@ -60,6 +60,9 @@ struct Partition {
     connection: Connection,
     forward: Arc<Forward>,
     local: RwLock<Option<Local>>,
+    // Only an exact owner/nonce match reuses a completed advisory wait after
+    // cancellation or provider failure. This never grants serving authority.
+    suspected: Mutex<Option<(Route, uuid::Uuid)>>,
 }
 // Advisory replies stop when placement retires this slot, even if in-flight
 // requests retain the old backend. Its permit remains the response authority.
@@ -101,6 +104,7 @@ impl Cluster {
                 connection,
                 forward,
                 local: RwLock::new(None),
+                suspected: Mutex::new(None),
             });
         }
         let residents = Arc::new(Semaphore::new(config.layout.partitions() as usize));
@@ -238,7 +242,7 @@ impl Cluster {
             membership(peers)
                 .is_ok_and(|peers| preferred(id as u32, &peers) == Some(self.config.address))
         };
-        let acquisition = self.acquire(id as u32, &partition.connection, members.clone());
+        let acquisition = self.acquire(id as u32, partition, members.clone());
         tokio::pin!(acquisition);
         let local = loop {
             if !wanted(&members.borrow_and_update()) {
@@ -259,9 +263,10 @@ impl Cluster {
     async fn acquire(
         &self,
         id: u32,
-        connection: &Connection,
+        partition: &Partition,
         members: watch::Receiver<Vec<SocketAddr>>,
     ) -> anyhow::Result<Local> {
+        let connection = &partition.connection;
         let started = std::time::Instant::now();
         let progress = |stage: &'static str| {
             tracing::info!(
@@ -287,14 +292,15 @@ impl Cluster {
             // Definite claim conflicts use a fresh candidate. Resolve unknown
             // outcomes on the same identity, without replaying its claim PUTs.
             let mut validations = 4;
-            // Registration funding can invalidate the first comparison. Reuse
-            // its completed wait only while the exact challenge remains.
-            let mut suspected = None;
             for _ in 0..4 {
                 let mut root = connection.root()?.advertise(self.config.address)?;
                 stage = "observe";
                 progress(stage);
                 let mut observed = root.observe().await?;
+                let suspected = *partition
+                    .suspected
+                    .lock()
+                    .expect("partition challenge lock");
                 if let Some(incumbent) = observed.incumbent()
                     && incumbent.address != self.config.address
                     && !members.borrow().contains(&incumbent.address)
@@ -320,7 +326,10 @@ impl Cluster {
                             break;
                         }
                     }
-                    suspected = Some((incumbent, nonce));
+                    *partition
+                        .suspected
+                        .lock()
+                        .expect("partition challenge lock") = Some((incumbent, nonce));
                 }
                 stage = "claim";
                 progress(stage);

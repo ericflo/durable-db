@@ -32,6 +32,14 @@ Create namespace `durable-db`, a `durable-db-signing` Secret containing `admin.k
 
 The headless service publishes not-ready addresses so discovery does not depend on acquisition completing first. Discovery admits candidates only after an HTTP 200 from `/health/live`, and excludes an established peer after two missed observations even if DNS still lists it. Probes run independently of DNS refresh, with sixteen requests at most and a one-second request deadline. Three-second rounds do not overlap; large peer lists can take longer. Permit fencing, not this failure suspicion, authorizes takeover. Allow peer HTTP traffic on the advertised port. All pods must use the same peer port, IP family and fixed layout. Defaults are 16 partitions and a 128 MiB aggregate resident payload allowance (`--partitions`, `--resident-memory-mib`). The partition count does not cap database count and does not change when pods scale. Too-small per-partition shares fail startup. Frame/window/checkpoint thresholds remain per partition; the cloud receipt window is 128 commits. Journal bytes retain a 256 MiB aggregate component ceiling. Cache, transient checkpoint/HTTP/provider buffers and allocator overhead are separate from resident payload accounting; qualify peak RSS against pod limits.
 
+Before taking over from an excluded incumbent, the candidate publishes or joins a
+storage-path challenge and waits 15 seconds for an answer. The incumbent answers
+through the bucket even when peer HTTP is blocked. A response defers takeover;
+a timeout only schedules the existing fenced recovery. Slow storage or pauses
+can still cause false suspicions. This adds failure-detection latency and does
+not make every partition reachable through every isolated pod. Upgrade all
+servers before relying on this behavior; older binaries do not answer challenges.
+
 Earlier publication-engine process/HPA fixtures were retired at the native CLI cutover. Their results remain historical in the verification record. `scripts/qualify-multinode.py` is the maintained native deployment/fault campaign; it permits peer forwarding during provider-only egress faults. The provider-egress phase verifies a ten-second workload blackout after a thirty-second settling period, so a policy that leaves existing connections usable cannot silently pass on a new-connection probe alone. Its clients keep the stable client Service URL throughout scaling and replacement; pod addresses are recorded only as placement evidence. Writer names are fixed within each fresh disposable bucket, mapping to partitions 2, 12, 14 and 2 in the sixteen-partition fixture. This keeps shared-partition contention consistent between runs instead of letting the random namespace choose it. Each new fault waits for two further verified readbacks from every writer; HTTP readiness and aggregate traffic alone do not establish recovery. The host-pause phase selects the preferred host of an active writer’s partition, pauses all database processes there and requires the remaining hosts to recover every writer without adding pods. It checks the stopped identities and retained DNS addresses again before resume. The later all-process pause requires a newly added process to recover every writer. Both use the same pause/resume helper and keep the existing recovery targets. These simulate process loss on a host, not physical power loss or a peer-only network partition. Its same-UID control sidecar, shared PID namespace and disabled liveness restart apply only to the disposable fixture. The v0.23.8 executable passes this expanded B2 campaign with 2,018 independently checked acknowledgements. Several recovery timings miss their engineering targets; see the [exact image, configuration and limitations](verification-results.md#v0238-recovery-cursor-reuse-2026-11-12).
 
 For the focused network experiment, add `--scenario peer-isolation` to the same
@@ -46,14 +54,11 @@ must also complete a fresh provider-backed administrative read. Each split is
 held for thirty seconds after its network checks pass. Per-writer progress during
 the split is recorded separately from recovery after healing. Both scenarios
 share cold replacement, full history verification and namespace cleanup. The
-exact v0.23.10 executable completes two focused B2 campaigns with all 553 / 709
-acknowledged writes recovered and independently checked. All 36 provider-backed
-administrative reads succeed. One-way healing takes 38.99 / 41.91 seconds;
-two-way healing takes 34.87 / 46.33 seconds, meeting the 60-second target in both
-runs. Cold recovery also meets its 120-second target. Only one of four writers
-progresses during each two-way hold. These short runs qualify their bounded
-fault/recovery histories, not permanent-partition availability or a production
-SLO. The full rolling and scale-down campaign still needs requalification.
+harness records bounded claim-attempt samples during each hold independently of
+writer progress. [Current results and missed targets](verification-results.md)
+retain exact binaries, configurations and timings. These short runs qualify their
+bounded fault/recovery histories, not permanent-partition availability or a
+production SLO. Rolling and scale-down still need broader qualification.
 The initial NetworkPolicy attempt
 failed injection validation because established connections remained usable;
 [that behavior is implementation-defined](https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-s-impact-on-existing-connections).

@@ -2,18 +2,36 @@
 
 ## Storage-path placement challenges (v0.23.11 candidate)
 
-The current candidate asks an unreachable incumbent to answer through the existing
-conditional metadata record before attempting takeover. The local split-view
-regression preserves both owners for a simulated minute, then recovers after one
-controller stops without a DNS change. Three focused challenge checks pass in
-0.49 seconds. The policy model checks 3,142 states with four negative and two
-coverage controls; the existing acquisition and routing checks also pass.
-[Mechanism and assumptions](verification.md#storage-path-owner-challenges).
+Before replacing an unreachable incumbent, the controller asks it to answer an
+incarnation-bound challenge through the existing conditional metadata record.
+It waits 15 seconds before attempting the unchanged fenced takeover protocol.
+The local regression preserves both owners through a simulated minute of disjoint
+membership views, then recovers after a stop without a DNS change.
+[Mechanism, model and assumptions](verification.md#storage-path-owner-challenges).
 
-All 341 routine Rust checks pass. B2/S3 qualification is pending. The harness now records bounded claim-attempt
-samples during each hold separately from writer progress. Neither those samples
-nor an answered challenge establish universal availability during a peer split.
-The v0.23.10 results below describe the released binary, before this change.
+At `9976821`, Woodpecker #261 passes all checks, including 341 routine Rust tests,
+the 10,005-database release check and native JavaScript/Pi integration. Versioned
+MinIO passes the native HTTP fixture in 182.23 seconds and 1→2→1→0→1 membership
+in 32.22 seconds. Both buckets, containers and 111 remaining versions were removed.
+The latter includes two 15-second waits; it is not a latency improvement.
+
+The exact static binary completes a B2/Kubernetes peer-isolation campaign with
+**569 acknowledgements recovered and independently checked**, zero retained claim
+attempts during either hold, and all 18 administrative probes returning 200.
+One-way healing takes **10.30 seconds**, two-way healing **13.83 seconds**. During
+the holds, three / one writers progress, matching the routes reachable under the
+initial rendezvous placement. Two databases share a partition but enter opposite
+sides; universal four-writer progress during a permanent split is not promised.
+The namespace, bucket, scoped key and 620 remaining versions were removed.
+
+Cold recovery takes **126.28 seconds**, missing its 120-second target. Partition 14
+loses a claim after completing the challenge wait, then its next acquisition waits
+again on the same unchanged owner/nonce. The current retry correction retains
+that completed wait across acquisitions while still requiring an exact match.
+Its regression fails on the first candidate; all 342 routine Rust checks, strict
+clippy and formatting pass with the correction. Fresh cloud qualification is pending.
+The policy model checks 3,518 states with five negative and two coverage controls.
+[Exact candidate, configuration and failed target](evidence/native-recovery-2026-11-11.json).
 
 ## v0.23.10 batched journal recovery (2026-11-12)
 

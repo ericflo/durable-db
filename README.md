@@ -142,19 +142,13 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-B2/Kubernetes qualification covers shared-partition writers, process loss, peer
-and provider isolation, rolling replacement, and removal of every API process.
-Acknowledged histories survive the completed campaigns. Batched journal recovery
-meets all targets in two peer-isolation runs; broader recovery targets and
-availability during isolation remain open. Worst-case memory, sustained
-performance and public multitenancy also remain open. See the
-[measured results and their limits](docs/verification-results.md).
-
-The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) lists the remaining gates, their rough size and what can wait until after 1.0. [Verification results](docs/verification-results.md) record each release and its evidence; [backup and restore](docs/recovery.md#local-format-upgrades) covers format compatibility and upgrades.
-
-Current main adds storage-path challenges to avoid fencing responsive owners when
-peer health views disagree. The local regression preserves owners during a split
-and recovers after a stop without a DNS change; cloud qualification is pending.
+Completed B2/Kubernetes campaigns recover acknowledged histories through process
+loss, peer/provider isolation, rolling replacement and cold recovery. The latest
+candidate avoids claims during the measured peer-isolation holds, but cold recovery
+misses its target; the retry correction is under qualification. Worst-case memory,
+sustained performance and public multitenancy remain open. See the
+[measured results and limits](docs/verification-results.md) and the
+[ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 
 ## Verification
 
