@@ -2,6 +2,7 @@ use super::*;
 use std::time::Duration;
 mod budget;
 mod catalog;
+mod challenge;
 mod checkpoint;
 mod cluster;
 mod http;

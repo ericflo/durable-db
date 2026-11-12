@@ -1,0 +1,7 @@
+safe OwnerChallenge.cfg owner-challenge 256m -
+unsafe OwnerChallengeCompare.cfg owner-challenge-compare 256m Waited
+unsafe OwnerChallengeCoalesce.cfg owner-challenge-coalesce 256m Coalesced
+unsafe OwnerChallengeWait.cfg owner-challenge-wait 256m Waited
+unsafe OwnerChallengeAnswer.cfg owner-challenge-answer 256m OwnerAnswered
+unsafe OwnerChallengeDeadOwnerRecovered.cfg owner-challenge-deadownerrecovered 256m DeadOwnerRecovered
+unsafe OwnerChallengeLiveOwnerAnswered.cfg owner-challenge-liveowneranswered 256m LiveOwnerAnswered

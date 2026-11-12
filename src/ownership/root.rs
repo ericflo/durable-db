@@ -2,6 +2,7 @@
 //! validation. Remote serving has no clock bound. Local directories retain an
 //! exclusive OS guard. Journal recovery must precede service in either mode.
 mod catalog;
+mod challenge;
 mod collection;
 mod metadata;
 mod permit;
@@ -283,6 +284,7 @@ impl Root {
             catalog: observed.record.and_then(|r| r.catalog),
             checkpoint: observed.record.and_then(|r| r.checkpoint),
             retained: observed.record.and_then(|r| r.retained),
+            challenge: None,
         };
         let registration = Registration::new(record.identity, observed.record.map(|r| r.identity));
         let mut prepared = self.begin(observed.raw, record)?;
@@ -339,10 +341,15 @@ impl Root {
         Ok(prepared)
     }
 
-    fn begin(&mut self, observed: control::Observation, record: Record) -> Result<Prepared, Error> {
+    fn begin(
+        &mut self,
+        observed: control::Observation,
+        mut record: Record,
+    ) -> Result<Prepared, Error> {
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
+        record.challenge = None;
         let metadata = metadata::encode(
             observed.metadata(),
             &self.prefix,

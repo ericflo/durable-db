@@ -6,6 +6,8 @@ use uuid::Uuid;
 const FORMAT: &str = "durable-db-format";
 const PREFIX: &str = "durable-db-prefix";
 const ROOT: &str = "durable-db-owned-root";
+// Advisory and opaque to older readers; never part of serving authority.
+const CHALLENGE: &str = "ddb-challenge";
 const RETAINED: &str = "durable-db-retained-checkpoint";
 pub(crate) const VERSION: &str = "owned-candidate-23";
 const PROBE: &str = "durable-db-probe";
@@ -38,17 +40,20 @@ pub(crate) struct Record {
     pub catalog: Option<Uuid>,
     pub checkpoint: Option<crate::index::recovery::checkpoint::Reference>,
     pub retained: Option<super::RetainedCheckpoint>,
+    pub challenge: Option<Uuid>,
 }
 impl Record {
-    /// Backup-slot changes do not invalidate a staged recovery. Publication
+    /// Backup-slot and advisory challenge changes do not invalidate recovery. Publication
     /// preserves the confirmed slot and still compares every recovery field,
     /// including the collection generation captured before staging.
     pub(crate) fn same_recovery(self, other: Self) -> bool {
         Self {
             retained: None,
+            challenge: None,
             ..self
         } == Self {
             retained: None,
+            challenge: None,
             ..other
         }
     }
@@ -156,6 +161,25 @@ pub(super) fn decode(
             epoch: wire.epoch,
             incarnation,
         },
+        challenge: info
+            .get(CHALLENGE)
+            .map(|value| {
+                let (owner, nonce) = value.split_once(':').ok_or(Error::Incompatible)?;
+                let owner_id = Uuid::parse_str(owner).map_err(|_| Error::Incompatible)?;
+                let nonce_id = Uuid::parse_str(nonce).map_err(|_| Error::Incompatible)?;
+                if owner_id.is_nil()
+                    || nonce_id.is_nil()
+                    || owner_id.to_string() != owner
+                    || nonce_id.to_string() != nonce
+                {
+                    return Err(Error::Incompatible);
+                }
+                // Older writers preserve opaque metadata across a claim. Its hint
+                // belongs only to the recorded incarnation, never its successor.
+                Ok((owner_id == incarnation).then_some(nonce_id))
+            })
+            .transpose()?
+            .flatten(),
         phase: wire.phase,
         address: wire.address,
         catalog,
@@ -219,6 +243,14 @@ pub(super) fn encode(
     } else {
         info.remove(RETAINED);
     }
+    if let Some(nonce) = record.challenge {
+        info.insert(
+            CHALLENGE.into(),
+            format!("{}:{nonce}", record.identity.incarnation),
+        );
+    } else {
+        info.remove(CHALLENGE);
+    }
     info.insert(
         ROOT.into(),
         serde_json::to_string(&Wire {
@@ -249,6 +281,14 @@ pub(crate) fn budget(info: &BTreeMap<String, String>) -> anyhow::Result<()> {
     let mut reserved = info.clone();
     for (field, bytes) in [
         (ROOT, 1024),
+        (
+            CHALLENGE,
+            if info.contains_key(crate::upload_budget::FIELD) {
+                73
+            } else {
+                0
+            },
+        ),
         (RETAINED, if info.contains_key(RETAINED) { 1024 } else { 0 }),
         (
             super::collection::FIELD,

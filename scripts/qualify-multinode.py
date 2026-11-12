@@ -161,6 +161,12 @@ def main():
 
     def phase(name, **details):
         acquisitions()
+        if name.endswith('-peer-isolation-held'):
+            start=next(p['time_utc'] for p in reversed(report['phases'])
+                       if p['name']==name.replace('-held','-start'))
+            details['claim_attempts_during_hold']={pod: [event for event in events
+                if event['time_utc']>=start and event['stage']=='claim' and event['outcome']=='progress']
+                for pod,events in report['acquisition_events'].items()}
         report['phases'].append(dict(name=name,time_utc=utc(),**details))
         save()
         print(json.dumps(report['phases'][-1]),flush=True)
@@ -184,12 +190,12 @@ def main():
         for pod in pods():
             name = pod['metadata']['name']
             try:
-                log = kube('logs', name, '--tail=256').decode(errors='replace')
+                log = kube('logs', name, '--tail=1024').decode(errors='replace')
                 log = re.sub(r'\x1b\[[0-9;]*m', '', log)
                 samples[name] = [dict(time_utc=stamp, outcome=outcome,
                     partition=int(partition), stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, partition, stage, elapsed in re.findall(
-                        r'(?m)^([0-9TZ:.+\-]+).*?native acquisition (progress|failed).*?partition=(\d+)\s+stage="?(resident|budget|observe|claim|activate|select_journals|recover|serve|ready)"?\b.*?elapsed_ms=(\d+)', log)]
+                        r'(?m)^([0-9TZ:.+\-]+).*?native acquisition (progress|failed).*?partition=(\d+)\s+stage="?(resident|budget|observe|challenge|claim|activate|select_journals|recover|serve|ready)"?\b.*?elapsed_ms=(\d+)', log)]
                 maintenance[name] = [dict(time_utc=stamp, owner=owner,
                     stage=stage, elapsed_ms=int(elapsed))
                     for stamp, owner, stage, elapsed in re.findall(

@@ -125,7 +125,7 @@ fn names() -> [String; 2] {
     })
 }
 async fn settled(nodes: &[&Node], peers: &[SocketAddr]) {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let mut done = true;
             for node in nodes {
@@ -251,76 +251,84 @@ async fn shared_partition_checkpoints_keep_both_writers_progressing() {
     }
 }
 
-#[tokio::test]
-async fn idle_revoked_owner_is_replaced_when_membership_rejoins() {
+#[tokio::test(start_paused = true)]
+async fn storage_challenges_preserve_split_owners_then_recover_without_dns_changes() {
     let provider = Provider::new();
     let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = first.local_addr().unwrap();
     let second = loop {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        if preferred(0, &[address, listener.local_addr().unwrap()]) == address {
+        let peers = [address, listener.local_addr().unwrap()];
+        if preferred(0, &peers) != preferred(1, &peers) {
             break listener;
         }
     };
+    let peers = [address, second.local_addr().unwrap()];
     let directory = directory(&provider).await;
-    let b = Node::start(directory.clone(), first, vec![address]).await;
-    settled(&[&b], &[address]).await;
-    let name = &names()[0];
-    let path = format!("/v1/databases/{name}");
-    let token = auth().administrator_token(600).unwrap();
-    b.server
-        .ok(
-            "PUT",
-            &path,
-            &token,
-            json!({"request_id":"create","limits":{"max_keys":20,"max_bytes":10000}}),
-        )
-        .await;
-    b.server
-        .ok("POST", &format!("{path}/commit"), &token, commit(0))
-        .await;
-    let old = b
-        .cluster
-        .resolve(name)
-        .await
-        .unwrap()
-        .unwrap()
-        .owner_incarnation();
-    // Divergent hints simulate a replacement while the old process cannot
-    // observe the membership change. Its native worker is otherwise idle.
-    let peers = vec![address, second.local_addr().unwrap()];
-    let a = Node::start(directory, second, vec![peers[1]]).await;
+    let a = Node::start(directory.clone(), first, peers.to_vec()).await;
+    let b = Node::start(directory, second, peers.to_vec()).await;
+    settled(&[&a, &b], &peers).await;
+    let mut before = Vec::new();
+    for (id, name) in names().iter().enumerate() {
+        let node = if preferred(id as u32, &peers) == a.address {
+            &a
+        } else {
+            &b
+        };
+        before.push(
+            node.cluster
+                .resolve(name)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .unwrap(),
+        );
+    }
+    a.members(&[a.address]);
+    b.members(&[b.address]);
+    // Two disjoint views both want every partition. More than three challenge
+    // deadlines pass, but actual owner identities must not churn.
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        for (id, name) in names().iter().enumerate() {
+            let node = if preferred(id as u32, &peers) == a.address {
+                &a
+            } else {
+                &b
+            };
+            assert_eq!(
+                node.cluster
+                    .resolve(name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .owner_incarnation(),
+                Some(before[id])
+            );
+        }
+    }
+    // Retain the old data handle to exercise permit fencing separately from
+    // responder lifetime. No membership change tells A that B has stopped.
+    let id = (0..2)
+        .find(|id| preferred(*id, &peers) == b.address)
+        .unwrap() as usize;
+    let old = b.cluster.resolve(&names()[id]).await.unwrap().unwrap();
+    drop(b);
     settled(&[&a], &[a.address]).await;
     assert_ne!(
         a.cluster
-            .resolve(name)
+            .resolve(&names()[id])
             .await
             .unwrap()
             .unwrap()
             .owner_incarnation(),
-        old
+        Some(before[id])
     );
-    a.members(&peers);
-    b.members(&peers);
-    settled(&[&a, &b], &peers).await;
-    // Requests enter the other node: they must not be needed at the revoked
-    // process to discover that its cached serving state is obsolete.
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let (status, result) = a.server.call("GET", &path, &token, Value::Null).await;
-            if status == StatusCode::OK {
-                assert_eq!(result["revision"], 1);
-                break;
-            }
-            assert!(matches!(
-                status,
-                StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
-            ));
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("idle revoked owner eventually reclaims its assigned partition");
+    assert!(matches!(
+        old.info(&names()[id], &Access::Administrator).await,
+        Err(crate::Error::Storage(_))
+    ));
 }
 
 #[tokio::test]

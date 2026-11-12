@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::{
     sync::{RwLock, Semaphore, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 
 pub(super) const MAX_MEMBERS: usize = 256;
@@ -59,7 +59,13 @@ impl ClusterConfig {
 struct Partition {
     connection: Connection,
     forward: Arc<Forward>,
-    local: RwLock<Option<Arc<Native>>>,
+    local: RwLock<Option<Local>>,
+}
+// Advisory replies stop when placement retires this slot, even if in-flight
+// requests retain the old backend. Its permit remains the response authority.
+struct Local {
+    backend: Arc<Native>,
+    _challenges: JoinSet<()>,
 }
 /// A bounded native controller. The caller supplies membership snapshots; an
 /// update or a three-second retry tick reconciles placement. Closing membership
@@ -189,7 +195,12 @@ impl Cluster {
                         continue;
                     }
                     let partition = &cluster.partitions[id];
-                    let local = partition.local.read().await.clone();
+                    let local = partition
+                        .local
+                        .read()
+                        .await
+                        .as_ref()
+                        .map(|local| local.backend.clone());
                     if let Some(local) = local
                         && local.ready().await
                     {
@@ -227,7 +238,7 @@ impl Cluster {
             membership(peers)
                 .is_ok_and(|peers| preferred(id as u32, &peers) == Some(self.config.address))
         };
-        let acquisition = self.acquire(id as u32, &partition.connection);
+        let acquisition = self.acquire(id as u32, &partition.connection, members.clone());
         tokio::pin!(acquisition);
         let local = loop {
             if !wanted(&members.borrow_and_update()) {
@@ -241,11 +252,16 @@ impl Cluster {
         // A simultaneous membership update may have selected a different peer.
         // Cancel only this partition; unrelated recovery keeps its progress.
         if wanted(&members.borrow()) {
-            *partition.local.write().await = Some(Arc::new(local));
+            *partition.local.write().await = Some(local);
         }
         Ok(())
     }
-    async fn acquire(&self, id: u32, connection: &Connection) -> anyhow::Result<Native> {
+    async fn acquire(
+        &self,
+        id: u32,
+        connection: &Connection,
+        members: watch::Receiver<Vec<SocketAddr>>,
+    ) -> anyhow::Result<Local> {
         let started = std::time::Instant::now();
         let progress = |stage: &'static str| {
             tracing::info!(
@@ -271,11 +287,41 @@ impl Cluster {
             // Definite claim conflicts use a fresh candidate. Resolve unknown
             // outcomes on the same identity, without replaying its claim PUTs.
             let mut validations = 4;
+            // Registration funding can invalidate the first comparison. Reuse
+            // its completed wait only while the exact challenge remains.
+            let mut suspected = None;
             for _ in 0..4 {
                 let mut root = connection.root()?.advertise(self.config.address)?;
                 stage = "observe";
                 progress(stage);
-                let observed = root.observe().await?;
+                let mut observed = root.observe().await?;
+                if let Some(incumbent) = observed.incumbent()
+                    && incumbent.address != self.config.address
+                    && !members.borrow().contains(&incumbent.address)
+                    && (suspected.is_none()
+                        || suspected != observed.challenge().map(|nonce| (incumbent, nonce)))
+                {
+                    stage = "challenge";
+                    progress(stage);
+                    let nonce = root
+                        .challenge(observed)
+                        .await?
+                        .context("owner challenge unconfirmed")?;
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        observed = root.observe().await?;
+                        ensure!(
+                            observed.incumbent() == Some(incumbent)
+                                && observed.challenge() == Some(nonce),
+                            "owner answered or changed during storage challenge"
+                        );
+                        if tokio::time::Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                    suspected = Some((incumbent, nonce));
+                }
                 stage = "claim";
                 progress(stage);
                 let claim = root.claim(observed)?;
@@ -286,6 +332,8 @@ impl Cluster {
                 root.confirm_outcome(outcome, &mut validations)
                     .await
                     .context("ownership claim unconfirmed")?;
+                let mut challenges = JoinSet::new();
+                challenges.spawn(root.answer_challenges());
                 stage = "activate";
                 progress(stage);
                 root.activate_confirmed(&mut validations).await?;
@@ -299,13 +347,17 @@ impl Cluster {
                     .await?;
                 stage = "serve";
                 progress(stage);
-                return Native::start_reserved(
+                let native = Native::start_reserved(
                     owner,
                     self.config.capacity,
                     self.config.maintenance,
                     Some(reservation),
                 )
-                .map_err(anyhow::Error::from);
+                .map_err(anyhow::Error::from)?;
+                return Ok(Local {
+                    backend: Arc::new(native),
+                    _challenges: challenges,
+                });
             }
             anyhow::bail!("ownership claim remained contended")
         }
@@ -319,6 +371,8 @@ impl Cluster {
                 "partition changed after publication; outcome uncertain",
                 "published manifest changed repeatedly or is unavailable",
                 "activation permit revoked",
+                "owner answered or changed during storage challenge",
+                "owner challenge unconfirmed",
             ]
             .into_iter()
             .find(|message| error.chain().any(|cause| cause.to_string() == *message))
@@ -353,7 +407,13 @@ impl Backend for Cluster {
     async fn resolve(&self, db: &str) -> Result<Option<Arc<dyn Backend>>> {
         let id = self.config.layout.partition(db)?;
         let partition = &self.partitions[id as usize];
-        let backend: Arc<dyn Backend> = match partition.local.read().await.clone() {
+        let backend: Arc<dyn Backend> = match partition
+            .local
+            .read()
+            .await
+            .as_ref()
+            .map(|local| local.backend.clone())
+        {
             Some(local) => local,
             None => partition.forward.clone(),
         };

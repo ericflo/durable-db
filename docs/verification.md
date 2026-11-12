@@ -707,6 +707,48 @@ Four TCP/root regressions complete in 0.10 seconds after compilation. They cover
 
 At `80841e5`, the expanded four-server/two-partition fixture passes on B2 in **51.42 seconds** and versioned MinIO in **1.48 seconds**. Create/write/read requests traverse the gateway; a cached stale route returns 503 after live takeover, and the caller's explicit identical retry discovers the successor and returns its retained receipt. The unmoved partition keeps serving. Shared ceilings, checkpoint recovery, collection and physical metric checks still pass. Both disposable buckets, all 88 remaining physical versions, the temporary B2 key and the MinIO container were removed. These are debug functional runs, not latency/throughput benchmarks, AWS qualification or automatic placement. [Evidence](evidence/owner-routing-2026-11-11.json).
 
+## Storage-path owner challenges
+
+Before replacing an advertised owner excluded by local peer health, the controller
+publishes or joins an incarnation-bound random challenge in the existing partition
+metadata. It waits 15 seconds for that same owner and nonce to remain unanswered;
+only then does it attempt the ordinary exact conditional claim. A response, changed
+incarnation/nonce or uncertain challenge publication defers takeover. A completed
+wait can survive a claim conflict only while the same owner and nonce remain.
+Known healthy peers can still rebalance; reuse of this process's address takes the
+normal fenced recovery path directly.
+
+Each confirmed claimant polls once every three seconds, with one request in flight,
+through activation, recovery and serving. It conditionally clears only its own
+challenge. Retiring placement stops this responder even when an in-flight request
+retains the old backend. Ordinary owner publications can also answer; collection,
+budget operations and read barriers preserve the hint. No extra storage object or
+collector is introduced. The opaque `ddb-challenge` field binds two canonical UUIDs;
+older readers preserve it, so mixed-version placement convergence is not qualified.
+The remote metadata budget reserves its space. Local-directory serving is unchanged.
+
+A timeout is a failure suspicion, never serving authority or a clock-error bound.
+Pauses, delayed storage or inaccurate clocks may still cause a safe false takeover.
+Revocation, journal recovery and fresh response permits remain mandatory. Stable
+placement requires timely storage responses and scheduling. API pods unable to
+reach a partition's owner may still refuse requests during a permanent peer split.
+
+`OwnerChallenge.tla` checks one incumbent, two challengers, one challenge round and
+four metadata writes: **3,142 distinct states, depth 13**. Four negative controls
+break comparison, coalescing, waiting and owner-only acknowledgement; two coverage
+controls reach a live answer and replacement after a stop. Captured requests can
+apply after owner death or lost replies. This finite policy check assumes the
+existing exact register/permit protocol; it is neither Rust refinement nor a proof
+of arbitrary-round liveness. RootAcquisition and OwnerRouting remain separate
+checks of acquisition and response authority.
+
+The paused-time Rust regression holds two disjoint membership views for a minute,
+checks unchanged owner incarnations, stops one controller without a DNS change,
+and verifies recovery and fencing of a retained old backend. Root tests cover
+coalesced/uncertain challenges, stale comparisons, activating-owner responses,
+non-owner metadata work, malformed hints and old-writer preservation. Cloud
+qualification of this change remains pending.
+
 ## Membership-driven native placement
 
 `api::Cluster` persists a versioned layout in the existing directory-root envelope, before the first partition entry. Different partition counts and populated manual directories are refused. Publication/rebase preserves this layout from the successful comparison. SHA-256 database mapping never uses membership; rendezvous placement changes the preferred process while preserving partition IDs and object scopes. Counts are 1..1,024 partitions and at most 256 canonical peer addresses, independent of database count. The byte cache is shared. Aggregate resident index/validation allowances and journal bytes are now divided across the fixed layout; see the owner lifetime accounting below.
@@ -750,7 +792,8 @@ revoked predecessor's comparison and serving permission.
 Cancelled forwarding retires only its own cached route instance, without replay
 or invalidating a replacement. Background permit observation retires an idle
 revoked owner so membership rejoin can recover even when requests enter through
-another process. TCP regressions cover both cancellation and idle-owner rejoin.
+another process. TCP regressions cover cancellation and dead-peer recovery; the split-view
+regression separately checks placement and retained-owner fencing.
 
 The current batched journal-selection path completes two B2 peer-isolation
 campaigns with all 553 / 709 acknowledgements recovered and all six recovery

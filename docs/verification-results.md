@@ -1,5 +1,20 @@
 # Verification results
 
+## Storage-path placement challenges (v0.23.11 candidate)
+
+The current candidate asks an unreachable incumbent to answer through the existing
+conditional metadata record before attempting takeover. The local split-view
+regression preserves both owners for a simulated minute, then recovers after one
+controller stops without a DNS change. Three focused challenge checks pass in
+0.49 seconds. The policy model checks 3,142 states with four negative and two
+coverage controls; the existing acquisition and routing checks also pass.
+[Mechanism and assumptions](verification.md#storage-path-owner-challenges).
+
+All 341 routine Rust checks pass. B2/S3 qualification is pending. The harness now records bounded claim-attempt
+samples during each hold separately from writer progress. Neither those samples
+nor an answered challenge establish universal availability during a peer split.
+The v0.23.10 results below describe the released binary, before this change.
+
 ## v0.23.10 batched journal recovery (2026-11-12)
 
 Recovery now publishes up to eight completed journal prefixes from one catalog

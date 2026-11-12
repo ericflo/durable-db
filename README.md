@@ -152,6 +152,10 @@ performance and public multitenancy also remain open. See the
 
 The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) lists the remaining gates, their rough size and what can wait until after 1.0. [Verification results](docs/verification-results.md) record each release and its evidence; [backup and restore](docs/recovery.md#local-format-upgrades) covers format compatibility and upgrades.
 
+Current main adds storage-path challenges to avoid fencing responsive owners when
+peer health views disagree. The local regression preserves owners during a split
+and recovers after a stop without a DNS change; cloud qualification is pending.
+
 ## Verification
 
 Protocol changes start as TLA+ models, which ship with deliberately broken variants that must produce counterexamples. An [unbounded TLAPS proof](docs/proof-publication.md) covers abstract page reachability. The Rust implementation faces adversarial and failure-injection tests against real B2, MinIO and Kubernetes, including SIGKILL, OOM, provider partitions and removal of every server.

@@ -257,6 +257,12 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     scripts/check-model.sh OwnerResidency && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed
 
+FROM model-tools AS model-owner-challenge
+COPY spec/OwnerChallenge.tla spec/OwnerChallenge.checks spec/OwnerChallenge*.cfg spec/
+RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
+    scripts/check-model.sh OwnerChallenge && mkdir -p /checks && cp .tools/model-*.log /checks/ \
+    && rm -rf .tools/tlc-* && touch /checks/passed
+
 FROM model-tools AS model-owner-routing
 COPY spec/OwnerRouting.tla spec/OwnerRouting.checks spec/OwnerRouting.cfg spec/UnsafeRoute*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
@@ -290,6 +296,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
 FROM scratch AS model
 COPY --from=model-cluster-layout /checks/ /checks/
 COPY --from=model-owner-residency /checks/ /checks/
+COPY --from=model-owner-challenge /checks/ /checks/
 COPY --from=model-owner-routing /checks/ /checks/
 COPY --from=model-candidate-catalogreplay /checks/ /checks/
 COPY --from=model-candidate-rootcatalog /checks/ /checks/
