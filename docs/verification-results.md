@@ -1,17 +1,56 @@
 # Verification results
 
-## Stable member identity (unreleased)
+## v0.24.0 stable member identity (2026-11-12)
 
-Placement now hashes a stable logical member ID independently of its transport
+Placement hashes a stable logical member ID independently of its transport
 address. The Kubernetes base replaces the Deployment with a StatefulSet using
 pod names, parallel scaling and disposable caches. The existing health probe
 carries identity; no new background worker, timer or authority record is added.
+[Existing installations need a controller migration](deployment.md#kubernetes-manifests).
 
-The focused real-HTTP regression passes three replacements in 0.36 seconds,
-preserving values, exact retry receipts and the unaffected owner incarnation
-while fencing retained predecessors. The layout model checks 112 states and
-three negative controls. These are bounded tests, not a production availability
-claim. Cloud rollout qualification and release publication are pending.
+All **347 routine Rust checks**, formatting and strict clippy pass. The real-HTTP
+regression passes three replacements in 0.36 seconds, preserving values, exact
+retry receipts and the unaffected owner incarnation while fencing retained
+predecessors. The layout model checks **112 states with three negative controls**.
+[Woodpecker #275](https://ci.eflorenzano.com/repos/18/pipeline/275/1) passes at
+`6d6b76e`, including optimized capacity and native JavaScript/Pi checks. Versioned
+MinIO passes membership/recovery in 40.47 seconds. These are bounded checks, not
+a proof of the implementation or a production availability claim.
+
+The exact static executable recovers **all 833 acknowledged B2 writes** across
+four independently checked histories. The observed member ID survives a new pod
+UID and IP. Three of five recovery targets pass:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 22.76 s | 60 s | Pass |
+| Scale to six | 19.38 s | 60 s | Pass |
+| First rolling replacement | 146.72 s | 60 s | Miss |
+| Second rolling replacement | 174.44 s | 60 s | Miss |
+| Cold API readiness | 83.29 s | 120 s | Pass |
+
+These bounds include rollout/readiness completion and the subsequent per-writer
+readback barrier. The largest acknowledgement gaps in the recorded rollout
+history slices are **94.07 / 91.38 seconds**. Those slices include intervening
+budget/diagnostic time and are not exact fault windows or readback latencies.
+The prior release measured 141.84 / 157.77-second rollout bounds and 77.54 /
+70.13-second acknowledgement gaps. This run does **not** establish a rollout
+latency improvement; the controller strategy, placements and histories differ.
+
+Stable IDs remove address-driven score changes when the logical membership is
+unchanged. Temporary membership loss still moves partitions. A retained log
+sample shows partition 2 completing acquisition twice in the same pod UID during
+the first rollout. The sample does not establish why it retired. Next distinguish
+membership removal, permit loss and worker retirement, then resolve the repeated
+acquisition before rerunning the broader failure matrix.
+
+The namespace, bucket and scoped key were removed, including 1,453 physical B2
+versions. MinIO's bucket, container and 79 remaining versions were also removed.
+[Sources, artifacts, timings, identity observations and cleanup](evidence/native-recovery-2026-11-11.json)
+retain the result. [v0.24.0](https://github.com/ericflo/durable-db/releases/tag/v0.24.0)
+ships the checked static executable; standalone installation, transactions,
+backup/restore and crash recovery also pass. Physical-host loss, sustained load,
+AWS, peak memory and the production operating envelope remain unqualified.
 
 ## v0.23.14 confirmed recovery retention (2026-11-12)
 
@@ -74,11 +113,6 @@ final source. [Exact sources, artifacts, histories, timing bounds and cleanup](e
 retain all three runs. [v0.23.14](https://github.com/ericflo/durable-db/releases/tag/v0.23.14)
 ships the final static executable, also checked by the standalone install,
 transaction, backup and crash-recovery smoke test.
-
-Pod addresses still determine placement scores. Next evaluate stable logical
-member identities across replacements, then repeat rollout continuity and the
-broader failure matrix. Physical-host loss, sustained load, AWS, peak memory and
-a production operating envelope remain unqualified.
 
 ## v0.23.13 incumbent retention (2026-11-12)
 

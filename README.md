@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.23.14. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.0. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,11 +142,11 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.23.14 retains confirmed recovery across placement changes and recovers all
-952 acknowledged writes through B2 scaling, two consecutive rollouts and cold
+v0.24.0 adds stable member identities across pod replacement and recovers all
+833 acknowledged writes through B2 scaling, two consecutive rollouts and cold
 restart. Scale-up and cold-recovery targets pass; both rollout targets still
-miss. Continuous split availability, worst-case memory, sustained performance
-and public multitenancy remain open. See
+miss, with no demonstrated latency improvement. Continuous split availability,
+worst-case memory, sustained performance and public multitenancy remain open. See
 the [measured results and limits](docs/verification-results.md) and the
 [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 

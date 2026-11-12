@@ -791,8 +791,10 @@ A focused real-HTTP regression replaces one logical member three times, verifies
 recovered values and identical retry receipts, fences its retained predecessors,
 and checks that the other owner's incarnation stays unchanged. Address permutation
 checks cover 1,024 partitions; duplicate identity, malformed ID and probe tests
-cover discovery boundaries. Cluster timing and rolling upgrades still require
-cloud qualification.
+cover discovery boundaries. The exact static executable completes B2 scaling, two consecutive StatefulSet
+rollouts and cold recovery with all 833 acknowledgements recovered. Both rollout
+timing targets still miss; mixed-version upgrades, broader failures and
+production availability remain unqualified.
 
 A watch channel supplies membership snapshots. A single task retires local backends when this process leaves membership or local health detects retirement, and maintains at most four acquisitions. A preference change alone keeps the incumbent serving until actual revocation; its resident reservation remains held. Each completion immediately admits the next eligible partition through a rotating cursor; one stalled operation cannot hold up the remaining slots. Failed acquisitions wait for the existing three-second retry tick or a membership update. Controller health checks perform no provider I/O or blocking owner-lock acquisition. Each native worker separately observes its permit at most once every three seconds, with one observation in flight and no owner lock held over I/O. Confirmed absence retires the owner; errors leave authority unchanged. This adds a background GET per cloud partition, never a conditional update. It is independent of the fresh permit validation required for each response. Local-directory guards need no object request. Membership changes cancel unconfirmed acquisitions whose preferred peer changes. After a confirmed claim, the incumbent finishes recovery and installs its backend while it remains a member, even if preference moves elsewhere. A subsequent takeover still fences its permit; explicit removal still cancels acquisition. Unchanged partitions keep their progress. Closing membership cancels recovery and retires local backends. Membership and readiness schedule work, never authorize responses.
 
