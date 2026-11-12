@@ -71,6 +71,9 @@ Ancestors(c) == Walk(durableParents[c], Cardinality(Candidates))
 Required(c, stop) == IF UnsafeImmediateOnly
     THEN {durableParents[c]} \ {None}
     ELSE {d \in Ancestors(c): IF stop = None THEN TRUE ELSE target[d] >= target[stop]}
+\* Independent revocations may complete in any order, including concurrent
+\* provider calls. FinishRevocation joins every required completion; starting
+\* or cancelling a call cannot satisfy it. Rust separately bounds in-flight I/O.
 RevokeAncestor(c, d) ==
     /\ confirmed[c] # 0 /\ c \in persisted
     /\ d \in Required(c, None) \cap live

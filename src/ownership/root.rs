@@ -14,6 +14,7 @@ use crate::{
     storage::Storage,
 };
 pub(crate) use collection::Collection;
+use futures::{StreamExt, stream::FuturesUnordered};
 use metadata::Phase;
 pub(crate) use metadata::Record;
 pub(crate) use metadata::{VERSION, budget as metadata_budget};
@@ -721,8 +722,16 @@ impl Prepared {
                 // Keep registrations: deleting permission must not erase ancestry.
                 let own = registrations.next().await?.ok_or(Error::NotReady)?;
                 let mut reached = cut.is_none();
+                let mut revocations = FuturesUnordered::new();
                 while let Some(old) = registrations.next().await? {
-                    permit::revoke(&files, &authority, old.identity().incarnation).await?;
+                    if revocations.len() == 4 {
+                        revocations.next().await.expect("revocation in flight")?;
+                    }
+                    revocations.push(permit::revoke(
+                        &files,
+                        &authority,
+                        old.identity().incarnation,
+                    ));
                     // A published checkpoint's owner completed revocation before
                     // it could serve. Revoke that owner too; earlier registrations
                     // need not survive collection. Never stop at an unfinished claim.
@@ -732,6 +741,11 @@ impl Prepared {
                     }
                 }
                 anyhow::ensure!(reached, "checkpoint owner missing from ancestry");
+                // Independent deletions commute, but every absence must be
+                // confirmed before activation. Failure/cancellation grants nothing.
+                while let Some(result) = revocations.next().await {
+                    result?;
+                }
                 anyhow::ensure!(
                     permit::live(&files, own.identity().incarnation).await?,
                     "activation permit revoked"

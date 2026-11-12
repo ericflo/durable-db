@@ -1,5 +1,18 @@
 # Verification results
 
+## Bounded concurrent revocation (unreleased)
+
+Activation now overlaps up to four independent predecessor-permit revocations,
+joining every confirmed absence before it may publish. Cancellation or any error
+leaves activation unconfirmed. The eight-predecessor regression covers the
+concurrency bound, held completion, lost deletion replies, cancellation and a
+replacement owner. It fails against the serial code and passes in 0.02 seconds
+with the change. RootRegistration retains its 34,061 / 281,563-state bounds and
+all six negative/coverage controls; arbitrary completion order was already modeled.
+All 338 enabled Rust checks, formatting and strict clippy pass.
+The serial wait is removed. No durable format, API or ownership rule changes.
+Cloud latency qualification is pending; this is not yet a speedup claim.
+
 ## v0.23.8 recovery cursor reuse (2026-11-12)
 
 Confirmed journal-prefix publications now preserve the immutable ancestry cursor

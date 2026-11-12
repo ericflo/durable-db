@@ -248,3 +248,131 @@ fn ownership_refuses_forked_handles_before_io_or_locking() {
         io::ErrorKind::PermissionDenied
     );
 }
+
+struct Revocations {
+    provider: Arc<Provider>,
+    gate: tokio::sync::Semaphore,
+    started: AtomicU64,
+    finished: AtomicU64,
+    active: AtomicU64,
+    peak: AtomicU64,
+    fail: AtomicBool,
+}
+struct Revoking<'a>(&'a AtomicU64);
+impl Drop for Revoking<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl Authority for Revocations {
+    async fn read(&self) -> anyhow::Result<Bucket> {
+        self.provider.read().await
+    }
+    async fn replace(
+        &self,
+        old: &Bucket,
+        info: BTreeMap<String, String>,
+    ) -> anyhow::Result<Option<Bucket>> {
+        self.provider.replace(old, info).await
+    }
+    async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _active = Revoking(&self.active);
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.started.fetch_add(1, Ordering::SeqCst);
+        self.gate.acquire().await.unwrap().forget();
+        self.provider.delete_versions(key).await?;
+        anyhow::ensure!(!self.fail.load(Ordering::SeqCst), "lost deletion reply");
+        self.finished.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn activation_bounds_parallel_revocations_and_joins_every_result() {
+    for fault in ["none", "failure", "cancel"] {
+        let provider = Provider::new();
+        let old = active(&provider).await;
+        let mut ancestors = vec![old.incarnation];
+        for _ in 1..8 {
+            let mut interrupted = provider.root();
+            claim(&mut interrupted).await;
+            ancestors.push(interrupted.incarnation);
+        }
+        let revocations = Arc::new(Revocations {
+            provider: provider.clone(),
+            gate: tokio::sync::Semaphore::new(0),
+            started: 0.into(),
+            finished: 0.into(),
+            active: 0.into(),
+            peak: 0.into(),
+            fail: false.into(),
+        });
+        let connection = Connection::new(provider.files.clone(), revocations.clone(), "test");
+        let mut root = connection.root().unwrap();
+        claim(&mut root).await;
+        let prepared = root.activate().unwrap();
+        let work = tokio::spawn(prepared.execute());
+        async fn wait(counter: &AtomicU64, expected: u64) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while counter.load(Ordering::SeqCst) != expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("revocation progress");
+        }
+        wait(&revocations.started, 4).await;
+        assert_eq!(revocations.active.load(Ordering::SeqCst), 4);
+        assert!(provider.record().phase == Phase::Fenced);
+        assert!(old.permission().await.unwrap().is_some());
+        if fault == "cancel" {
+            work.abort();
+            assert!(matches!(work.await, Err(error) if error.is_cancelled()));
+        } else {
+            revocations.gate.add_permits(7);
+            wait(&revocations.finished, 7).await;
+            wait(&revocations.started, 8).await;
+            assert!(
+                !work.is_finished(),
+                "activation skipped an unfinished revocation"
+            );
+            assert!(provider.record().phase == Phase::Fenced);
+            revocations.fail.store(fault == "failure", Ordering::SeqCst);
+            revocations.gate.add_permits(1);
+            let outcome = root.finish(work.await.unwrap()).unwrap();
+            if fault == "failure" {
+                assert!(matches!(outcome, Outcome::Uncertain(_)));
+                assert!(provider.record().phase == Phase::Fenced);
+                validate(&mut root).await;
+            } else {
+                assert!(matches!(outcome, Outcome::Confirmed));
+            }
+        }
+        assert_eq!(revocations.peak.load(Ordering::SeqCst), 4);
+        assert_eq!(revocations.active.load(Ordering::SeqCst), 0);
+        if fault != "none" {
+            // Reopen after cancellation/unknown deletion; never infer completion
+            // from starting the calls or from the other successful deletions.
+            drop(root);
+            revocations.fail.store(false, Ordering::SeqCst);
+            revocations.gate.add_permits(9);
+            root = connection.root().unwrap();
+            claim(&mut root).await;
+            activate(&mut root).await;
+        }
+        assert!(root.permission().await.unwrap().is_some());
+        for id in ancestors {
+            assert!(
+                provider
+                    .files
+                    .get(&super::super::permit::key(id), 24)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(old.permission().await.unwrap().is_none());
+    }
+}
