@@ -1,6 +1,6 @@
 # Verification results
 
-## Incumbent retention (v0.23.13 candidate)
+## v0.23.13 incumbent retention (2026-11-12)
 
 A preference change no longer drops a healthy serving backend before a successor
 claims ownership. Local removal and confirmed retirement still clear it; fresh
@@ -24,10 +24,66 @@ OwnerChallenge retain 19 / 3,518 states and their controls. These bounded checks
 are not a proof of the Rust implementation or permanent-partition liveness.
 
 Successful checkpoints now report whole-call elapsed time alongside deferrals,
-using the same bounded diagnostic collection. This will distinguish post-readiness
-maintenance from acquisition time in the next exact-binary cloud campaign.
-All 344 routine Rust checks, formatting and strict clippy pass. Cloud
-qualification is pending; v0.23.12 remains the latest release.
+using the same bounded diagnostic collection. Both campaigns below retain these
+measurements; the final stage label does not measure that stage alone or establish
+which call delayed a client.
+All 344 routine Rust checks, formatting and strict clippy pass.
+[Woodpecker #268](https://ci.eflorenzano.com/repos/18/pipeline/268/1) builds `6ef7f62`.
+Versioned MinIO passes 1→2→1→0→1 membership in 40.18 seconds; the bucket,
+container and 79 remaining versions were removed.
+
+The exact static executable passes the B2 peer-isolation campaign with **556
+acknowledged writes recovered and independently checked**. Both holds record
+zero claim attempts, and all 18 provider-backed administrative probes return 200.
+Three / two writers progress during the one-way / two-way holds. All three
+recovery targets pass: **14.58 / 18.26 seconds** after healing and **101.62 seconds**
+after cold readiness. The namespace, bucket, scoped key and 1,014 versions were
+removed. These short runs do not establish a causal latency improvement or a
+production SLO.
+
+The trace retains 18 completed checkpoint calls (median 2.90 seconds, maximum
+10.67 seconds) and two deferrals. It does not bind each owner UUID to a partition
+or attribute client delay to a particular call.
+
+A broader B2 campaign recovers **all 2,077 acknowledged writes**, independently
+checked across four histories. Seven of twelve recovery targets pass; five miss:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 23.26 s | 60 s | Pass |
+| Scale to six | 76.29 s | 60 s | Miss |
+| Pause database processes on one host | 107.37 s | 60 s | Miss |
+| Resume that host’s processes | 47.03 s | 60 s | Pass |
+| Sole replacement with stopped peers still in DNS | 115.07 s | 120 s | Pass |
+| Resume all old processes | 75.23 s | 60 s | Miss |
+| Return from seven to six | 6.30 s | 60 s | Pass |
+| Force-delete one API pod | 20.33 s | 60 s | Pass |
+| Rolling replacement | 151.27 s | 60 s | Miss |
+| Restore provider connectivity | 53.19 s | 60 s | Pass |
+| Scale down to one | 112.08 s | 60 s | Miss |
+| Cold API readiness | 75.46 s | 120 s | Pass |
+
+The two-minute pilot records six samples across six processes with no restarts.
+Peak sampled RSS is 5,025,792 bytes; working set is 5,017,600 bytes. This small
+workload does not qualify resident limits or peak recovery memory. The namespace,
+bucket, scoped key and 1,875 remaining versions were removed.
+
+The broader trace retains 112 completed checkpoint calls (median **3.47 seconds**,
+maximum **15.07 seconds**) and four deferrals. One same-pod reacquisition follows
+an explicit unresolved-journal-upload retirement, rather than a placement change.
+The conservative uncertain-upload recovery rule is unchanged. The trace does
+not establish that checkpoint time alone explains the client-progress delay.
+
+Rolling replacement remains **151.27 seconds**, close to the prior 153.30-second
+run; this change has not established a material rollout improvement. The next
+placement experiment is coalescing transient healthy-owner moves without delaying
+failed-owner recovery. Checkpoint work on the serving path and uncertain-upload
+recovery also remain targets.
+
+[v0.23.13](https://github.com/ericflo/durable-db/releases/tag/v0.23.13) ships this
+exact static executable. [Source hashes, configuration, samples and cleanup](evidence/native-recovery-2026-11-11.json)
+retain both campaigns. Physical-host loss, AWS, sustained load and a production
+operating envelope remain unqualified.
 
 ## v0.23.12 deferred challenge scheduling (2026-11-12)
 
