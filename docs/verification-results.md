@@ -20,38 +20,48 @@ The disposable bucket/container and 31 physical versions were removed.
 
 [v0.23.8](https://github.com/ericflo/durable-db/releases/tag/v0.23.8) packages
 `43d9ea4`, verified by [Woodpecker #242](https://ci.eflorenzano.com/repos/18/pipeline/242/1).
-The exact executable passes the complete B2/Kubernetes campaign with **1,969
-acknowledged writes recovered and independently checked**. The namespace, scoped
-key, bucket and 1,235 remaining physical versions were removed. This baseline
-uses the preceding harness: writers occupy partitions 2, 7, 14 and 6.
+The exact executable passes two complete B2/Kubernetes campaigns: **1,969
+acknowledged writes** in the baseline and **2,018** in the strengthened fault
+campaign, all recovered and independently checked. Both disposable namespaces
+were removed, along with both buckets, scoped keys and 3,243 remaining physical
+versions (1,235 baseline / 2,008 stronger run). The baseline uses partitions 2, 7,
+14 and 6. The maintained harness
+now fixes writer names within each fresh bucket, giving partitions 2, 12, 14 and
+2 instead of letting the random namespace change contention.
 
-| Transition | Every writer's recovery upper bound | Engineering target |
-| --- | ---: | ---: |
-| Scale to three / six | 65.68 / 68.36 s | 60 s — missed |
-| Stopped-peer replacement after API readiness | 151.05 s | 120 s — missed |
-| Resume old peers / return to six | 70.15 / 92.06 s | 60 s — missed |
-| Forced pod loss | 94.37 s | 60 s — missed |
-| Rolling replacement | 120.60 s | 60 s — missed |
-| Restore provider egress | 56.99 s | 60 s — met |
-| Scale to one | 94.73 s | 60 s — missed |
-| Cold recovery after API readiness | 59.73 s | 120 s — met |
+In the stronger run, both database processes on one selected host stay stopped
+while the other hosts recover every writer without replacement pods. Process
+identities, restart counts, stopped states and retained DNS entries are checked
+before and after progress. Rejoin then passes. During provider isolation, a fresh
+connection probe fails and all four writers' acknowledgement/readback counters
+remain unchanged for ten seconds after thirty seconds of settling. This replaces
+the blind sleep and detects policies that leave the workload connected. All-process
+pause, replacement, pod loss, rolling replacement, scale-down and cold recovery
+also pass. These are process faults on existing hosts and a provider-egress fault;
+physical host shutdown and peer-only/asymmetric network isolation remain open.
+
+Every-writer recovery upper bounds, in seconds:
+
+| Transition | Baseline | Stronger fault campaign | Target |
+| --- | ---: | ---: | ---: |
+| Scale to three / six | 65.68 / 68.36 | 64.96 / 101.75 | 60 |
+| One-host process pause | — | 89.03 | 60 |
+| Resume that host's processes | — | 61.15 | 60 |
+| Stopped-peer replacement after API readiness | 151.05 | 104.98 | 120 |
+| Resume all old peers | 70.15 | 92.39 | 60 |
+| Return to six | 92.06 | 81.80 | 60 |
+| Forced pod loss | 94.37 | 34.60 | 60 |
+| Rolling replacement | 120.60 | 136.55 | 60 |
+| Restore provider egress | 56.99 | 41.11 | 60 |
+| Scale to one | 94.73 | 110.90 | 60 |
+| Cold recovery after API readiness | 59.73 | 69.60 | 120 |
 
 These include readiness/polling and two further readbacks per writer; replacement
-and cold timers start after API readiness. Eight of ten transitions miss their
-target. The lower metadata-read count does **not** demonstrate a cloud latency
-speedup. Sampled steady-phase peak RSS is 4,886,528 bytes, not a worst-case bound.
+and cold timers start after API readiness. Eight of ten baseline transitions and
+eight of twelve stronger-campaign transitions miss their targets. The lower
+metadata-read count does **not** demonstrate a cloud latency speedup. Sampled
+steady-phase peak RSS is 4,886,528 / 4,780,032 bytes, not a worst-case bound.
 [Exact sources, hashes, timings and cleanup](evidence/native-recovery-2026-11-11.json).
-
-The maintained fault harness now adds a targeted one-host process pause before
-the all-process fault: surviving hosts must recover every writer without adding
-pods, while stopped process identities and DNS entries remain unchanged. This
-new phase is not yet qualified; it does not simulate a peer-only network partition.
-The provider-egress phase also replaces its blind forty-second sleep with thirty
-seconds to settle responses and ten seconds requiring unchanged acknowledgement
-and readback counters. A fresh connection probe alone cannot establish that an
-existing provider connection was blocked. The stronger check remains unqualified. Writer names in future runs are fixed
-inside the fresh bucket, giving partitions 2, 12, 14 and 2; prior campaigns let
-the random namespace change that workload characteristic.
 
 ## v0.23.7 idle-owner rejoin recovery (2026-11-12)
 
