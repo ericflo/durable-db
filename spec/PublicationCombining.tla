@@ -204,5 +204,10 @@ PrematureReceipt(j) == /\ phase[j] = "submitted" /\ response[j] = "waiting"
 \* within Helpers. Databases and the collector are never mixed with either.
 Symmetry == {jp @@ hp: jp \in Permutations(Jobs), hp \in Permutations(Helpers)}
 Spec == Init /\ [][Next]_vars
+\* Coverage must deliver the receipt during the busy interval, not merely
+\* start a new helper after an earlier acknowledgement.
+QueuedReceiptSpec == Init /\ [][Next /\
+    ((\E j \in Jobs: response[j] # "success" /\ response'[j] = "success")
+     => \E h \in Helpers: helping[h])]_vars
 UnsafeReceiptSpec == Init /\ [][Next \/ (\E j \in Jobs: PrematureReceipt(j))]_vars
 =============================================================================

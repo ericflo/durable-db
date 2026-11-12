@@ -127,8 +127,9 @@ every selection still rechecks the target and original collection fence. It
 checks **1,736,213 distinct states** (11,377,184 generated, depth 25) in 47 seconds
 on the development host. Five fault controls and the superseded-receipt coverage
 control still produce their expected counterexamples. A one-revision coverage
-check also reaches a receipt while another helper remains busy (13,780 states,
-depth 9). `Ack` already permits this independently of helper admission; no new
+check restricts receipt delivery to when a helper is already busy. Its one-job,
+one-database instance reaches that interleaving in 582 states (depth 9). `Ack`
+already permits this independently of helper admission; no new
 protocol state or safety relaxation is needed. This does not prove Rust,
 latency, fairness or whole-deployment behavior.
 

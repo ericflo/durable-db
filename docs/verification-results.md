@@ -1,5 +1,86 @@
 # Verification results
 
+## Confirming receipts while a helper is busy (v0.24.8, 2026-11-12)
+
+A queued publication can now observe its exact published identity without waiting
+for the local helper slot. At most eight delayed read-only probes run per
+invocation, with one probe in flight per shared connection. The FIFO helper
+future stays queued; helper admission cancels a stalled probe. Absence, a changed
+pointer, collection or a failed read never supplies success or a definite abort.
+Once the probe budget is exhausted, the normal helper path continues unchanged.
+There is no new storage format, detached worker or publication implementation.
+The unconditional helper wait before receipt confirmation is removed.
+
+The original code fails a two-second virtual-time deadline after another replica
+publishes the queued proposal while the local helper remains stalled. Both new
+regressions pass in 0.01 seconds, including a lost publication reply, read failure,
+competing pointer, the eight-probe bound, one-probe concurrency and cancellation
+of a stalled observation on helper admission. All **362 routine Rust checks**,
+formatting and strict clippy pass; the publication suite passes 22 checks in
+1.42 seconds. [Woodpecker #303](https://ci.eflorenzano.com/repos/18/pipeline/303/1)
+checks the static runtime and the optimized 10,005-database regression (200.06
+seconds).
+
+The publication model still checks 1,736,213 states with five fault controls.
+A verification-only refinement after the runtime candidate requires receipt
+delivery while a helper is already busy. It reduces the new coverage fixture from
+13,780 states to **582**, using one job, one database, two helpers and one revision.
+The earlier coverage could start a helper after receiving the receipt; the
+refined specification excludes that witness. The normal safety specification
+and runtime code are unchanged. This is bounded component checking, not a proof
+of Rust, a composed deployment or fairness. Both coverage controls pass.
+
+Versioned MinIO passes membership/recovery in **40.40 seconds** and the broader
+tenant-budget, automatic collection, retention, export/restore and cold-recovery
+fixture in **182.59 seconds**, including its collection-cycle waits. Both buckets,
+containers and all **111 physical versions** are removed. These loopback fixtures
+do not qualify AWS or production latency.
+
+The exact static executable passes the fresh B2/Kubernetes campaign on the
+existing hosts: **804 acknowledgements, readbacks and recovered keys**, across
+four independently checked histories. The namespace, scoped key, bucket and
+all **1,919 physical versions** are removed. The workload and fault schedule
+are unchanged; the harness additionally captures the fixed `queued_receipt`
+outcome without logging data.
+
+| Recovery observation | Bound | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 51.37s | 60s | Pass |
+| Scale to six | 13.51s | 60s | Pass |
+| First rolling replacement | 116.37s | 60s | Miss |
+| Second rolling replacement | 135.44s | 60s | Miss |
+| Cold three-node recovery, after readiness | 56.76s | 120s | Pass |
+
+Bounded logs contain **57 queued receipt completions**. Their largest queue
+interval is **5.50s**, including probe work; the longest complete invocation
+finishes in 10.66s, with 7.33s before queueing. Another 460 complete calls enter
+the helper: 257 confirm a comparison and 203 observe a helped result. These
+calls record 142 comparison conflicts across 120 invocations. Their largest
+queue interval is 4.09s. Log rotation, incomplete calls and failures before
+admission limit these samples; they are not population rates or a latency
+distribution.
+
+The longest sampled activation is **10.55s**, including a 9.94s publication
+with no helper wait: 0.86s initial work, 6.88s preparation and 2.18s across two
+conflicting comparisons before observing a helped result. Selection reaches
+16.50s, including two publication rounds and an intervening validation. Three
+sampled retries retain completed discovery, including one with 34 frames. The
+longest checkpoint is 10.93s; one of 61 sampled checkpoints needs confirmation,
+and funding reaches 6.51s. The largest sampled individual comparison is 1.19s;
+this run does not reproduce the previous 15.10s comparison. Lower queue and
+checkpoint maxima alongside a higher activation maximum do not establish an
+overall recovery speedup.
+
+Rollout bounds include the complete StatefulSet replacement and a subsequent
+per-writer readback barrier. Recorded rollout slices have maximum acknowledgement
+gaps of **64.73 / 73.17s**, including intervening diagnostics; these are neither
+exact fault windows nor readback timings. The next targets are remaining retry
+preparation/selection validation and direct per-writer readback-gap measurement
+during rollout. Continuous split availability, physical-host failures,
+worst-case memory, full tenant accounting and sustained performance remain open.
+[Source, model bounds, runtime identity, measurements and cleanup](evidence/native-recovery-2026-11-11.json),
+`queued_publication_receipts` and `release_0_24_8`.
+
 ## Bounded publication discovery and contention timing (v0.24.7, 2026-11-12)
 
 A publication now loads at most 64 proposals once, reusing that metadata after
