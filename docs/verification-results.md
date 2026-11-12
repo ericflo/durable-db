@@ -1,5 +1,23 @@
 # Verification results
 
+## Response validation uncertainty (v0.24.1 candidate, 2026-11-12)
+
+Two real TCP regressions reproduce worker retirement after a transient permit
+GET failure: one for a rejected command, one for a sealed durable commit. Both
+fail against the previous implementation in 0.02 seconds and pass after the fix
+in 0.04 seconds. An unavailable check returns HTTP 503 without discarding the
+healthy worker; confirmed revocation still stops serving. Identical retries keep
+the same incarnation and perform no additional journal PUT. The commit retry
+returns its original receipt. The routing model checks 728 states with nine
+negative controls, including this mistaken retirement.
+
+The change removes both unconditional worker exits on response-validation
+errors. One fixed-cardinality counter records uncertainty while local ownership
+remains valid. No new worker, timer, provider call or retry queue is added. This
+reproduces a real defect; it does **not** establish the cause of v0.24.0’s repeated
+B2 acquisitions or qualify rollout latency. All 349 routine Rust checks pass;
+cloud qualification is pending.
+
 ## v0.24.0 stable member identity (2026-11-12)
 
 Placement hashes a stable logical member ID independently of its transport

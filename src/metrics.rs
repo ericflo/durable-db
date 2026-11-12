@@ -101,8 +101,9 @@ pub enum Event {
     UploadGrantBytes,
     UploadGrantAttempts,
     UploadBudgetExhausted,
+    ResponseValidationUnavailable,
 }
-const EVENTS: [&str; 23] = [
+const EVENTS: [&str; 24] = [
     "read_groups",
     "read_group_members",
     "observation_queue_rejected",
@@ -126,6 +127,7 @@ const EVENTS: [&str; 23] = [
     "upload_grant_bytes",
     "upload_grant_attempts",
     "upload_budget_exhausted",
+    "response_validation_unavailable",
 ];
 const OUTCOMES: [&str; 8] = [
     "ok",

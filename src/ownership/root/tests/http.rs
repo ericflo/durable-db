@@ -835,6 +835,76 @@ async fn native_http_javascript_contract() {
     assert!(status.success(), "native client contract failed: {status}");
 }
 
+// Independent HTTP servers in one test process; no controller can hide a
+// retired worker by automatically acquiring a replacement.
+async fn unavailable_reply_check_preserves_worker(existing: bool) {
+    let (router, provider, faults, token) = fixture(4, 256).await;
+    if existing {
+        create(&router, &token, "app").await;
+    }
+    let incarnation = provider.record().identity;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let url = format!("{base}/v1/databases/app/commit");
+    faults.fail_permit.store(true, Ordering::SeqCst);
+    // Missing database rejects before admission; an existing database commits
+    // durably but must withhold its sealed reply while validation is unavailable.
+    assert_eq!(
+        tcp_call(&client, "POST", &url, &token, commit()).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let healthy = client
+        .get(format!("{base}/health/ready"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    faults.fail_permit.store(false, Ordering::SeqCst);
+    let puts = faults.puts.load(Ordering::SeqCst);
+    let retry = tcp_call(&client, "POST", &url, &token, commit()).await;
+    assert_eq!(provider.record().identity, incarnation);
+    server.abort();
+    let _ = server.await;
+    assert_eq!(
+        healthy,
+        StatusCode::OK,
+        "unavailable permission is not revocation"
+    );
+    assert_eq!(
+        retry.0,
+        if existing {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    );
+    if existing {
+        assert_eq!(retry.1["revision"], 1);
+        assert_eq!(retry.1["replayed"], true);
+    }
+    assert_eq!(
+        faults.puts.load(Ordering::SeqCst),
+        puts,
+        "retry never resubmits a durable journal"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_rejection_validation_preserves_the_worker() {
+    unavailable_reply_check_preserves_worker(false).await;
+}
+
+#[tokio::test]
+async fn unavailable_commit_validation_preserves_the_worker() {
+    unavailable_reply_check_preserves_worker(true).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn native_http_health_is_local_but_responses_refuse_revoked_owner() {
     use crate::api::Backend;

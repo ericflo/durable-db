@@ -7,3 +7,4 @@ unsafe UnsafeRouteCancel.cfg route-cancel 256m CancelInvalidates
 unsafe UnsafeRouteReadiness.cfg route-readiness 256m AuthorizedResponse
 unsafe UnsafeRouteIdle.cfg route-idle 256m IdleRetires
 unsafe UnsafeRoutePlacement.cfg route-placement 256m IncumbentAvailable
+unsafe UnsafeRouteUnavailable.cfg route-unavailable 256m IncumbentAvailable

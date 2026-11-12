@@ -301,6 +301,21 @@ async fn prepare(
     Ok((Ticket::Catalog(change), upload))
 }
 
+// A failed observation suppresses this response, not the worker. Only a
+// confirmed missing permit or an already failed local view requires retirement.
+async fn validate_response(owner: &Owner) -> Result<()> {
+    owner
+        .validate()
+        .await
+        .inspect_err(|_| {
+            if owner.check().is_ok() {
+                crate::metrics::REGISTRY
+                    .event(crate::metrics::Event::ResponseValidationUnavailable, 1);
+            }
+        })
+        .map_err(Error::Storage)
+}
+
 async fn run(
     owner: Arc<Resident>,
     mut queue: mpsc::Receiver<Command>,
@@ -371,8 +386,8 @@ async fn run(
                             pending.push(Pending { ticket, response: command.response });
                         }
                         Err(error) => {
-                            if owner.read().await.validate().await.is_err() { return; }
-                            let _ = command.response.send.send(Err(error));
+                            let result = validate_response(&*owner.read().await).await.and(Err(error));
+                            let _ = command.response.send.send(result);
                         }
                     }
                 }
@@ -445,10 +460,15 @@ async fn run(
             replies.push((pending.swap_remove(i).response, result));
         }
         if !replies.is_empty() {
-            if owner.validate().await.is_err() {
-                return;
-            }
+            let validated = validate_response(&owner).await.is_ok();
             for (response, result) in replies {
+                let result = if validated {
+                    result
+                } else {
+                    Err(Error::Storage(anyhow::anyhow!(
+                        "serving permission unavailable"
+                    )))
+                };
                 let _ = response.send.send(result);
             }
         }

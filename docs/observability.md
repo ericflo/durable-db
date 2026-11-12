@@ -82,6 +82,8 @@ Check whether discovery has removed all targets, scraping authentication has fai
 
 Compare authority, immutable-object, and native B2 operation outcomes and latency. An authorization failure calls for checking the mounted workload credential and its permissions; native authorization refresh is automatic. A provider outage or service-unavailable response calls for reducing offered work and preserving identical retries. B2 documents native rate limiting with HTTP `429`, while its S3-compatible API uses `503 SlowDown`; a generic native `503` alone does not establish throttling. See [Backblaze's rate-limit guide](https://www.backblaze.com/docs/cloud-storage-rate-limits).
 
+`response_validation_unavailable` counts failed final response validations while the local owner remains valid. The server withholds the application result with HTTP 503 and retains the worker; an identical retry can resolve a durable receipt. Confirmed revocation still stops serving. This counter diagnoses failed observations, not their provider cause, and cannot account for samples lost when a process disappears.
+
 Preserve the request ID, expected revision, and exact transaction body after an uncertain write. Do not turn uncertainty into a new write ID or blindly delete its uploaded objects. Repeated checksum or manifest-validation errors require preserving the authoritative objects for diagnosis; do not run an external lifecycle cleanup or replace the directory root manually.
 
 ## Publication contention

@@ -1,7 +1,7 @@
 ------------------------- MODULE OwnerRouting -------------------------
 EXTENDS Naturals
 CONSTANT Fault
-ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle", "Placement"}
+ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle", "Placement", "Unavailable"}
 VARIABLE s
 vars == <<s>>
 Owners == {"old", "new", "foreign"}
@@ -32,6 +32,11 @@ Readiness == s' = [s EXCEPT !.ready = ~@]
 Probe == /\ s.activated
          /\ s' = [s EXCEPT !.absent = ~s.permit,
                  !.retired = @ \/ (~s.permit /\ Fault # "Idle")]
+\* A failed fresh validation releases only a retryable transport error, never
+\* a state-derived reply. It cannot infer revocation or discard a healthy owner.
+ValidationFailure == /\ s.activated /\ s.phase = "sent" /\ s.pinned = "old"
+                     /\ s' = [s EXCEPT !.phase = "done",
+                               !.retired = @ \/ Fault = "Unavailable"]
 IdleRetires == s.absent => s.retired
 \* Routing observations are hints, including stale ones after takeover.
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
@@ -67,7 +72,7 @@ Cancel == /\ s.phase = "sent"
           /\ s' = [s EXCEPT !.phase = "cancelled",
                      !.cached = IF Fault = "CancelCache" THEN @ ELSE "none"]
 CancelInvalidates == s.phase = "cancelled" => s.cached = "none"
-Next == Activate \/ Placement \/ Probe \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
+Next == Activate \/ Placement \/ Probe \/ ValidationFailure \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
 TypeOK == s \in [route: {"old", "new"}, endpoint: Owners,
     activated: BOOLEAN, permit: BOOLEAN, cached: Owners \cup {"none"}, expected: Owners \cup {"none"},
     phase: {"idle", "sent", "done", "busy", "cancelled"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},
