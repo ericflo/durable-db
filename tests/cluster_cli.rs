@@ -29,6 +29,7 @@ fn cluster_cli_configuration_is_validated_before_provider_access() {
         key.to_str().unwrap(),
     ];
     for (args, expected) in [
+        (vec!["--member-id", "two words"], "member ID must"),
         // Valid default resource settings must reach the missing-credential boundary.
         (vec!["--listen", "127.0.0.1:0"], "initialize B2 transport"),
         (vec!["--listen", "0.0.0.0:0"], "require --advertise-ip"),
@@ -145,6 +146,7 @@ impl Server {
             ])
             .env_remove("DURABLE_DB_ADVERTISE_IP")
             .env_remove("DURABLE_DB_DISCOVERY_SERVICE")
+            .env_remove("DURABLE_DB_MEMBER_ID")
             .stdout(output.try_clone().unwrap())
             .stderr(Stdio::from(output))
             .spawn()

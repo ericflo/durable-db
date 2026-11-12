@@ -109,7 +109,7 @@ S3-compatible providers must supply atomic `If-Match`/`If-None-Match` writes, du
 > [!IMPORTANT]
 > The native cloud path removes bucket-wide conditional publication from ordinary data operations. Reads still require a fresh permit GET. Its production performance and failure envelope remain unqualified; historical shared-engine benchmarks do not describe this replacement.
 
-[Deployment](docs/deployment.md) covers Kubernetes manifests in `deploy/kubernetes/`, request budgets and key rotation. [B2](docs/b2.md) and [upload admission](docs/design-upload-admission.md) cover provider details and durable spending limits.
+[Deployment](docs/deployment.md) covers Kubernetes manifests in `deploy/kubernetes/` (stable pod identities and disposable caches), request budgets and key rotation. [B2](docs/b2.md) and [upload admission](docs/design-upload-admission.md) cover provider details and durable spending limits.
 
 ## Contract and limits
 

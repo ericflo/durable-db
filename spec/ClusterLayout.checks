@@ -1,3 +1,4 @@
 safe ClusterLayout.cfg cluster-layout 256m -
 unsafe UnsafeLayoutErase.cfg layout-erase 256m ImmutableLayout
 unsafe UnsafeLayoutMembers.cfg layout-members 256m StableMapping
+unsafe UnsafeLayoutAddress.cfg layout-address 256m StablePlacement

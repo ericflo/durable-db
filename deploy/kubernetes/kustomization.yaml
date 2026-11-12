@@ -3,6 +3,6 @@ kind: Kustomization
 namespace: durable-db
 resources:
   - namespace.yaml
-  - deployment.yaml
+  - statefulset.yaml
   - service.yaml
   - autoscaling.yaml

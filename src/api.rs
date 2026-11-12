@@ -2,7 +2,7 @@ mod backend;
 mod cluster;
 mod membership;
 pub use cluster::{Cluster, ClusterConfig};
-pub use membership::Membership;
+pub use membership::{Member, Membership};
 mod forward;
 pub use forward::Forward;
 mod local;
@@ -51,6 +51,7 @@ enum Principal {
     Database(String),
 }
 pub struct App {
+    member_id: Option<axum::http::HeaderValue>,
     pub backend: Arc<dyn Backend>,
     pub auth: Arc<Auth>,
     pub ready: AtomicBool,
@@ -63,6 +64,12 @@ pub struct App {
     pub rejected: AtomicU64,
 }
 impl App {
+    /// Advertise a bounded placement hint on the existing liveness probe.
+    pub fn with_member(mut self, member: &Member) -> anyhow::Result<Self> {
+        member.validate()?;
+        self.member_id = Some(member.id.parse()?);
+        Ok(self)
+    }
     pub fn new(backend: Arc<dyn Backend>, auth: impl Into<Arc<Auth>>, concurrency: usize) -> Self {
         Self::with_rate_limits(backend, auth, concurrency, RateLimits::default())
     }
@@ -76,6 +83,7 @@ impl App {
         rate_limits: RateLimits,
     ) -> Self {
         Self {
+            member_id: None,
             backend,
             auth: auth.into(),
             ready: AtomicBool::new(true),
@@ -91,7 +99,7 @@ impl App {
 }
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
-        .route("/health/live", get(|| async { "ok" }))
+        .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/metrics", get(metrics))
         .route(
@@ -114,6 +122,15 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(middleware::from_fn_with_state(app.clone(), admission))
         .with_state(app)
+}
+async fn live(State(app): State<Arc<App>>) -> Response {
+    let mut response = "ok".into_response();
+    if let Some(id) = &app.member_id {
+        response
+            .headers_mut()
+            .insert(membership::MEMBER_HEADER, id.clone());
+    }
+    response
 }
 fn bearer(headers: &HeaderMap) -> Result<&str> {
     headers

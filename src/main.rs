@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use durable_db::{
-    api::{App, Cluster, ClusterConfig, Membership, RateLimits, router},
+    api::{App, Cluster, ClusterConfig, Member, Membership, RateLimits, router},
     auth::Auth,
     cache::Cache,
     providers::b2::Native,
@@ -90,6 +90,9 @@ struct Serve {
     /// Headless DNS service; omit only for a single cloud process.
     #[arg(long, env = "DURABLE_DB_DISCOVERY_SERVICE")]
     discovery_service: Option<String>,
+    /// Stable, unique cloud placement identity; defaults to the advertised address.
+    #[arg(long, env = "DURABLE_DB_MEMBER_ID")]
+    member_id: Option<String>,
     /// Fixed cloud partition count (default 16); cannot change on reopen.
     #[arg(long, env = "DURABLE_DB_PARTITIONS", value_parser = clap::value_parser!(u32).range(1..=1024))]
     partitions: Option<u32>,
@@ -264,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
                 prefix,
                 advertise_ip,
                 discovery_service,
+                member_id,
                 partitions,
                 resident_memory_mib,
                 upload_budget_bytes,
@@ -290,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
             if !cluster
                 && (advertise_ip.is_some()
                     || discovery_service.is_some()
+                    || member_id.is_some()
                     || partitions.is_some()
                     || resident_memory_mib.is_some())
             {
@@ -331,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
             )?);
             let listener = tokio::net::TcpListener::bind(listen).await?;
             let listen = listener.local_addr()?;
+            let mut member = None;
             let (backend, membership): (Arc<dyn durable_db::api::Backend>, Option<Membership>) =
                 if cluster {
                     let ip = advertise_ip.unwrap_or(listen.ip());
@@ -364,7 +370,12 @@ async fn main() -> anyhow::Result<()> {
                         },
                     };
                     config.validate()?;
-                    let membership = Membership::start(address, discovery_service)?;
+                    let identity = Member {
+                        id: member_id.unwrap_or_else(|| address.to_string()),
+                        address,
+                    };
+                    let membership = Membership::start(identity.clone(), discovery_service)?;
+                    member = Some(identity);
                     let connection = if let Some(bucket) = b2_bucket {
                         Native::connect_storage(&bucket, &prefix)
                             .await
@@ -405,12 +416,11 @@ async fn main() -> anyhow::Result<()> {
                         None,
                     )
                 };
-            let app = Arc::new(App::with_rate_limits(
-                backend,
-                auth,
-                concurrency,
-                rate_limits,
-            ));
+            let mut app = App::with_rate_limits(backend, auth, concurrency, rate_limits);
+            if let Some(member) = member {
+                app = app.with_member(&member)?;
+            }
+            let app = Arc::new(app);
             tracing::info!(address = %listen, cluster, "durable-db HTTP listener started");
             let shutdown_app = app.clone();
             axum::serve(listener, router(app))

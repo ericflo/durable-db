@@ -1,6 +1,6 @@
 //! Membership schedules work; only the object-store ownership protocol can
 //! authorize service. No lease, heartbeat expiry or bounded clock is involved.
-use super::{Backend, Forward, Native};
+use super::{Backend, Forward, Member, Native};
 use crate::{
     Result,
     auth::Auth,
@@ -95,7 +95,7 @@ impl Cluster {
         config: ClusterConfig,
         cache: Arc<Cache>,
         auth: Arc<Auth>,
-        mut members: watch::Receiver<Vec<SocketAddr>>,
+        mut members: watch::Receiver<Vec<Member>>,
     ) -> anyhow::Result<Arc<Self>> {
         config.validate()?;
         let limits = config.limits.share(config.layout.partitions() as usize)?;
@@ -182,14 +182,14 @@ impl Cluster {
                 // schedules work but cannot authorize a data response.
                 cluster
                     .ready
-                    .store(peers.contains(&cluster.config.address), Ordering::Release);
+                    .store(contains(&peers, cluster.config.address), Ordering::Release);
                 for partition in &cluster.partitions {
                     let mut local = partition.local.write().await;
                     // A preference change schedules the successor; it does not
                     // revoke this incumbent. Keep serving until actual takeover
                     // or removal, retaining the resident reservation throughout.
                     // Native health checks are local and never wait for I/O.
-                    if !peers.contains(&cluster.config.address)
+                    if !contains(&peers, cluster.config.address)
                         || matches!(&*local, Some(local) if !local.backend.ready().await)
                     {
                         local.take();
@@ -235,13 +235,13 @@ impl Cluster {
     async fn acquire_current(
         &self,
         id: usize,
-        mut members: watch::Receiver<Vec<SocketAddr>>,
+        mut members: watch::Receiver<Vec<Member>>,
     ) -> anyhow::Result<()> {
         let partition = &self.partitions[id];
         let claimed = AtomicBool::new(false);
-        let wanted = |peers: &[SocketAddr]| {
+        let wanted = |peers: &[Member]| {
             membership(peers).is_ok_and(|peers| {
-                peers.contains(&self.config.address)
+                contains(&peers, self.config.address)
                     && (claimed.load(Ordering::Acquire)
                         || preferred(id as u32, &peers) == Some(self.config.address))
             })
@@ -269,7 +269,7 @@ impl Cluster {
         &self,
         id: u32,
         partition: &Partition,
-        members: watch::Receiver<Vec<SocketAddr>>,
+        members: watch::Receiver<Vec<Member>>,
         claimed: &AtomicBool,
     ) -> anyhow::Result<Local> {
         let connection = &partition.connection;
@@ -305,7 +305,7 @@ impl Cluster {
                 let observed = root.observe().await?;
                 if let Some(incumbent) = observed.incumbent()
                     && incumbent.address != self.config.address
-                    && !members.borrow().contains(&incumbent.address)
+                    && !contains(&members.borrow(), incumbent.address)
                 {
                     stage = "challenge";
                     progress(stage);
@@ -460,25 +460,76 @@ impl Backend for Cluster {
         self.directory.replenish_upload_budget(request).await
     }
 }
-fn membership(peers: &[SocketAddr]) -> anyhow::Result<Vec<SocketAddr>> {
+fn contains(peers: &[Member], address: SocketAddr) -> bool {
+    peers.iter().any(|peer| peer.address == address)
+}
+fn membership(peers: &[Member]) -> anyhow::Result<Vec<Member>> {
     ensure!(peers.len() <= MAX_MEMBERS, "membership exceeds 256 peers");
     for peer in peers {
-        crate::ownership::root::valid_address(*peer)?;
+        peer.validate()?;
     }
     let mut sorted = peers.to_vec();
     sorted.sort_unstable();
-    sorted.dedup();
-    ensure!(sorted.len() == peers.len(), "duplicate peer address");
+    ensure!(
+        sorted.windows(2).all(|pair| pair[0].id != pair[1].id),
+        "duplicate member ID"
+    );
+    let addresses: std::collections::BTreeSet<_> = peers.iter().map(|peer| peer.address).collect();
+    ensure!(addresses.len() == peers.len(), "duplicate peer address");
     Ok(sorted)
 }
 /// Rendezvous selection moves only partitions whose preferred node changes.
 /// Ordering/duplicates are handled by membership validation, never as authority.
-fn preferred(partition: u32, peers: &[SocketAddr]) -> Option<SocketAddr> {
-    peers.iter().copied().max_by_key(|peer| {
-        let mut hash = Sha256::new();
-        hash.update(b"durable-db.placement.v1\0");
-        hash.update(partition.to_be_bytes());
-        hash.update(peer.to_string().as_bytes());
-        (hash.finalize(), *peer)
-    })
+fn preferred(partition: u32, peers: &[Member]) -> Option<SocketAddr> {
+    peers
+        .iter()
+        .max_by_key(|peer| {
+            let mut hash = Sha256::new();
+            hash.update(b"durable-db.placement.v1\0");
+            hash.update(partition.to_be_bytes());
+            hash.update(peer.id.as_bytes());
+            (hash.finalize(), &peer.id)
+        })
+        .map(|peer| peer.address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacing_endpoints_preserves_logical_placement() {
+        let mut peers: Vec<_> = (0..6)
+            .map(|n| Member {
+                id: format!("durable-db-{n}"),
+                address: SocketAddr::from(([127, 0, 0, 1], 8000 + n)),
+            })
+            .collect();
+        let winners: Vec<_> = (0..1024)
+            .map(|p| {
+                peers
+                    .iter()
+                    .find(|m| Some(m.address) == preferred(p, &peers))
+                    .unwrap()
+                    .id
+                    .clone()
+            })
+            .collect();
+        peers.reverse();
+        for index in 0..peers.len() {
+            peers[index].address.set_port(9000 + index as u16);
+            let validated = membership(&peers).unwrap();
+            for (p, expected) in winners.iter().enumerate() {
+                let winner = preferred(p as u32, &validated).unwrap();
+                assert_eq!(
+                    &validated.iter().find(|m| m.address == winner).unwrap().id,
+                    expected
+                );
+            }
+        }
+        let mut duplicate = peers[0].clone();
+        duplicate.address.set_port(12345);
+        peers.push(duplicate);
+        assert!(membership(&peers).is_err());
+    }
 }

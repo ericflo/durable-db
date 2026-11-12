@@ -1,7 +1,7 @@
 use super::routing::{Server, app, auth};
 use super::*;
 use crate::{
-    api::{Backend, Cluster, ClusterConfig, Membership},
+    api::{Backend, Cluster, ClusterConfig, Member, Membership},
     auth::Access,
     cache::Cache,
     engine::Info,
@@ -34,7 +34,7 @@ struct Node {
     server: Server,
     cluster: Arc<Cluster>,
     address: SocketAddr,
-    membership: watch::Sender<Vec<SocketAddr>>,
+    membership: watch::Sender<Vec<Member>>,
 }
 impl Node {
     async fn start(directory: Partitions, listener: TcpListener, peers: Vec<SocketAddr>) -> Self {
@@ -46,13 +46,13 @@ impl Node {
         peers: Vec<SocketAddr>,
         layout: Layout,
     ) -> Self {
-        let (membership, receiver) = watch::channel(peers);
+        let (membership, receiver) = watch::channel(peers.into_iter().map(Member::from).collect());
         Self::with_membership(directory, listener, layout, membership, receiver).await
     }
     async fn monitored(
         directory: Partitions,
         listener: TcpListener,
-        membership: watch::Sender<Vec<SocketAddr>>,
+        membership: watch::Sender<Vec<Member>>,
     ) -> (Self, Membership) {
         let monitor = Membership::observe(membership.subscribe()).unwrap();
         let node = Self::with_membership(
@@ -69,10 +69,16 @@ impl Node {
         directory: Partitions,
         listener: TcpListener,
         layout: Layout,
-        membership: watch::Sender<Vec<SocketAddr>>,
-        receiver: watch::Receiver<Vec<SocketAddr>>,
+        membership: watch::Sender<Vec<Member>>,
+        receiver: watch::Receiver<Vec<Member>>,
     ) -> Self {
         let address = listener.local_addr().unwrap();
+        let identity = receiver
+            .borrow()
+            .iter()
+            .find(|m| m.address == address)
+            .cloned()
+            .unwrap_or_else(|| Member::from(address));
         let cluster = Cluster::open(
             directory,
             ClusterConfig {
@@ -89,7 +95,15 @@ impl Node {
         )
         .await
         .unwrap();
-        let server = Server::serve(listener, app(cluster.clone()));
+        let application = crate::api::App::with_rate_limits(
+            cluster.clone(),
+            auth(),
+            32,
+            crate::api::RateLimits::new(20_000, 20_000).unwrap(),
+        )
+        .with_member(&identity)
+        .unwrap();
+        let server = Server::serve(listener, crate::api::router(Arc::new(application)));
         Self {
             server,
             cluster,
@@ -98,7 +112,8 @@ impl Node {
         }
     }
     fn members(&self, peers: &[SocketAddr]) {
-        self.membership.send_replace(peers.to_vec());
+        self.membership
+            .send_replace(peers.iter().copied().map(Member::from).collect());
     }
 }
 // Select representative ephemeral addresses with one partition on each node.
@@ -439,7 +454,7 @@ async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenc
         }
     };
     let peers = vec![address, second.local_addr().unwrap()];
-    let (dns, _) = watch::channel(peers.clone());
+    let (dns, _) = watch::channel(peers.iter().copied().map(Member::from).collect());
     let (a, _a_monitor) = Node::monitored(directory(&provider).await, listener, dns.clone()).await;
     let (b, b_monitor) = Node::monitored(directory(&provider).await, second, dns.clone()).await;
     settled(&[&a, &b], &peers).await;
@@ -480,7 +495,7 @@ async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenc
     settled(&[&a], &[a.address]).await;
     assert_eq!(
         *dns.borrow(),
-        peers,
+        peers.iter().copied().map(Member::from).collect::<Vec<_>>(),
         "discovery never withdrew the failed address"
     );
     assert_ne!(
@@ -527,6 +542,107 @@ async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenc
             .await,
         receipt
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stable_identity_replacements_leave_the_other_owner_and_receipts_unchanged() {
+    async fn start(directory: Partitions, listener: TcpListener, peers: Vec<Member>) -> Node {
+        let (send, receive) = watch::channel(peers);
+        Node::with_membership(directory, listener, Layout::new(2).unwrap(), send, receive).await
+    }
+    async fn owner(node: &Node, name: &str) -> Arc<dyn Backend> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let backend = node.cluster.resolve(name).await.unwrap().unwrap();
+                if backend.owner_incarnation().is_some() {
+                    return backend;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("replacement serves")
+    }
+    let provider = Provider::new();
+    let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut peers = vec![
+        Member {
+            id: "durable-db-0".into(),
+            address: first.local_addr().unwrap(),
+        },
+        Member {
+            id: "durable-db-1".into(),
+            address: second.local_addr().unwrap(),
+        },
+    ];
+    let mut a = start(directory(&provider).await, first, peers.clone()).await;
+    let b = start(directory(&provider).await, second, peers.clone()).await;
+    let names = names();
+    owner(&a, &names[0]).await;
+    let untouched = owner(&b, &names[1]).await.owner_incarnation();
+    let token = auth().administrator_token(600).unwrap();
+    for (id, name) in names.iter().enumerate() {
+        b.server
+            .ok(
+                "PUT",
+                &format!("/v1/databases/{name}"),
+                &token,
+                json!({"request_id":"create","limits":{"max_keys":20,"max_bytes":10000}}),
+            )
+            .await;
+        b.server
+            .ok(
+                "POST",
+                &format!("/v1/databases/{name}/commit"),
+                &token,
+                commit(id),
+            )
+            .await;
+    }
+    // Keep each replaced process alive to exercise storage fencing, not just
+    // a dead socket. Only its logical identity is reused, never its incarnation.
+    for _ in 0..3 {
+        let old = owner(&a, &names[0]).await;
+        let replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        peers[0].address = replacement.local_addr().unwrap();
+        a.membership.send_replace(peers.clone());
+        b.membership.send_replace(peers.clone());
+        let next = start(directory(&provider).await, replacement, peers.clone()).await;
+        let new = owner(&next, &names[0]).await;
+        assert_ne!(new.owner_incarnation(), old.owner_incarnation());
+        assert!(old.info(&names[0], &Access::Administrator).await.is_err());
+        assert_eq!(owner(&b, &names[1]).await.owner_incarnation(), untouched);
+        let health = reqwest::get(format!("{}/health/live", next.server.url))
+            .await
+            .unwrap();
+        assert_eq!(health.headers()["x-durable-db-member"], "durable-db-0");
+        for (id, name) in names.iter().enumerate() {
+            assert_eq!(
+                next.server
+                    .ok(
+                        "POST",
+                        &format!("/v1/databases/{name}/commit"),
+                        &token,
+                        commit(id)
+                    )
+                    .await["replayed"],
+                true
+            );
+            assert_eq!(
+                next.server
+                    .ok(
+                        "POST",
+                        &format!("/v1/databases/{name}/read"),
+                        &token,
+                        json!({"keys":["x"]})
+                    )
+                    .await["values"][0],
+                if id == 0 { "b25l" } else { "dHdv" }
+            );
+        }
+        a = next;
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -950,7 +1066,7 @@ async fn invalid_cluster_configuration_cannot_acquire_or_change_the_layout() {
             4 => peers = vec![address; 257],
             _ => config.limits.index.receipts = 2048, // Valid alone, too small when split.
         }
-        let (_send, receive) = watch::channel(peers);
+        let (_send, receive) = watch::channel(peers.into_iter().map(Member::from).collect());
         assert!(
             Cluster::open(
                 directory.clone(),

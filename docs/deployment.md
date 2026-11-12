@@ -24,7 +24,28 @@ Each native owner performs bounded scheduled maintenance. Collection uses a dura
 
 ## Kubernetes manifests
 
-`deploy/kubernetes/` is a Kustomize base with a Deployment, client Service, headless discovery Service, HPA (1–8 replicas), and disruption budget. It uses a read-only root filesystem, unprivileged UID, bounded disposable disk cache, startup/readiness/liveness probes, and graceful drain. CPU-based autoscaling requires Metrics Server; provider latency can limit throughput even when CPU is low. Calibrate scaling against real workload measurements.
+`deploy/kubernetes/` is a Kustomize base with a StatefulSet, client Service, headless discovery Service, HPA (1–8 replicas), and disruption budget. It uses a read-only root filesystem, unprivileged UID, bounded disposable disk cache, startup/readiness/liveness probes, and graceful drain. CPU-based autoscaling requires Metrics Server; provider latency can limit throughput even when CPU is low. Calibrate scaling against real workload measurements.
+
+Each pod advertises its stable name through `DURABLE_DB_MEMBER_ID`; placement
+hashes this identity, while routing uses its current IP. [StatefulSet pod identities](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#pod-identity)
+survive replacement. Scale operations run in parallel; rolling updates replace one
+pod at a time. There are no PVCs: the bucket remains authoritative and `emptyDir`
+caches remain disposable. Replacement still needs fenced recovery, and temporary
+membership loss can still move partitions.
+
+Outside Kubernetes, set `--member-id` to a stable unique name per logical process.
+The existing `/health/live` response advertises `x-durable-db-member`; IDs are
+bounded to 253 ASCII characters. Missing headers fall back to address identity for
+older peers. Duplicate IDs exclude all ambiguous destinations while retaining
+unrelated members. These unauthenticated discovery hints belong on a trusted peer
+network and never grant permission to read or write data. Mixed-version placement
+is transitional and has not been qualified for continuous availability.
+
+Existing Deployment installations need a controller migration: scale the old
+Deployment to zero and wait for its pods to terminate, remove that Deployment,
+then apply the StatefulSet overlay. Preserve the namespace, Services, Secrets and
+bucket. This procedure has a cold-recovery interruption; applying the new base
+alone does not delete an existing Deployment.
 
 Build/pull the runtime image, then set its immutable digest in an overlay. The base's `durable-db:local` is a deliberate image placeholder, not a published registry claim. Woodpecker publishes each successful commit's image in the configured private registry.
 

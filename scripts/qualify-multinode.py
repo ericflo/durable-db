@@ -119,7 +119,7 @@ def main():
                                      client_origin='http://durable-db:7654', database_prefix='app',
                                      writer_origins=['http://durable-db-isolated:7654','http://durable-db-majority:7654'] if args.scenario=='peer-isolation' else ['http://durable-db:7654'],
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
-                                     rollout_surge=1, rollout_unavailable=0, rollout_deadline_seconds=240,
+                                     controller="StatefulSet", placement_identity="pod name", rollout_unavailable=1, rollout_deadline_seconds=240,
                                      per_writer_readbacks_before_phase=2,
                                      process_pause=dict(shared_pid_namespace=True, liveness_probe=False,
                                                         sidecar_image=NODE_IMAGE,sidecar_cpu_limit='100m',sidecar_memory_limit='128Mi' if args.scenario=='peer-isolation' else '64Mi'),
@@ -179,8 +179,8 @@ def main():
         partition=int.from_bytes(hashlib.sha256(b'durable-db.partition.v1\0'+
             (report['configuration']['database_prefix']+'-writer-0').encode()).digest()[:4],'big')%report['configuration']['partitions']
         def rank(pod):
-            ip=pod['status']['podIP'];address=f'[{ip}]:7654' if ':' in ip else f'{ip}:7654'
-            return hashlib.sha256(b'durable-db.placement.v1\0'+partition.to_bytes(4,'big')+address.encode()).digest()
+            identity=pod['metadata']['name']
+            return hashlib.sha256(b'durable-db.placement.v1\0'+partition.to_bytes(4,'big')+identity.encode()).digest()
         return partition,max(live,key=rank)
 
     def acquisitions():
@@ -190,14 +190,15 @@ def main():
         maintenance = report.setdefault('checkpoint_events', {})
         for pod in pods():
             name = pod['metadata']['name']
+            identity = name + '/' + pod['metadata']['uid']
             try:
                 log = kube('logs', name, '--tail=1024').decode(errors='replace')
                 log = re.sub(r'\x1b\[[0-9;]*m', '', log)
-                samples[name] = [dict(time_utc=stamp, outcome=outcome,
+                samples[identity] = [dict(time_utc=stamp, outcome=outcome,
                     partition=int(partition), stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, partition, stage, elapsed in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native acquisition (progress|failed|deferred).*?partition=(\d+)\s+stage="?(resident|budget|observe|challenge|claim|activate|select_journals|recover|serve|ready)"?\b.*?elapsed_ms=(\d+)', log)]
-                maintenance[name] = [dict(time_utc=stamp, outcome=outcome, owner=owner,
+                maintenance[identity] = [dict(time_utc=stamp, outcome=outcome, owner=owner,
                     stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, owner, stage, elapsed in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint (deferred|completed).*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
@@ -314,8 +315,8 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
 
     def rolling(name):
         timing=recovery(name)
-        kube('rollout','restart','deployment/durable-db')
-        kube('rollout','status','deployment/durable-db','--timeout=240s',timeout=270)
+        kube('rollout','restart','statefulset/durable-db')
+        kube('rollout','status','statefulset/durable-db','--timeout=240s',timeout=270)
         phase(name,placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
 
     def sample_resources():
@@ -512,8 +513,8 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                    dict(apiVersion='v1',kind='ConfigMap',metadata=dict(name='workload'),data={'runner.mjs':Path('scripts/cluster-workload.mjs').read_text()}),policy]
         base=subprocess.check_output(['kubectl','kustomize','deploy/kubernetes'],text=True)
         for resource in yaml.safe_load_all(base):
-            if resource['kind'] not in ('Deployment','Service','PodDisruptionBudget'):continue
-            if resource['kind']=='Deployment':
+            if resource['kind'] not in ('StatefulSet','Service','PodDisruptionBudget'):continue
+            if resource['kind']=='StatefulSet':
                 resource['spec']['replicas']=3 if args.scenario=='peer-isolation' else 1
                 template=resource['spec']['template'];template['metadata']['labels']['durable-db-role']='storage-client'
                 if template['spec'].get('hostNetwork'):raise RuntimeError('Fault injection requires a private pod network namespace')
@@ -576,7 +577,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
         phase('initial-progress',writes_acknowledged=progress())
         for count in (() if args.scenario=='peer-isolation' else (3,6)):
             timing=recovery(f'scale-{count}')
-            kube('scale','deployment','durable-db',f'--replicas={count}')
+            kube('scale','statefulset','durable-db',f'--replicas={count}')
             located=placement(wait_replicas(count))
             phase(f'scale-{count}',placement=located,writes_acknowledged=progress(timing))
             budget(f'scale-{count}')
@@ -628,7 +629,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             # All old owners stop, but their pod identities and DNS records remain.
             # Only the new seventh process can satisfy the per-writer barrier.
             pause_processes(pods())
-            kube('scale','deployment','durable-db','--replicas=7')
+            kube('scale','statefulset','durable-db','--replicas=7')
             phase('prior-api-processes-paused',**verify_paused_peers())
             replacement=wait_replicas(7,ready_count=1)
             timing=recovery('paused-dns-replacement',120,'after sole replacement API readiness with old peers stopped')
@@ -639,7 +640,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             resume_processes()
             phase('paused-processes-resumed',placement=placement(wait_replicas(7)),writes_acknowledged=progress(timing))
             timing=recovery('resume-scale-six')
-            kube('scale','deployment','durable-db','--replicas=6')
+            kube('scale','statefulset','durable-db','--replicas=6')
             phase('resume-scale-six',placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
             victim=pods()[0]
             timing=recovery('forced-api-pod-loss')
@@ -665,14 +666,14 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             kube('apply','-f','-',body=policy)
             phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress(timing))
             timing=recovery('scale-one')
-            kube('scale','deployment','durable-db','--replicas=1')
+            kube('scale','statefulset','durable-db','--replicas=1')
             phase('scale-one',placement=placement(wait_replicas(1)),writes_acknowledged=progress(timing))
             budget('scale-one')
         # Writers remain active: pending mutations resolve after the cold restart.
-        kube('scale','deployment','durable-db','--replicas=0');wait_replicas(0)
+        kube('scale','statefulset','durable-db','--replicas=0');wait_replicas(0)
         phase('zero-api-pods',writes_acknowledged=snapshot()['writes_acknowledged'])
         time.sleep(5)
-        kube('scale','deployment','durable-db','--replicas=3')
+        kube('scale','statefulset','durable-db','--replicas=3')
         located=placement(wait_replicas(3))
         timing=recovery('cold-three',120,'after cold API readiness')
         phase('cold-three',placement=located,writes_acknowledged=progress(timing))

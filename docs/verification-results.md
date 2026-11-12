@@ -1,5 +1,18 @@
 # Verification results
 
+## Stable member identity (unreleased)
+
+Placement now hashes a stable logical member ID independently of its transport
+address. The Kubernetes base replaces the Deployment with a StatefulSet using
+pod names, parallel scaling and disposable caches. The existing health probe
+carries identity; no new background worker, timer or authority record is added.
+
+The focused real-HTTP regression passes three replacements in 0.36 seconds,
+preserving values, exact retry receipts and the unaffected owner incarnation
+while fencing retained predecessors. The layout model checks 112 states and
+three negative controls. These are bounded tests, not a production availability
+claim. Cloud rollout qualification and release publication are pending.
+
 ## v0.23.14 confirmed recovery retention (2026-11-12)
 
 A confirmed claimant is already the incumbent. It now finishes activation and

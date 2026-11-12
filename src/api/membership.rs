@@ -4,20 +4,53 @@ use futures::{StreamExt, stream};
 use std::{collections::BTreeSet, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 
-/// Keep this handle alive while serving. With no service, membership contains
-/// only this address. DNS service peers use its port and address family.
+pub(crate) const MEMBER_HEADER: &str = "x-durable-db-member";
+
+/// A placement identity and its current transport address. Neither grants authority.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Member {
+    pub id: String,
+    pub address: SocketAddr,
+}
+impl Member {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        crate::ownership::root::valid_address(self.address)?;
+        ensure!(
+            !self.id.is_empty()
+                && self.id.len() <= 253
+                && self
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_:[]".contains(&b)),
+            "member ID must be 1..253 ASCII letters, digits or .-_:[]"
+        );
+        Ok(())
+    }
+}
+impl From<SocketAddr> for Member {
+    fn from(address: SocketAddr) -> Self {
+        Self {
+            id: address.to_string(),
+            address,
+        }
+    }
+}
+
+/// Keep this handle alive while serving. Without DNS, only this member is present.
+/// DNS service peers use its port and address family.
 pub struct Membership {
-    receiver: watch::Receiver<Vec<SocketAddr>>,
+    receiver: watch::Receiver<Vec<Member>>,
     workers: Vec<JoinHandle<()>>,
 }
 impl Membership {
-    pub fn start(address: SocketAddr, service: Option<String>) -> anyhow::Result<Self> {
-        crate::ownership::root::valid_address(address)?;
+    pub fn start(member: Member, service: Option<String>) -> anyhow::Result<Self> {
+        member.validate()?;
+        let address = member.address;
         if let Some(service) = &service {
             validate_service(service)?;
         }
         let Some(service) = service else {
-            let (send, receiver) = watch::channel(vec![address]);
+            let (send, receiver) = watch::channel(vec![member]);
             return Ok(Self {
                 receiver,
                 workers: vec![tokio::spawn(async move {
@@ -37,7 +70,7 @@ impl Membership {
         })));
         Ok(membership)
     }
-    pub(crate) fn observe(candidates: watch::Receiver<Vec<SocketAddr>>) -> anyhow::Result<Self> {
+    pub(crate) fn observe(candidates: watch::Receiver<Vec<Member>>) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -48,11 +81,21 @@ impl Membership {
         let worker = tokio::spawn(filter(send, candidates, move |address| {
             let client = client.clone();
             async move {
-                client
+                let reply = client
                     .get(format!("http://{address}/health/live"))
                     .send()
                     .await
-                    .is_ok_and(|reply| reply.status() == reqwest::StatusCode::OK)
+                    .ok()?;
+                if reply.status() != reqwest::StatusCode::OK {
+                    return None;
+                }
+                // Missing headers support address-based peers during an upgrade.
+                let mut member = Member::from(address);
+                if let Some(id) = reply.headers().get(MEMBER_HEADER) {
+                    member.id = id.to_str().ok()?.to_owned();
+                }
+                member.validate().ok()?;
+                Some(member)
             }
         }));
         Ok(Self {
@@ -60,7 +103,7 @@ impl Membership {
             workers: vec![worker],
         })
     }
-    pub fn subscribe(&self) -> watch::Receiver<Vec<SocketAddr>> {
+    pub fn subscribe(&self) -> watch::Receiver<Vec<Member>> {
         self.receiver.clone()
     }
 }
@@ -92,7 +135,7 @@ fn validate_service(service: &str) -> anyhow::Result<()> {
 fn normalize(
     answers: impl IntoIterator<Item = SocketAddr>,
     ipv4: bool,
-) -> anyhow::Result<Vec<SocketAddr>> {
+) -> anyhow::Result<Vec<Member>> {
     let mut peers = BTreeSet::new();
     for address in answers {
         if address.is_ipv4() != ipv4 {
@@ -105,12 +148,12 @@ fn normalize(
             "discovery exceeds peer bound"
         );
     }
-    Ok(peers.into_iter().collect())
+    Ok(peers.into_iter().map(Member::from).collect())
 }
-async fn follow<F, Fut>(send: watch::Sender<Vec<SocketAddr>>, mut resolve: F)
+async fn follow<F, Fut>(send: watch::Sender<Vec<Member>>, mut resolve: F)
 where
     F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<Vec<SocketAddr>>>,
+    Fut: Future<Output = anyhow::Result<Vec<Member>>>,
 {
     let mut poll = tokio::time::interval(Duration::from_secs(3));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -143,12 +186,12 @@ where
 // Resolve and probe independently: a stuck system lookup cannot pin a failed
 // peer in placement. New peers must answer; an eligible peer survives one miss.
 async fn filter<F, Fut>(
-    send: watch::Sender<Vec<SocketAddr>>,
-    mut candidates: watch::Receiver<Vec<SocketAddr>>,
+    send: watch::Sender<Vec<Member>>,
+    mut candidates: watch::Receiver<Vec<Member>>,
     probe: F,
 ) where
     F: Fn(SocketAddr) -> Fut,
-    Fut: Future<Output = bool>,
+    Fut: Future<Output = Option<Member>>,
 {
     let mut poll = tokio::time::interval(Duration::from_secs(3));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -162,8 +205,9 @@ async fn filter<F, Fut>(
         let peers = candidates.borrow_and_update().clone();
         let round = stream::iter(peers)
             .map(|peer| {
-                let observation = probe(peer);
-                async move { (peer, observation.await) }
+                let address = peer.address;
+                let observation = probe(address);
+                async move { (address, observation.await) }
             })
             .buffer_unordered(16)
             .collect::<Vec<_>>();
@@ -181,16 +225,28 @@ async fn filter<F, Fut>(
         let previous = send.borrow().clone();
         let mut eligible = Vec::new();
         let mut failures = BTreeSet::new();
-        for (peer, alive) in observations {
-            if alive || (previous.contains(&peer) && !missed.contains(&peer)) {
-                eligible.push(peer);
-            }
-            if !alive {
-                failures.insert(peer);
+        for (address, observed) in observations {
+            if let Some(member) = observed {
+                eligible.push(member);
+            } else {
+                if !missed.contains(&address)
+                    && let Some(member) = previous.iter().find(|member| member.address == address)
+                {
+                    eligible.push(member.clone());
+                }
+                failures.insert(address);
             }
         }
         missed = failures;
+        // Ambiguous identities cannot choose a destination. Keep unrelated peers.
         eligible.sort_unstable();
+        let mut duplicates = BTreeSet::new();
+        for pair in eligible.windows(2) {
+            if pair[0].id == pair[1].id {
+                duplicates.insert(pair[0].id.clone());
+            }
+        }
+        eligible.retain(|member| !duplicates.contains(&member.id));
         send.send_if_modified(|current| {
             if *current == eligible {
                 return false;
@@ -208,11 +264,14 @@ mod tests {
 
     #[test]
     fn canonical_discovery_is_bounded_and_uses_one_address_family() {
-        let a = "127.0.0.1:7654".parse().unwrap();
-        let b = "127.0.0.2:7654".parse().unwrap();
+        let a: SocketAddr = "127.0.0.1:7654".parse().unwrap();
+        let b: SocketAddr = "127.0.0.2:7654".parse().unwrap();
         let v6 = "[::1]:7654".parse().unwrap();
-        assert_eq!(normalize([b, a, a, v6], true).unwrap(), [a, b]);
-        assert_eq!(normalize([a, v6], false).unwrap(), [v6]);
+        assert_eq!(
+            normalize([b, a, a, v6], true).unwrap(),
+            [a, b].map(Member::from)
+        );
+        assert_eq!(normalize([a, v6], false).unwrap(), [v6].map(Member::from));
         assert!(normalize(["0.0.0.0:7654".parse().unwrap()], true).is_err());
         assert!(normalize((1..=257).map(|port| SocketAddr::new(a.ip(), port)), true).is_err());
         for name in ["durable-db-peers", "peers.namespace.svc.cluster.local."] {
@@ -232,12 +291,21 @@ mod tests {
         }
         assert!(validate_service(&"a".repeat(64)).is_err());
         assert!(validate_service(&("a.".repeat(127) + "a")).is_err());
+        for id in [
+            String::new(),
+            "x".repeat(254),
+            "two words".into(),
+            "\r\n".into(),
+            "é".into(),
+        ] {
+            assert!(Member { id, address: a }.validate().is_err());
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn failures_keep_membership_and_slow_lookups_cannot_overlap() {
-        let a = "127.0.0.1:7654".parse().unwrap();
-        let b = "127.0.0.2:7654".parse().unwrap();
+        let a: SocketAddr = "127.0.0.1:7654".parse().unwrap();
+        let b: SocketAddr = "127.0.0.2:7654".parse().unwrap();
         let (send, mut receive) = watch::channel(vec![]);
         let (answers, pending) = tokio::sync::mpsc::unbounded_channel();
         let pending = Arc::new(tokio::sync::Mutex::new(pending));
@@ -248,14 +316,14 @@ mod tests {
             count.fetch_add(1, Ordering::SeqCst);
             async move { pending.lock().await.recv().await.unwrap() }
         }));
-        answers.send(Ok(vec![a])).unwrap();
+        answers.send(Ok(vec![Member::from(a)])).unwrap();
         receive.changed().await.unwrap();
-        assert_eq!(*receive.borrow_and_update(), [a]);
+        assert_eq!(*receive.borrow_and_update(), [Member::from(a)]);
         answers.send(Err(anyhow::anyhow!("DNS failure"))).unwrap();
         tokio::time::advance(Duration::from_secs(3)).await;
         tokio::task::yield_now().await;
         assert!(!receive.has_changed().unwrap());
-        assert_eq!(*receive.borrow(), [a]);
+        assert_eq!(*receive.borrow(), [Member::from(a)]);
         tokio::time::advance(Duration::from_secs(3)).await;
         tokio::task::yield_now().await;
         let stalled = calls.load(Ordering::SeqCst);
@@ -266,9 +334,9 @@ mod tests {
             stalled,
             "no overlapping blocking resolutions"
         );
-        answers.send(Ok(vec![b])).unwrap();
+        answers.send(Ok(vec![Member::from(b)])).unwrap();
         receive.changed().await.unwrap();
-        assert_eq!(*receive.borrow_and_update(), [b]);
+        assert_eq!(*receive.borrow_and_update(), [Member::from(b)]);
         answers.send(Ok(vec![])).unwrap();
         receive.changed().await.unwrap();
         assert!(receive.borrow().is_empty());
@@ -280,14 +348,17 @@ mod tests {
     async fn lifetime_handle_controls_static_and_dns_membership() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let static_members = Membership::start(address, None).unwrap();
+        let static_members = Membership::start(address.into(), None).unwrap();
         let mut receiver = static_members.subscribe();
-        assert_eq!(*receiver.borrow(), [address]);
+        assert_eq!(*receiver.borrow(), [Member::from(address)]);
         drop(static_members);
         assert!(receiver.changed().await.is_err());
         let server = tokio::spawn(async move {
             let app = axum::Router::new()
-                .route("/health/live", axum::routing::get(|| async { "ok" }))
+                .route(
+                    "/health/live",
+                    axum::routing::get(|| async { ([(MEMBER_HEADER, "worker-0")], "ok") }),
+                )
                 .route(
                     "/health/ready",
                     axum::routing::get(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
@@ -295,32 +366,72 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         // Exercises the actual system resolver without depending on public DNS.
-        let dns = Membership::start(address, Some("localhost".into())).unwrap();
+        let dns = Membership::start(address.into(), Some("localhost".into())).unwrap();
         let mut receiver = dns.subscribe();
         tokio::time::timeout(Duration::from_secs(3), receiver.changed())
             .await
             .unwrap()
             .unwrap();
-        assert!(receiver.borrow().contains(&address));
+        assert!(
+            receiver
+                .borrow()
+                .iter()
+                .any(|member| member.address == address && member.id == "worker-0")
+        );
         drop(dns);
         assert!(receiver.changed().await.is_err());
         server.abort();
     }
 
     #[tokio::test(start_paused = true)]
+    async fn duplicate_identities_exclude_only_the_ambiguous_destinations() {
+        let addresses: Vec<_> = (1..=3)
+            .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+            .collect();
+        let (dns, candidates) =
+            watch::channel(addresses.iter().copied().map(Member::from).collect());
+        let (send, mut receive) = watch::channel(vec![]);
+        let worker = tokio::spawn(filter(send, candidates, |address| async move {
+            Some(Member {
+                id: if address.port() == 1 {
+                    "one"
+                } else {
+                    "duplicate"
+                }
+                .into(),
+                address,
+            })
+        }));
+        receive.changed().await.unwrap();
+        assert_eq!(
+            receive
+                .borrow_and_update()
+                .iter()
+                .map(|m| m.address)
+                .collect::<Vec<_>>(),
+            addresses[..1]
+        );
+        dns.send_replace(addresses[..2].iter().copied().map(Member::from).collect());
+        receive.changed().await.unwrap();
+        assert_eq!(receive.borrow().len(), 2);
+        drop(receive);
+        worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn unchanged_candidates_are_rechecked_with_one_miss_of_hysteresis() {
-        let a = "127.0.0.1:7654".parse().unwrap();
-        let b = "127.0.0.2:7654".parse().unwrap();
-        let (dns, candidates) = watch::channel(vec![a, b]);
+        let a: SocketAddr = "127.0.0.1:7654".parse().unwrap();
+        let b: SocketAddr = "127.0.0.2:7654".parse().unwrap();
+        let (dns, candidates) = watch::channel(vec![Member::from(a), Member::from(b)]);
         let (send, mut receive) = watch::channel(vec![]);
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let up = alive.clone();
         let worker = tokio::spawn(filter(send, candidates, move |peer| {
             let up = up.clone();
-            async move { peer == a || up.load(Ordering::SeqCst) }
+            async move { (peer == a || up.load(Ordering::SeqCst)).then(|| Member::from(peer)) }
         }));
         receive.changed().await.unwrap();
-        assert_eq!(*receive.borrow_and_update(), [a, b]);
+        assert_eq!(*receive.borrow_and_update(), [a, b].map(Member::from));
         alive.store(false, Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(3)).await;
         for _ in 0..4 {
@@ -332,12 +443,12 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(3)).await;
         receive.changed().await.unwrap();
-        assert_eq!(*receive.borrow_and_update(), [a]);
-        assert_eq!(*dns.borrow(), [a, b]);
+        assert_eq!(*receive.borrow_and_update(), [Member::from(a)]);
+        assert_eq!(*dns.borrow(), [a, b].map(Member::from));
         alive.store(true, Ordering::SeqCst);
         tokio::time::advance(Duration::from_secs(3)).await;
         receive.changed().await.unwrap();
-        assert_eq!(*receive.borrow_and_update(), [a, b]);
+        assert_eq!(*receive.borrow_and_update(), [a, b].map(Member::from));
         dns.send_replace(vec![]);
         receive.changed().await.unwrap();
         assert!(receive.borrow().is_empty());
@@ -363,7 +474,7 @@ mod tests {
             }
         }
         let peers = (1..=super::super::cluster::MAX_MEMBERS)
-            .map(|port| SocketAddr::from(([127, 0, 0, 1], port as u16)))
+            .map(|port| Member::from(SocketAddr::from(([127, 0, 0, 1], port as u16))))
             .collect();
         let (dns, candidates) = watch::channel(peers);
         let (send, receive) = watch::channel(vec![]);
@@ -376,14 +487,16 @@ mod tests {
                 let _guard = Active(count.clone());
                 assert!(count.fetch_add(1, Ordering::SeqCst) < 16);
                 called.fetch_add(1, Ordering::SeqCst);
-                std::future::pending::<bool>().await
+                std::future::pending::<Option<Member>>().await
             }
         }));
         reaches(&active, 16).await;
         assert_eq!(calls.load(Ordering::SeqCst), 16);
         dns.send_replace(vec![]);
         reaches(&active, 0).await;
-        dns.send_replace(vec!["127.0.0.1:7654".parse().unwrap()]);
+        dns.send_replace(vec![Member::from(
+            "127.0.0.1:7654".parse::<SocketAddr>().unwrap(),
+        )]);
         reaches(&active, 1).await;
         drop(receive);
         worker.await.unwrap();

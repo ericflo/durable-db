@@ -695,7 +695,7 @@ struct Node {
     http: Http,
     cluster: Arc<api::Cluster>,
     address: std::net::SocketAddr,
-    members: tokio::sync::watch::Sender<Vec<std::net::SocketAddr>>,
+    members: tokio::sync::watch::Sender<Vec<api::Member>>,
 }
 impl Node {
     async fn start(
@@ -705,7 +705,8 @@ impl Node {
         limits: UploadLimits,
     ) -> Self {
         let address = listener.local_addr().unwrap();
-        let (members, receiver) = tokio::sync::watch::channel(peers);
+        let (members, receiver) =
+            tokio::sync::watch::channel(peers.into_iter().map(api::Member::from).collect());
         let cluster = api::Cluster::open(
             directory,
             api::ClusterConfig {
@@ -899,8 +900,12 @@ async fn membership_places_partitions_and_recovers_over_http() {
     wait_checkpoint(&a, None).await;
     wait_checkpoint(&b, None).await;
     let peers = [first.address, second.address];
-    first.members.send_replace(peers.to_vec());
-    second.members.send_replace(peers.to_vec());
+    first
+        .members
+        .send_replace(peers.iter().copied().map(api::Member::from).collect());
+    second
+        .members
+        .send_replace(peers.iter().copied().map(api::Member::from).collect());
     placed(&[&first, &second], &peers, &names).await;
     for (id, name) in names.iter().enumerate() {
         let node = if preferred(id as u32, &peers) == first.address {
@@ -930,8 +935,18 @@ async fn membership_places_partitions_and_recovers_over_http() {
         );
     }
     drop(old);
-    first.members.send_replace(vec![second.address]);
-    second.members.send_replace(vec![second.address]);
+    first.members.send_replace(
+        vec![second.address]
+            .into_iter()
+            .map(api::Member::from)
+            .collect(),
+    );
+    second.members.send_replace(
+        vec![second.address]
+            .into_iter()
+            .map(api::Member::from)
+            .collect(),
+    );
     placed(&[&first, &second], &[second.address], &names).await;
     for name in &names {
         assert_eq!(

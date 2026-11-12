@@ -3,7 +3,7 @@ kind: HorizontalPodAutoscaler
 metadata:
   name: durable-db
 spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: durable-db}
+  scaleTargetRef: {apiVersion: apps/v1, kind: StatefulSet, name: durable-db}
   minReplicas: 1
   maxReplicas: 8
   metrics:
