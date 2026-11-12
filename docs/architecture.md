@@ -43,7 +43,7 @@ Collection lists candidates before obtaining its publication fence and deletes o
 
 ## Provider and local boundaries
 
-Cloud providers must supply durable immutable uploads, fresh permit reads after revocation and the documented conditional control operations. A startup probe checks stale-write exclusion; it cannot establish the complete provider contract. Raw metadata observations may be stale and require the shared conditional barrier. That barrier remains on control-directory work, not every ordinary database read.
+Cloud providers must supply durable immutable uploads, fresh permit reads after revocation and the documented conditional control operations. A startup probe checks stale-write exclusion; it cannot establish the complete provider contract. Raw partition-control observations may be stale and are only hints; claims and activation require exact comparisons. Directory operations that need a fresh snapshot, including public upload-budget status, retain the shared conditional barrier. Ordinary database reads validate their writer permit instead.
 
 Conditional mutations and immutable uploads have one physical attempt per invocation. Redirects and hidden transport retries are disabled so a committed update with a lost reply cannot become a reported definite conflict. Read-only provider observations retain bounded retries. [B2 binding and qualification](b2.md).
 

@@ -2,15 +2,15 @@
 
 **Status: native local and cloud CLI serving are integrated; production qualification remains open.** Local mode uses exclusive filesystem ownership. Cloud mode uses clock-independent permits, fixed database mapping, DNS membership, owner forwarding and bounded resident state. Qualification on the existing Kubernetes hosts remains required; a restricted compute profile is not an acceptable first-production requirement.
 
-## Why the current engine must change
+## Why the serving engine changed
 
 Replaceable compute does not require every request to reconstruct authority independently. Treating those as equivalent was an architectural overconstraint. A running node can retain useful state when ownership, handoff, recovery and resource bounds make that state safely replaceable.
 
-`Authority::read_fresh` conditionally updates the shared bucket authority even for a cache-hit read. Grouping amortizes this operation but does not remove it. Writes and collectors also contend on the same authority revision. The directory removes the former database-count cap without creating independent write capacity: its 100,005-entry correctness test is not evidence of 100,005 concurrently useful databases.
+The previous shared serving path used `Authority::read_fresh` to conditionally update the bucket authority even for a cache-hit read. Grouping amortized that operation without removing it; writes and collectors contended on the same revision. The directory removed the former database-count cap without creating independent write capacity. Its 100,005-entry correctness test is not evidence of 100,005 concurrently useful databases.
 
-The [B2 combiner measurement](verification-results.md#publication-combining-qualification) completed four-writer phases at 1.051 operations/second with second-scale latency. The later [one-hour baseline](evidence/physical-memory-hour-2026-11-09.json) also remains far below the intended operating envelope. Safety checks cannot establish performance suitability. The replacement must meet both requirements.
+The [B2 combiner measurement](verification-results.md#publication-combining-qualification) completed four-writer phases at 1.051 operations/second with second-scale latency. The later [one-hour baseline](evidence/physical-memory-hour-2026-11-09.json) also remains far below the intended operating envelope. Safety checks cannot establish performance suitability. The native engine must meet both requirements.
 
-The current [engine protocol](architecture.md) remains the compatibility reference while the replacement is built. Provider bindings, API behavior, authorization and adversarial fixtures remain useful; the shared per-request publication path will be retired when its replacement passes the same behavioral checks and the new performance gates.
+The [current serving protocol](architecture.md) uses native owners in both local and cloud CLI modes. Ordinary cloud data responses validate a per-writer permit GET instead of updating the shared authority. Raw control observations are also read-only hints; claims and activation still need exact comparisons. Provider bindings, API behavior, authorization and adversarial fixtures remain shared. Passing behavioral checks does not close the performance and recovery gates.
 
 ## Exclusive local serving
 
