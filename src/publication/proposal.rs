@@ -87,6 +87,8 @@ impl Published {
         old: Option<&Version>,
         bytes: Bytes,
     ) -> anyhow::Result<Option<Version>> {
+        let started = std::time::Instant::now();
+        let publication = Uuid::new_v4();
         let database = slot(key)?;
         ensure!(
             bytes.len() <= MAX_MANIFEST_BYTES,
@@ -130,7 +132,7 @@ impl Published {
             database,
             expected,
             next: Pointer {
-                key: format!("manifests/{}.{}", slot(key)?, Uuid::new_v4()),
+                key: format!("manifests/{}.{}", slot(key)?, publication),
                 sha256: hex::encode(Sha256::digest(&bytes)),
             },
             fence: initial.info.get("durable-db-fence").cloned(),
@@ -153,85 +155,116 @@ impl Published {
         metrics::REGISTRY.event(Event::ProposalSubmitted, 1);
         // Admission only: the protocol is safe with concurrent helpers. One
         // helper per process bounds staging memory and duplicate network work.
+        let queued = std::time::Instant::now();
         let _helper = self
             .helpers
             .acquire()
             .await
             .context("publication helper stopped")?;
+        let queue_ms = queued.elapsed().as_millis() as u64;
+        // Fixed outcomes and a random invocation identity only; never log a
+        // database name, key, manifest body or provider error.
+        let progress = |outcome: &'static str, attempt: u64, prepare_ms: u64, compare_ms: u64| {
+            tracing::info!(%publication, outcome, attempt, queue_ms, prepare_ms, compare_ms,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "shared publication progress");
+        };
+        progress("admitted", 0, 0, 0);
+        let mut discovery = None;
         for attempt in 0..8 {
+            let preparing = std::time::Instant::now();
             let before = self.authority.read().await?;
             if self.proposal_result(&proposal, &before).await? {
                 self.proposal_cleanup.committed(name.clone());
+                progress("helped", attempt, preparing.elapsed().as_millis() as u64, 0);
                 return self.head_version(&proposal.next, &before).map(Some);
             }
-            let names = self
-                .files
-                .list("proposals/", cursor(&before, HELP_CURSOR), MAX_SELECTION)
-                .await?;
-            let next_cursor = if names.len() == MAX_SELECTION {
-                names.last().cloned().unwrap()
-            } else {
-                String::new()
-            };
-            let pending: Vec<Option<Proposal>> = stream::iter(names)
-                .map(|candidate_name| {
-                    let own_name = &name;
-                    async move {
-                        let name = candidate_name;
-                        if &name == own_name {
-                            return Ok::<Option<Proposal>, anyhow::Error>(None);
-                        }
-                        let Some(object) = self.files.get(&name, MAX_PROPOSAL_BYTES).await? else {
-                            return Ok(None);
-                        };
-                        let candidate = serde_json::from_slice::<Proposal>(&object.bytes)
-                            .map_err(anyhow::Error::from)
-                            .and_then(|candidate| {
-                                candidate.validate(&name)?;
-                                Ok(candidate)
-                            });
-                        match candidate {
-                            Ok(candidate) => Ok(Some(candidate)),
-                            Err(_) => {
-                                // An invalid uncommitted proposal cannot authorize
-                                // a write. The fenced collector can reclaim it.
-                                metrics::REGISTRY.event(Event::ProposalRejected, 1);
-                                Ok(None)
+            // One bounded discovery per invocation. A comparison conflict can
+            // reuse immutable proposal metadata, but never target eligibility.
+            // New arrivals can be helped by the next invocation.
+            let observed = if discovery.is_none() {
+                let names = self
+                    .files
+                    .list("proposals/", cursor(&before, HELP_CURSOR), MAX_SELECTION)
+                    .await?;
+                let next_cursor = if names.len() == MAX_SELECTION {
+                    names.last().cloned().unwrap()
+                } else {
+                    String::new()
+                };
+                let pending: Vec<Option<Proposal>> = stream::iter(names)
+                    .map(|candidate_name| {
+                        let own_name = &name;
+                        async move {
+                            let name = candidate_name;
+                            if &name == own_name {
+                                return Ok::<Option<Proposal>, anyhow::Error>(None);
+                            }
+                            let Some(object) = self.files.get(&name, MAX_PROPOSAL_BYTES).await?
+                            else {
+                                return Ok(None);
+                            };
+                            let candidate = serde_json::from_slice::<Proposal>(&object.bytes)
+                                .map_err(anyhow::Error::from)
+                                .and_then(|candidate| {
+                                    candidate.validate(&name)?;
+                                    Ok(candidate)
+                                });
+                            match candidate {
+                                Ok(candidate) => Ok(Some(candidate)),
+                                Err(_) => {
+                                    // An invalid uncommitted proposal cannot authorize
+                                    // a write. The fenced collector can reclaim it.
+                                    metrics::REGISTRY.event(Event::ProposalRejected, 1);
+                                    Ok(None)
+                                }
                             }
                         }
-                    }
-                })
-                .buffer_unordered(8)
-                .try_collect::<Vec<_>>()
-                .await?;
-            // Selection uses this observation, after listing/loading proposals.
-            // Raw observations may be stale; only its exact CAS can publish.
-            let observed = self.authority.read().await?;
-            if self.proposal_result(&proposal, &observed).await? {
-                self.proposal_cleanup.committed(name.clone());
-                return self.head_version(&proposal.next, &observed).map(Some);
-            }
+                    })
+                    .buffer_unordered(8)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                discovery = Some((
+                    next_cursor,
+                    pending.into_iter().flatten().collect::<Vec<_>>(),
+                ));
+                // Refresh after discovery I/O. Retries already checked a new
+                // comparison above and need no duplicate read/target lookup.
+                let observed = self.authority.read().await?;
+                if self.proposal_result(&proposal, &observed).await? {
+                    self.proposal_cleanup.committed(name.clone());
+                    progress("helped", attempt, preparing.elapsed().as_millis() as u64, 0);
+                    return self.head_version(&proposal.next, &observed).map(Some);
+                }
+                observed
+            } else {
+                before
+            };
+            let (next_cursor, pending) = discovery.as_ref().unwrap();
+            // Raw observations may be stale; only the exact CAS can publish.
             let observed_root = root(&observed.info)?;
             let mut selected = BTreeMap::new();
             selected.insert(proposal.database.clone(), proposal.next.clone());
             if !self.manifest_available(&proposal.next).await? {
                 bail!("submitted manifest unavailable; outcome is uncertain");
             }
-            let eligible: Vec<Option<Proposal>> =
-                stream::iter(pending.into_iter().flatten().filter(|candidate| {
-                    candidate.database != proposal.database
-                        && candidate.fence.as_ref() == observed.info.get("durable-db-fence")
-                }))
-                .map(|candidate| {
+            let eligible: Vec<Option<&Proposal>> = stream::iter(0..pending.len())
+                .map(|index| {
+                    let candidate = &pending[index];
                     let observed_root = &observed_root;
+                    let eligible = candidate.database != proposal.database
+                        && candidate.fence.as_ref() == observed.info.get("durable-db-fence");
                     async move {
+                        if !eligible {
+                            return Ok(None);
+                        }
                         let current = match self
                             .directory
                             .get(observed_root.as_ref(), &candidate.database)
                             .await
                         {
                             Err(e) if e.is::<MissingNode>() => {
-                                return Ok::<Option<Proposal>, anyhow::Error>(None);
+                                return Ok::<Option<&Proposal>, anyhow::Error>(None);
                             }
                             other => other?,
                         };
@@ -251,7 +284,9 @@ impl Published {
                 if selected.len() == MAX_SELECTION {
                     break;
                 }
-                selected.entry(candidate.database).or_insert(candidate.next);
+                selected
+                    .entry(candidate.database.clone())
+                    .or_insert_with(|| candidate.next.clone());
             }
             let updated = match self
                 .directory
@@ -263,10 +298,23 @@ impl Published {
             };
             let mut info = observed.info.clone();
             write_root(&mut info, updated)?;
-            info.insert(HELP_CURSOR.into(), next_cursor);
+            info.insert(HELP_CURSOR.into(), next_cursor.clone());
             budget(&info)?;
             // Errors may have committed the whole group. Preserve uncertainty.
-            if let Some(published) = self.authority.replace(&observed, info).await? {
+            let prepare_ms = preparing.elapsed().as_millis() as u64;
+            let comparing = std::time::Instant::now();
+            let result = self.authority.replace(&observed, info).await;
+            progress(
+                match &result {
+                    Ok(Some(_)) => "confirmed",
+                    Ok(None) => "conflict",
+                    Err(_) => "uncertain",
+                },
+                attempt + 1,
+                prepare_ms,
+                comparing.elapsed().as_millis() as u64,
+            );
+            if let Some(published) = result? {
                 metrics::REGISTRY.event(Event::PublicationGroups, 1);
                 metrics::REGISTRY.event(Event::PublicationGroupMembers, selected.len());
                 for pointer in selected.values() {

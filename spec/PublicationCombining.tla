@@ -55,7 +55,11 @@ Submit(j) == /\ phase[j] = "uploaded"
 
 Select(h, selected, r) ==
     /\ ~helping[h] /\ r \in 1..Len(history)
-    /\ selected \subseteq proposals /\ selected # {} /\ UniqueTargets(selected)
+    \* Retained discovery can outlive a proposal's deletion or helper reset.
+    \* Overapproximate the bounded local batch by every submitted identity;
+    \* each selection still rechecks its target and original collection fence.
+    /\ selected \subseteq {j \in Jobs: phase[j] = "submitted"}
+    /\ selected # {} /\ UniqueTargets(selected)
     /\ \A j \in selected: Eligible(j, history[r])
     /\ chosen' = [chosen EXCEPT ![h] = selected]
     /\ seen' = [seen EXCEPT ![h] = history[r]]

@@ -19,12 +19,17 @@ use tokio::sync::{Mutex, Notify};
 struct Counted {
     inner: Arc<dyn Storage>,
     gets: Arc<AtomicUsize>,
+    proposal_gets: Arc<AtomicUsize>,
+    proposal_lists: Arc<AtomicUsize>,
     lost_proposal_ack: Arc<AtomicBool>,
 }
 #[async_trait]
 impl Storage for Counted {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
         self.gets.fetch_add(1, Ordering::SeqCst);
+        if key.starts_with("proposals/") {
+            self.proposal_gets.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.get(key, max).await
     }
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool> {
@@ -43,6 +48,9 @@ impl Storage for Counted {
         after: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<String>> {
+        if prefix == "proposals/" {
+            self.proposal_lists.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.list(prefix, after, limit).await
     }
     async fn delete(&self, key: &str) -> anyhow::Result<()> {
@@ -51,6 +59,8 @@ impl Storage for Counted {
 }
 struct Metadata {
     gets: Arc<AtomicUsize>,
+    proposal_gets: Arc<AtomicUsize>,
+    proposal_lists: Arc<AtomicUsize>,
     lost_proposal_ack: Arc<AtomicBool>,
     state: Mutex<Bucket>,
     files: Arc<dyn Storage>,
@@ -101,14 +111,20 @@ async fn setup_with_budget(
     let files =
         Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap());
     let gets = Arc::new(AtomicUsize::new(0));
+    let proposal_gets = Arc::new(AtomicUsize::new(0));
+    let proposal_lists = Arc::new(AtomicUsize::new(0));
     let lost_proposal_ack = Arc::new(AtomicBool::new(false));
     let files = Arc::new(Counted {
         inner: files,
         gets: gets.clone(),
+        proposal_gets: proposal_gets.clone(),
+        proposal_lists: proposal_lists.clone(),
         lost_proposal_ack: lost_proposal_ack.clone(),
     });
     let metadata = Arc::new(Metadata {
         gets,
+        proposal_gets,
+        proposal_lists,
         lost_proposal_ack,
         state: Mutex::new(Bucket {
             version: None,
@@ -871,6 +887,73 @@ async fn idle_page_collection_does_not_rewrite_the_directory() {
         metadata.read().await.unwrap().info["durable-db-root"],
         live_root
     );
+}
+
+#[tokio::test]
+async fn publication_retries_reuse_discovery_without_replaying_uploads() {
+    for lose_reply in [false, true] {
+        let (store, metadata) = setup().await;
+        // An abandoned proposal remains eligible for another caller's group.
+        metadata.lost_proposal_ack.store(true, Ordering::SeqCst);
+        assert!(
+            store
+                .cas("heads/b.json", None, Bytes::from_static(b"b"))
+                .await
+                .is_err()
+        );
+        metadata.pause.store(true, Ordering::SeqCst);
+        let writer = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas("heads/a.json", None, Bytes::from_static(b"a"))
+                    .await
+            }
+        });
+        wait_paused(&metadata).await;
+        assert_eq!(metadata.proposal_gets.load(Ordering::SeqCst), 1);
+        assert_eq!(metadata.proposal_lists.load(Ordering::SeqCst), 1);
+        // Defeat two comparisons without changing the target or data fence.
+        metadata.read_fresh().await.unwrap();
+        metadata.pause.store(true, Ordering::SeqCst);
+        metadata.resume.notify_one();
+        wait_paused(&metadata).await;
+        assert_eq!(
+            metadata.proposal_gets.load(Ordering::SeqCst),
+            1,
+            "a definite comparison conflict must not download the same batch again"
+        );
+        assert_eq!(metadata.proposal_lists.load(Ordering::SeqCst), 1);
+        metadata.read_fresh().await.unwrap();
+        metadata.lost_ack.store(lose_reply, Ordering::SeqCst);
+        metadata.resume.notify_one();
+        let result = writer.await.unwrap();
+        if lose_reply {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap());
+        }
+        assert_eq!(metadata.proposal_gets.load(Ordering::SeqCst), 1);
+        assert_eq!(metadata.proposal_lists.load(Ordering::SeqCst), 1);
+        for (name, value) in [("a", b"a"), ("b", b"b")] {
+            let object = store
+                .get(&format!("heads/{name}.json"), 16)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(object.bytes, value.as_slice());
+        }
+        assert_eq!(
+            metadata
+                .files
+                .list("manifests/", None, 16)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "each proposal keeps its original immutable manifest across retries"
+        );
+    }
 }
 
 #[tokio::test]
