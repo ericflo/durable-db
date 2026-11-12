@@ -1,31 +1,38 @@
 # Verification results
 
-## v0.23.14 placement settling (2026-11-12)
+## v0.23.14 confirmed recovery retention (2026-11-12)
 
-Elective takeover from a reachable incumbent now waits for 15 seconds without an
-observed membership change. This coalesces transient rollout destinations while
-the incumbent keeps serving. Empty partitions, excluded owners and reuse of this
-process's address bypass the delay. Identical snapshots do not restart it;
-already submitted claims cannot be recalled. The ordinary retry loop revisits
-deferrals without retaining an acquisition slot. No worker, durable field,
-wire format or serving-authority rule is added.
+A confirmed claimant is already the incumbent. It now finishes activation and
+recovery while it remains a member, even if placement preference changes first.
+Previously that hint cancelled useful recovery and could leave a durable route
+without a serving backend. Unconfirmed candidates still yield immediately;
+explicit removal still cancels recovery, and actual takeover still fences the
+old permit. The same bounded acquisition and resident slots cover this work.
 
-The three-node TCP regression checks intermediate destinations, uninterrupted
-receipt replay, eventual placement after membership settles, and unchanged
-snapshot handling. It fails against v0.23.13 in 0.09 seconds and passes in
-0.27 seconds. Applying the delay to excluded owners makes the existing
-16-partition recovery deadline fail in 0.25 seconds. OwnerRouting checks 1,888
-states with ten negative controls, including premature elective moves and delayed
-failure recovery. These are bounded scheduling checks, not a proof of Rust or
-a production latency guarantee.
+The regression pauses activation, changes preference, then checks completion and
+an actual HTTP create through the retained owner. It detects the previous
+cancellation in 0.03 seconds and passes in 0.06 seconds. OwnerRouting now starts
+with a confirmed, pre-activation claimant and checks 728 states with eight
+negative controls. These bounded checks do not prove the Rust implementation or
+production liveness.
 
-All 345 routine Rust checks, formatting and strict clippy pass. The 19 controller
-checks run in 6.08 seconds after moving two existing timer-driven tests to
-simulated time (57.13 seconds before); their real TCP requests and assertions
-remain. The focused `--scenario rollout` cloud fixture reuses the existing
-scaling, four writers, budget checks, two-readback barriers and cold-history
-verification, and exercises two consecutive six-pod rollouts. The duplicated
-rollout sequence is replaced by one shared function. Cloud results are pending.
+A prior experiment at `b7d5073` waited 15 seconds for membership to settle before
+moving a reachable incumbent. In the same focused B2 harness, v0.23.13 rolls in
+121.70 / 154.78 seconds; that candidate rolls in 123.41 / 141.84 seconds, while
+scale-to-six rises from 57.91 to 77.02 seconds. The largest acknowledgement gaps were shorter in that sample
+(80.56 / 91.94 seconds versus 95.10 / 123.08), but both rollout targets still
+missed. The final change instead fixes the confirmed-recovery cancellation;
+the timer, its dedicated regression and two model configurations were removed. Both runs recover every acknowledgement (746 / 754 respectively).
+These are small sequential runs with different placements, not a controlled
+latency estimate or production SLO.
+
+The reusable `--scenario rollout` fixture remains: 1→3→6 scaling, two consecutive
+six-pod replacements, then zero-compute cold recovery. It shares the four writers,
+budget checks, two-readback barriers and independent history verification with
+the broader campaign. Two existing controller checks retain their TCP assertions
+but use simulated time, reducing the controller suite from about 57 to 6 seconds.
+All 344 routine Rust checks, formatting and strict clippy pass.
+Final-source cloud qualification is pending.
 
 ## v0.23.13 incumbent retention (2026-11-12)
 

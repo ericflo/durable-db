@@ -86,8 +86,6 @@ pub struct Cluster {
     partitions: Vec<Partition>,
     limits: Limits,
     residents: Arc<Semaphore>,
-    // Advisory only: avoid elective moves through transient rollout members.
-    rebalance_at: Mutex<tokio::time::Instant>,
     ready: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -118,7 +116,6 @@ impl Cluster {
         let cluster = Arc::new(Self {
             limits,
             residents,
-            rebalance_at: Mutex::new(tokio::time::Instant::now()),
             directory,
             config,
             cache,
@@ -164,7 +161,6 @@ impl Cluster {
             let mut failed = vec![false; count];
             let mut acquisitions = FuturesUnordered::new();
             let mut cursor = 0;
-            let mut peers = Vec::new();
             loop {
                 tokio::select! {
                     _ = retry.tick() => failed.fill(false),
@@ -178,18 +174,10 @@ impl Cluster {
                         failed[id] = result.is_err();
                     }
                 }
-                let updated = membership(&members.borrow_and_update()).unwrap_or_default();
+                let peers = membership(&members.borrow_and_update()).unwrap_or_default();
                 let Some(cluster) = weak.upgrade() else {
                     return;
                 };
-                if peers != updated {
-                    peers = updated;
-                    *cluster
-                        .rebalance_at
-                        .lock()
-                        .expect("rebalance deadline lock") =
-                        tokio::time::Instant::now() + Duration::from_secs(15);
-                }
                 // Readiness keeps routing/administration reachable; membership
                 // schedules work but cannot authorize a data response.
                 cluster
@@ -250,11 +238,15 @@ impl Cluster {
         mut members: watch::Receiver<Vec<SocketAddr>>,
     ) -> anyhow::Result<()> {
         let partition = &self.partitions[id];
+        let claimed = AtomicBool::new(false);
         let wanted = |peers: &[SocketAddr]| {
-            membership(peers)
-                .is_ok_and(|peers| preferred(id as u32, &peers) == Some(self.config.address))
+            membership(peers).is_ok_and(|peers| {
+                peers.contains(&self.config.address)
+                    && (claimed.load(Ordering::Acquire)
+                        || preferred(id as u32, &peers) == Some(self.config.address))
+            })
         };
-        let acquisition = self.acquire(id as u32, partition, members.clone());
+        let acquisition = self.acquire(id as u32, partition, members.clone(), &claimed);
         tokio::pin!(acquisition);
         let local = loop {
             if !wanted(&members.borrow_and_update()) {
@@ -265,8 +257,9 @@ impl Cluster {
                 update = members.changed() => if update.is_err() { return Ok(()); },
             }
         };
-        // A simultaneous membership update may have selected a different peer.
-        // Cancel only this partition; unrelated recovery keeps its progress.
+        // A confirmed claimant is already the incumbent. Finish recovery while
+        // still a member, even if preference changes; takeover can fence it at
+        // any point. Unclaimed candidates still yield to their new destination.
         if wanted(&members.borrow()) {
             *partition.local.write().await = Some(local);
         }
@@ -277,6 +270,7 @@ impl Cluster {
         id: u32,
         partition: &Partition,
         members: watch::Receiver<Vec<SocketAddr>>,
+        claimed: &AtomicBool,
     ) -> anyhow::Result<Local> {
         let connection = &partition.connection;
         let started = std::time::Instant::now();
@@ -311,46 +305,35 @@ impl Cluster {
                 let observed = root.observe().await?;
                 if let Some(incumbent) = observed.incumbent()
                     && incumbent.address != self.config.address
+                    && !members.borrow().contains(&incumbent.address)
                 {
-                    if members.borrow().contains(&incumbent.address) {
-                        stage = "settle";
-                        // Keep the reachable incumbent serving while membership
-                        // changes. Empty partitions, excluded owners and address
-                        // reuse bypass this delay. Deferral releases the slot.
+                    stage = "challenge";
+                    progress(stage);
+                    let challenge = *partition
+                        .challenge
+                        .lock()
+                        .expect("partition challenge lock");
+                    if let Some(challenge) = challenge.filter(|c| {
+                        c.incumbent == incumbent && observed.challenge() == Some(c.nonce)
+                    }) {
                         ensure!(
-                            tokio::time::Instant::now()
-                                >= *self.rebalance_at.lock().expect("rebalance deadline lock"),
-                            "placement settling"
+                            tokio::time::Instant::now() >= challenge.ready_at,
+                            "owner challenge pending"
                         );
                     } else {
-                        stage = "challenge";
-                        progress(stage);
-                        let challenge = *partition
+                        let nonce = root
+                            .challenge(observed)
+                            .await?
+                            .context("owner challenge unconfirmed")?;
+                        *partition
                             .challenge
                             .lock()
-                            .expect("partition challenge lock");
-                        if let Some(challenge) = challenge.filter(|c| {
-                            c.incumbent == incumbent && observed.challenge() == Some(c.nonce)
-                        }) {
-                            ensure!(
-                                tokio::time::Instant::now() >= challenge.ready_at,
-                                "owner challenge pending"
-                            );
-                        } else {
-                            let nonce = root
-                                .challenge(observed)
-                                .await?
-                                .context("owner challenge unconfirmed")?;
-                            *partition
-                                .challenge
-                                .lock()
-                                .expect("partition challenge lock") = Some(Challenge {
-                                incumbent,
-                                nonce,
-                                ready_at: tokio::time::Instant::now() + Duration::from_secs(15),
-                            });
-                            anyhow::bail!("owner challenge pending");
-                        }
+                            .expect("partition challenge lock") = Some(Challenge {
+                            incumbent,
+                            nonce,
+                            ready_at: tokio::time::Instant::now() + Duration::from_secs(15),
+                        });
+                        anyhow::bail!("owner challenge pending");
                     }
                 }
                 stage = "claim";
@@ -363,6 +346,7 @@ impl Cluster {
                 root.confirm_outcome(outcome, &mut validations)
                     .await
                     .context("ownership claim unconfirmed")?;
+                claimed.store(true, Ordering::Release);
                 let mut challenges = JoinSet::new();
                 let answering_members = members.clone();
                 let address = self.config.address;
@@ -408,12 +392,11 @@ impl Cluster {
                 "activation permit revoked",
                 "owner challenge pending",
                 "owner challenge unconfirmed",
-                "placement settling",
             ]
             .into_iter()
             .find(|message| error.chain().any(|cause| cause.to_string() == *message))
             .unwrap_or("provider_or_validation");
-            if matches!(reason, "owner challenge pending" | "placement settling") {
+            if reason == "owner challenge pending" {
                 tracing::info!(
                     partition = id,
                     stage,

@@ -687,123 +687,6 @@ async fn membership_scales_one_two_one_then_recovers_without_compute() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn rollout_coalesces_reachable_owner_moves_until_membership_settles() {
-    let provider = Provider::new();
-    let mut listeners = Vec::new();
-    for _ in 0..3 {
-        listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
-    }
-    // Three reserved addresses ordered by the target partition's score make
-    // each addition a new destination, without an unbounded port search.
-    listeners.sort_by(|a, b| {
-        let a = a.local_addr().unwrap();
-        let b = b.local_addr().unwrap();
-        if a == b {
-            std::cmp::Ordering::Equal
-        } else if preferred(0, &[a, b]) == a {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Less
-        }
-    });
-    let address = listeners[0].local_addr().unwrap();
-    let mut nodes = Vec::new();
-    for listener in listeners {
-        nodes.push(Node::start(directory(&provider).await, listener, vec![address]).await);
-    }
-    let [a, b, c] = nodes.as_slice() else {
-        unreachable!()
-    };
-    settled(&[a, b, c], &[address]).await;
-    let name = &names()[0];
-    let path = format!("/v1/databases/{name}");
-    let token = auth().administrator_token(600).unwrap();
-    a.server
-        .ok(
-            "PUT",
-            &path,
-            &token,
-            json!({
-                "request_id":"create", "limits":{"max_keys":20,"max_bytes":10000}
-            }),
-        )
-        .await;
-    let old = a.cluster.resolve(name).await.unwrap().unwrap();
-    for peers in [
-        vec![a.address, b.address],
-        vec![a.address, b.address, c.address],
-        vec![a.address, b.address],
-        vec![a.address, b.address],
-    ] {
-        for node in &nodes {
-            node.members(&peers);
-        }
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        assert_eq!(
-            a.cluster
-                .resolve(name)
-                .await
-                .unwrap()
-                .unwrap()
-                .owner_incarnation(),
-            old.owner_incarnation(),
-            "a transient destination took over"
-        );
-        a.server
-            .ok("POST", &format!("{path}/commit"), &token, commit(0))
-            .await;
-        assert!(
-            b.cluster
-                .resolve(name)
-                .await
-                .unwrap()
-                .unwrap()
-                .owner_incarnation()
-                .is_none()
-        );
-        assert!(
-            c.cluster
-                .resolve(name)
-                .await
-                .unwrap()
-                .unwrap()
-                .owner_incarnation()
-                .is_none()
-        );
-    }
-    // Repeated identical snapshots cannot extend the quiet interval. Once it
-    // ends, B takes over once; C never interrupts service or creates an owner.
-    tokio::time::timeout(Duration::from_secs(9), async {
-        loop {
-            for node in &nodes {
-                node.members(&[a.address, b.address]);
-            }
-            if b.cluster
-                .resolve(name)
-                .await
-                .unwrap()
-                .unwrap()
-                .owner_incarnation()
-                .is_some()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
-    .await
-    .expect("stable placement converges despite repeated snapshots");
-    settled(&[a, b, c], &[a.address, b.address]).await;
-    assert!(old.info(name, &Access::Administrator).await.is_err());
-    assert_eq!(
-        b.server
-            .ok("POST", &format!("{path}/commit"), &token, commit(0))
-            .await["replayed"],
-        true
-    );
-}
-
-#[tokio::test(start_paused = true)]
 async fn placement_hint_keeps_incumbent_until_takeover_or_removal() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1395,7 +1278,7 @@ async fn paused_acquisition_does_not_block_queued_partitions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change() {
+async fn confirmed_recovery_survives_preference_changes_and_retires_on_removal() {
     let provider = Provider::new();
     let files = Arc::new(PausedPermit {
         inner: provider.files.clone(),
@@ -1500,6 +1383,46 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change(
             .is_some(),
         "a preferred-peer change must preserve the healthy incumbent"
     );
+    let successor = (1..=u16::MAX)
+        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+        .find(|peer| *peer != node.address && preferred(paused, &[node.address, *peer]) == *peer)
+        .unwrap();
+    node.members(&[node.address, successor]);
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        files.blocked.try_lock().is_err(),
+        "confirmed recovery cancelled by a preference hint"
+    );
+    // Releasing activation must install this owner despite the new preference.
+    // Otherwise its durable route would advertise a backend that never served.
+    files.release.notify_one();
+    let name = &names()[paused as usize];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while node
+            .cluster
+            .resolve(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("confirmed incumbent finishes recovery after preference changes");
+    let token = auth().administrator_token(600).unwrap();
+    node.server
+        .ok(
+            "PUT",
+            &format!("/v1/databases/{name}"),
+            &token,
+            json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
     node.members(&[]);
     // Let the controller observe removal before restoring the same address;
     // watch snapshots intentionally coalesce unobserved intermediate changes.
@@ -1507,8 +1430,8 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change(
         tokio::task::yield_now().await;
     }
     settled(&[&node], &[]).await;
-    // The old provider future remains blocked. Only cancellation can release
-    // the controller to acquire for this new placement.
+    // Explicit removal still retires owners; restoring this process requires
+    // new acquisition, rather than reviving a removed placement slot.
     node.members(&[node.address]);
     settled(&[&node], &[node.address]).await;
 }

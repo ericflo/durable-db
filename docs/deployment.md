@@ -45,11 +45,10 @@ A preference change keeps the current healthy backend serving until actual
 revocation; leaving membership still removes it. While yielding to another
 preferred process, the incumbent stops answering challenges so asymmetric peer
 reachability cannot prevent that successor from taking over. The existing
-resident budget covers this overlap. Elective takeover from a reachable incumbent
-waits for 15 seconds without a membership change, coalescing transient rollout
-destinations. Empty partitions, excluded incumbents and this process's reused
-address bypass that delay. Identical snapshots do not extend it; elapsed time
-only schedules work and never grants serving permission.
+resident budget covers this overlap. Once a claim is confirmed, recovery also
+continues while the process remains a member, even if preference changes before
+activation finishes. A later takeover still fences it. Candidates without a
+confirmed claim continue to yield immediately. No extra settling timer is used.
 
 `scripts/qualify-multinode.py` is the maintained native deployment/fault campaign.
 Use `--scenario rollout` for two consecutive replacements after 1→3→6 scaling,
