@@ -792,7 +792,8 @@ async fn membership_places_partitions_and_recovers_over_http() {
     let after = controls();
     assert_eq!(
         std::array::from_fn::<_, 3, _>(|i| after[i] - before[i]),
-        [1, 1, 1]
+        [1, 0, 0],
+        "raw partition observation reads authority once, without a replacement or barrier"
     );
     let names: [String; 2] = std::array::from_fn(|id| {
         (0..100)
