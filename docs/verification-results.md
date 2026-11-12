@@ -1,5 +1,57 @@
 # Verification results
 
+## v0.23.5 independent recovery scheduling (2026-11-12)
+
+[v0.23.5](https://github.com/ericflo/durable-db/releases/tag/v0.23.5) packages
+`503faaa`, verified by [Woodpecker #228](https://ci.eflorenzano.com/repos/18/pipeline/228/1).
+The downloaded static executable passes standalone installation, transactions,
+ordered reads, export/restore and forced-stop recovery.
+
+Recovery fills each freed slot immediately, with at most four acquisitions per
+process. Membership changes cancel only partitions whose own placement moved;
+other recoveries keep their progress. Failed work keeps retry backoff, removed
+owners retire promptly, and data responses still require fresh permit validation.
+The batch-draining reconciler, whole-pass cancellation and eight-probe limit were
+removed; the controller is 20 lines smaller. No wire or storage format changed.
+
+The queued-partition and partial-placement regressions both fail against the old
+scheduler. All 325 enabled local Rust checks, formatting and strict clippy pass.
+The residency model retains 19 states and two negative controls; layout retains
+56 states and two controls. These bounded checks do not prove Rust or liveness
+under permanent membership disagreement. CI also passes the client contract,
+formal checks and 10,005-database capacity regression.
+
+The **exact release executable** passes the complete B2/Kubernetes campaign on
+the existing hosts. All **1,350 acknowledged writes** were read back and recovered,
+and the independent checker passes all four sequential histories. Every phase
+requires two further verified readbacks from each writer. No deadline was raised.
+
+| Phase, measured between boundaries | Earlier v0.23.3 run | v0.23.5 run |
+| --- | ---: | ---: |
+| Initial ready node to writer progress | 121 s | 184 s |
+| Scale to three | 144 s | 80 s |
+| Scale to six | 149 s | 77 s |
+| Forced pod loss | 189 s | 113 s |
+| Rolling replacement | 165 s | 141 s |
+| Scale down to one | 177 s | 134 s |
+| Cold replacement after all pods were removed | 127 s | 106 s |
+
+The longest measured write was **123 seconds**, previously 151 seconds. Recovery
+improved in this run, but initial setup was slower and waits still reach minutes.
+These are observations, not an isolated A/B test or an SLO: placements, histories
+and provider conditions differ, and the candidate includes v0.23.4's health fix.
+Phase durations include orchestration, diagnostics and readback barriers. Five
+steady-memory samples cover 30 pod observations; the maximum sampled RSS is
+5,283,840 bytes. They do not measure recovery peaks or worst-case memory. The
+run does not qualify AWS, HPA, whole-host loss, unreachable peers retained in DNS,
+arbitrary concurrent histories or sustained load.
+[Exact source, hashes, configuration, timings and limits](evidence/native-recovery-2026-11-11.json).
+
+The disposable namespace, scoped key, bucket and all 1,247 remaining object
+versions were removed. Qualification used the verified CI runtime image by
+digest; no separate temporary registry image was created. The [production
+gates](production-readiness.md) remain open.
+
 ## v0.23.4 local health and complete B2 recovery (2026-11-11)
 
 [v0.23.4](https://github.com/ericflo/durable-db/releases/tag/v0.23.4) packages
