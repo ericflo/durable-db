@@ -429,6 +429,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
  const status=r.status;await r.body?.cancel();return status;
 }catch{return 0}})).then(r=>console.log(JSON.stringify(r)));"""
             statuses=json.loads(kube('exec','workload','--','node','-e',script,json.dumps(urls),timeout=20))
+            report.setdefault('provider_access_observations',[]).append(dict(time_utc=utc(),statuses=statuses));save()
             if statuses!=[200]*len(live):raise RuntimeError('A partition side could not read the provider-backed administrative budget')
             return statuses
 

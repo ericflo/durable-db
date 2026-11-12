@@ -1,6 +1,6 @@
 # Verification results
 
-## Bounded concurrent revocation (unreleased)
+## Recovery and control admission (unreleased)
 
 Activation now overlaps up to four independent predecessor-permit revocations,
 joining every confirmed absence before it may publish. Cancellation or any error
@@ -11,7 +11,23 @@ with the change. RootRegistration retains its 34,061 / 281,563-state bounds and
 all six negative/coverage controls; arbitrary completion order was already modeled.
 All 338 enabled Rust checks, formatting and strict clippy pass.
 The serial wait is removed. No durable format, API or ownership rule changes.
-Cloud latency qualification is pending; this is not yet a speedup claim.
+Versioned MinIO passes the full native HTTP budget, retention, takeover and
+cold-recovery fixture in 183.26 seconds. Its bucket/container and 32 remaining
+object versions were removed. The first B2 candidate stops before the one-way hold because a provider-backed
+administrative probe fails. It records 175 partial acknowledgements/readbacks,
+with no final cold/history check; subsequent monitoring on the isolated process
+returns 429. The namespace, bucket, key and 453 remaining versions were removed.
+The original probe did not retain its exact failure status; the harness now does.
+
+A local regression reproduces administrative/monitoring 429 responses when four
+tenants fill all eight data slots. Authenticated operational requests now share
+two additional slots while retaining principal/rate limits. Administrator data
+traffic keeps the data pool and a separate principal allowance.
+The extended fixture passes in 0.01 seconds: all data slots remain held, budget
+inspection and monitoring succeed, the two-slot control bound rejects excess
+traffic, and cancellation returns capacity. Tenant paths/names cannot select the
+reserve. This replaces the shared global admission gate for control traffic;
+no durable accounting or authority rule changes. B2 requalification is pending.
 
 ## v0.23.8 recovery cursor reuse (2026-11-12)
 

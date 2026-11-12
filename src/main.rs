@@ -118,6 +118,7 @@ struct Serve {
     disk_cache: Option<PathBuf>,
     #[arg(long, default_value_t = 1024, env = "DURABLE_DB_DISK_CACHE_MIB")]
     disk_cache_mib: usize,
+    /// Tenant HTTP slots per pod, plus two reserved administrator/metrics slots.
     #[arg(long, default_value_t = 8, env = "DURABLE_DB_CONCURRENCY")]
     concurrency: usize,
     /// Per-principal, per-pod budget refill. A commit costs 5 units; other requests cost 1.

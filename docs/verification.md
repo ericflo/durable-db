@@ -845,6 +845,21 @@ a subsequent write to succeed and the previous receipt to replay. The bounded
 models retain their state counts and negative controls. Timing, complete liveness
 and correspondence to the cloud stall remain separate qualification obligations.
 
+## Control admission under data saturation
+
+Authenticated administrator operational requests and metrics capabilities share two reserved HTTP slots
+in addition to the configured tenant pool. Principal/rate limits, body limits,
+timeouts and cancellation guards still apply. Pool selection follows validated
+capability type and matched operational routes; tenants cannot select the reserve.
+Administrator data requests keep the data pool and a separate principal allowance.
+The extended HTTP fixture holds all eight data slots across four tenants, checks
+budget/monitoring access, fills both control slots and checks cancellation. It
+fails with 429 against the old shared gate and passes in 0.01 seconds afterward.
+This is bounded local overload protection checked in Rust; it neither changes
+the durable protocol nor proves end-to-end administrative availability during
+provider contention. The existing RequestBudget model still covers refill and
+eviction, not HTTP scheduling.
+
 ## Bounded remote observations
 
 The failed B2 runs are retained in the recovery evidence. Local shared-partition

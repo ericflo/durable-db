@@ -46,6 +46,7 @@ struct Bucket {
 #[derive(Hash, Eq, PartialEq)]
 enum Principal {
     Administrator,
+    AdministratorData,
     Metrics,
     Database(String),
 }
@@ -54,6 +55,7 @@ pub struct App {
     pub auth: Arc<Auth>,
     pub ready: AtomicBool,
     pub permits: Arc<Semaphore>,
+    control_permits: Arc<Semaphore>,
     rates: Mutex<HashMap<Principal, Bucket>>,
     rate_limits: RateLimits,
     principal_concurrency: usize,
@@ -78,6 +80,7 @@ impl App {
             auth: auth.into(),
             ready: AtomicBool::new(true),
             permits: Arc::new(Semaphore::new(concurrency)),
+            control_permits: Arc::new(Semaphore::new(2)),
             rates: Mutex::new(HashMap::new()),
             rate_limits,
             principal_concurrency: (concurrency / 4).max(1),
@@ -163,7 +166,20 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
         Err(e) => return e.into_response(),
     };
     let bucket = if app.auth.is_admin(token) {
-        Principal::Administrator
+        match request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .map(|p| p.as_str())
+        {
+            Some(
+                "/metrics"
+                | "/v1/storage/upload-budget"
+                | "/v1/databases/{db}/upload-budget"
+                | "/v1/databases/{db}/access"
+                | "/v1/tokens",
+            ) => Principal::Administrator,
+            _ => Principal::AdministratorData,
+        }
     } else if app.auth.is_metrics(token) {
         if request.uri().path() != "/metrics" || request.method() != axum::http::Method::GET {
             return Error::Unauthorized.into_response();
@@ -180,6 +196,13 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
     } else {
         1
     };
+    // Authenticated control principals retain two bounded slots when tenants
+    // fill the data pool. Paths and tenant names cannot select this reserve.
+    let permits = if matches!(&bucket, Principal::Administrator | Principal::Metrics) {
+        app.control_permits.clone()
+    } else {
+        app.permits.clone()
+    };
     // The owned permit survives every await and is returned on cancellation,
     // timeout, extractor failure, or normal completion. All tokens for a
     // database share one allowance; request paths cannot select another one.
@@ -188,9 +211,9 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
         // Sampling before the lock can reuse elapsed time or credit an old
         // interval after a later request has already consumed its budget.
         let now = Instant::now();
-        // Two fixed control principals may always create their entries even
+        // Three fixed operator principals may always create their entries even
         // when tenants fill the bounded map. Otherwise churn can lock out
-        // administrative recovery and monitoring. At most 4,098 entries exist.
+        // administrative recovery and monitoring. At most 4,099 entries exist.
         if matches!(&bucket, Principal::Database(_))
             && rates.len() >= 4096
             && !rates.contains_key(&bucket)
@@ -214,7 +237,7 @@ async fn admit(app: Arc<App>, request: Request, next: Next) -> Response {
         }
         permit
     };
-    let Ok(_permit) = app.permits.clone().try_acquire_owned() else {
+    let Ok(_permit) = permits.try_acquire_owned() else {
         app.rejected.fetch_add(1, Ordering::Relaxed);
         return Error::Busy.into_response();
     };

@@ -243,9 +243,18 @@ async fn a_database_cannot_hold_every_slot_and_cancelled_requests_release_capaci
     let engine = Arc::new(Engine::new(storage, Arc::new(Cache::new(0, None).unwrap())));
     engine.create("_admin", Limits::default()).await.unwrap();
     engine.create("other", Limits::default()).await.unwrap();
+    let metrics = auth.metrics_token(3600).unwrap();
+    let neighbors = [
+        other.clone(),
+        auth.issue("third".into(), false, 3600).unwrap(),
+        auth.issue("fourth".into(), false, 3600).unwrap(),
+    ];
     let app = router(Arc::new(App::new(engine, auth, 8)));
-    let mut held = Vec::new();
-    for _ in 0..2 {
+    async fn hold(
+        app: &axum::Router,
+        token: &str,
+        path: &str,
+    ) -> tokio::task::JoinHandle<Result<axum::response::Response, Infallible>> {
         let entered = Arc::new(Notify::new());
         let notify = entered.clone();
         let body = Body::from_stream(futures::stream::once(async move {
@@ -255,15 +264,20 @@ async fn a_database_cannot_hold_every_slot_and_cancelled_requests_release_capaci
         }));
         let req = Request::builder()
             .method("POST")
-            .uri("/v1/databases/_admin/read")
+            .uri(path)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {hostile}"))
+            .header("authorization", format!("Bearer {token}"))
             .body(body)
             .unwrap();
-        held.push(tokio::spawn(app.clone().oneshot(req)));
+        let work = tokio::spawn(app.clone().oneshot(req));
         tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
             .await
             .unwrap();
+        work
+    }
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(hold(&app, &hostile, "/v1/databases/_admin/read").await);
     }
     async fn status(app: &axum::Router, token: &str, path: &str, method: &str) -> StatusCode {
         app.clone()
@@ -288,11 +302,41 @@ async fn a_database_cannot_hold_every_slot_and_cancelled_requests_release_capaci
         status(&app, &other, "/v1/databases/other/read", "POST").await,
         StatusCode::OK
     );
+    // Multiple tenants may fill the entire data pool, including body reads
+    // or stalled forwarding. Recovery/monitoring still have bounded capacity.
+    for (name, token) in ["other", "third", "fourth"].into_iter().zip(&neighbors) {
+        for _ in 0..2 {
+            held.push(hold(&app, token, &format!("/v1/databases/{name}/read")).await);
+        }
+    }
     assert_eq!(
-        status(&app, &admin, "/metrics", "GET").await,
+        status(&app, &other, "/v1/databases/other/read", "POST").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for (token, path) in [
+        (&admin, "/metrics"),
+        (&metrics, "/metrics"),
+        (&admin, "/v1/storage/upload-budget"),
+    ] {
+        assert_eq!(status(&app, token, path, "GET").await, StatusCode::OK);
+    }
+    // Control has two slots, not an unlimited bypass. Cancellation returns one
+    // without freeing any tenant slot or accepting a new principal identity.
+    let first = hold(&app, &admin, "/v1/tokens").await;
+    let second = hold(&app, &admin, "/v1/tokens").await;
+    assert_eq!(
+        status(&app, &metrics, "/metrics", "GET").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        status(&app, &metrics, "/metrics", "GET").await,
         StatusCode::OK
     );
-    let task = held.pop().unwrap();
+    second.abort();
+    assert!(second.await.unwrap_err().is_cancelled());
+    let task = held.remove(0);
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     assert_eq!(
@@ -303,6 +347,18 @@ async fn a_database_cannot_hold_every_slot_and_cancelled_requests_release_capaci
         task.abort();
         let _ = task.await;
     }
+    // Ordinary administrator data requests keep the data pool and cannot
+    // consume their operator's separate recovery/monitoring allowance.
+    let first = hold(&app, &admin, "/v1/databases/_admin/read").await;
+    let second = hold(&app, &admin, "/v1/databases/_admin/read").await;
+    assert_eq!(
+        status(&app, &admin, "/v1/storage/upload-budget", "GET").await,
+        StatusCode::OK
+    );
+    first.abort();
+    second.abort();
+    let _ = first.await;
+    let _ = second.await;
 }
 
 #[tokio::test]

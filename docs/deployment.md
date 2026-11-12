@@ -62,6 +62,12 @@ Use a registry address reachable by the **nodes' container runtime**, not just b
 
 ## Request budgets
 
+`--concurrency` bounds admitted tenant HTTP requests. Two additional slots are
+reserved for authenticated budget, access-policy, token and metrics operations; these requests
+retain their per-principal rate/concurrency limits. Budget for at most
+`concurrency + 2` admitted HTTP requests per process. Tenant traffic cannot use
+the control reserve, even with a control-like path or database name.
+
 v0.19.0 exposes two per-principal, per-pod overload settings:
 
 | Flag | Environment variable | Default | Accepted range |

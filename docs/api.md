@@ -147,7 +147,7 @@ Errors use `{error,message}`: 400 invalid request, 401 invalid/mismatched creden
 | Manifest | 512 KiB; at most 2,048 pages |
 | Database logical quota | Configurable up to 256 MiB and 1,000,000 keys |
 | Default cache | 64 MiB accounted encoded bytes; at most 4,096 entries |
-| Default concurrent admitted requests | 8 per pod |
+| Default concurrent admitted requests | 8 tenant slots plus 2 administrator/metrics slots per pod |
 | Per-database admission | 20 tokens/sec, burst 40 per pod; commit costs 5, other requests 1 |
 | Request deadline | 30 seconds |
 
