@@ -77,7 +77,7 @@ def main():
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   workload_sha256=hashlib.sha256(Path('scripts/cluster-workload.mjs').read_bytes()).hexdigest(),
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
-                                     client_origin='http://durable-db:7654',
+                                     client_origin='http://durable-db:7654', database_prefix='app',
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      rollout_surge=1, rollout_unavailable=0, rollout_deadline_seconds=240,
                                      per_writer_readbacks_before_phase=2,
@@ -357,7 +357,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
                     spec=dict(restartPolicy='Never',automountServiceAccountToken=False,
                               securityContext=dict(runAsNonRoot=True,runAsUser=1000,runAsGroup=1000,fsGroup=1000,seccompProfile=dict(type='RuntimeDefault')),
                               containers=[dict(name='workload',image=NODE_IMAGE,command=['node','/work/runner.mjs'],
-                                               env=[dict(name='DATABASE_URL',value='http://durable-db:7654'),dict(name='DATABASE_PREFIX',value='physical-'+run)],
+                                               env=[dict(name='DATABASE_URL',value='http://durable-db:7654'),dict(name='DATABASE_PREFIX',value=report['configuration']['database_prefix'])],
                                                resources=dict(requests=dict(cpu='25m',memory='64Mi'),limits=dict(cpu='250m',memory='256Mi')),
                                                securityContext=dict(allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,capabilities=dict(drop=['ALL'])),
                                                volumeMounts=[dict(name='work',mountPath='/work',readOnly=True),dict(name='credentials',mountPath='/run/credentials',readOnly=True)])],
@@ -407,7 +407,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
         # This is process unavailability on a host; the host kernel stays alive.
         live=pods()
         partition=int.from_bytes(hashlib.sha256(b'durable-db.partition.v1\0'+
-            f'physical-{run}-writer-0'.encode()).digest()[:4],'big')%report['configuration']['partitions']
+            (report['configuration']['database_prefix']+'-writer-0').encode()).digest()[:4],'big')%report['configuration']['partitions']
         def rank(pod):
             ip=pod['status']['podIP'];address=f'[{ip}]:7654' if ':' in ip else f'{ip}:7654'
             return hashlib.sha256(b'durable-db.placement.v1\0'+partition.to_bytes(4,'big')+address.encode()).digest()

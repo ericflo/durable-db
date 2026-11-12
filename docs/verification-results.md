@@ -25,7 +25,9 @@ new phase is not yet qualified; it does not simulate a peer-only network partiti
 The provider-egress phase also replaces its blind forty-second sleep with thirty
 seconds to settle responses and ten seconds requiring unchanged acknowledgement
 and readback counters. A fresh connection probe alone cannot establish that an
-existing provider connection was blocked. The stronger check remains unqualified.
+existing provider connection was blocked. The stronger check remains unqualified. Writer names in future runs are fixed
+inside the fresh bucket, giving partitions 2, 12, 14 and 2; prior campaigns let
+the random namespace change that workload characteristic.
 
 ## v0.23.7 idle-owner rejoin recovery (2026-11-12)
 
