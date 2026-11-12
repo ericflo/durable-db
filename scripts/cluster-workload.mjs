@@ -5,6 +5,7 @@ import {createServer} from 'node:http';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
 const origin=process.env.DATABASE_URL;
+const writerOrigins=process.env.WRITER_ORIGINS?.split(',')??[origin];
 const admin=readFileSync('/run/credentials/admin.token','utf8').trim();
 const control=Buffer.from(readFileSync('/run/credentials/control.token','utf8').trim());
 const prefix=process.env.DATABASE_PREFIX;
@@ -16,13 +17,13 @@ const maxIntents=100000;
 const tenantLimits={bytes:1024*1024*1024,attempts:100000};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const hash=value=>createHash('sha256').update(value).digest('hex');
-async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
+async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',endpoint=origin) {
   const encoded=body===undefined?undefined:JSON.stringify(body), start=performance.now();
   let attempts=0;
   for(;;) {
     let code='transport_or_decode_error', result, refusal;
     try {
-      const response=await fetch(origin+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
+      const response=await fetch(endpoint+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
       code=String(response.status);
       if(response.ok) result=await response.json();
       else if(response.status===413) {
@@ -49,6 +50,7 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST') {
   }
 }
 async function writer(index) {
+  const endpoint=writerOrigins[index%writerOrigins.length];
   try {
     while(running) {
       if(issued>=maxIntents)throw new Error('Qualification write-intent bound reached');
@@ -56,11 +58,11 @@ async function writer(index) {
       const revision=status.expected[index], request_id=randomUUID();
       const value=Buffer.from(`${index}/${revision}`), key=String(revision).padStart(8,'0');
       const start=performance.now()/1000;
-      const result=await rpc(`/v1/databases/${names[index]}/commit`,{request_id,expected_revision:revision,writes:[{key,value:value.toString('base64')}]},tokens[index]);
+      const result=await rpc(`/v1/databases/${names[index]}/commit`,{request_id,expected_revision:revision,writes:[{key,value:value.toString('base64')}]},tokens[index],'POST',endpoint);
       if(result.revision!==revision+1) throw new Error('Acknowledged revision mismatch');
       status.expected[index]=revision+1;status.writes_acknowledged++;
       status.history.push({database_index:index,request_id,revision:revision+1,start,end:performance.now()/1000,value_sha256:hash(value)});
-      const read=await rpc(`/v1/databases/${names[index]}/read`,{expected_revision:revision+1,keys:[key]},tokens[index]);
+      const read=await rpc(`/v1/databases/${names[index]}/read`,{expected_revision:revision+1,keys:[key]},tokens[index],'POST',endpoint);
       if(read.revision!==revision+1||JSON.stringify(read.values)!==JSON.stringify([value.toString('base64')])) throw new Error('Read after acknowledgement mismatch');
       status.reads_verified++;status.verified[index]=revision+1;
       await sleep(250);

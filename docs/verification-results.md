@@ -39,6 +39,10 @@ the blind sleep and detects policies that leave the workload connected. All-proc
 pause, replacement, pod loss, rolling replacement, scale-down and cold recovery
 also pass. These are process faults on existing hosts and a provider-egress fault;
 physical host shutdown and peer-only/asymmetric network isolation remain open.
+The maintained harness now has a focused `peer-isolation` scenario with requests
+entering both sides, fresh/retained connection checks and provider-backed admin
+reads. Local socket reuse/block/heal and directed-policy checks pass; real B2
+qualification is pending.
 
 Every-writer recovery upper bounds, in seconds:
 
