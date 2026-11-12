@@ -390,8 +390,8 @@ async fn run(
                         }
                         Err(_) => (),
                     }
-                } else if owner.maintain().await.is_err() {
-                    tracing::warn!("native checkpoint deferred; checking authority before retry");
+                } else {
+                    let _ = owner.maintain().await;
                 }
             }
         }

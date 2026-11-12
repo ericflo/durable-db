@@ -819,6 +819,13 @@ namespace, bucket, key and 611 physical versions were removed. See the
 
 ## Bounded remote observations
 
+The failed B2 runs are retained in the recovery evidence. Local shared-partition
+coverage drives two tenants through 400 HTTP commits with concurrent collection;
+it does not reproduce the cloud stall. Checkpoint warnings identify only a fixed
+stage and owner incarnation, and the cluster harness collects bounded metrics
+before failure cleanup. Neither diagnostic changes serving authority or retries
+an uncertain mutation.
+
 B2 and S3 share a ten-second deadline for each object GET, bounded range and
 listing, including retries and streamed bytes. Read retries have at most three
 physical attempts; conditional writes and immutable uploads remain single-attempt. A timeout is an

@@ -157,6 +157,101 @@ fn commit(id: usize) -> Value {
 }
 
 #[tokio::test]
+async fn shared_partition_checkpoints_keep_both_writers_progressing() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peers = vec![listener.local_addr().unwrap()];
+    let layout = Layout::new(16).unwrap();
+    let directory = directory(&provider).await;
+    let node = Node::with_layout(directory.clone(), listener, peers, layout).await;
+    let collection = directory
+        .partition(0, budget())
+        .await
+        .unwrap()
+        .root()
+        .unwrap()
+        .collection();
+    let token = auth().administrator_token(600).unwrap();
+    let names: Vec<_> = (0..1000)
+        .map(|n| format!("tenant-{n}"))
+        .filter(|name| layout.partition(name).unwrap() == 0)
+        .take(2)
+        .collect();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if node
+                .cluster
+                .resolve(&names[0])
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for name in &names {
+        node.server
+            .ok(
+                "PUT",
+                &format!("/v1/databases/{name}"),
+                &token,
+                json!({"request_id":"create", "limits":{"max_keys":1000,"max_bytes":1048576}}),
+            )
+            .await;
+    }
+    let write = async |name: &str| {
+        for revision in 0..200 {
+            let request = json!({"expected_revision":revision, "request_id":format!("write-{revision}"),
+                "writes":[{"key":format!("key-{revision}"),"value":"eA=="}]});
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let (status, value) = node
+                        .server
+                        .call(
+                            "POST",
+                            &format!("/v1/databases/{name}/commit"),
+                            &token,
+                            request.clone(),
+                        )
+                        .await;
+                    if status == StatusCode::OK {
+                        break value;
+                    }
+                    assert!(
+                        matches!(
+                            status,
+                            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+                        ),
+                        "{status}: {value}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("both tenants resume after concurrent collection");
+            assert_eq!(result["revision"], revision + 1);
+        }
+    };
+    tokio::select! {
+        _ = async { tokio::join!(write(&names[0]), write(&names[1])); } => (),
+        _ = async {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let _ = collection.collect().await;
+                let _ = directory.maintenance().await;
+            }
+            std::future::pending::<()>().await;
+        } => unreachable!(),
+    }
+}
+
+#[tokio::test]
 async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenced() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -27,8 +27,23 @@ conditional writes and immutable uploads remain single-attempt. The stalled-body
 previous reader. All 332 enabled Rust checks, formatting, strict clippy and the
 site build pass. The unchanged 856-state revocable-owner model passes its nine
 negative controls. These bounded checks do not prove Rust or liveness.
-This policy correction is not yet established as the cloud
-failure's cause or its resolution. Fresh full qualification remains pending.
+Candidate `0e31829` passes [Woodpecker #236](https://ci.eflorenzano.com/repos/18/pipeline/236/1)
+and independent executable checks, but its B2/Kubernetes run **fails during the
+steady phase, before fault injection**. Writers 0 and 3 share partition 11 and
+exhaust their unchanged 180-second commit retry limits; writers 1 and 2 continue.
+The partial snapshot has 787 acknowledgements and readbacks. Tenant credits
+remain available. There is no final cold recovery or full history check, and no
+failure metrics were captured before the pods disappeared. All disposable
+resources and 625 physical versions were removed.
+
+Scale-to-three takes at most 121.73 seconds for every writer's two readbacks;
+scale-to-six takes 61.83 seconds. Both miss the 60-second engineering target.
+The observation policy correction is not established as the stall's cause or
+resolution. The candidate remains unreleased. A two-tenant production-directory
+test completes 400 commits with concurrent collection locally in 2.06 seconds,
+but does not reproduce the cloud stall. Fixed-stage checkpoint warnings and
+bounded metric capture before cleanup now make the next failure diagnosable
+without recording provider error text, credentials, keys or values.
 
 Candidate `aa3996f` passes [Woodpecker #233](https://ci.eflorenzano.com/repos/18/pipeline/233/1)
 and the independent executable checks. Its fresh B2/Kubernetes campaign reaches
@@ -70,7 +85,7 @@ checkpoint, allows its claim of preserved reserve, and writes two new frames
 before demanding their collection. It still checks the exact final charge,
 unchanged admission ceilings and reclamation; it no longer expects a valid live
 suffix to disappear. All three MinIO buckets/containers and 86 physical versions
-were removed. B2/Kubernetes qualification of this runtime is still pending.
+were removed. The B2/Kubernetes failure above remains unresolved.
 
 The earlier candidate and provider checks below remain part of the record.
 

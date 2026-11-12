@@ -130,6 +130,7 @@ def main():
         # Preserve bounded progress from earlier pods before rolling deletion.
         # Fixed fields only; provider messages may contain secrets or data.
         samples = report.setdefault('acquisition_events', {})
+        maintenance = report.setdefault('checkpoint_failures', {})
         for pod in pods():
             name = pod['metadata']['name']
             try:
@@ -139,8 +140,24 @@ def main():
                     partition=int(partition), stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, partition, stage, elapsed in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native acquisition (progress|failed).*?partition=(\d+)\s+stage="?(resident|budget|observe|claim|activate|select_journals|recover|serve|ready)"?\b.*?elapsed_ms=(\d+)', log)]
+                maintenance[name] = [dict(time_utc=stamp, owner=owner,
+                    stage=stage, elapsed_ms=int(elapsed))
+                    for stamp, owner, stage, elapsed in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint deferred.*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
             except subprocess.SubprocessError:
                 pass  # A disappearing pod must not prevent the failure report.
+
+    def failure_metrics():
+        peers = [p['status']['podIP'] for p in pods() if p['status'].get('podIP')]
+        # Read the mounted token inside the disposable workload. Only bounded
+        # static server metrics leave the pod; no credential appears in argv.
+        script = """const fs=require('fs');const token=fs.readFileSync('/run/credentials/admin.token','utf8').trim();
+Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
+ const r=await fetch('http://'+ip+':7654/metrics',{headers:{authorization:'Bearer '+token},redirect:'error',signal:AbortSignal.timeout(10000)});
+ const body=await r.text();if(body.length>1048576)throw Error();
+ return {ip,status:r.status,metrics:r.ok?body.split('\\n').filter(l=>/^durable_db_[a-z_]+(?:\\{[^}]*\\})? [0-9.e+\\-]+$/.test(l)):[]};
+}catch{return {ip,status:'unreachable'}}})).then(r=>console.log(JSON.stringify(r)));"""
+        report['failure_metrics'] = json.loads(kube('exec', 'workload', '--', 'node', '-e', script, json.dumps(peers), timeout=20))
 
     def wait_replicas(count, ready_count=None):
         if ready_count is None:ready_count=count
@@ -433,6 +450,8 @@ def main():
                 current=pods()
                 report['pod_states']=[dict(name=p['metadata']['name'],node=p['spec'].get('nodeName'),phase=p['status']['phase'],conditions=p['status'].get('conditions',[]),containers=[dict(name=c['name'],restart_count=c['restartCount'],state=c['state'],last_state=c.get('lastState')) for c in p['status'].get('containerStatuses',[])]) for p in current]
                 acquisitions()
+                try:failure_metrics()
+                except Exception:report['failure_metrics_unavailable']=True
                 events=json.loads(kube('get','events','-o','json'))['items']
                 report['event_reasons']=[dict(reason=e.get('reason'),message=e.get('message')) for e in events]
             except Exception:pass
