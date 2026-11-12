@@ -262,6 +262,38 @@ impl Published {
         self.head(key, max_bytes, false).await
     }
 
+    /// Return the exact published pointer, never a later readback's identity.
+    /// Success records this invocation's publication, not continuing ownership.
+    pub(crate) async fn compare_head(
+        &self,
+        key: &str,
+        old: Option<&Version>,
+        bytes: Bytes,
+    ) -> anyhow::Result<Option<Version>> {
+        let timer = metrics::REGISTRY.start(Operation::Publication);
+        let result = self.publish(key, old, bytes).await;
+        timer.finish(match &result {
+            Ok(Some(_)) => Outcome::Ok,
+            Ok(None) => Outcome::Conflict,
+            Err(_) => Outcome::Error,
+        });
+        result
+    }
+
+    fn head_version(&self, pointer: &Pointer, bucket: &Bucket) -> anyhow::Result<Version> {
+        Ok(Version(UpdateVersion {
+            e_tag: Some(serde_json::to_string(pointer)?),
+            version: Some(if self.global_collection {
+                serde_json::to_string(&DataObservation {
+                    format: 5,
+                    fence: bucket.info.get("durable-db-fence").cloned(),
+                })?
+            } else {
+                bucket.revision.to_string()
+            }),
+        }))
+    }
+
     async fn head(
         &self,
         key: &str,
@@ -283,7 +315,6 @@ impl Published {
             let Some(pointer) = pointer else {
                 return Ok(None);
             };
-            let value = serde_json::to_string(&pointer)?;
             // Only immutable bytes are cached. Raw observations remain hints;
             // fresh callers seal their group before the remote read barrier.
             let cached = match &self.cache {
@@ -312,17 +343,7 @@ impl Published {
             };
             return Ok(Some(Object {
                 bytes,
-                version: Version(UpdateVersion {
-                    e_tag: Some(value.clone()),
-                    version: Some(if self.global_collection {
-                        serde_json::to_string(&DataObservation {
-                            format: 5,
-                            fence: bucket.info.get("durable-db-fence").cloned(),
-                        })?
-                    } else {
-                        bucket.revision.to_string()
-                    }),
-                }),
+                version: self.head_version(&pointer, &bucket)?,
             }));
         }
         bail!("published manifest changed repeatedly or is unavailable")
@@ -542,14 +563,9 @@ impl Storage for Published {
         self.head(key, max_bytes, true).await
     }
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool> {
-        let timer = metrics::REGISTRY.start(Operation::Publication);
-        let result = self.publish(key, old, bytes).await;
-        timer.finish(match &result {
-            Ok(true) => Outcome::Ok,
-            Ok(false) => Outcome::Conflict,
-            Err(_) => Outcome::Error,
-        });
-        result
+        self.compare_head(key, old, bytes)
+            .await
+            .map(|v| v.is_some())
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.files.put(key, bytes).await

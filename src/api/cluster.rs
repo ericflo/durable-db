@@ -391,7 +391,6 @@ impl Cluster {
             let reason = [
                 "submitted publication changed or was fenced; outcome is uncertain",
                 "publication helping budget exhausted; outcome is uncertain",
-                "partition changed after publication; outcome uncertain",
                 "published manifest changed repeatedly or is unavailable",
                 "activation permit revoked",
                 "owner challenge pending",

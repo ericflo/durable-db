@@ -86,7 +86,7 @@ impl Published {
         key: &str,
         old: Option<&Version>,
         bytes: Bytes,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<Version>> {
         let database = slot(key)?;
         ensure!(
             bytes.len() <= MAX_MANIFEST_BYTES,
@@ -109,12 +109,12 @@ impl Published {
             // The engine captured this before preparing any pages. Adopting a
             // later fence here could publish pages already collected as orphans.
             if observation.fence.as_ref() != initial.info.get("durable-db-fence") {
-                return Ok(false);
+                return Ok(None);
             }
         }
         let initial_root = root(&initial.info)?;
         let expected = match self.directory.get(initial_root.as_ref(), &database).await {
-            Err(e) if e.is::<MissingNode>() => return Ok(false),
+            Err(e) if e.is::<MissingNode>() => return Ok(None),
             other => other?,
         };
         let identity = expected.as_ref().map(serde_json::to_string).transpose()?;
@@ -123,7 +123,7 @@ impl Published {
             Some(v) => identity.as_ref() == v.0.e_tag.as_ref(),
         };
         if !matches {
-            return Ok(false);
+            return Ok(None);
         }
         budget(&initial.info)?;
         let proposal = Proposal {
@@ -148,7 +148,7 @@ impl Published {
         }
 
         // Once this upload starts, another replica can publish it, including
-        // after this task disappears. No path below may return Ok(false).
+        // after this task disappears. No path below may return Ok(None).
         self.files.put(&name, encoded).await?;
         metrics::REGISTRY.event(Event::ProposalSubmitted, 1);
         // Admission only: the protocol is safe with concurrent helpers. One
@@ -162,7 +162,7 @@ impl Published {
             let before = self.authority.read().await?;
             if self.proposal_result(&proposal, &before).await? {
                 self.proposal_cleanup.committed(name.clone());
-                return Ok(true);
+                return self.head_version(&proposal.next, &before).map(Some);
             }
             let names = self
                 .files
@@ -209,7 +209,7 @@ impl Published {
             let observed = self.authority.read().await?;
             if self.proposal_result(&proposal, &observed).await? {
                 self.proposal_cleanup.committed(name.clone());
-                return Ok(true);
+                return self.head_version(&proposal.next, &observed).map(Some);
             }
             let observed_root = root(&observed.info)?;
             let mut selected = BTreeMap::new();
@@ -266,7 +266,7 @@ impl Published {
             info.insert(HELP_CURSOR.into(), next_cursor);
             budget(&info)?;
             // Errors may have committed the whole group. Preserve uncertainty.
-            if self.authority.replace(&observed, info).await?.is_some() {
+            if let Some(published) = self.authority.replace(&observed, info).await? {
                 metrics::REGISTRY.event(Event::PublicationGroups, 1);
                 metrics::REGISTRY.event(Event::PublicationGroupMembers, selected.len());
                 for pointer in selected.values() {
@@ -278,7 +278,7 @@ impl Published {
                             .expect("validated manifest")
                     ));
                 }
-                return Ok(true);
+                return self.head_version(&proposal.next, &published).map(Some);
             }
             metrics::REGISTRY.event(Event::PublicationRebase, 1);
             tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;

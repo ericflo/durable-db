@@ -69,7 +69,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-publicationcombining
-COPY spec/PublicationCombining.tla spec/PublicationCombining.checks spec/PublicationCombining.cfg spec/UnsafeCombiningFence.cfg spec/UnsafeCombiningTarget.cfg spec/UnsafeCombiningMerge.cfg spec/UnsafeCombiningAbort.cfg spec/
+COPY spec/PublicationCombining.tla spec/PublicationCombining.checks spec/PublicationCombining*.cfg spec/UnsafeCombining*.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh PublicationCombining && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed

@@ -122,6 +122,17 @@ Automatic maintenance also shares its initial manifest between compaction and no
 
 The default two-revision instance checks 1,722,773 distinct states (10,689,765 generated, depth 25) in 43 seconds on the development host. All four unsafe controls still fail as required. This replaces the larger three-revision default to shorten iteration; it does not extend the proof scope.
 
+Publication receipts now return the directory's exact published pointer, including
+when another helper confirmed it. They do not require a subsequent metadata
+read. The default model still checks **1,722,773 states** in 43 seconds; five
+fault controls pass, including a new premature-receipt fault. A two-job,
+one-database, one-helper coverage check reaches a successful receipt whose target
+has since changed. This does not grant serving authority: `RootAcquisition`
+binds the delayed result to its invocation, and response permission remains
+separate. Rust regressions block all metadata reads after a successful CAS and
+race a newer publication against delayed success delivery; stale tokens must
+still fail their next comparison. Lost publication replies remain uncertain.
+
 The historical three-revision run checked all 13,049,720 symmetry-reduced states (84,918,974 generated, depth 29) against the seven checked invariants: types, referenced-manifest existence, original target comparison, unrelated-write preservation, no duplicate publication, acknowledged history, and no commit after a definite abort. Symmetry renames only jobs among jobs and helpers among helpers. A separate run without symmetry also passed: 42,716,288 states, 279,275,713 generated, depth 29. Reproduce that larger run with `PublicationCombiningNoSymmetry.cfg`. TLC uses probabilistic state fingerprints; these runs are finite model-checking evidence, not a mechanized proof. Four intentionally unsafe configurations omit the collection fence, expected target, current-root merge, or post-submission uncertainty rule.
 
 | Model boundary | Rust boundary |

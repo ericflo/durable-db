@@ -45,6 +45,8 @@ struct Provider {
     pause: AtomicBool,
     pause_root: AtomicBool,
     pause_publication: AtomicBool,
+    pause_reads_after_publication: AtomicBool,
+    pause_publication_reply: AtomicBool,
     pause_budget: AtomicBool,
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -73,6 +75,8 @@ impl Provider {
             pause: AtomicBool::new(false),
             pause_root: AtomicBool::new(false),
             pause_publication: AtomicBool::new(false),
+            pause_reads_after_publication: AtomicBool::new(false),
+            pause_publication_reply: AtomicBool::new(false),
             pause_budget: AtomicBool::new(false),
             entered: Default::default(),
             release: Default::default(),
@@ -145,21 +149,31 @@ impl Authority for Provider {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        let mut history = self.history.lock().unwrap();
-        let current = history.last().unwrap();
-        // Keep B2's no-op shortcut; the shared nonce wrapper must prevent it.
-        if current.info == info {
-            return Ok(Some(current.clone()));
-        }
-        if current.revision != old.revision {
-            return Ok(None);
-        }
-        let mut bucket = Bucket {
-            revision: current.revision + 1,
-            version: None,
-            info,
+        let mut bucket = {
+            let mut history = self.history.lock().unwrap();
+            let current = history.last().unwrap();
+            // Keep B2's no-op shortcut; the shared nonce wrapper must prevent it.
+            if current.info == info {
+                return Ok(Some(current.clone()));
+            }
+            if current.revision != old.revision {
+                return Ok(None);
+            }
+            let bucket = Bucket {
+                revision: current.revision + 1,
+                version: None,
+                info,
+            };
+            history.push(bucket.clone());
+            bucket
         };
-        history.push(bucket.clone());
+        if old.info.get("durable-db-root") != bucket.info.get("durable-db-root")
+            && self
+                .pause_reads_after_publication
+                .swap(false, Ordering::SeqCst)
+        {
+            self.pause_all_reads.store(true, Ordering::SeqCst);
+        }
         if self.lose_reply.swap(false, Ordering::SeqCst)
             || (old.info.get("durable-db-root") != bucket.info.get("durable-db-root")
                 && self.lose_publication_reply.swap(false, Ordering::SeqCst))
@@ -170,6 +184,12 @@ impl Authority for Provider {
             bucket
                 .info
                 .insert("durable-db-prefix".into(), "unexpected".into());
+        }
+        if old.info.get("durable-db-root") != bucket.info.get("durable-db-root")
+            && self.pause_publication_reply.swap(false, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
         }
         Ok(Some(bucket))
     }

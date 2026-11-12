@@ -4,3 +4,5 @@ unsafe UnsafeCombiningFence.cfg combining-Fence 1g ReferencedManifestsExist
 unsafe UnsafeCombiningTarget.cfg combining-Target 1g ExpectedTargetsCompared
 unsafe UnsafeCombiningMerge.cfg combining-Merge 1g UnrelatedWritesPreserved
 unsafe UnsafeCombiningAbort.cfg combining-Abort 1g NoCommitAfterDefiniteAbort
+unsafe UnsafeCombiningReceipt.cfg combining-receipt 512m AcknowledgedHistory
+unsafe PublicationCombiningReceipt.cfg combining-superseded 512m NotSupersededReceipt

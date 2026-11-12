@@ -113,6 +113,9 @@ Abort(j) == /\ response[j] = "waiting" /\ j \notin committed
             /\ UNCHANGED <<history, files, proposals, target, base, chosen, seen, helping,
                            committed, commits, latest, badTarget, gcPhase, candidates,
                            proposalCandidates, gcSeen, protected>>
+\* Return this publication's fresh pointer, not a later observation's pointer.
+\* A historical success remains a valid receipt after the target changes; it
+\* does not authorize serving or let a subsequent CAS skip its comparison.
 Ack(j,r) == /\ response[j] = "waiting" /\ r \in 1..Len(history)
             /\ history[r].heads[target[j]] = j
             /\ response' = [response EXCEPT ![j] = "success"]
@@ -182,8 +185,17 @@ UnrelatedWritesPreserved == Current.heads = latest
 NoDuplicateCommit == \A j \in Jobs: commits[j] <= 1
 AcknowledgedHistory == \A j \in Jobs: response[j] = "success" => j \in committed
 NoCommitAfterDefiniteAbort == \A j \in Jobs: response[j] = "aborted" => j \notin committed
+NotSupersededReceipt == ~\E j \in Jobs:
+    response[j] = "success" /\ Current.heads[target[j]] # j
+\* Fault: let a submitted but unconfirmed proposal manufacture a receipt.
+PrematureReceipt(j) == /\ phase[j] = "submitted" /\ response[j] = "waiting"
+    /\ response' = [response EXCEPT ![j] = "success"]
+    /\ UNCHANGED <<history, files, proposals, phase, target, base, chosen, seen, helping,
+                   committed, commits, latest, badTarget, gcPhase, candidates,
+                   proposalCandidates, gcSeen, protected>>
 \* Only rename fresh job identities within Jobs and interchangeable helpers
 \* within Helpers. Databases and the collector are never mixed with either.
 Symmetry == {jp @@ hp: jp \in Permutations(Jobs), hp \in Permutations(Helpers)}
 Spec == Init /\ [][Next]_vars
+UnsafeReceiptSpec == Init /\ [][Next \/ (\E j \in Jobs: PrematureReceipt(j))]_vars
 =============================================================================

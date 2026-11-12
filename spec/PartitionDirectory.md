@@ -15,11 +15,20 @@ an older partition observation before uploading. The shared directory collector
 uses the existing global publication fence to protect directory pages and
 control manifests. Neither collector treats an observation as permission.
 
-After a successful entry CAS, the adapter reads the published entry to obtain
-its exact comparison token. It confirms only identical revision and metadata.
-An intervening change or failed read returns **uncertain**, never conflict or a
-token reconstructed from the old observation. A proposal can publish after its
-caller disappears, as already modeled by `PublicationCombining`.
+After confirmed publication, the directory returns the exact fresh pointer it
+published as the comparison token. The adapter returns its captured record with
+that token; it needs no follow-up observation. A later update may already have
+superseded this result. Subsequent mutations still compare the exact pointer,
+and serving still requires a fresh permit. This is a publication receipt, never
+a claim that the returned record remains current.
+
+`PublicationCombining.Ack` accepts only the job's own fresh published identity,
+including a historical root after a later publication. The receipt coverage
+control reaches a superseded success; the premature-receipt fault must violate
+`AcknowledgedHistory`. `RootAcquisition.Deliver` binds delayed success to the
+original invocation and its captured result. Unknown publication replies remain
+unknown; returning a token before confirmation is forbidden. A proposal can
+still publish after its caller disappears.
 
 For each partition, `RootRegistration` and `RevocableOwner` apply unchanged.
 Object names are mapped injectively to `partitions/<eight lowercase hex digits>/`.
@@ -81,21 +90,22 @@ SHA-256 over a domain-separated database name chooses a stable partition;
 membership never participates in this calculation. `ClusterLayout` checks this
 boundary with two configurations and changing membership, plus erase/remap faults.
 
-Rendezvous ranking of canonical peer addresses chooses a preferred node for each
-partition. Membership is only a scheduling hint and may disagree, pause, omit
+Rendezvous ranking of stable member IDs chooses a preferred node for each
+partition; socket changes alone do not change that ranking. Membership is only a scheduling hint and may disagree, pause, omit
 live nodes or be empty. It grants no authority. Each acquisition uses a fresh
 root incarnation and the existing claim, revocation, journal selection and
 private recovery path. Only a recovered owner enters the serving map. Unknown
-control outcomes stop that attempt; a later attempt uses a new incarnation and
-therefore discovers/revokes any abandoned winner through its registration chain.
+control outcomes require exact validation of the same bound candidate within a
+finite budget. An exhausted or unrecoverable attempt discards that candidate; a
+later fresh incarnation discovers/revokes any abandoned winner through its
+registration chain.
 These are the existing `RootAcquisition`, `RootRegistration`, `RevocableOwner`
 and replay obligations, not a second ownership protocol.
 
-Reconciliation is serialized per process. Each pass checks at most eight owned
-partitions and advances a rotating cursor before I/O, including failed or
-canceled attempts, so one failing partition cannot monopolize retries. Membership
-updates and a retry timer trigger it. Timers affect progress
-only. Removing a local placement drops its serving-map entry; already admitted
+One scheduler drives at most four acquisitions concurrently, one per partition,
+and advances a rotating cursor before I/O. Membership updates and a retry timer
+trigger it. Timers affect progress only. A preference change keeps the incumbent
+serving until takeover; local failure or removal retires it. Already admitted
 requests retain the exact backend they selected and still validate its permit.
 An expected-incarnation header must be checked against that same pinned backend,
 never one selected again after the check. The HTTP contract and tenant scopes
@@ -116,8 +126,8 @@ Safety does not require membership agreement. Eventual progress does: peers must
 eventually receive the same healthy membership, provider operations must make
 progress, upload credit must remain available, and the preferred node must keep
 retrying. Permanent partitions and unlimited placement churn have no availability
-promise. Membership discovery, Kubernetes qualification and CLI migration are
-separate integration work; the library accepts explicit membership snapshots.
+promise. The cloud CLI supplies DNS membership snapshots to this controller; Kubernetes
+failure, memory and performance qualification remain separate obligations.
 
 ## Membership discovery
 

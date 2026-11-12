@@ -1,5 +1,23 @@
 # Verification results
 
+## Control publication receipts (v0.24.4 candidate, 2026-11-12)
+
+The partition adapter now returns the exact immutable pointer confirmed by the
+shared directory. It removes the metadata readback after every successful control
+publication, including its directory/manifest reads and the uncertainty caused by
+a failed or superseded readback. The publication algorithm, formats, physical
+admission, metrics and fresh serving-permit checks remain shared and unchanged.
+Unknown publication replies still require exact validation. A receipt can already
+be historical when delivered; its next mutation compares the original pointer.
+
+A blocked-readback regression fails against v0.24.3 in zero measured seconds
+under simulated time. The publication model checks 1,722,773 states, five fault
+controls and a superseded-receipt coverage control. All **355 routine Rust checks**,
+formatting and strict clippy pass; 11 focused partition checks finish in 0.24
+seconds. Existing acquisition-model bounds and controls pass. Cloud qualification
+is pending; no recovery speedup is claimed. The obsolete readback implementation,
+its error classification and outdated scheduling text are removed.
+
 ## v0.24.3 acquisition costs and overlapping table uploads (2026-11-12)
 
 Table builds now overlap their two fresh immutable PUTs using buffers already

@@ -234,7 +234,7 @@ impl Authority for Register {
         old: &Bucket,
         info: BTreeMap<String, String>,
     ) -> anyhow::Result<Option<Bucket>> {
-        let next = Bucket {
+        let mut next = Bucket {
             revision: old
                 .revision
                 .checked_add(1)
@@ -247,22 +247,18 @@ impl Authority for Register {
             bytes.len() <= MAX_RECORD,
             "partition control record exceeds bound"
         );
-        if !self
+        let Some(version) = self
             .files
             .directory
-            .cas(&self.key, old.version.as_ref(), bytes.into())
+            .compare_head(&self.key, old.version.as_ref(), bytes.into())
             .await?
-        {
+        else {
             return Ok(None);
-        }
-        // The directory owns its exact pointer token. Never invent a token or
-        // turn an intervening publication/read failure into a definite conflict.
-        let current = self.read().await?;
-        ensure!(
-            current.revision == next.revision && current.info == next.info,
-            "partition changed after publication; outcome uncertain"
-        );
-        Ok(Some(current))
+        };
+        // A later writer may already have superseded this exact publication.
+        // Further mutations compare its pointer; serving still checks a permit.
+        next.version = Some(version);
+        Ok(Some(next))
     }
     async fn delete_versions(&self, key: &str) -> anyhow::Result<()> {
         self.files.delete(key).await

@@ -248,6 +248,86 @@ async fn partition_stale_comparison_and_lost_publication_reply() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn partition_publication_receipt_needs_no_followup_read() {
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let partition = directory.partition(3, limits()).await.unwrap();
+    let authority = partition.authority();
+    let before = authority.read().await.unwrap();
+    let mut first = before.info.clone();
+    first.insert("note".into(), "one".into());
+    // The exact CAS replies, but all subsequent metadata reads hang.
+    provider
+        .pause_reads_after_publication
+        .store(true, Ordering::SeqCst);
+    let receipt = tokio::time::timeout(Duration::from_secs(1), authority.replace(&before, first))
+        .await
+        .expect("confirmed publication must not wait for a readback")
+        .unwrap()
+        .unwrap();
+    assert!(provider.pause_all_reads.load(Ordering::SeqCst));
+    assert_eq!(receipt.revision, before.revision + 1);
+    assert_eq!(receipt.info["note"], "one");
+    assert!(receipt.version.is_some());
+    provider.pause_all_reads.store(false, Ordering::SeqCst);
+
+    // The returned token is the directory's actual pointer: it can update this
+    // record once, then cannot overwrite a later independent publication.
+    let mut second = receipt.info.clone();
+    second.insert("note".into(), "two".into());
+    let successor = authority.replace(&receipt, second).await.unwrap().unwrap();
+    assert_eq!(successor.revision, receipt.revision + 1);
+    assert!(
+        authority
+            .replace(&receipt, receipt.info.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(authority.read().await.unwrap().info["note"], "two");
+}
+
+#[tokio::test]
+async fn delayed_partition_receipt_keeps_its_own_pointer_after_a_newer_write() {
+    let provider = Provider::new();
+    let first = directory(&provider).await;
+    let second = directory(&provider).await;
+    let a = first.partition(3, limits()).await.unwrap().authority();
+    let b = second.partition(3, limits()).await.unwrap().authority();
+    let before = a.read().await.unwrap();
+    let mut info = before.info.clone();
+    info.insert("note".into(), "one".into());
+    provider
+        .pause_publication_reply
+        .store(true, Ordering::SeqCst);
+    let pending = tokio::spawn(async move { a.replace(&before, info).await });
+    tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+        .await
+        .unwrap();
+    let published = b.read().await.unwrap();
+    assert_eq!(published.info["note"], "one");
+    let mut next = published.info.clone();
+    next.insert("note".into(), "two".into());
+    b.replace(&published, next).await.unwrap().unwrap();
+    provider.release.notify_one();
+    let receipt = pending.await.unwrap().unwrap().unwrap();
+    assert_eq!(receipt.revision, published.revision);
+    assert_eq!(receipt.info, published.info);
+    assert_eq!(
+        receipt.version.as_ref().unwrap().0.e_tag,
+        published.version.as_ref().unwrap().0.e_tag
+    );
+    // A historical success grants no right to overwrite its successor.
+    assert!(
+        b.replace(&published, published.info.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(b.read().await.unwrap().info["note"], "two");
+}
+
 #[tokio::test]
 async fn layout_is_immutable_survives_publication_and_refuses_populated_directories() {
     use crate::providers::partitions::Layout;
