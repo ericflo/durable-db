@@ -13,26 +13,59 @@ The regression pauses activation, changes preference, then checks completion and
 an actual HTTP create through the retained owner. It detects the previous
 cancellation in 0.03 seconds and passes in 0.06 seconds. OwnerRouting now starts
 with a confirmed, pre-activation claimant and checks 728 states with eight
-negative controls. These bounded checks do not prove the Rust implementation or
-production liveness.
+negative controls. All 344 routine Rust checks, formatting and strict clippy pass.
+These bounded checks do not prove the Rust implementation or production liveness.
+
+[Woodpecker #272](https://ci.eflorenzano.com/repos/18/pipeline/272/1) passes at
+`878a3c5`, including optimized capacity and native JavaScript/Pi checks. Versioned
+MinIO passes membership, receipt replay, fencing and cold recovery in 40.27 seconds;
+its container, bucket and 79 remaining versions were removed.
+
+The exact release executable recovers **all 952 acknowledged B2 writes**, checked
+independently across four histories. Three of five targets pass:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 16.12 s | 60 s | Pass |
+| Scale to six | 59.13 s | 60 s | Pass |
+| First rolling replacement | 141.84 s | 60 s | Miss |
+| Second rolling replacement | 157.77 s | 60 s | Miss |
+| Cold API readiness | 93.44 s | 120 s | Pass |
+
+Those upper bounds include rollout/readiness completion and the subsequent
+per-writer readback barrier. The largest acknowledgement gaps in the corresponding
+history slices are **77.54 / 70.13 seconds**, compared with **95.10 / 123.08 seconds**
+for v0.23.13 in the same focused harness. The slices include preceding-phase
+budget/diagnostic time; these are neither exact outage windows nor readback
+latencies. Different pod placements and short sequential runs prevent a controlled
+latency claim. Repeated ownership completions remain visible in both rollouts.
 
 A prior experiment at `b7d5073` waited 15 seconds for membership to settle before
-moving a reachable incumbent. In the same focused B2 harness, v0.23.13 rolls in
-121.70 / 154.78 seconds; that candidate rolls in 123.41 / 141.84 seconds, while
-scale-to-six rises from 57.91 to 77.02 seconds. The largest acknowledgement gaps were shorter in that sample
-(80.56 / 91.94 seconds versus 95.10 / 123.08), but both rollout targets still
-missed. The final change instead fixes the confirmed-recovery cancellation;
-the timer, its dedicated regression and two model configurations were removed. Both runs recover every acknowledgement (746 / 754 respectively).
-These are small sequential runs with different placements, not a controlled
-latency estimate or production SLO.
+moving a reachable incumbent. It recovered all 754 acknowledgements, with shorter
+acknowledgement gaps than the 746-write baseline, but mixed overall timings:
+123.41 / 141.84-second rollouts versus 121.70 / 154.78 seconds, and slower scale-to-six
+(77.02 versus 57.91 seconds). The final change instead fixes the confirmed-recovery
+cancellation. The timer, its dedicated regression and two model configurations
+were removed; the bounded routing model shrank from 1,888 to 728 states.
 
-The reusable `--scenario rollout` fixture remains: 1→3→6 scaling, two consecutive
+The reusable `--scenario rollout` fixture exercises 1→3→6 scaling, two consecutive
 six-pod replacements, then zero-compute cold recovery. It shares the four writers,
 budget checks, two-readback barriers and independent history verification with
 the broader campaign. Two existing controller checks retain their TCP assertions
 but use simulated time, reducing the controller suite from about 57 to 6 seconds.
-All 344 routine Rust checks, formatting and strict clippy pass.
-Final-source cloud qualification is pending.
+The duplicated rollout sequence was replaced by one shared function.
+
+All three B2 namespaces, buckets and scoped keys were removed, including
+1,574 / 1,460 / 1,643 remaining versions for baseline / discarded experiment /
+final source. [Exact sources, artifacts, histories, timing bounds and cleanup](evidence/native-recovery-2026-11-11.json)
+retain all three runs. [v0.23.14](https://github.com/ericflo/durable-db/releases/tag/v0.23.14)
+ships the final static executable, also checked by the standalone install,
+transaction, backup and crash-recovery smoke test.
+
+Pod addresses still determine placement scores. Next evaluate stable logical
+member identities across replacements, then repeat rollout continuity and the
+broader failure matrix. Physical-host loss, sustained load, AWS, peak memory and
+a production operating envelope remain unqualified.
 
 ## v0.23.13 incumbent retention (2026-11-12)
 
@@ -109,10 +142,7 @@ The conservative uncertain-upload recovery rule is unchanged. The trace does
 not establish that checkpoint time alone explains the client-progress delay.
 
 Rolling replacement remains **151.27 seconds**, close to the prior 153.30-second
-run; this change has not established a material rollout improvement. The next
-placement experiment is coalescing transient healthy-owner moves without delaying
-failed-owner recovery. Checkpoint work on the serving path and uncertain-upload
-recovery also remain targets.
+run; this change did not establish a material rollout improvement.
 
 [v0.23.13](https://github.com/ericflo/durable-db/releases/tag/v0.23.13) ships this
 exact static executable. [Source hashes, configuration, samples and cleanup](evidence/native-recovery-2026-11-11.json)
