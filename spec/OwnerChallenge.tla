@@ -1,7 +1,7 @@
 ------------------------ MODULE OwnerChallenge ------------------------
 EXTENDS Integers, FiniteSets
 CONSTANT Fault
-ASSUME Fault \in {"None", "Compare", "Coalesce", "Wait", "Answer", "Forget"}
+ASSUME Fault \in {"None", "Compare", "Coalesce", "Wait", "Answer", "Forget", "WithdrawCompare"}
 VARIABLE s
 vars == <<s>>
 Candidates == {1, 2}
@@ -11,7 +11,7 @@ Candidates == {1, 2}
 Init == s = [owner |-> 0, nonce |-> 0, revision |-> 0, alive |-> TRUE,
   joined |-> [c \in Candidates |-> 0], waited |-> {},
   captured |-> [c \in Candidates |-> -1], answer |-> -1,
-  answered |-> FALSE, replaced |-> FALSE, valid |-> TRUE, coalesced |-> TRUE, kept |-> TRUE]
+  answered |-> FALSE, withdrawn |-> FALSE, replaced |-> FALSE, valid |-> TRUE, coalesced |-> TRUE, kept |-> TRUE]
 Challenge(c) == /\ s.owner = 0 /\ s.revision < 4
   /\ s' = [s EXCEPT !.nonce = IF @ = 0 \/ Fault = "Coalesce" THEN c ELSE @,
     !.revision = @ + 1,
@@ -23,21 +23,30 @@ Join(c) == /\ s.owner = 0 /\ s.nonce # 0 /\ s.joined[c] = 0
 \* The finite policy check abstracts scheduling/rate, not a latency guarantee.
 Wait(c) == /\ s.joined[c] # 0
   /\ s' = [s EXCEPT !.waited = @ \cup {c}]
-Prepare(c) == /\ s.owner = 0 /\ s.nonce # 0 /\ s.nonce = s.joined[c]
-  /\ (c \in s.waited \/ Fault = "Wait")
+Prepare(c) == /\ s.owner = 0
+  /\ (s.withdrawn \/ (s.nonce # 0 /\ s.nonce = s.joined[c]
+                         /\ (c \in s.waited \/ Fault = "Wait")))
   /\ s' = [s EXCEPT !.captured[c] = s.revision]
 \* Captured requests may apply after their caller disappears or loses a reply.
 Apply(c) == /\ s.captured[c] >= 0 /\ s.owner = 0 /\ s.revision < 4
   /\ (s.revision = s.captured[c] \/ Fault = "Compare")
   /\ s' = [s EXCEPT !.owner = c, !.nonce = 0, !.revision = @ + 1,
     !.replaced = TRUE,
-    !.valid = ~s.answered /\ c \in s.waited]
+    !.valid = s.withdrawn \/ (~s.answered /\ c \in s.waited), !.withdrawn = FALSE]
 \* Retrying an uncertain claim retains the completed owner/nonce wait. It
 \* grants no authority and cannot survive an answer's changed comparison.
 Forget(c) == /\ s.captured[c] >= 0
   /\ s' = [s EXCEPT !.captured[c] = -1,
     !.waited = IF Fault = "Forget" THEN @ \ {c} ELSE @,
     !.kept = @ /\ (c \notin s.waited \/ Fault # "Forget")]
+\* Best-effort shutdown removes only the old route, using its captured revision.
+\* It grants no authority: permit revocation/recovery remain outside this hint model.
+\* One shutdown hint captured at revision zero, allowed to arrive arbitrarily late.
+Withdraw == /\ s.revision < 4
+  /\ (s.revision = 0 \/ Fault = "WithdrawCompare")
+  /\ s' = [s EXCEPT !.withdrawn = TRUE, !.nonce = 0, !.revision = @ + 1]
+WithdrawalBound == s.withdrawn => s.owner = 0
+NotWithdrawnReplacement == ~(s.replaced /\ s.waited = {})
 RetryKeepsWait == s.kept
 PrepareAnswer == /\ s.owner = 0 /\ s.nonce # 0 /\ s.alive
   /\ s' = [s EXCEPT !.answer = s.revision]
@@ -52,7 +61,7 @@ Stop == s' = [s EXCEPT !.alive = FALSE]
 \* Unrelated metadata work can invalidate a comparison, never answer a probe.
 Other == /\ s.revision < 4 /\ s' = [s EXCEPT !.revision = @ + 1]
 Next == (\E c \in Candidates: Challenge(c) \/ Join(c) \/ Wait(c) \/ Prepare(c) \/ Apply(c) \/ Forget(c))
-  \/ PrepareAnswer \/ Answer \/ Stop \/ Other
+  \/ PrepareAnswer \/ Answer \/ Stop \/ Other \/ Withdraw
 Coalesced == s.coalesced
 Waited == s.replaced => s.valid
 OwnerAnswered == s.answered => s.answer >= 0

@@ -1721,3 +1721,53 @@ async fn absent_uncertain_journal_reacquires_and_excludes_a_late_old_upload() {
         "b25l"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn graceful_withdrawal_skips_challenge_and_preserves_http_receipts() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let directory = directory(&provider).await;
+    let first = Node::start(directory.clone(), listener, vec![address]).await;
+    settled(&[&first], &[address]).await;
+    let name = &names()[0];
+    let path = format!("/v1/databases/{name}");
+    let token = auth().administrator_token(600).unwrap();
+    first
+        .server
+        .ok(
+            "PUT",
+            &path,
+            &token,
+            json!({"request_id":"create", "limits":{"max_keys":20,"max_bytes":10000}}),
+        )
+        .await;
+    let request = commit(0);
+    let mut receipt = first
+        .server
+        .ok("POST", &format!("{path}/commit"), &token, request.clone())
+        .await;
+    receipt["replayed"] = json!(true);
+    let old = first.cluster.resolve(name).await.unwrap().unwrap();
+    first.cluster.drain().await;
+    assert!(!first.cluster.ready().await);
+    // The old process and backend remain alive. Withdrawal only removes routing;
+    // the successor must still revoke its permit and recover the durable receipt.
+    assert!(old.info(name, &Access::Administrator).await.is_ok());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let next = Node::start(directory, listener, vec![address]).await;
+    tokio::time::timeout(Duration::from_secs(5), settled(&[&next], &[address]))
+        .await
+        .expect("clean withdrawal must not wait for the fifteen-second challenge");
+    assert!(matches!(
+        old.info(name, &Access::Administrator).await,
+        Err(crate::Error::Storage(_))
+    ));
+    assert_eq!(
+        next.server
+            .ok("POST", &format!("{path}/commit"), &token, request)
+            .await,
+        receipt
+    );
+}

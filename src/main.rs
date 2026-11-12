@@ -427,6 +427,12 @@ async fn main() -> anyhow::Result<()> {
                 .with_graceful_shutdown(async move {
                     shutdown().await;
                     shutdown_app.ready.store(false, Ordering::Relaxed);
+                    if tokio::time::timeout(Duration::from_secs(5), shutdown_app.backend.drain())
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("routing withdrawal deadline reached");
+                    }
                     drop(membership);
                     tracing::info!("draining requests");
                 })

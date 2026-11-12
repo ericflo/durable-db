@@ -30,6 +30,32 @@ impl Root {
         }
         let nonce = Uuid::new_v4();
         record.challenge = Some(nonce);
+        Ok(self.publish_hint(observed, record).await?.then_some(nonce))
+    }
+
+    /// Withdraw only this retiring incarnation's route. Exact comparison keeps
+    /// a delayed or uncertain shutdown hint from clearing a successor's route.
+    /// Permission and selected history are unchanged; takeover still fences.
+    pub(crate) async fn withdraw_route(
+        &mut self,
+        observed: Observation,
+        incarnation: Uuid,
+    ) -> Result<bool, Error> {
+        self.available()?;
+        if self.epoch.is_some() {
+            return Err(Error::Bound);
+        }
+        let mut record = observed.record.ok_or(Error::NotOwner)?;
+        if record.identity.incarnation != incarnation {
+            return Err(Error::NotOwner);
+        }
+        record.address = None;
+        record.challenge = None;
+        self.publish_hint(observed, record).await
+    }
+
+    // Hint publication never confirms or activates the foreign incarnation.
+    async fn publish_hint(&mut self, observed: Observation, record: Record) -> Result<bool, Error> {
         let metadata = metadata::encode(
             observed.raw.metadata(),
             &self.prefix,
@@ -42,8 +68,7 @@ impl Root {
         Ok(matches!(
             self.session.finish(request.execute().await),
             control::Outcome::Confirmed
-        )
-        .then_some(nonce))
+        ))
     }
 
     /// Bounded background work for this incarnation, from confirmed claim until

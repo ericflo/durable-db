@@ -432,6 +432,42 @@ impl Drop for Cluster {
 }
 #[async_trait]
 impl Backend for Cluster {
+    async fn drain(&self) {
+        // Stop acquisition/maintenance before taking the final resident set.
+        // Abort and join outside the mutex; cancellation needs no storage hint.
+        let workers = std::mem::take(&mut *self.workers.lock().expect("cluster workers lock"));
+        for worker in &workers {
+            worker.abort();
+        }
+        for worker in workers {
+            let _ = worker.await;
+        }
+        self.ready.store(false, Ordering::Release);
+        futures::stream::iter(0..self.partitions.len())
+            .map(|id| async move {
+                let partition = &self.partitions[id];
+                let Some(local) = partition.local.write().await.take() else {
+                    return;
+                };
+                let incarnation = local
+                    .backend
+                    .owner_incarnation()
+                    .expect("native owner identity");
+                drop(local);
+                let withdraw = async {
+                    let mut root = partition.connection.root()?;
+                    let observed = root.observe().await?;
+                    root.withdraw_route(observed, incarnation).await
+                };
+                if !matches!(withdraw.await, Ok(true)) {
+                    tracing::warn!(partition = id, "native routing withdrawal deferred");
+                }
+            })
+            .buffer_unordered(4)
+            .for_each(|_| async {})
+            .await;
+    }
+
     async fn resolve(&self, db: &str) -> Result<Option<Arc<dyn Backend>>> {
         let id = self.config.layout.partition(db)?;
         let partition = &self.partitions[id as usize];

@@ -25,6 +25,10 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// Called after admission closes; the caller bounds this best-effort wait.
+    /// Shutdown hints grant no authority and interruption must preserve safety.
+    async fn drain(&self) {}
+
     async fn ready(&self) -> bool {
         true
     }

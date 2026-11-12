@@ -1,5 +1,23 @@
 # Verification results
 
+## Graceful routing withdrawal (v0.24.2 candidate, 2026-11-12)
+
+Shutdown closes admission, stops the cluster scheduler, and conditionally removes
+the addresses of its owned partitions within a five-second budget. Replacements
+can skip the 15-second advisory challenge wait after a confirmed withdrawal.
+They still fence old permits and recover selected journals. Crashes or failed
+hints use the existing challenge path. The existing optional address field and
+conditional update implement the hint; no format or object class is added.
+
+The real HTTP regression retains the old backend, requires replacement within
+five simulated seconds, then checks fencing and exact receipt replay. Suppressing
+the hint fails in 0.10 seconds. Both regressions pass in 0.11 seconds, including
+failed writes, lost replies, stale comparisons and wrong incarnations. The
+updated challenge model checks 14,750 states with six fault controls and three
+reachability checks. All 351 routine Rust checks, formatting and strict clippy
+pass. These bounded checks do not prove Rust or production latency. Cloud
+qualification is pending.
+
 ## v0.24.1 response validation uncertainty (2026-11-12)
 
 Two real TCP regressions reproduce worker retirement after a transient permit

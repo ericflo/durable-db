@@ -117,3 +117,64 @@ async fn uncertain_challenges_defer_and_stale_owner_markers_are_not_answers() {
         assert!(metadata::decode(&info, "test", encoding(), false).is_err());
     }
 }
+
+#[tokio::test]
+async fn route_withdrawal_is_identity_bound_and_never_grants_permission() {
+    let provider = Provider::new();
+    let mut owner = provider
+        .root()
+        .advertise("127.0.0.1:7654".parse().unwrap())
+        .unwrap();
+    claim(&mut owner).await;
+    activate(&mut owner).await;
+    let identity = owner.identity().unwrap().unwrap();
+    let mut hint = provider.root();
+    let stale = hint.observe().await.unwrap();
+    provider.fail_replacements.store(1, Ordering::SeqCst);
+    assert!(
+        !hint
+            .withdraw_route(hint.observe().await.unwrap(), identity.incarnation)
+            .await
+            .unwrap()
+    );
+    assert!(
+        hint.observe().await.unwrap().incumbent().is_some(),
+        "failed hint retains the normal challenge path"
+    );
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(
+        !hint
+            .withdraw_route(hint.observe().await.unwrap(), identity.incarnation)
+            .await
+            .unwrap()
+    );
+    assert!(hint.observe().await.unwrap().incumbent().is_none());
+    assert_eq!(owner.permission().await.unwrap(), Some(identity));
+    assert!(
+        hint.permission().await.unwrap().is_none(),
+        "a hint cannot activate the old owner"
+    );
+    let mut next = provider
+        .root()
+        .advertise("127.0.0.1:7655".parse().unwrap())
+        .unwrap();
+    claim(&mut next).await;
+    activate(&mut next).await;
+    let successor = provider.record();
+    assert!(
+        !hint
+            .withdraw_route(stale, identity.incarnation)
+            .await
+            .unwrap()
+    );
+    assert!(
+        hint.withdraw_route(hint.observe().await.unwrap(), identity.incarnation)
+            .await
+            .is_err()
+    );
+    assert!(
+        provider.record() == successor,
+        "stale shutdown never clears a successor route"
+    );
+    assert!(owner.permission().await.unwrap().is_none());
+}
