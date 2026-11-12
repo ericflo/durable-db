@@ -46,13 +46,13 @@ must also complete a fresh provider-backed administrative read. Each split is
 held for thirty seconds after its network checks pass. Per-writer progress during
 the split is recorded separately from recovery after healing. Both scenarios
 share cold replacement, full history verification and namespace cleanup. The
-exact v0.23.8 executable passes this focused B2 scenario with all 495 acknowledged
-writes recovered and independently checked. Provider-backed administrative reads
-succeed on every process during both splits. Only two of four writers advance
-during the one-way split, and one of four during the two-way split. Every writer
-resumes within 20.84 / 60.02 seconds after healing, respectively; the latter
-misses the 60-second target. This qualifies bounded fault recovery, not
-availability during a permanent partition. The initial NetworkPolicy attempt
+exact v0.23.9 executable completes this focused B2 scenario with all 560 acknowledged
+writes recovered and independently checked. All eighteen provider-backed
+administrative reads succeed across the three processes. Only two of four writers
+advance during the one-way split; none advance during the two-way split. Every
+writer resumes within 105.60 / 138.46 seconds after healing, respectively; both
+miss the 60-second target. This records recovery within the harness's outer
+ceiling, not availability during a permanent partition or a met recovery SLO. The initial NetworkPolicy attempt
 failed injection validation because established connections remained usable;
 [that behavior is implementation-defined](https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-s-impact-on-existing-connections).
 

@@ -1,33 +1,58 @@
 # Verification results
 
-## Recovery and control admission (unreleased)
+## v0.23.9 operational access during tenant saturation (2026-11-12)
 
-Activation now overlaps up to four independent predecessor-permit revocations,
-joining every confirmed absence before it may publish. Cancellation or any error
-leaves activation unconfirmed. The eight-predecessor regression covers the
-concurrency bound, held completion, lost deletion replies, cancellation and a
-replacement owner. It fails against the serial code and passes in 0.02 seconds
-with the change. RootRegistration retains its 34,061 / 281,563-state bounds and
-all six negative/coverage controls; arbitrary completion order was already modeled.
-All 338 enabled Rust checks, formatting and strict clippy pass.
-The serial wait is removed. No durable format, API or ownership rule changes.
-Versioned MinIO passes the full native HTTP budget, retention, takeover and
-cold-recovery fixture in 183.26 seconds. Its bucket/container and 32 remaining
-object versions were removed. The first B2 candidate stops before the one-way hold because a provider-backed
-administrative probe fails. It records 175 partial acknowledgements/readbacks,
-with no final cold/history check; subsequent monitoring on the isolated process
-returns 429. The namespace, bucket, key and 453 remaining versions were removed.
-The original probe did not retain its exact failure status; the harness now does.
+Tenant saturation could block budget inspection and monitoring. Authenticated
+operational requests now share two additional slots while retaining principal
+and rate limits. Administrator data traffic stays in the data pool with a
+separate principal allowance. The local regression holds all eight data slots,
+checks that budget inspection and monitoring succeed, fills the two-slot control
+reserve, and verifies cancellation returns capacity. It fails against the old
+shared gate and passes in 0.01 seconds with the fix. Tenant paths and names cannot
+select the reserve. No durable accounting or authority rule changes.
 
-A local regression reproduces administrative/monitoring 429 responses when four
-tenants fill all eight data slots. Authenticated operational requests now share
-two additional slots while retaining principal/rate limits. Administrator data
-traffic keeps the data pool and a separate principal allowance.
-The extended fixture passes in 0.01 seconds: all data slots remain held, budget
-inspection and monitoring succeed, the two-slot control bound rejects excess
-traffic, and cancellation returns capacity. Tenant paths/names cannot select the
-reserve. This replaces the shared global admission gate for control traffic;
-no durable accounting or authority rule changes. B2 requalification is pending.
+Activation also overlaps at most four predecessor-permit revocations, joining
+every confirmed absence before publication. The eight-predecessor regression
+covers held completion, lost deletion replies, cancellation and replacement-owner
+recovery in 0.02 seconds. RootRegistration retains its 34,061 / 281,563-state
+bounds and six negative/coverage controls; arbitrary completion order was already
+modeled. All 338 enabled Rust checks, formatting and strict clippy pass.
+This removes a serial I/O wait; it has **not established faster cloud recovery**.
+No durable format or API changes.
+
+[v0.23.9](https://github.com/ericflo/durable-db/releases/tag/v0.23.9) packages
+`257273e`, verified by [Woodpecker #255](https://ci.eflorenzano.com/repos/18/pipeline/255/1).
+Versioned MinIO passes the native HTTP budget, retention, takeover and cold-recovery
+fixture in 183.29 seconds. Its bucket/container and 31 remaining versions were
+removed. The exact release executable completes the B2/Kubernetes peer-isolation
+campaign with **560 acknowledgements, 560 readbacks and 560 recovered keys**.
+All four independent sequential histories pass; all eighteen provider-backed
+administrative probes return 200 across three processes. The namespace, bucket,
+scoped key and 1,004 remaining physical versions were removed.
+
+| Fault or recovery | Progress during the thirty-second hold | Every writer resumes within | Target |
+| --- | --- | --- | --- |
+| One-way peer isolation, B2 reachable | 2 of 4 writers | 105.60 seconds after healing | 60 seconds: missed |
+| Two-way peer isolation, B2 reachable | 0 of 4 writers | 138.46 seconds after healing | 60 seconds: missed |
+| Total compute replacement | No API processes running | 65.19 seconds after API readiness | 120 seconds: met |
+
+Fresh and retained peer sockets demonstrate both packet faults. These timings
+are controller-observed upper bounds to two further readbacks per writer.
+Both healing times exceed the previous v0.23.8 run; different scheduling and
+ownership histories prevent causal attribution from these single runs. The
+longest completed journal-selection stage was 90.30 seconds, identifying the
+next recovery path to investigate. Continuous partition availability and repeatable
+recovery targets remain unqualified. This focused scenario does not repeat the
+full rolling/HPA/host-failure qualification or establish an AWS SLO.
+
+The first candidate at `3b7c643` stopped at an administrative probe before the
+one-way hold: 175 partial acknowledgements/readbacks, no final cold/history check,
+and a later monitoring response of 429 on the isolated process. Its namespace,
+bucket, key and 453 versions were removed. The original failed probe's exact
+status was not retained; the maintained harness now records it before asserting.
+[Sources, hashes, bounds, both attempts and cleanup](evidence/native-recovery-2026-11-11.json)
+remain available. The shared control-admission gate and duplicated status prose
+were replaced; no separate serving path or protocol model was introduced.
 
 ## v0.23.8 recovery cursor reuse (2026-11-12)
 
