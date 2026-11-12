@@ -1,6 +1,6 @@
 # Verification results
 
-## Control publication receipts (v0.24.4 candidate, 2026-11-12)
+## Control publication receipts (v0.24.4, 2026-11-12)
 
 The partition adapter now returns the exact immutable pointer confirmed by the
 shared directory. It removes the metadata readback after every successful control
@@ -14,9 +14,53 @@ A blocked-readback regression fails against v0.24.3 in zero measured seconds
 under simulated time. The publication model checks 1,722,773 states, five fault
 controls and a superseded-receipt coverage control. All **355 routine Rust checks**,
 formatting and strict clippy pass; 11 focused partition checks finish in 0.24
-seconds. Existing acquisition-model bounds and controls pass. Cloud qualification
-is pending; no recovery speedup is claimed. The obsolete readback implementation,
-its error classification and outdated scheduling text are removed.
+seconds. Existing acquisition-model bounds and controls pass.
+[Woodpecker #291](https://ci.eflorenzano.com/repos/18/pipeline/291/1) passes at
+`b78d306`, including JavaScript/Pi contracts and the optimized 10,005-database
+regression (197.60 seconds). Versioned MinIO membership/recovery passes in
+40.46 seconds; its bucket, container and 80 versions are removed. The static
+executable passes installation without a toolchain, transactions, backup/restore
+and forced-stop recovery.
+
+The exact static executable recovers **all 884 B2 acknowledgements**,
+independently checked across four histories:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 15.37 s | 60 s | Pass |
+| Scale to six | 51.54 s | 60 s | Pass |
+| First rolling replacement | 130.96 s | 60 s | Miss |
+| Second rolling replacement | 128.10 s | 60 s | Miss |
+| Cold API readiness | 86.48 s | 120 s | Pass |
+
+Rollout bounds include rollout/readiness completion and the subsequent per-writer
+readback barrier. Maximum acknowledgement gaps in the recorded rollout slices
+are **75.97 / 88.24 seconds**; these slices include intervening diagnostics and
+are not exact fault windows or readback latencies. **This run does not establish
+an overall latency improvement.** The namespace, bucket, scoped key and all
+1,761 physical B2 versions are removed.
+
+Bounded samples retain 88 owner bindings, 89 complete activation calls, 86
+selections and 70 checkpoints. The longest complete sampled activation takes
+9.97 seconds, including 9.46 seconds in conditional publication. An empty
+selection takes 11.14 seconds, mostly publication. Another selection takes
+**21.50 seconds over 130 frame reads**, with validation and restarted discovery
+after the first 65 reads. Counters include rescans, not unique journal frames.
+A checkpoint takes 15.95 seconds, including 10.51 funding and 1.17 staging.
+These are separate sampled calls, not a combined critical path or distribution.
+
+The next target is avoiding repeated discovery when validation confirms its
+recovery snapshot is still unchanged, including the collection generation.
+Control funding and serial journal reads also remain costs. The removed readback
+was reproduced in a focused regression; this run does not attribute the entire
+v0.24.3 empty-selection delay to that readback. Continuous split availability,
+physical-host failure, worst-case memory and a sustained operating envelope
+remain unqualified. The obsolete readback implementation, its error
+classification, duplicate token encoding and outdated scheduling text are
+removed, along with seven completed model scratch directories.
+
+Evidence: [native recovery record](evidence/native-recovery-2026-11-11.json),
+`control_publication_receipts` and `release_0_24_4`.
 
 ## v0.24.3 acquisition costs and overlapping table uploads (2026-11-12)
 
