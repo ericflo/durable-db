@@ -33,7 +33,12 @@ clippy. The existing acquisition model already permits historical observations:
 117,741 states in its main bound and 30,349 in the three-candidate bound pass,
 along with six negative controls. These are bounded protocol checks, not a proof
 of Rust or a guarantee of liveness.
-A fresh cloud run must qualify this correction before release.
+The corrected provider-cost assertion requires one raw read and zero updates or
+barriers. Versioned MinIO passes 1→2→1→0→1 handoff and cold recovery in 2.61 seconds.
+The B2 fixture stops on a single-attempt HTTP 503; its failure remains recorded.
+All four provider-fixture buckets, both B2 keys, both MinIO containers and 173
+remaining physical versions were removed. A fresh Kubernetes campaign with the
+existing bounded identical retries must qualify this correction before release.
 
 ## v0.23.5 independent recovery scheduling (2026-11-12)
 

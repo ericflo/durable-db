@@ -1631,6 +1631,74 @@
       "mandatory_negative_controls": 6
     },
     "cloud_followup": "pending",
-    "scope": "Raw observations are hints; exact comparisons, public budget freshness and serving-permit validation are unchanged."
+    "scope": "Raw observations are hints; exact comparisons, public budget freshness and serving-permit validation are unchanged.",
+    "provider_checks": [
+      {
+        "provider": "B2",
+        "cleanup": {
+          "bucket_removed": true,
+          "workload_key_revoked": true,
+          "physical_versions_deleted": 7
+        },
+        "source_commit": "9b6875dbf934eec3617f2b183fab3ac87588e409",
+        "failure": "Old instrumentation assertion expected [read, replace, barrier] = [1,1,1]; raw observations correctly produced [1,0,0]. The assertion was corrected; no handoff phase was reached."
+      },
+      {
+        "provider": "versioned MinIO",
+        "image": "epsilon-maintenance-minio:20261105",
+        "image_id": "sha256:9d75ed8ad714bbe8111050a031fe9cb31eb446e1ee4651bb94b805c96eaadef1",
+        "cleanup": {
+          "bucket_removed": true,
+          "physical_versions_deleted": 15,
+          "container_removed": true
+        },
+        "source_commit": "9b6875dbf934eec3617f2b183fab3ac87588e409",
+        "failure": "Old instrumentation assertion expected [read, replace, barrier] = [1,1,1]; raw observations correctly produced [1,0,0]. The assertion was corrected; no handoff phase was reached."
+      },
+      {
+        "provider": "B2",
+        "cleanup": {
+          "bucket_removed": true,
+          "workload_key_revoked": true,
+          "physical_versions_deleted": 71
+        },
+        "source_commit": "6ee7807",
+        "failure": "Single-attempt POST /v1/databases/app-0/commit returned HTTP 503; fixture performs no implicit retries. Full deadline-bounded Kubernetes qualification remains pending."
+      },
+      {
+        "provider": "versioned MinIO",
+        "image": "epsilon-maintenance-minio:20261105",
+        "image_id": "sha256:9d75ed8ad714bbe8111050a031fe9cb31eb446e1ee4651bb94b805c96eaadef1",
+        "test": {
+          "automatic_acquisition_and_placement": true,
+          "ceilings_preserved": true,
+          "checkpoint_and_cold_recovery": true,
+          "independent_node_transports_and_caches": true,
+          "layout_mismatch_refused": true,
+          "live_removed_owner_refused": true,
+          "maximum_live_servers": 2,
+          "membership_sequence": [
+            1,
+            2,
+            1,
+            0,
+            1
+          ],
+          "partitions": 2,
+          "provider_metrics_count_once": true,
+          "receipts_preserved": true,
+          "scope": "Loopback controller with supplied membership snapshots and B2/versioned-MinIO storage. Not Kubernetes discovery, AWS, CLI cutover or a performance SLO.",
+          "seconds": 2.607750431,
+          "shared_metadata_collection": true,
+          "unmoved_owner_preserved": true
+        },
+        "cleanup": {
+          "bucket_removed": true,
+          "physical_versions_deleted": 80,
+          "container_removed": true
+        },
+        "source_commit": "6ee7807"
+      }
+    ]
   }
 }
