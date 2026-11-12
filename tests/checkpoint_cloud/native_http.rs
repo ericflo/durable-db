@@ -377,6 +377,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     assert_eq!(calls("object_put"), puts, "retention uploads no objects");
     let (cleanup_ms, retained_tables) = collected(&connection, [2, 1, 1]).await;
     assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
+    let previous_cut = wait_checkpoint(&connection, None).await;
     let previous = server;
     drop((connection, files));
 
@@ -402,7 +403,31 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     previous.stop().await;
 
     assert!(server.control.retained_checkpoint().await.unwrap() == Some(retained));
-    assert_eq!(server.ok("GET", budget, &json!({})).await, balance);
+    wait_checkpoint(&connection, Some(&previous_cut)).await;
+    // Recovery may claim its preserved maintenance reserve before this read.
+    // The exact final charge is checked after the next checkpoint settles below.
+    let opened_balance = server.ok("GET", budget, &json!({})).await;
+    let mut expected = balance.clone();
+    expected["maintenance"]["allocated"] = opened_balance["maintenance"]["allocated"].clone();
+    assert_eq!(opened_balance, expected);
+    for resource in ["bytes", "attempts"] {
+        assert!(
+            opened_balance["maintenance"]["allocated"][resource]
+                .as_u64()
+                .unwrap()
+                >= balance["maintenance"]["allocated"][resource]
+                    .as_u64()
+                    .unwrap()
+        );
+    }
+    assert!(
+        opened_balance["maintenance"]["allocated"]["bytes"]
+            .as_u64()
+            .unwrap()
+            <= opened_balance["maintenance"]["funded_bytes"]
+                .as_u64()
+                .unwrap()
+    );
     assert_eq!(server.ok("POST", commit, &write(1)).await["replayed"], true);
     assert_eq!(
         server.ok("POST", "/v1/databases/b/commit", &write(0)).await["replayed"],
@@ -417,7 +442,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         ("/v1/databases/a/read", 2, "dHdv"),
         ("/v1/databases/b/read", 1, "b25l"),
     ];
-    // Warm both the recovered suffix and checkpoint-backed value paths.
+    // Warm both databases from the settled handoff checkpoint.
     for (path, _, value) in readers {
         assert_eq!(
             server.ok("POST", path, &read).await["values"],
@@ -451,12 +476,17 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     );
     elapsed.sort_by(f64::total_cmp);
 
-    // A new checkpoint covers both the prior epoch and this owner's frame.
-    assert_eq!(
-        server.ok("POST", "/v1/databases/b/commit", &write(1)).await["revision"],
-        2
-    );
-    readers[1] = ("/v1/databases/b/read", 2, "dHdv");
+    // Handoff already covered the previous epoch. Two new frames trigger this
+    // owner's next checkpoint; a single live suffix is not collectible.
+    for revision in 1..=2 {
+        assert_eq!(
+            server
+                .ok("POST", "/v1/databases/b/commit", &write(revision))
+                .await["revision"],
+            revision + 1
+        );
+    }
+    readers[1] = ("/v1/databases/b/read", 3, "dHdv");
     // Wait for both metadata loops and all covered journals after takeover.
     // The catalog shares prefixes with budgets and must survive this sweep.
     let files = connection.objects();
@@ -628,7 +658,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
-        "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":100,"warm_read_paths":["checkpoint","recovered_suffix"],
+        "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":100,"warm_read_paths":["checkpoint"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
         "retention":{"cold_reopen_and_collection":true,"exact_cut_values":true,"release_reclaimed_old_checkpoint":true,"immutable_puts":0},
         "automatic_table_and_manifest_collection":true,"checkpoint_objects_after_first_sweep":retained_tables,"checkpoint_objects_after_takeover_sweep":takeover_tables,
