@@ -27,6 +27,17 @@ impl HttpConnector for Connector {
     }
 }
 
+pub(super) fn observations(builder: AmazonS3Builder) -> object_store::Result<AmazonS3> {
+    builder
+        .with_http_connector(Connector)
+        .with_retry(RetryConfig {
+            max_retries: 2,
+            retry_timeout: Duration::from_secs(10),
+            ..Default::default()
+        })
+        .build()
+}
+
 pub(super) fn single_attempt(builder: AmazonS3Builder) -> object_store::Result<AmazonS3> {
     builder
         .with_http_connector(Connector)
@@ -216,6 +227,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observations_bound_transient_retries_without_following_redirects() {
+        let wire = Arc::new(Mutex::new(Wire {
+            status: 503,
+            calls: vec![],
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Remote::new(
+            Arc::new(
+                observations(builder(format!(
+                    "http://{}",
+                    listener.local_addr().unwrap()
+                )))
+                .unwrap(),
+            ),
+            "prefix",
+        )
+        .unwrap();
+        let app = axum::Router::new()
+            .route("/test/prefix/blocks/fixture", any(response))
+            .with_state(wire.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (status, attempts) in [(503, 3), (403, 1), (303, 1)] {
+            {
+                let mut state = wire.lock().unwrap();
+                state.status = status;
+                state.calls.clear();
+            }
+            assert!(remote.get("blocks/fixture", 1).await.is_err());
+            assert_eq!(
+                wire.lock().unwrap().calls,
+                vec![(Method::GET, Bytes::new()); attempts]
+            );
+        }
+        server.abort();
+        server.await.unwrap_err();
+    }
+
+    #[tokio::test]
     async fn fully_received_upload_with_lost_response_is_not_replayed() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upload = single_attempt(builder(format!(
@@ -257,6 +306,73 @@ mod tests {
         .expect("upload should resolve without SDK retry backoff");
         assert!(result.is_err());
         assert_eq!(*wire.lock().unwrap(), [b"delayed".to_vec()]);
+        server.abort();
+        server.await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn stalled_observation_bodies_release_reads_ranges_and_listings() {
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let seen = entered.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let store = builder(format!("http://{}", listener.local_addr().unwrap()))
+            .with_http_connector(Connector)
+            .build()
+            .unwrap();
+        let remote = Arc::new(Remote::new(Arc::new(store), "prefix").unwrap());
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            seen.add_permits(1);
+            async move {
+                Response::builder()
+                    .status(if headers.contains_key("range") {
+                        206
+                    } else {
+                        200
+                    })
+                    .header("content-length", "1")
+                    .header("content-range", "bytes 0-0/1")
+                    .header("last-modified", "Wed, 11 Nov 2026 00:00:00 GMT")
+                    .header("etag", "\"fixture\"")
+                    .body(Body::from_stream(futures::stream::pending::<
+                        Result<Bytes, std::io::Error>,
+                    >()))
+                    .unwrap()
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut requests = Vec::new();
+        for operation in 0..3 {
+            let remote = remote.clone();
+            requests.push(tokio::spawn(async move {
+                match operation {
+                    0 => remote.get("blocks/fixture", 1).await.map(|_| ()),
+                    1 => remote
+                        .get_range("blocks/fixture", 0..1, 1)
+                        .await
+                        .map(|_| ()),
+                    _ => remote.list("blocks/", None, 1).await.map(|_| ()),
+                }
+            }));
+        }
+        tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(3))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        for request in requests {
+            let result = tokio::time::timeout(Duration::from_secs(1), request)
+                .await
+                .expect("stalled observation must release its caller")
+                .unwrap();
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("observation deadline")
+            );
+        }
         server.abort();
         server.await.unwrap_err();
     }

@@ -140,14 +140,8 @@ impl Native {
             .with_secret_access_key(&native.application_key);
         let uploads = Arc::new(super::transport::single_attempt(s3.clone())?);
         let files = Arc::new(
-            Remote::new(
-                Arc::new(
-                    s3.with_http_connector(super::transport::Connector)
-                        .build()?,
-                ),
-                prefix,
-            )?
-            .with_uploads(uploads),
+            Remote::new(Arc::new(super::transport::observations(s3)?), prefix)?
+                .with_uploads(uploads),
         );
         let native = Arc::new(native);
         Ok(super::Connection::new(files, native, prefix))

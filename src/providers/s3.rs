@@ -71,15 +71,8 @@ impl S3 {
         // and immutable uploads have one attempt; reads retain SDK retries.
         let store = Arc::new(super::transport::single_attempt(builder.clone())?);
         let files = Arc::new(
-            Remote::new(
-                Arc::new(
-                    builder
-                        .with_http_connector(super::transport::Connector)
-                        .build()?,
-                ),
-                prefix,
-            )?
-            .with_uploads(store.clone()),
+            Remote::new(Arc::new(super::transport::observations(builder)?), prefix)?
+                .with_uploads(store.clone()),
         );
         Ok(Arc::new(Self {
             store,

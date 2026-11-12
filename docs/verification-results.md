@@ -1,6 +1,34 @@
 # Verification results
 
-## Peer failure and raw control observations (2026-11-12, release pending)
+## Peer failure, routing and observation deadlines (2026-11-12, release pending)
+
+Candidate `5e9b5fd` passes [Woodpecker #234](https://ci.eflorenzano.com/repos/18/pipeline/234/1),
+independent executable checks and stale-DNS replacement in a fresh B2 campaign,
+but **fails rejoin**. Writer 2 exhausts its 180-second read-retry deadline while
+its partition has not reached a new ready owner. The partial snapshot records
+1,022 acknowledgements and 1,021 readbacks, without final history/cold recovery.
+The difference is unresolved in this failed run, not a finding of data loss.
+All resources and 788 physical versions were removed. Six of seven diagnostic
+metric reads succeeded; cumulative durations include the deliberate process
+pause and cannot be treated as isolated provider latency.
+
+The new controller-monotonic measurements put scale-to-three at **61.56 seconds**
+and scale-to-six at **62.24 seconds** for the last writer's two further readbacks.
+Both pass the outer ceiling but miss the 60-second engineering target. Initial
+setup took 231 seconds. The stopped-process phase boundary took 194 seconds,
+including diagnostics. No latency SLO or repeatability claim follows.
+
+A further local correction bounds a shared-provider wait: the object SDK's
+default ten retries and three-minute retry budget could occupy an acquisition
+slot through the client's entire recovery window. B2 and S3 now share at most
+three read attempts and a ten-second whole-observation deadline covering GET,
+range and listing bodies. Expiration returns an error, never confirmed absence;
+mutation retries remain disabled. The stalled-body TCP regression fails on the
+previous reader. All 332 enabled Rust checks, formatting, strict clippy and the
+site build pass. The unchanged 856-state revocable-owner model passes its nine
+negative controls. These bounded checks do not prove Rust or liveness.
+This policy correction is not yet established as the cloud
+failure's cause or its resolution. Fresh full qualification remains pending.
 
 Candidate `aa3996f` passes [Woodpecker #233](https://ci.eflorenzano.com/repos/18/pipeline/233/1)
 and the independent executable checks. Its fresh B2/Kubernetes campaign reaches

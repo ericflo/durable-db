@@ -817,6 +817,23 @@ namespace, bucket, key and 611 physical versions were removed. See the
 [configuration and bounded timing evidence](evidence/native-recovery-2026-11-11.json).
 
 
+## Bounded remote observations
+
+B2 and S3 share a ten-second deadline for each object GET, bounded range and
+listing, including retries and streamed bytes. Read retries have at most three
+physical attempts; mutation transports remain single-attempt. A timeout is an
+error, never a missing permit or a successful comparison. These are scheduling
+bounds checked when the process runs, not leases or real-time guarantees during
+process suspension. Slow transfers can fail and require an explicit retry.
+
+A real TCP fixture delivers headers but stalls all three response bodies. It
+first fails on the old reader and then requires each caller to receive an error
+when virtual time crosses the deadline. A second fixture checks bounded retries
+for transient failures, one attempt for permanent refusals, and no redirects.
+The existing lost-upload and redirect regressions continue to protect the
+mutation boundary. Ownership, uncertainty and revocation rules are unchanged;
+full B2/Kubernetes qualification of this wait reduction remains pending.
+
 ## HTTP readiness during partition recovery
 
 An observed scale-up marked every pod unready together because readiness required
