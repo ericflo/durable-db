@@ -1,5 +1,40 @@
 # Verification results
 
+## Peer failure and raw control observations (2026-11-12, release pending)
+
+Candidate `689cfcf` passes [Woodpecker #231](https://ci.eflorenzano.com/repos/18/pipeline/231/1)
+and the independently downloaded static executable checks, but **fails the fresh
+B2/Kubernetes campaign**. Two writers exhaust the unchanged 180-second retry
+limit during scale-to-six; tenant-budget observation also fails. The stopped-peer
+fault is not reached. The partial snapshot records 219 acknowledged/read-back
+writes, without a complete cold recovery or history check. This is a failed
+availability qualification, not a finding of lost acknowledgements.
+
+The auxiliary metrics locate substantial delay in bucket-metadata updates:
+one new pod spent 207.82 seconds across 22 calls, while its 23 list-bucket calls
+took 2.36 seconds in total. These measure client-observed request durations;
+they do not identify a provider rate limit. Four of six metric reads succeeded;
+administrator admission refused the other two. The namespace, bucket, key and
+all 554 remaining physical object versions were removed. The failed run remains
+in the [campaign evidence](evidence/native-recovery-2026-11-11.json).
+
+The follow-up removes redundant conditional writes from raw partition control
+observations. The common manifest reader still validates immutable bytes and
+bounds retries; ordinary storage reads retain their freshness barrier. Claims,
+activation and public budget status still require exact comparisons. Routed data
+responses still require fresh writer-permit validation. No wire or storage format
+changes, special clocks or additional coordinator are introduced.
+
+The stale-observation regression fails on the previous implementation. It now
+reads an intentionally old partition pointer without an authority write, then
+checks that exact validation fails and the revoked owner cannot serve. All nine
+partition tests and 329 enabled Rust checks pass, with formatting and strict
+clippy. The existing acquisition model already permits historical observations:
+117,741 states in its main bound and 30,349 in the three-candidate bound pass,
+along with six negative controls. These are bounded protocol checks, not a proof
+of Rust or a guarantee of liveness.
+A fresh cloud run must qualify this correction before release.
+
 ## v0.23.5 independent recovery scheduling (2026-11-12)
 
 [v0.23.5](https://github.com/ericflo/durable-db/releases/tag/v0.23.5) packages

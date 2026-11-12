@@ -8,6 +8,8 @@ ASSUME /\ IsFiniteSet(Candidates) /\ Candidates # {} /\ 0 \notin Candidates
 \* Fresh candidate identities are NOT ordered by their eventual winning epoch.
 \* Each binds once to an observed predecessor. A lost claim is recovered by
 \* exact validation of that same identity/epoch, never retargeted to a new one.
+\* Start may observe any historical source. Partition observation therefore
+\* needs no read barrier: only the subsequent exact comparison confirms it.
 \* Activation changes the confirmed fence to open. Start(activate) abstracts
 \* completed predecessor revocation, checked separately by RootRegistration.
 \* Validation preserves phase: a lost activation that applied can be recovered;

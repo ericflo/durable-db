@@ -183,6 +183,32 @@ async fn partition_directory_splits_preserves_limits_and_refuses_legacy_open() {
 }
 
 #[tokio::test]
+async fn stale_partition_observation_needs_no_write_and_cannot_reconfirm_old_owner() {
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let partition = directory.partition(3, limits()).await.unwrap();
+    let mut old = acquire(&partition).await;
+    let historical = provider.history.lock().unwrap().len() - 1;
+    let successor = acquire(&partition).await;
+
+    // An intentionally stale bucket pointer still resolves immutable metadata.
+    // Observing it must neither mutate authority nor restore serving permission.
+    *provider.stale.lock().unwrap() = Some(historical);
+    let writes = provider.calls.load(Ordering::SeqCst);
+    let seen = old.observe().await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), writes);
+    assert_eq!(seen.record.unwrap().identity.incarnation, old.incarnation);
+    let validate = old.validate(seen).unwrap();
+    *provider.stale.lock().unwrap() = None;
+    assert!(matches!(
+        old.finish(validate.execute().await).unwrap(),
+        Outcome::Conflict
+    ));
+    assert!(old.permission().await.unwrap().is_none());
+    assert!(successor.permission().await.unwrap().is_some());
+}
+
+#[tokio::test]
 async fn partition_stale_comparison_and_lost_publication_reply() {
     let provider = Provider::new();
     let directory = directory(&provider).await;

@@ -210,7 +210,14 @@ struct Register {
 #[async_trait]
 impl Authority for Register {
     async fn read(&self) -> anyhow::Result<Bucket> {
-        let Some(object) = self.files.directory.get(&self.key, MAX_RECORD).await? else {
+        // Authority::read permits stale observations. Root claims/validation
+        // compare this exact pointer; routes still validate the target permit.
+        let Some(object) = self
+            .files
+            .directory
+            .observe_head(&self.key, MAX_RECORD)
+            .await?
+        else {
             return Ok(Bucket {
                 revision: 0,
                 version: None,

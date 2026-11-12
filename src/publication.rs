@@ -251,6 +251,83 @@ impl Published {
             global_collection: format == "5",
         }
     }
+    /// An unvalidated control observation, never a data read or serving grant.
+    /// The caller must subsequently compare this exact pointer or validate a
+    /// fresh writer permit. Stale/missing metadata may cause refusal or retry.
+    pub(crate) async fn observe_head(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> anyhow::Result<Option<Object>> {
+        self.head(key, max_bytes, false).await
+    }
+
+    async fn head(
+        &self,
+        key: &str,
+        max_bytes: usize,
+        fresh: bool,
+    ) -> anyhow::Result<Option<Object>> {
+        let slot = slot(key)?;
+        for _ in 0..4 {
+            let bucket = if fresh {
+                self.observations.read().await?
+            } else {
+                self.authority.read().await?
+            };
+            let root = root(&bucket.info)?;
+            let pointer = match self.directory.get(root.as_ref(), &slot).await {
+                Err(e) if e.is::<MissingNode>() => continue,
+                other => other?,
+            };
+            let Some(pointer) = pointer else {
+                return Ok(None);
+            };
+            let value = serde_json::to_string(&pointer)?;
+            // Only immutable bytes are cached. Raw observations remain hints;
+            // fresh callers seal their group before the remote read barrier.
+            let cached = match &self.cache {
+                Some(cache) => cache.get(&pointer.key, &pointer.sha256).await,
+                None => None,
+            };
+            let bytes = match cached {
+                Some(bytes) => {
+                    anyhow::ensure!(bytes.len() <= max_bytes, "manifest exceeds read bound");
+                    bytes
+                }
+                None => {
+                    // Collection may remove an old manifest after pointer
+                    // selection. Restart the complete observation in that case.
+                    let Some(object) = self.files.get(&pointer.key, max_bytes).await? else {
+                        continue;
+                    };
+                    if hex::encode(Sha256::digest(&object.bytes)) != pointer.sha256 {
+                        bail!("published manifest checksum mismatch");
+                    }
+                    if let Some(cache) = &self.cache {
+                        cache.insert(&pointer.key, object.bytes.clone()).await;
+                    }
+                    object.bytes
+                }
+            };
+            return Ok(Some(Object {
+                bytes,
+                version: Version(UpdateVersion {
+                    e_tag: Some(value.clone()),
+                    version: Some(if self.global_collection {
+                        serde_json::to_string(&DataObservation {
+                            format: 5,
+                            fence: bucket.info.get("durable-db-fence").cloned(),
+                        })?
+                    } else {
+                        bucket.revision.to_string()
+                    }),
+                }),
+            }));
+        }
+        bail!("published manifest changed repeatedly or is unavailable")
+    }
+
     /// Shares the engine's bounded cache; no extra unaccounted index cache.
     pub fn with_cache(mut self, cache: Arc<Cache>) -> Self {
         self.directory = self.directory.with_cache(cache.clone());
@@ -462,60 +539,7 @@ impl Storage for Published {
         if !key.starts_with("heads/") {
             return self.files.get(key, max_bytes).await;
         }
-        let slot = slot(key)?;
-        for _ in 0..4 {
-            let bucket = self.observations.read().await?;
-            let root = root(&bucket.info)?;
-            let pointer = match self.directory.get(root.as_ref(), &slot).await {
-                Err(e) if e.is::<MissingNode>() => continue,
-                other => other?,
-            };
-            let Some(pointer) = pointer else {
-                return Ok(None);
-            };
-            let value = serde_json::to_string(&pointer)?;
-            // Only immutable bytes are cached. The pointer above always comes
-            // from a new remote barrier admitted after this request began.
-            let cached = match &self.cache {
-                Some(cache) => cache.get(&pointer.key, &pointer.sha256).await,
-                None => None,
-            };
-            let bytes = match cached {
-                Some(bytes) => {
-                    anyhow::ensure!(bytes.len() <= max_bytes, "manifest exceeds read bound");
-                    bytes
-                }
-                None => {
-                    // Collection may remove an old manifest after pointer
-                    // selection. Restart the complete observation in that case.
-                    let Some(object) = self.files.get(&pointer.key, max_bytes).await? else {
-                        continue;
-                    };
-                    if hex::encode(Sha256::digest(&object.bytes)) != pointer.sha256 {
-                        bail!("published manifest checksum mismatch");
-                    }
-                    if let Some(cache) = &self.cache {
-                        cache.insert(&pointer.key, object.bytes.clone()).await;
-                    }
-                    object.bytes
-                }
-            };
-            return Ok(Some(Object {
-                bytes,
-                version: Version(UpdateVersion {
-                    e_tag: Some(value.clone()),
-                    version: Some(if self.global_collection {
-                        serde_json::to_string(&DataObservation {
-                            format: 5,
-                            fence: bucket.info.get("durable-db-fence").cloned(),
-                        })?
-                    } else {
-                        bucket.revision.to_string()
-                    }),
-                }),
-            }));
-        }
-        bail!("published manifest changed repeatedly or is unavailable")
+        self.head(key, max_bytes, true).await
     }
     async fn cas(&self, key: &str, old: Option<&Version>, bytes: Bytes) -> anyhow::Result<bool> {
         let timer = metrics::REGISTRY.start(Operation::Publication);
