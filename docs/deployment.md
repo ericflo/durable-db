@@ -46,13 +46,15 @@ must also complete a fresh provider-backed administrative read. Each split is
 held for thirty seconds after its network checks pass. Per-writer progress during
 the split is recorded separately from recovery after healing. Both scenarios
 share cold replacement, full history verification and namespace cleanup. The
-exact v0.23.9 executable completes this focused B2 scenario with all 560 acknowledged
-writes recovered and independently checked. All eighteen provider-backed
-administrative reads succeed across the three processes. Only two of four writers
-advance during the one-way split; none advance during the two-way split. Every
-writer resumes within 105.60 / 138.46 seconds after healing, respectively; both
-miss the 60-second target. This records recovery within the harness's outer
-ceiling, not availability during a permanent partition or a met recovery SLO. The initial NetworkPolicy attempt
+exact v0.23.10 executable completes two focused B2 campaigns with all 553 / 709
+acknowledged writes recovered and independently checked. All 36 provider-backed
+administrative reads succeed. One-way healing takes 38.99 / 41.91 seconds;
+two-way healing takes 34.87 / 46.33 seconds, meeting the 60-second target in both
+runs. Cold recovery also meets its 120-second target. Only one of four writers
+progresses during each two-way hold. These short runs qualify their bounded
+fault/recovery histories, not permanent-partition availability or a production
+SLO. The full rolling and scale-down campaign still needs requalification.
+The initial NetworkPolicy attempt
 failed injection validation because established connections remained usable;
 [that behavior is implementation-defined](https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-s-impact-on-existing-connections).
 

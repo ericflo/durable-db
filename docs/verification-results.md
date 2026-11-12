@@ -1,6 +1,6 @@
 # Verification results
 
-## Batched journal selection (unreleased)
+## v0.23.10 batched journal recovery (2026-11-12)
 
 Recovery now publishes up to eight completed journal prefixes from one catalog
 snapshot together, using the existing immutable B+tree and exact conditional
@@ -14,9 +14,37 @@ The existing RootCatalog model now checks batched seals from a shared snapshot
 (393,513 / 156,345 states); five unsafe and three coverage controls pass. Rust
 checks cover late bytes after an uncertain two-journal selection, takeover, mixed
 snapshots, incomplete/duplicate/oversized batches, upload failures and index
-splitting. Eleven focused catalog tests and strict clippy pass; cloud timing
-qualification is pending. The capacity sweep is now opt-in locally and remains
-mandatory in release-mode CI, removing the routine debug sweep and skip flags.
+splitting. All 339 routine Rust checks, formatting and strict clippy pass.
+Versioned MinIO passes the complete native HTTP fixture in 183.50 seconds; its
+bucket, container and 32 versions were removed. The capacity sweep is now opt-in
+locally and remains mandatory in release-mode CI, removing the routine debug
+sweep and skip flags. [Woodpecker #258](https://ci.eflorenzano.com/repos/18/pipeline/258/1)
+passes that 10,005-database gate and builds the exact `5aafa89` executable shipped
+in [v0.23.10](https://github.com/ericflo/durable-db/releases/tag/v0.23.10).
+
+Two complete B2/Kubernetes peer-isolation campaigns recover and independently
+check **553 and 709 acknowledged writes**, with matching readback/key counts.
+All 36 provider-backed administrative probes return 200. Both namespaces,
+buckets, scoped keys and 2,207 remaining object versions were removed.
+
+| Recovery upper bound | Previous v0.23.9 run | First v0.23.10 run | Repeat | Target |
+| --- | ---: | ---: | ---: | ---: |
+| One-way healing | 105.60 s | 38.99 s | 41.91 s | 60 s |
+| Two-way healing | 138.46 s | 34.87 s | 46.33 s | 60 s |
+| Cold API readiness to progress | 65.19 s | 54.70 s | 73.21 s | 120 s |
+
+All six targets pass across the new runs. The longest retained completed
+journal-selection samples are **13.46 / 16.92 seconds**, versus 90.30 seconds
+previously; medians remain near five seconds (63 / 66 new samples). Different
+placement and ownership histories prevent causal attribution from these short
+runs. They do not establish a general latency speedup or production SLO.
+
+During the one-way holds, three / four writers progress. During **each two-way
+hold, only one of four progresses**. Permanent-partition availability remains
+unresolved. The new binary has not repeated the full rolling, scale-down and
+host-loss campaign; the earlier unmet targets remain open there.
+[Sources, hashes, configurations, timings and cleanup](evidence/native-recovery-2026-11-11.json)
+retain both campaigns.
 
 The v0.23.9 trace places the 90.30-second selection on unused partition 10, and
 a 45.91-second selection on active partition 2. During the two-way isolation hold,

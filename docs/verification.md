@@ -474,9 +474,14 @@ two-journal batch. The eight-entry implementation bound and mixed-snapshot
 validation are checked in Rust. These bounded instances do not prove Rust or
 all nonempty batch interleavings.
 
-The Rust `owned-candidate-3` record carries an immutable catalog identity and rejects earlier candidate formats. Catalogs reuse the existing bounded-page B+tree, with a checksummed header of at most 4 KiB and 112-byte prefixes. `recovery()` requires confirmed activation and drain. Opaque scans bind to that owner and catalog; only a completed unselected scan can be published. The controller captures the exact comparison before any immutable upload. An upload failure prevents publication; a lost publication reply requires exact validation or a winning claim to recover the durable decision. Existing selections replay only their fixed prefix. Missing or corrupt referenced objects never become absent entries.
+The root record carries an immutable catalog identity and rejects incompatible formats. Catalogs reuse the existing bounded-page B+tree, with a checksummed header of at most 4 KiB and 112-byte prefixes. `recovery()` requires confirmed activation and drain. Opaque scans bind to that owner and catalog; only a completed unselected scan can be published. The controller captures the exact comparison before any immutable upload. An upload failure prevents publication; a lost publication reply requires exact validation or a winning claim to recover the durable decision. Existing selections replay only their fixed prefix. Missing or corrupt referenced objects never become absent entries.
 
-Eight additional tests cover lost replies and complete reopening, both selection/claim orders, stale parallel scans, activation/identity/expiry checks, missing/corrupt/oversized catalog objects, failures at all three upload stages, a split index with 130 selected journals, and renewals during a long scan. B2's real HTTP control fixture loses an applied selection reply; S3's HTTP fixture also uploads and reads the journal, index, prefix and catalog and excludes a late second frame after recovery. These are loopback fixtures with controlled clocks, not cloud qualification. [Evidence](evidence/root-catalog-2026-11-09.json).
+The original loopback qualification used the earlier `owned-candidate-3`
+format. Its B2 binding loses an applied selection reply; the S3 binding reads
+back journal, index, prefix and catalog bytes and excludes a late second frame.
+That [historical evidence](evidence/root-catalog-2026-11-09.json) is not cloud or
+current-release qualification. Current native checks and cloud campaigns are
+recorded in [verification results](verification-results.md).
 
 The model assumes ordered winning epochs, durable immutable bytes and exact register comparisons. Drain completion abstracts the ending of every earlier acknowledgement interval. The separate acquisition, registration, timing and journal results are not a complete composition or Rust-refinement theorem. Later sections describe transaction/receipt recovery, checkpoints and native HTTP integration. Collection, physical upload admission, election and placement are outside this component model. History traversal still grows with ownership changes.
 
@@ -736,7 +741,26 @@ Five focused monitor checks pass in 0.03 seconds. They cover bounds/configuratio
 
 The cloud harness now pauses all six old database processes in a disposable namespace, keeps their DNS records, and adds a seventh process. Every writer must progress while the old process IDs/start ticks remain stopped and the pod restart counts remain unchanged. It then resumes the old processes and continues the existing fault campaign. Only the fixture adds an unprivileged same-UID control sidecar and disables liveness restart; production manifests are unchanged. The process-control helper passes a local stop/refusal/resume check.
 
-The first B2 candidate failed during scale-to-six, before reaching this fault; the failed evidence is retained. Raw partition control observations subsequently stop issuing the common data-read barrier: the control protocol accepts stale hints, and subsequent exact comparisons/permit validation establish authority. The same bounded immutable-manifest reader serves both paths; ordinary storage reads keep their barrier. A stale-pointer regression requires zero authority writes, then rejects the revoked predecessor’s comparison and serving permission. All 329 enabled Rust checks and the existing acquisition model bounds/controls pass. The subsequent B2 campaign confirms takeover and rejoin with all six original processes stopped and retained in DNS, then fails a later pod-loss progress check. A separate TCP regression reproduces cancelled forwarding retaining a stale route: cancellation now retires that route instance synchronously, without replay, and cannot invalidate a replacement instance. The cancelled-route regression and the routing bound pass. After a separate checkpoint-origin correction, the exact v0.23.6 executable completes the full B2 campaign with 1,974 recovered acknowledgements. A later idle-owner regression simulates takeover and membership rejoin with requests entering only the other node: the old code times out at eight seconds, while background permit observation allows recovery in 6.05 seconds. All 336 enabled Rust checks and the expanded 236-state routing bound with seven negative controls pass locally; the full MinIO native HTTP fixture passes, and the exact v0.23.7 executable passes the complete B2/Kubernetes campaign with 1,593 independently checked acknowledgements, including two shared-partition writers. The ancestry-cursor optimization in v0.23.8 subsequently passes the complete B2 campaign with 1,969 recovered acknowledgements, but eight of ten recovery timings miss their targets; fewer registration GETs do not establish a cloud latency speedup. The strengthened campaign then recovers all 2,018 acknowledgements after targeted one-host process pause/rejoin, all-process replacement, a measured provider blackout and cold recovery, with fixed shared-partition writers. Process identities and DNS entries remain unchanged during both pauses. Eight of twelve timings miss their targets. A separate focused peer-only campaign then recovers all 495 acknowledgements after one-way and two-way packet isolation. Fresh and retained peer connections are blocked while each process completes provider-backed administrative reads; only two of four / one of four writers progress during the respective thirty-second holds. Every writer resumes within 20.84 / 60.02 seconds after healing, and within 75.80 seconds after cold API readiness. The two-way healing bound just misses its 60-second target. The v0.23.9 control-admission fix then passes a 560-acknowledgement peer campaign with all eighteen administrative probes returning 200, but healing takes 105.60 / 138.46 seconds and no writers progress during the two-way hold. Cold recovery takes 65.19 seconds after API readiness. Repeatable recovery targets, sustained partition availability and physical-host loss remain open. See the [retained campaigns](verification-results.md). The headless service continues publishing not-ready endpoints, as required for bootstrap; see the [Kubernetes DNS contract](https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/).
+Raw partition control observations do not issue the common data-read barrier:
+they supply stale hints, while exact comparisons and permit validation establish
+authority. The same bounded immutable-manifest reader serves both paths. The
+regression requires zero authority writes for observation, then rejects a
+revoked predecessor's comparison and serving permission.
+
+Cancelled forwarding retires only its own cached route instance, without replay
+or invalidating a replacement. Background permit observation retires an idle
+revoked owner so membership rejoin can recover even when requests enter through
+another process. TCP regressions cover both cancellation and idle-owner rejoin.
+
+The current batched journal-selection path completes two B2 peer-isolation
+campaigns with all 553 / 709 acknowledgements recovered and all six recovery
+targets met. Only one writer progresses during each two-way hold: peer-local
+failure views can still schedule competing claims. Broader recovery targets,
+continuous partition availability and physical-host loss remain open. The
+[verification results](verification-results.md) retain successful and failed
+campaigns, exact images, configurations and timing limits. The headless service
+continues publishing not-ready endpoints for bootstrap; see the
+[Kubernetes DNS contract](https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/).
 
 ## Native cloud CLI
 

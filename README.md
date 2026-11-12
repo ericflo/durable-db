@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.23.9. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.23.10. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -144,9 +144,10 @@ This is the contract the first production release must qualify:
 
 B2/Kubernetes qualification covers shared-partition writers, process loss, peer
 and provider isolation, rolling replacement, and removal of every API process.
-Acknowledged histories survive the completed campaigns, but several recovery
-targets remain unmet and some writers stall during peer isolation. Worst-case
-memory, sustained performance and public multitenancy remain open. See the
+Acknowledged histories survive the completed campaigns. Batched journal recovery
+meets all targets in two peer-isolation runs; broader recovery targets and
+availability during isolation remain open. Worst-case memory, sustained
+performance and public multitenancy also remain open. See the
 [measured results and their limits](docs/verification-results.md).
 
 The [ordered production path](docs/production-readiness.md#remaining-production-gates-in-order) lists the remaining gates, their rough size and what can wait until after 1.0. [Verification results](docs/verification-results.md) record each release and its evidence; [backup and restore](docs/recovery.md#local-format-upgrades) covers format compatibility and upgrades.
