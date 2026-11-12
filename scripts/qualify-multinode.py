@@ -456,7 +456,18 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
         restricted=json.loads(json.dumps(policy));restricted['spec']['egress']=restricted['spec']['egress'][:-1]
         kube('apply','-f','-',body=restricted)
         phase('provider-partition-start',probe=provider_probe(False))
-        time.sleep(40)
+        # Allow outstanding HTTP responses to settle, then require an actual
+        # workload blackout. A new probe alone cannot detect established TCP
+        # connections that a NetworkPolicy implementation leaves untouched.
+        time.sleep(30)
+        before=snapshot()
+        time.sleep(10)
+        after=snapshot()
+        blocked=all(before[k]==after[k] for k in ('expected','verified'))
+        phase('provider-partition-held',no_progress=blocked,
+              before={k:before[k] for k in ('expected','verified')},
+              after={k:after[k] for k in ('expected','verified')})
+        if not blocked:raise RuntimeError('Provider fault did not stop acknowledged/readback progress')
         timing=recovery('provider-restored',60,'before restoring provider egress')
         kube('apply','-f','-',body=policy)
         phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress(timing))
