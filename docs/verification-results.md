@@ -1,5 +1,54 @@
 # Verification results
 
+## Checkpoint publication supplies its own validation (v0.24.6, 2026-11-12)
+
+Funding changes the partition register while leaving the recovery origin intact.
+Publication now reads a comparison after funding/staging, checks the full origin,
+and validates it with the checkpoint CAS itself. The uncontended regression needs
+**two control replacements instead of four**: the predictable stale attempt and
+standalone validation update are removed, along with the obsolete cached
+collection precheck. There is no new storage format or parallel implementation.
+Conflicts, lost replies and cancellation still require exact resolution; changed
+collection fences invalidate staged bytes, and newly retained backups survive.
+
+All **359 routine Rust checks**, formatting and strict clippy pass. The focused
+ownership suite passes 142 checks in 11.39 seconds. The checkpoint model checks
+144,288 states in one second with one unrelated funding update, and all nine
+unsafe controls still fail. These are bounded component checks, not a proof of
+Rust or the whole deployment. Versioned MinIO passes membership/recovery in
+40.38 seconds; its bucket, container and 80 physical versions are removed.
+
+The exact static release binary passes a fresh B2/Kubernetes campaign on the
+existing hosts: **805 acknowledgements, readbacks and recovered keys**, with four
+independently checked histories. The namespace, bucket, scoped key and all
+**1,672 physical versions** are removed.
+
+| Recovery observation | Bound | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 21.49s | 60s | Pass |
+| Scale to six | 45.03s | 60s | Pass |
+| First rolling replacement | 125.61s | 60s | Miss |
+| Second rolling replacement | 178.66s | 60s | Miss |
+| Cold three-node recovery, after readiness | 57.12s | 120s | Pass |
+
+The bounded logs contain 87 owner bindings, 88 complete activation calls,
+87 selections and 69 checkpoints. Only **2 of 69** sampled checkpoints need a
+confirmation stage, compared with **14 of 70** previously. The longest sampled
+checkpoint is **10.05s**, versus 45.41s previously; it spends 5.08s in funding,
+2.99s staging and 1.90s publication. The largest sampled funding interval is
+5.54s. These separate cloud samples do not establish a population rate, latency
+distribution or overall recovery speedup; both rollout bounds are worse here.
+
+A sampled activation takes 31.91s, including **30.99s in control publication**.
+The largest selection takes 15.90s and discovers 102 frames; the largest empty
+selection takes 10.60s, including 9.74s publication. Rollout history slices show
+65.01 / 104.93s maximum acknowledgement gaps; they include intervening diagnostics
+and are not exact fault windows or readback latencies. The next target is the
+remaining acquisition control-publication delay, including retry/contender work.
+Full tenant accounting, continuous split availability, physical-host failures,
+worst-case memory and sustained performance remain open. [Source, model, runtime
+identity, measurements and cleanup](evidence/native-recovery-2026-11-11.json).
+
 ## Reusing completed journal discovery (v0.24.5, 2026-11-12)
 
 After an unconfirmed selection, exact validation can retain a completed scan if
@@ -47,9 +96,9 @@ The longest sampled activation takes 18.68 seconds, including 18.05 in
 publication. An empty selection takes 34.56 seconds, including 33.95 in
 publication. A checkpoint takes 45.41 seconds: 18.81 funding, 1.13 staging,
 17.96 confirmation and further publication work. These are separate sampled
-calls, not a combined critical path or latency distribution. The next target is
-checkpoint funding and its extra control work: funding changes the record and
-leaves the cached checkpoint comparison stale. Continuous split availability,
+calls, not a combined critical path or latency distribution. That run identified checkpoint funding and its extra control work: funding
+changed the record and left the cached comparison stale. v0.24.6 removes that
+redundant publication path, as measured above. Continuous split availability,
 physical-host failures, worst-case memory and sustained performance remain open.
 
 Verification-only cleanup after the binary candidate reduces six fault/coverage
