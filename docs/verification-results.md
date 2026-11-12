@@ -1,6 +1,6 @@
 # Verification results
 
-## Recovery cursor reuse (2026-11-12, release pending)
+## v0.23.8 recovery cursor reuse (2026-11-12)
 
 Confirmed journal-prefix publications now preserve the immutable ancestry cursor
 and load the newly confirmed catalog before choosing the next prefix. Uncertain
@@ -16,7 +16,31 @@ coverage controls pass. This is a provider-operation reduction measured locally,
 not a qualified cloud latency improvement or proof of Rust. Versioned MinIO
 passes the full native HTTP budget/retention/cold-recovery fixture at `8a82346`
 in 182.76 seconds, including zero warm cache misses and automatic collection.
-The disposable bucket/container and 31 physical versions were removed. The B2 campaign is pending.
+The disposable bucket/container and 31 physical versions were removed.
+
+[v0.23.8](https://github.com/ericflo/durable-db/releases/tag/v0.23.8) packages
+`43d9ea4`, verified by [Woodpecker #242](https://ci.eflorenzano.com/repos/18/pipeline/242/1).
+The exact executable passes the complete B2/Kubernetes campaign with **1,969
+acknowledged writes recovered and independently checked**. The namespace, scoped
+key, bucket and 1,235 remaining physical versions were removed. This baseline
+uses the preceding harness: writers occupy partitions 2, 7, 14 and 6.
+
+| Transition | Every writer's recovery upper bound | Engineering target |
+| --- | ---: | ---: |
+| Scale to three / six | 65.68 / 68.36 s | 60 s — missed |
+| Stopped-peer replacement after API readiness | 151.05 s | 120 s — missed |
+| Resume old peers / return to six | 70.15 / 92.06 s | 60 s — missed |
+| Forced pod loss | 94.37 s | 60 s — missed |
+| Rolling replacement | 120.60 s | 60 s — missed |
+| Restore provider egress | 56.99 s | 60 s — met |
+| Scale to one | 94.73 s | 60 s — missed |
+| Cold recovery after API readiness | 59.73 s | 120 s — met |
+
+These include readiness/polling and two further readbacks per writer; replacement
+and cold timers start after API readiness. Eight of ten transitions miss their
+target. The lower metadata-read count does **not** demonstrate a cloud latency
+speedup. Sampled steady-phase peak RSS is 4,886,528 bytes, not a worst-case bound.
+[Exact sources, hashes, timings and cleanup](evidence/native-recovery-2026-11-11.json).
 
 The maintained fault harness now adds a targeted one-host process pause before
 the all-process fault: surviving hosts must recover every writer without adding
@@ -71,8 +95,9 @@ bucket, scoped key and 1,463 remaining physical versions were removed.
 
 These direct controller measurements include readiness/polling and two further
 readbacks per writer. The replacement and cold timers begin after API readiness;
-other timers begin before the fault/change command. The 40-second provider blackout
-precedes the restoration timer. Sampled peak steady-phase API RSS is 4,648,960 bytes.
+other timers begin before the fault/change command. The 40-second provider-egress restriction
+precedes the restoration timer; this earlier harness checks a fresh connection
+probe, not an unchanged-workload-counter interval. Sampled peak steady-phase API RSS is 4,648,960 bytes.
 This is one short run, not a worst-case memory bound, repeatable speedup, physical-
 host power-loss qualification or production SLO. The later ancestry-cursor change
 is absent from this binary. [Exact sources, hashes, timings, failures and cleanup](evidence/native-recovery-2026-11-11.json).
