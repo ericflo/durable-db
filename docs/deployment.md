@@ -34,13 +34,29 @@ The headless service publishes not-ready addresses so discovery does not depend 
 
 Before taking over from an excluded incumbent, the candidate publishes or joins a
 storage-path challenge and waits 15 seconds for an answer. The incumbent answers
-through the bucket even when peer HTTP is blocked. A response defers takeover;
-a timeout only schedules the existing fenced recovery. Slow storage or pauses
+through the bucket even when peer HTTP is blocked. Pending waits release acquisition
+slots; the three-second scheduler revisits them while other partitions recover.
+A response defers takeover; a timeout only schedules the existing fenced recovery. Slow storage or pauses
 can still cause false suspicions. This adds failure-detection latency and does
 not make every partition reachable through every isolated pod. Upgrade all
 servers before relying on this behavior; older binaries do not answer challenges.
 
-Earlier publication-engine process/HPA fixtures were retired at the native CLI cutover. Their results remain historical in the verification record. `scripts/qualify-multinode.py` is the maintained native deployment/fault campaign; it permits peer forwarding during provider-only egress faults. The provider-egress phase verifies a ten-second workload blackout after a thirty-second settling period, so a policy that leaves existing connections usable cannot silently pass on a new-connection probe alone. Its clients keep the stable client Service URL throughout scaling and replacement; pod addresses are recorded only as placement evidence. Writer names are fixed within each fresh disposable bucket, mapping to partitions 2, 12, 14 and 2 in the sixteen-partition fixture. This keeps shared-partition contention consistent between runs instead of letting the random namespace choose it. Each new fault waits for two further verified readbacks from every writer; HTTP readiness and aggregate traffic alone do not establish recovery. The host-pause phase selects the preferred host of an active writer’s partition, pauses all database processes there and requires the remaining hosts to recover every writer without adding pods. It checks the stopped identities and retained DNS addresses again before resume. The later all-process pause requires a newly added process to recover every writer. Both use the same pause/resume helper and keep the existing recovery targets. These simulate process loss on a host, not physical power loss or a peer-only network partition. Its same-UID control sidecar, shared PID namespace and disabled liveness restart apply only to the disposable fixture. The v0.23.8 executable passes this expanded B2 campaign with 2,018 independently checked acknowledgements. Several recovery timings miss their engineering targets; see the [exact image, configuration and limitations](verification-results.md#v0238-recovery-cursor-reuse-2026-11-12).
+`scripts/qualify-multinode.py` is the maintained native deployment/fault campaign.
+It uses a stable client Service through scaling and replacement and requires two
+new verified readbacks from every writer before each fault. Fixed writer names
+map to partitions 2, 12, 14 and 2, preserving shared-partition contention across
+runs. The provider-egress fault allows peer forwarding and verifies a ten-second
+workload blackout after thirty seconds of settling; a new-connection probe alone
+cannot establish that existing connections were blocked.
+
+The host-pause phase stops every database process on the preferred host of an
+active writer, retains its DNS records and requires recovery without adding pods.
+The all-process pause then requires a sole new process to recover all writers.
+Both verify the stopped identities before resume. The same-UID control sidecar,
+shared PID namespace and disabled liveness restart apply only to the disposable
+fixture. This simulates process loss on a host, not physical power loss or a
+network partition. [Current measurements and historical failures](verification-results.md)
+remain separate from the declared recovery targets.
 
 For the focused network experiment, add `--scenario peer-isolation` to the same
 qualification command. It starts three processes on three hosts, sends writers

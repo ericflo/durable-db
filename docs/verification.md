@@ -763,8 +763,11 @@ same 3,518 states and controls pass. It is not a cloud latency guarantee.
 The first B2 campaign below preserves acknowledgements and
 avoids claims during peer isolation, but misses the cold-recovery target. The
 corrected v0.23.11 campaign recovers all 558 acknowledgements with zero claims
-in either hold and all three targets met; broader failure qualification remains
-open. See [measurements and exact binaries](verification-results.md).
+in either hold and all three targets met. v0.23.12 repeats peer isolation with 578
+recovered acknowledgements and all three targets met, then recovers all 1,968
+acknowledgements in the broader fault campaign. Six of twelve broader timing
+targets miss; continuous split availability remains unqualified. See
+[measurements and exact binaries](verification-results.md).
 
 ## Membership-driven native placement
 

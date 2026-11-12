@@ -1,6 +1,6 @@
 # Verification results
 
-## Deferred challenge scheduling (v0.23.12 candidate)
+## v0.23.12 deferred challenge scheduling (2026-11-12)
 
 An idle challenge wait no longer occupies one of four acquisition slots. The
 scheduler retains its owner, nonce and deadline and revisits it on the existing
@@ -12,8 +12,60 @@ A paused-time regression replaces one owner of all 16 partitions and requires
 all replacements within 25 simulated seconds. v0.23.11 fails this check in 0.24
 seconds of real time; the new scheduling passes all five challenge checks in
 0.37 seconds. The existing policy model and its controls pass unchanged (3,518
-states). All 343 routine Rust checks, strict clippy and formatting pass. Real B2
-failure and peer-isolation qualification remains pending.
+states). All 343 routine Rust checks, strict clippy and formatting pass.
+[Woodpecker #265](https://ci.eflorenzano.com/repos/18/pipeline/265/1) passes the
+release checks for `8200bc5`. Versioned MinIO passes 1→2→1→0→1 membership in
+37.15 seconds; its bucket, container and 79 versions were removed.
+
+The exact static executable completes B2 peer isolation with **578 acknowledged
+writes recovered and independently checked**. All three targets pass: **17.65 /
+13.69 seconds** after one-way / two-way healing and **81.66 seconds** after cold
+readiness. Both holds record zero claims; all 18 administrative probes return
+200. The namespace, bucket, scoped key and 888 versions were removed.
+
+During each hold, two writers satisfy the two-readback progress threshold. In the
+one-way hold, writer zero has a reachable owner but advances only once. Its owner
+finishes a 22.59-second reacquisition after fault injection, before the measured
+hold ends; the retained trace does not isolate the remaining request delay.
+Stable ownership alone does not establish continuous availability.
+
+A separate broader campaign recovers **all 1,968 acknowledged writes**, checked
+by the independent four-writer history validator. Every fault phase completes;
+six of twelve timing targets pass and six miss:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 62.10 s | 60 s | Miss |
+| Scale to six | 45.64 s | 60 s | Pass |
+| Pause database processes on one host | 74.08 s | 60 s | Miss |
+| Resume that host's processes | 50.76 s | 60 s | Pass |
+| Sole replacement with stopped peers still in DNS | 103.79 s | 120 s | Pass |
+| Resume all old processes | 66.15 s | 60 s | Miss |
+| Return from seven to six | 5.78 s | 60 s | Pass |
+| Force-delete one API pod | 30.09 s | 60 s | Pass |
+| Rolling replacement | 153.30 s | 60 s | Miss |
+| Restore provider connectivity | 69.93 s | 60 s | Miss |
+| Scale down to one | 108.46 s | 60 s | Miss |
+| Cold API readiness | 80.72 s | 120 s | Pass |
+
+The two-minute steady pilot records six samples across six processes, with peak
+sampled RSS of 4,280,320 bytes and working set of 5,058,560 bytes; none restarts.
+This small workload does not approach resident limits or qualify worst-case RSS.
+The provider fault produces a verified workload blackout. No physical host is
+shut down or drained; the pause fixture stops only task-owned database processes.
+The namespace, bucket, scoped key and 1,641 remaining versions were removed.
+
+During rolling replacement, partition 12 has claim attempts from successive
+replacement processes. During the host-process pause, partition 2 becomes ready
+about 22 seconds before both of its writers pass the progress barrier. These
+observations motivate checking placement churn and post-recovery serving work;
+they do not isolate causal stage costs. All raw timing bounds include readiness
+and polling effects described in the production gates.
+
+[v0.23.12](https://github.com/ericflo/durable-db/releases/tag/v0.23.12) ships this exact
+static executable. [Evidence](evidence/native-recovery-2026-11-11.json) records
+source/image hashes, configurations, complete histories and cleanup. These short
+runs do not qualify AWS, sustained performance or production availability.
 
 
 ## v0.23.11 storage-path placement challenges (2026-11-12)
