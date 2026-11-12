@@ -120,6 +120,7 @@ Abort(j) == /\ response[j] = "waiting" /\ j \notin committed
 \* Return this publication's fresh pointer, not a later observation's pointer.
 \* A historical success remains a valid receipt after the target changes; it
 \* does not authorize serving or let a subsequent CAS skip its comparison.
+\* Observation does not need a helper slot: another helper may still be busy.
 Ack(j,r) == /\ response[j] = "waiting" /\ r \in 1..Len(history)
             /\ history[r].heads[target[j]] = j
             /\ response' = [response EXCEPT ![j] = "success"]
@@ -191,6 +192,8 @@ AcknowledgedHistory == \A j \in Jobs: response[j] = "success" => j \in committed
 NoCommitAfterDefiniteAbort == \A j \in Jobs: response[j] = "aborted" => j \notin committed
 NotSupersededReceipt == ~\E j \in Jobs:
     response[j] = "success" /\ Current.heads[target[j]] # j
+NotReceiptWhileHelperBusy == ~\E j \in Jobs, h \in Helpers:
+    response[j] = "success" /\ helping[h]
 \* Fault: let a submitted but unconfirmed proposal manufacture a receipt.
 PrematureReceipt(j) == /\ phase[j] = "submitted" /\ response[j] = "waiting"
     /\ response' = [response EXCEPT ![j] = "success"]

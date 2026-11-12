@@ -156,11 +156,38 @@ impl Published {
         // Admission only: the protocol is safe with concurrent helpers. One
         // helper per process bounds staging memory and duplicate network work.
         let queued = std::time::Instant::now();
-        let _helper = self
-            .helpers
-            .acquire()
-            .await
-            .context("publication helper stopped")?;
+        let _helper = tokio::select! {
+            biased;
+            permit = self.helpers.acquire() => permit.context("publication helper stopped")?,
+            receipt = async {
+                // Keep our place in the helper queue while checking only for
+                // this exact receipt. At most eight probes per invocation and
+                // one in flight per connection; no detached polling task.
+                for _ in 0..8 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let Ok(_probe) = self.receipt_probes.try_acquire() else { continue };
+                    let Ok(observed) = self.authority.read().await else { continue };
+                    if matches!(self.proposal_result(&proposal, &observed).await, Ok(true))
+                        && let Ok(receipt) = self.head_version(&proposal.next, &observed)
+                    {
+                        return receipt;
+                    }
+                }
+                // Absence, supersession, collection or an observation failure
+                // cannot manufacture success or a definite abort. The normal
+                // helper path retains all comparison/uncertainty checks.
+                std::future::pending::<Version>().await
+            } => {
+                self.proposal_cleanup.committed(name);
+                // Queue time here includes the bounded observation work.
+                tracing::info!(%publication, outcome = "queued_receipt", attempt = 0_u64,
+                    queue_ms = queued.elapsed().as_millis() as u64,
+                    prepare_ms = 0_u64, compare_ms = 0_u64,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "shared publication progress");
+                return Ok(Some(receipt));
+            }
+        };
         let queue_ms = queued.elapsed().as_millis() as u64;
         // Fixed outcomes and a random invocation identity only; never log a
         // database name, key, manifest body or provider error.

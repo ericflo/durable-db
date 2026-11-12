@@ -79,6 +79,7 @@ pub struct Published {
     observations: Observations,
     cache: Option<Arc<Cache>>,
     helpers: Semaphore,
+    receipt_probes: Semaphore,
     proposal_cleanup: proposal::Cleanup,
     upload_budget: Option<Arc<Allocator>>,
     global_collection: bool,
@@ -242,6 +243,7 @@ impl Published {
         Self {
             cache: None,
             helpers: Semaphore::new(1),
+            receipt_probes: Semaphore::new(1),
             proposal_cleanup: proposal::Cleanup::new(authority.clone()),
             observations: Observations::new(authority.clone()),
             directory: Directory::new(files.clone()),

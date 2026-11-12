@@ -22,6 +22,7 @@ struct Counted {
     proposal_gets: Arc<AtomicUsize>,
     proposal_lists: Arc<AtomicUsize>,
     lost_proposal_ack: Arc<AtomicBool>,
+    submitted: Arc<Notify>,
 }
 #[async_trait]
 impl Storage for Counted {
@@ -37,6 +38,9 @@ impl Storage for Counted {
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.inner.put(key, bytes).await?;
+        if key.starts_with("proposals/") {
+            self.submitted.notify_one();
+        }
         if key.starts_with("proposals/") && self.lost_proposal_ack.swap(false, Ordering::SeqCst) {
             anyhow::bail!("injected lost response after proposal upload");
         }
@@ -62,6 +66,11 @@ struct Metadata {
     proposal_gets: Arc<AtomicUsize>,
     proposal_lists: Arc<AtomicUsize>,
     lost_proposal_ack: Arc<AtomicBool>,
+    submitted: Arc<Notify>,
+    reads: AtomicUsize,
+    pause_read: AtomicBool,
+    fail_read: AtomicBool,
+    read_paused: Notify,
     state: Mutex<Bucket>,
     files: Arc<dyn Storage>,
     pause: AtomicBool,
@@ -72,6 +81,15 @@ struct Metadata {
 #[async_trait]
 impl Authority for Metadata {
     async fn read(&self) -> anyhow::Result<Bucket> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.pause_read.swap(false, Ordering::SeqCst) {
+            self.read_paused.notify_one();
+            std::future::pending::<()>().await;
+        }
+        anyhow::ensure!(
+            !self.fail_read.swap(false, Ordering::SeqCst),
+            "injected read failure"
+        );
         Ok(self.state.lock().await.clone())
     }
     async fn replace(
@@ -114,18 +132,25 @@ async fn setup_with_budget(
     let proposal_gets = Arc::new(AtomicUsize::new(0));
     let proposal_lists = Arc::new(AtomicUsize::new(0));
     let lost_proposal_ack = Arc::new(AtomicBool::new(false));
+    let submitted = Arc::new(Notify::new());
     let files = Arc::new(Counted {
         inner: files,
         gets: gets.clone(),
         proposal_gets: proposal_gets.clone(),
         proposal_lists: proposal_lists.clone(),
         lost_proposal_ack: lost_proposal_ack.clone(),
+        submitted: submitted.clone(),
     });
     let metadata = Arc::new(Metadata {
         gets,
         proposal_gets,
         proposal_lists,
         lost_proposal_ack,
+        submitted,
+        reads: AtomicUsize::new(0),
+        pause_read: AtomicBool::new(false),
+        fail_read: AtomicBool::new(false),
+        read_paused: Notify::new(),
         state: Mutex::new(Bucket {
             version: None,
             revision: 0,
@@ -953,6 +978,180 @@ async fn publication_retries_reuse_discovery_without_replaying_uploads() {
             2,
             "each proposal keeps its original immutable manifest across retries"
         );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_receipt_bypasses_a_stalled_helper() {
+    for lose_reply in [false, true] {
+        let (store, metadata) = setup().await;
+        let other = replica(&metadata).await;
+        metadata.pause.store(true, Ordering::SeqCst);
+        let stalled = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas("heads/a.json", None, Bytes::from_static(b"a"))
+                    .await
+            }
+        });
+        wait_paused(&metadata).await;
+        metadata.submitted.notified().await;
+        let queued = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas("heads/b.json", None, Bytes::from_static(b"b"))
+                    .await
+            }
+        });
+        metadata.submitted.notified().await;
+        assert!(
+            !queued.is_finished(),
+            "upload alone never confirms a receipt"
+        );
+        metadata.lost_ack.store(lose_reply, Ordering::SeqCst);
+        let result = other
+            .cas("heads/c.json", None, Bytes::from_static(b"c"))
+            .await;
+        if lose_reply {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap());
+        }
+        let revision = metadata.read().await.unwrap().revision;
+        let lists = metadata.proposal_lists.load(Ordering::SeqCst);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+                .await
+                .expect("a helped receipt must not wait behind the stalled helper")
+                .unwrap()
+                .unwrap()
+        );
+        assert!(!stalled.is_finished());
+        assert_eq!(
+            metadata.read().await.unwrap().revision,
+            revision,
+            "receipt observation must not make a conditional update"
+        );
+        assert_eq!(
+            metadata.proposal_lists.load(Ordering::SeqCst),
+            lists,
+            "receipt observation must not discover or help more proposals"
+        );
+        metadata.resume.notify_one();
+        assert!(stalled.await.unwrap().unwrap());
+        for name in ["a", "b", "c"] {
+            assert_eq!(
+                store
+                    .get(&format!("heads/{name}.json"), 16)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .bytes,
+                name.as_bytes()
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_receipt_probes_are_bounded_and_yield_to_the_helper() {
+    use std::time::Duration;
+    for mode in ["absent", "superseded", "failed", "stalled"] {
+        let (store, metadata) = setup().await;
+        let other = replica(&metadata).await;
+        metadata.pause.store(true, Ordering::SeqCst);
+        let stalled = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas("heads/a.json", None, Bytes::from_static(b"a"))
+                    .await
+            }
+        });
+        wait_paused(&metadata).await;
+        metadata.submitted.notified().await;
+        let queued = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .cas("heads/b.json", None, Bytes::from_static(b"b"))
+                    .await
+            }
+        });
+        metadata.submitted.notified().await;
+        if mode == "superseded" {
+            assert!(
+                other
+                    .cas("heads/b.json", None, Bytes::from_static(b"winner"))
+                    .await
+                    .unwrap()
+            );
+        }
+        if mode == "stalled" {
+            metadata.pause_read.store(true, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(2), metadata.read_paused.notified())
+                .await
+                .unwrap();
+            let next = tokio::spawn({
+                let store = store.clone();
+                async move {
+                    store
+                        .cas("heads/c.json", None, Bytes::from_static(b"c"))
+                        .await
+                }
+            });
+            metadata.submitted.notified().await;
+            let reads = metadata.reads.load(Ordering::SeqCst);
+            for _ in 0..3 {
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                metadata.reads.load(Ordering::SeqCst),
+                reads,
+                "another waiter must not start a probe while one is stalled"
+            );
+            metadata.resume.notify_one();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), queued)
+                    .await
+                    .expect("helper admission must cancel its stalled read probe")
+                    .unwrap()
+                    .unwrap()
+            );
+            assert!(next.await.unwrap().unwrap());
+        } else {
+            metadata.fail_read.store(mode == "failed", Ordering::SeqCst);
+            let reads = metadata.reads.load(Ordering::SeqCst);
+            for _ in 0..16 {
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                metadata.reads.load(Ordering::SeqCst) - reads,
+                8,
+                "receipt probes stop at their bound, including failed observations"
+            );
+            assert!(
+                !queued.is_finished(),
+                "absence or a different pointer cannot supply a receipt"
+            );
+            assert!(!stalled.is_finished());
+            metadata.resume.notify_one();
+            let result = queued.await.unwrap();
+            if mode == "superseded" {
+                assert!(result.is_err(), "a superseded submission remains uncertain");
+                assert_eq!(
+                    store.get("heads/b.json", 16).await.unwrap().unwrap().bytes,
+                    b"winner"[..]
+                );
+            } else {
+                assert!(result.unwrap());
+            }
+        }
+        assert!(stalled.await.unwrap().unwrap());
     }
 }
 
