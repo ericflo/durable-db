@@ -187,6 +187,114 @@ async fn selection_revalidates_the_same_owner_and_refuses_a_successor() {
 }
 
 #[tokio::test]
+async fn selection_retry_reuses_completed_scan_without_adopting_late_frames() {
+    // Definite comparison conflict, unknown comparison, and either outcome of
+    // a lost catalog PUT reply all retain the same completed discovery.
+    for mode in 0..4 {
+        let provider = Provider::new();
+        let (_old, late) = source(&provider).await;
+        let mut root = successor(&provider).await;
+        let identity = root.identity().unwrap().unwrap();
+        let files = registration::Faults::fail_at(
+            provider.files.clone(),
+            "catalogs/",
+            if mode >= 2 { mode - 1 } else { 0 },
+        );
+        root.files = files.clone();
+        if mode == 0 {
+            provider.pause.store(true, Ordering::SeqCst);
+        } else {
+            provider.pause_read.store(true, Ordering::SeqCst);
+            if mode == 1 {
+                provider.fail_replacements.store(1, Ordering::SeqCst);
+            }
+        }
+        let selecting = tokio::spawn(async move {
+            root.select_journals().await.unwrap();
+            root
+        });
+        tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(files.frame_reads.load(Ordering::SeqCst), 2);
+        if mode == 0 {
+            let before = provider.read().await.unwrap();
+            let mut info = before.info.clone();
+            info.insert("administrative-fixture".into(), "changed".into());
+            assert!(provider.replace(&before, info).await.unwrap().is_some());
+        }
+        let _completion = late.send().await;
+        provider.release.notify_one();
+        let mut root = selecting.await.unwrap();
+        assert_eq!(files.frame_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(root.identity().unwrap(), Some(identity));
+        // Each retry stages fresh objects; an old delayed PUT is never replayed
+        // and cannot replace the second catalog's already selected cut.
+        assert_eq!(files.puts.load(Ordering::SeqCst), 6);
+        files.release().await;
+        assert_eq!(
+            provider
+                .files
+                .list("catalogs/", None, 8)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let journal = scan(&mut root).await;
+        assert!(journal.is_selected());
+        assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+    }
+}
+
+#[tokio::test]
+async fn selection_retry_restarts_only_when_collection_snapshot_changes() {
+    for data_sweep in [false, true] {
+        let provider = Provider::new();
+        let (_old, late) = source(&provider).await;
+        let mut root = successor(&provider).await;
+        let collection = root.collection();
+        let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
+        root.files = files.clone();
+        provider.pause.store(true, Ordering::SeqCst);
+        let selecting = tokio::spawn(async move {
+            root.select_journals().await.unwrap();
+            root
+        });
+        tokio::time::timeout(Duration::from_secs(2), provider.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(files.frame_reads.load(Ordering::SeqCst), 2);
+        if data_sweep {
+            crate::storage::immutable::Blob::upload(
+                provider.files.clone(),
+                Bytes::from_static(b"orphan"),
+            )
+            .await
+            .unwrap();
+        }
+        let before = provider.record();
+        assert!(collection.collect().await.unwrap() > 0);
+        assert_eq!(provider.record().collection > before.collection, data_sweep);
+        let _completion = late.send().await;
+        provider.release.notify_one();
+        let mut root = selecting.await.unwrap();
+        // A data sweep invalidates the scan. A metadata-only sweep removes the
+        // first attempt's objects, but retrying stages fresh ones from the same cut.
+        assert_eq!(
+            files.frame_reads.load(Ordering::SeqCst),
+            if data_sweep { 5 } else { 2 }
+        );
+        let journal = scan(&mut root).await;
+        assert!(journal.is_selected());
+        assert_eq!(
+            journal.finished_prefix().unwrap().position(),
+            if data_sweep { 2 } else { 1 }
+        );
+    }
+}
+
+#[tokio::test]
 async fn abandoned_selection_and_successor_claim_are_serialized_in_both_orders() {
     for selection_first in [true, false] {
         let provider = Provider::new();
@@ -372,7 +480,7 @@ async fn failed_catalog_uploads_never_send_the_conditional_publication() {
             }
             assert_eq!(journals.len(), 2);
             let calls = provider.calls.load(Ordering::SeqCst);
-            let request = root.select_prefixes(journals).unwrap();
+            let request = root.select_prefixes(&journals).unwrap();
             assert!(matches!(
                 root.finish(request.execute().await).unwrap(),
                 Outcome::Uncertain(_)
@@ -442,22 +550,22 @@ async fn batch_selection_rejects_mixed_snapshots_duplicates_and_unbounded_input(
     let (_second, _) = source(&provider).await;
     let mut root = successor(&provider).await;
     let before = provider.calls.load(Ordering::SeqCst);
-    assert!(root.select_prefixes(vec![]).is_err());
+    assert!(root.select_prefixes(&[]).is_err());
     let mut too_many = Vec::new();
     for _ in 0..9 {
         too_many.push(scan(&mut root).await);
     }
-    assert!(root.select_prefixes(too_many).is_err());
+    assert!(root.select_prefixes(&too_many).is_err());
     let a = scan(&mut root).await;
     let b = scan(&mut root).await;
-    assert!(root.select_prefixes(vec![a, b]).is_err());
+    assert!(root.select_prefixes(&[a, b]).is_err());
     for incomplete_first in [false, true] {
         let mut recovery = root.recovery().unwrap();
         let mut a = recovery.next().await.unwrap().unwrap();
         let mut b = recovery.next().await.unwrap().unwrap();
         let complete = if incomplete_first { &mut b } else { &mut a };
         while complete.read_next().await.unwrap().is_some() {}
-        assert!(root.select_prefixes(vec![a, b]).is_err());
+        assert!(root.select_prefixes(&[a, b]).is_err());
     }
     assert_eq!(provider.calls.load(Ordering::SeqCst), before);
     let mut old = root.recovery().unwrap();
@@ -473,7 +581,7 @@ async fn batch_selection_rejects_mixed_snapshots_duplicates_and_unbounded_input(
     let before = provider.calls.load(Ordering::SeqCst);
     // The first member matches the current snapshot; the second does not.
     assert!(matches!(
-        root.select_prefixes(vec![fresh, b]),
+        root.select_prefixes(&[fresh, b]),
         Err(Error::StaleRecovery)
     ));
     assert_eq!(provider.calls.load(Ordering::SeqCst), before);

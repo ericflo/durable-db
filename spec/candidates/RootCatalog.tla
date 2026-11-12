@@ -9,8 +9,11 @@ CONSTANTS Epochs, Attempts, LogLength, UnsafeCompare, UnsafeInherit,
 \* Ordered winning epochs and durable journal registrations are assumed here.
 \* A confirmed seal preserves all prior cuts. The implementation may retain
 \* its immutable ancestry cursor across that seal, loading the new confirmed
-\* catalog before BeginScan for the next journal. An uncertain reply restarts
-\* discovery after exact validation. No prefix choice or comparison is skipped.
+\* catalog before BeginScan for the next journal. After exact validation an
+\* unchanged snapshot can reuse its completed scan. Each retry has fresh catalog
+\* uploads and a captured comparison; no request or uncertain PUT is replayed.
+\* Collection is abstracted out here. Rust also compares the captured collection
+\* generation, checkpoint and owner; tests exercise those invalidation guards.
 \* One seal may publish several fully scanned journals from that same snapshot;
 \* every selected cut is immutable and all catalog bytes precede the exact CAS.
 VARIABLES history, active, entered, objects, acknowledged, scans, requests,
@@ -23,7 +26,7 @@ EmptyCuts == [e \in Owners |-> -1]
 Initial == [owner |-> 1, revision |-> 0, cuts |-> EmptyCuts]
 Current == history[Len(history)]
 Idle == [epochs |-> {}, position |-> [e \in Owners |-> 0],
-         finished |-> {}, source |-> Initial]
+         finished |-> {}, source |-> Initial, attempted |-> FALSE, reused |-> FALSE]
 Fresh == [status |-> "fresh", kind |-> "fence", owner |-> 1,
           expected |-> 0, cuts |-> EmptyCuts]
 Init == /\ history = <<Initial>> /\ active = {1} /\ entered = {1}
@@ -83,8 +86,9 @@ StartFence(p, a, source) ==
     /\ UNCHANGED <<history, active, objects, acknowledged, scans,
                    uploaded, known, timedOut, lateApplied>>
 \* Exact validation (historically called renewal) can confirm the same owner
-\* after an uncertain seal. Restart discovery from that confirmed catalog:
-\* an adopted selection is never extended by a late old journal upload.
+\* after an uncertain seal. A changed catalog requires new discovery; an
+\* unchanged one permits reusing a finished scan, even after late uploads.
+\* An adopted selection is never extended by a late old journal upload.
 \* Refreshing a scan's comparison requires an unchanged catalog snapshot.
 StartRenew(p, a, source) ==
     /\ NextId(a) /\ pending[p] = 0 /\ source.owner = p
@@ -104,7 +108,8 @@ StartSeal(p, a, source) ==
             expected |-> source.revision,
             cuts |-> [e \in Owners |->
                 IF e \in s.epochs THEN s.position[e] ELSE s.source.cuts[e]]]]
-    /\ scans' = [scans EXCEPT ![p] = Idle]
+    /\ scans' = [scans EXCEPT ![p] =
+          [scans[p] EXCEPT !.attempted = TRUE, !.reused = scans[p].attempted]]
     /\ pending' = [pending EXCEPT ![p] = a]
     /\ UNCHANGED <<history, active, entered, objects, acknowledged,
                    uploaded, known, sent, timedOut, lateApplied>>
@@ -159,6 +164,7 @@ SelectedHistory == \A e \in Owners: Current.cuts[e] >= 0 =>
 DurableCatalog == \A a \in Ids:
     (requests[a].kind = "seal" /\ requests[a].status \in {"ok", "done"}) =>
       (requests[a].cuts \in {history[i].cuts : i \in 2..Len(history)} => a \in uploaded)
+NotRetriedScan == ~(\E p \in Owners: scans[p].reused)
 NotLateSelection == ~(\E a \in lateApplied: requests[a].kind = "seal" /\ Current.owner = Epochs)
 NotInheritedSelection == ~(Current.owner = 3 /\ Current.cuts[1] >= 0)
 NotBatchedSelection == ~(Current.owner = 3 /\ Current.cuts[1] >= 0 /\ Current.cuts[2] >= 0)

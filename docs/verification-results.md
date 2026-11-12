@@ -1,5 +1,23 @@
 # Verification results
 
+## Reusing completed journal discovery (v0.24.5 candidate, 2026-11-12)
+
+After an unconfirmed selection, exact validation can retain a completed scan if
+its full recovery snapshot is unchanged. The retry uploads fresh catalog objects
+and uses the new captured comparison. Changed ownership, catalog, checkpoint or
+collection generation invalidates the scan. This removes repeated frame reads
+and the single-prefix temporary vector without a new cache or format.
+
+The regression fails on v0.24.4 with five frame GETs after a late upload; the new
+path needs only the original two. Thirteen focused catalog tests pass in 0.52
+seconds, covering comparison conflicts, unknown replies, both outcomes of lost
+PUT replies, metadata/data sweeps and existing takeover cases. RootCatalog checks
+455,553 and 173,635 states, five fault controls and four coverage controls.
+All 357 routine Rust checks, formatting and strict clippy pass.
+Collection remains outside that model and is guarded by the Rust snapshot
+comparison and sweep test; this is not a composed proof. Cloud qualification is
+pending, and no cloud speedup is claimed.
+
 ## Control publication receipts (v0.24.4, 2026-11-12)
 
 The partition adapter now returns the exact immutable pointer confirmed by the
@@ -690,8 +708,8 @@ were replaced; no separate serving path or protocol model was introduced.
 ## v0.23.8 recovery cursor reuse (2026-11-12)
 
 Confirmed journal-prefix publications now preserve the immutable ancestry cursor
-and load the newly confirmed catalog before choosing the next prefix. Uncertain
-outcomes still validate the same owner and restart discovery. This removes the
+and load the newly confirmed catalog before choosing the next prefix. At that
+revision, uncertain outcomes validate the same owner and restart discovery. This removes the
 nested rescan and temporary pending-journal slot without changing the durable
 format or adding a cache, queue or publication algorithm.
 

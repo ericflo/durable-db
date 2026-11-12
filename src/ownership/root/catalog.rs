@@ -239,7 +239,7 @@ impl Publication {
     pub(super) fn new(
         files: Arc<dyn Storage>,
         id: Uuid,
-        recovered: Vec<JournalRecovery>,
+        recovered: &[JournalRecovery],
     ) -> anyhow::Result<Self> {
         ensure!(
             (1..=SELECT_LIMIT).contains(&recovered.len()),

@@ -370,7 +370,8 @@ impl Root {
 
     /// Discover and select ancestral journals after activation. Resolve an
     /// unconfirmed publication by exact validation of this same incarnation,
-    /// then restart discovery from the confirmed catalog. Never replay its PUTs.
+    /// retaining completed scans only while their full recovery snapshot is
+    /// unchanged. Each retry stages fresh objects; never replay uncertain PUTs.
     pub async fn select_journals(&mut self) -> Result<(), Error> {
         let started = std::time::Instant::now();
         let owner = self.incarnation;
@@ -382,36 +383,43 @@ impl Root {
         let mut validations = 4;
         let mut recovery = self.recovery()?;
         let (mut discovered, mut frames) = (0u64, 0u64);
+        let mut journals = Vec::new();
         loop {
-            progress("discovery", discovered, frames);
-            let mut journals = Vec::new();
-            while journals.len() < catalog::SELECT_LIMIT {
-                let Some(mut journal) = recovery.next().await? else {
-                    break;
-                };
-                if journal.is_selected() {
-                    continue;
+            if journals.is_empty() {
+                progress("discovery", discovered, frames);
+                while journals.len() < catalog::SELECT_LIMIT {
+                    let Some(mut journal) = recovery.next().await? else {
+                        break;
+                    };
+                    if journal.is_selected() {
+                        continue;
+                    }
+                    while journal.read_next().await?.is_some() {
+                        frames = frames.saturating_add(1);
+                    }
+                    discovered = discovered.saturating_add(1);
+                    journals.push(journal);
                 }
-                while journal.read_next().await?.is_some() {
-                    frames = frames.saturating_add(1);
-                }
-                discovered = discovered.saturating_add(1);
-                journals.push(journal);
             }
             if journals.is_empty() {
                 progress("complete", discovered, frames);
                 return Ok(());
             }
             progress("publication", discovered, frames);
-            let select = self.select_prefixes(journals)?;
+            let select = self.select_prefixes(&journals)?;
             let outcome = self.finish(select.execute().await)?;
             let confirmed = matches!(outcome, Outcome::Confirmed);
             progress("validation", discovered, frames);
             self.confirm_outcome(outcome, &mut validations).await?;
             progress("advance", discovered, frames);
+            let current = self.recovery_record()?;
             if confirmed {
-                recovery.advance(self.recovery_record()?).await?;
-            } else {
+                journals.clear();
+                recovery.advance(current).await?;
+            } else if !current.same_recovery(journals[0].record) {
+                // A new catalog, checkpoint or collection generation invalidates
+                // the captured scan. Unrelated control changes do not.
+                journals.clear();
                 recovery = self.recovery()?;
             }
         }
@@ -678,16 +686,16 @@ impl Root {
     /// Validation can refresh the comparison while a scan is running. A changed
     /// catalog requires a new snapshot; an already selected prefix never extends.
     pub fn select_prefix(&mut self, recovered: JournalRecovery) -> Result<Prepared, Error> {
-        self.select_prefixes(vec![recovered])
+        self.select_prefixes(&[recovered])
     }
 
-    fn select_prefixes(&mut self, recovered: Vec<JournalRecovery>) -> Result<Prepared, Error> {
+    fn select_prefixes(&mut self, recovered: &[JournalRecovery]) -> Result<Prepared, Error> {
         let identity = self.identity()?.ok_or(Error::NotReady)?;
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         let confirmed =
             metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?
                 .ok_or(Error::NotReady)?;
-        for journal in &recovered {
+        for journal in recovered {
             if journal.record.identity != identity {
                 return Err(Error::NotOwner);
             }

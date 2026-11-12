@@ -461,9 +461,23 @@ confirmed catalog into one publication. Every prefix upload and the shared
 index/header must complete before the exact conditional write. Mixed snapshots,
 incomplete or duplicate journals and oversized batches are rejected before
 upload. Single-prefix callers use the same implementation. Direct confirmation
-retains the immutable ancestry cursor and loads the new catalog; uncertainty
-validates the same owner and restarts discovery. Checkpoint and collection
-identity checks remain unchanged.
+retains the immutable ancestry cursor and loads the new catalog. An unconfirmed
+publication validates the same owner. If the full recovery snapshot is unchanged,
+the controller retains the completed scans and ancestry cursor instead of reading
+the frames again. A changed catalog, checkpoint, owner or collection generation
+requires fresh discovery. The existing four-validation budget still bounds retries.
+Only at most eight completed prefixes are retained; frame payloads are dropped.
+Every attempt creates fresh catalog objects before its captured comparison, so
+neither an unknown PUT nor an already selected cut is replayed.
+
+A focused regression fails against v0.24.4: one completed one-frame scan is read
+again after a control conflict, producing five GETs when a late frame arrives.
+The replacement uses the original two GETs and preserves that completed cut.
+The same check covers an unknown comparison and lost catalog PUT replies, both
+applied and delayed. A metadata-only sweep can remove the failed attempt's
+objects; the retry stages new ones. A data sweep advances the recovery generation
+and requires a new scan. Existing lost-publication, takeover and mixed-snapshot
+checks remain in place; thirteen catalog checks finish in 0.52 seconds.
 
 The eight-journal regression reduces catalog publications from eight to one,
 with ten immutable PUTs and at most nine registration GETs. Seventeen journals
@@ -474,16 +488,19 @@ This removes per-journal catalog/index publication; it does not bound retained
 ancestry, eliminate placement contention or establish a cloud latency speedup.
 
 The model now captures a set of completed scans from one source catalog in each
-seal. Routine checks use two epochs, three invocations and one frame (**393,513**
-states, depth 33; 8 seconds locally), plus three epochs and three invocations with
-empty journals (**156,345** states, depth 26; 5 seconds). The latter includes
+seal and retains that completed scan across attempts. Routine checks use two
+epochs, three invocations and one frame (**455,553** states, depth 33; 10 seconds
+locally), plus three epochs and three invocations with empty journals
+(**173,635** states, depth 27; 5 seconds). The latter includes
 multi-journal publication; the former covers nonempty-prefix preservation.
 Five mandatory unsafe controls detect missing comparison, dropped inheritance,
 reselection, publication before durable upload and discovery before drain.
-Three coverage controls witness a delayed selection, inherited selection and a
-two-journal batch. The eight-entry implementation bound and mixed-snapshot
-validation are checked in Rust. These bounded instances do not prove Rust or
-all nonempty batch interleavings.
+Four coverage controls witness a delayed selection, inherited selection, a
+two-journal batch and retry of the same completed scan. The model abstracts out
+collection; the existing Rust snapshot comparison and sweep regression guard
+that boundary. The eight-entry implementation bound and mixed-snapshot validation
+are checked in Rust. These bounded instances do not prove Rust, collection
+composition or all nonempty batch interleavings.
 
 The root record carries an immutable catalog identity and rejects incompatible formats. Catalogs reuse the existing bounded-page B+tree, with a checksummed header of at most 4 KiB and 112-byte prefixes. `recovery()` requires confirmed activation and drain. Opaque scans bind to that owner and catalog; only a completed unselected scan can be published. The controller captures the exact comparison before any immutable upload. An upload failure prevents publication; a lost publication reply requires exact validation or a winning claim to recover the durable decision. Existing selections replay only their fixed prefix. Missing or corrupt referenced objects never become absent entries.
 
@@ -831,7 +848,7 @@ production availability remain unqualified.
 
 A watch channel supplies membership snapshots. A single task retires local backends when this process leaves membership or local health detects retirement, and maintains at most four acquisitions. A preference change alone keeps the incumbent serving until actual revocation; its resident reservation remains held. Each completion immediately admits the next eligible partition through a rotating cursor; one stalled operation cannot hold up the remaining slots. Failed acquisitions wait for the existing three-second retry tick or a membership update. Controller health checks perform no provider I/O or blocking owner-lock acquisition. Each native worker separately observes its permit at most once every three seconds, with one observation in flight and no owner lock held over I/O. Confirmed absence retires the owner; errors leave authority unchanged. This adds a background GET per cloud partition, never a conditional update. It is independent of the fresh permit validation required for each response. Local-directory guards need no object request. Membership changes cancel unconfirmed acquisitions whose preferred peer changes. After a confirmed claim, the incumbent finishes recovery and installs its backend while it remains a member, even if preference moves elsewhere. A subsequent takeover still fences its permit; explicit removal still cancels acquisition. Unchanged partitions keep their progress. Closing membership cancels recovery and retires local backends. Membership and readiness schedule work, never authorize responses.
 
-Each fresh acquisition must confirm its exact claim and activation, select revoked predecessor journals and privately recover before entering the serving map. Unknown claim/activation outcomes validate the same incarnation; only a definite claim conflict permits a fresh candidate. Journal selection makes at most four exact validations of the same incarnation, restarting discovery from the confirmed catalog; a successor immediately ends that attempt. Individual provider requests retain their timeouts; whole recovery has no restart timer. Resident reservations cover overlapping recovery, serving and still-referenced retired owners. HTTP checks the requested incarnation against the same backend retained through dispatch. Cross-database tenant scope is rejected before selection, and forwarding remains one hop without hidden request replay.
+Each fresh acquisition must confirm its exact claim and activation, select revoked predecessor journals and privately recover before entering the serving map. Unknown claim/activation outcomes validate the same incarnation; only a definite claim conflict permits a fresh candidate. Journal selection makes at most four exact validations of the same incarnation, retaining completed scans while the full recovery snapshot is unchanged; otherwise it restarts discovery from the confirmed catalog. A successor immediately ends that attempt. Individual provider requests retain their timeouts; whole recovery has no restart timer. Resident reservations cover overlapping recovery, serving and still-referenced retired owners. HTTP checks the requested incarnation against the same backend retained through dispatch. Cross-database tenant scope is rejected before selection, and forwarding remains one hop without hidden request replay.
 
 The scheduler regression pauses one of eight acquisitions and requires the other seven to become available, including an actual HTTP create on a queued partition. The membership regression retains a blocked recovery while another partition changes preference, preserves the healthy incumbent until takeover, then removes/restores the local node. Both fail against the previous scheduler. All twelve controller tests and 325 enabled Rust checks pass, along with formatting and strict clippy. The unchanged residency state space checks 19 states and both negative controls; layout checks 56 states and both controls. The former batch drain, whole-pass cancellation and eight-probe limit are removed. This changes scheduling only, not serving authority or the storage/wire format. The exact v0.23.5 executable passes the complete B2 campaign with 1,350 recovered writes; [phase durations and limitations](verification-results.md#v0235-independent-recovery-scheduling-2026-11-12) separate the improvements from slower initial setup.
 
@@ -911,10 +928,11 @@ to confirm the same owner, with four additional validation attempts across the
 whole selection. It never repeats an uncertain immutable PUT. Confirmed cuts are
 reloaded before discovery continues; a different owner is refused. A lost-reply
 regression checks both late journal bytes and takeover during validation. Nine
-catalog checks pass in 0.70 seconds. The unchanged `RootCatalog` transition system
-checks 393,513 states with two epochs and 102,525 with three epochs, plus its seven
-negative/coverage controls. These bounds establish catalog properties under the
-model's assumptions, not controller liveness or implementation correctness.
+catalog checks originally passed in 0.70 seconds. That historical check used
+393,513 states with two epochs and 102,525 with three epochs, plus seven
+negative/coverage controls. The current scan-reuse behavior and bounds are in
+[Durable prefix catalog](#durable-prefix-catalog). Neither bounded check proves
+controller liveness or implementation correctness.
 
 The controller now compares local placement before canceling an acquisition pass.
 Peer arrivals that leave its assignments unchanged preserve pending recovery.
