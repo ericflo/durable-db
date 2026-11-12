@@ -3263,6 +3263,20 @@
       "negative_controls": 7
     },
     "provider_qualification": "pending",
-    "scope": "Bounded protocol and real TCP regression; scheduling liveness and Rust refinement are not proved."
+    "scope": "Bounded protocol and real TCP regression; scheduling liveness and Rust refinement are not proved.",
+    "provider_checks": [
+      {
+        "provider": "versioned MinIO",
+        "source_commit": "5606aff3d044de54853169a38d0d03fe8d2cc9b8",
+        "passed": false,
+        "seconds": 61.28,
+        "failure": "New fixture queried nonexistent object_range metric; replaced with the existing cache_miss event counter.",
+        "cleanup": {
+          "bucket_removed": true,
+          "physical_versions_deleted": 34,
+          "container_removed": true
+        }
+      }
+    ]
   }
 }

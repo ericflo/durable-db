@@ -451,7 +451,16 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     }
     let before = controls();
     let gets = calls("object_get");
-    let ranges = calls("object_range");
+    let cache_misses = || -> u64 {
+        REGISTRY
+            .render()
+            .lines()
+            .find_map(|line| line.strip_prefix("durable_db_events_total{event=\"cache_miss\"} "))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let misses = cache_misses();
     let warm_started = Instant::now();
     let mut elapsed = Vec::new();
     for i in 0..100 {
@@ -475,7 +484,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     // One fresh permit per response plus independent, nonoverlapping health
     // probes every three seconds. Allow a probe at either measurement boundary.
     assert!((100..=102 + warm_started.elapsed().as_secs() / 3).contains(&warm_gets));
-    assert_eq!(ranges, calls("object_range"), "warm values stay cached");
+    assert_eq!(misses, cache_misses(), "warm values stay cached");
     elapsed.sort_by(f64::total_cmp);
 
     // Handoff already covered the previous epoch. Two new frames trigger this
@@ -671,7 +680,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; clock-independent permits; live predecessor refused reads and receipt retries after takeover. Not AWS, Kubernetes placement, arbitrary memory rollback or performance-SLO qualification."});
     evidence["background_permission_interval_seconds"] = json!(3);
-    evidence["warm_value_range_reads"] = json!(0);
+    evidence["warm_cache_misses"] = json!(0);
     evidence["live_predecessor_refused_after_takeover"] = json!(true);
     evidence["catalog_admission_bytes"] = json!(creation_admission);
     evidence["maintenance_funding"] = json!({"cold_recovery_claimed_preserved_reserve":true,
