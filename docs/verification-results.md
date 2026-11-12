@@ -18,7 +18,10 @@ passes the full native HTTP budget/retention/cold-recovery fixture at `8a82346`
 in 182.76 seconds, including zero warm cache misses and automatic collection.
 The disposable bucket/container and 31 physical versions were removed.
 
-## Idle-owner rejoin correction (2026-11-12, release pending)
+## v0.23.7 idle-owner rejoin recovery (2026-11-12)
+
+[v0.23.7](https://github.com/ericflo/durable-db/releases/tag/v0.23.7) packages
+`5606aff`, verified by [Woodpecker #241](https://ci.eflorenzano.com/repos/18/pipeline/241/1).
 
 A revoked owner can remain idle when membership assigns its partition back to
 it. Requests routed through another process then follow stale durable routing
@@ -31,12 +34,37 @@ The real HTTP regression fails against the old implementation at its eight-secon
 deadline and passes in 6.05 seconds with the correction. All 336 enabled Rust
 checks, formatting and strict clippy pass. The 236-state routing model and seven
 negative controls pass; they do not prove scheduling liveness or Rust refinement.
-This follow-up is not included in v0.23.6. Versioned MinIO passes the full
+Versioned MinIO passes the full
 native HTTP budget/retention/cold-recovery fixture in 182.92 seconds: 100 warm
 reads, 100 permit GETs, zero cache misses and no authority operations. The first
 run failed because the new fixture referenced a nonexistent metric; it now reads
 the existing cache-miss counter. Both buckets/containers and 66 physical versions
-were removed. Full B2/Kubernetes qualification remains pending.
+were removed. The exact release executable also passes the complete B2/Kubernetes campaign:
+**1,593 acknowledgements recovered and independently checked**, including two
+writers sharing partition 11. All six original processes remain paused in DNS
+while the replacement restores every writer. Rejoin, pod loss, rolling replacement,
+provider interruption, scale-down and total compute replacement pass. The namespace,
+bucket, scoped key and 1,463 remaining physical versions were removed.
+
+| Transition | Every writer's recovery upper bound | Engineering target |
+| --- | ---: | ---: |
+| Scale to three / six | 86.25 / 76.83 s | 60 s — missed |
+| Stopped-peer replacement after API readiness | 87.66 s | 120 s — met |
+| Resume old peers | 60.33 s | 60 s — missed |
+| Return to six | 5.85 s | 60 s — met |
+| Forced pod loss | 19.62 s | 60 s — met |
+| Rolling replacement | 119.57 s | 60 s — missed |
+| Restore provider egress | 39.62 s | 60 s — met |
+| Scale to one | 113.08 s | 60 s — missed |
+| Cold recovery after API readiness | 55.37 s | 120 s — met |
+
+These direct controller measurements include readiness/polling and two further
+readbacks per writer. The replacement and cold timers begin after API readiness;
+other timers begin before the fault/change command. The 40-second provider blackout
+precedes the restoration timer. Sampled peak steady-phase API RSS is 4,648,960 bytes.
+This is one short run, not a worst-case memory bound, repeatable speedup, physical-
+host power-loss qualification or production SLO. The later ancestry-cursor change
+is absent from this binary. [Exact sources, hashes, timings, failures and cleanup](evidence/native-recovery-2026-11-11.json).
 
 ## v0.23.6 peer failure and checkpoint recovery (2026-11-12)
 
