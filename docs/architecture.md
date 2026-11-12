@@ -16,6 +16,8 @@ partition metadata and introduce no new object class. See the
 
 A permit is a write-once positive object. A successor permanently revokes predecessor permits before choosing their durable journal prefixes. Remote responses are sealed before a fresh, uncached permit GET. There is no lease, bounded-clock assumption or bucket-wide conditional write on the ordinary read path. A fresh object GET still has provider latency; this is not an in-memory latency claim. [Protocol details and assumptions](design-owned-partitions.md#revocable-writer-permits).
 
+If the fresh permit read is unavailable, the response returns HTTP 503 while a locally healthy worker stays resident. An identical retry can resolve its durable receipt without another journal upload. Confirmed revocation and a failed local view still stop serving.
+
 Requests arriving elsewhere are forwarded once to an advertised owner incarnation. The receiving API pins that backend through authorization and dispatch; address reuse cannot redirect a request to an unrelated incarnation. Tenant claims and policy checks remain intact. Unknown outcomes return to the caller for an identical retry, without hidden forwarding replay.
 
 ## Commit protocol

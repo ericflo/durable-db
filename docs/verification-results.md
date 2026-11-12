@@ -1,6 +1,6 @@
 # Verification results
 
-## Response validation uncertainty (v0.24.1 candidate, 2026-11-12)
+## v0.24.1 response validation uncertainty (2026-11-12)
 
 Two real TCP regressions reproduce worker retirement after a transient permit
 GET failure: one for a rejected command, one for a sealed durable commit. Both
@@ -8,15 +8,60 @@ fail against the previous implementation in 0.02 seconds and pass after the fix
 in 0.04 seconds. An unavailable check returns HTTP 503 without discarding the
 healthy worker; confirmed revocation still stops serving. Identical retries keep
 the same incarnation and perform no additional journal PUT. The commit retry
-returns its original receipt. The routing model checks 728 states with nine
-negative controls, including this mistaken retirement.
+returns its original receipt.
 
 The change removes both unconditional worker exits on response-validation
 errors. One fixed-cardinality counter records uncertainty while local ownership
-remains valid. No new worker, timer, provider call or retry queue is added. This
-reproduces a real defect; it does **not** establish the cause of v0.24.0’s repeated
-B2 acquisitions or qualify rollout latency. All 349 routine Rust checks pass;
-cloud qualification is pending.
+remains valid. No new worker, timer, provider call or retry queue is added. The
+routing model retains **728 states**, with **nine negative controls**. All **349
+routine Rust checks**, formatting and strict clippy pass. Versioned MinIO passes
+membership/recovery in 40.36 seconds. [Woodpecker #279](https://ci.eflorenzano.com/repos/18/pipeline/279/1)
+passes at `a782941`, including native JavaScript/Pi contracts and the optimized
+10,005-database regression (198.91 seconds).
+
+The exact static executable recovers **all 961 acknowledged B2 writes**, checked
+independently across four histories. Two of five recovery targets pass:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 47.90 s | 60 s | Pass |
+| Scale to six | 66.70 s | 60 s | Miss |
+| First rolling replacement | 110.44 s | 60 s | Miss |
+| Second rolling replacement | 150.01 s | 60 s | Miss |
+| Cold API readiness | 63.37 s | 120 s | Pass |
+
+The rollout bounds include rollout/readiness completion and the subsequent
+per-writer readback barrier. Maximum acknowledgement gaps in the recorded
+rollout history slices are **73.88 / 73.64 seconds**. Those slices include
+intervening budget/diagnostic time and are not exact fault windows or readback
+latencies. The previous run measured 146.72 / 174.44-second rollout bounds and
+94.07 / 91.38-second acknowledgement gaps; this run improves those observations
+but misses the scale-to-six target that previously passed. It does not establish
+a repeatable performance improvement or a production SLO.
+
+Across 45 periodic samples, 170 successful counter observations from 21 pod UIDs
+all report zero `response_validation_unavailable` events. Thirteen peer observations were
+rate limited and ten were unreachable. Retained acquisition logs contain no
+repeat completed acquisition for a partition within one pod UID. Neither sample
+is exhaustive across pod deletion. This campaign therefore does **not** attribute
+the earlier repeated acquisitions or the changed timings to the locally
+reproduced permission-check defect.
+
+Acquisition/handoff latency remains the next target. In the second rollout,
+writer one's replacement waits about 17 seconds through the challenge phase;
+its successful acquisition then takes 33.12 seconds, including 14.19 seconds in
+journal selection and 8.61 seconds in recovery. The overall progress bound also
+includes preceding pod replacements. These logs identify work to investigate;
+they do not establish a sole cause of the acknowledgement gaps.
+
+[v0.24.1](https://github.com/ericflo/durable-db/releases/tag/v0.24.1) ships the
+checked static executable. Its installation, transactions, backup/restore and
+forced-stop recovery also pass. The namespace, B2 bucket, 1,687 physical versions
+and scoped key are removed; MinIO's bucket, container and 79 remaining versions
+are removed.
+[Sources, artifacts, timings and diagnostic scope](evidence/native-recovery-2026-11-11.json)
+retain the evidence. Physical-host loss, sustained load, AWS, peak memory,
+complete cost isolation and the production operating envelope remain unqualified.
 
 ## v0.24.0 stable member identity (2026-11-12)
 
