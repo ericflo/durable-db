@@ -43,42 +43,48 @@ pub(super) async fn seal(root: &mut Root, journal: JournalRecovery) {
 
 #[tokio::test]
 async fn selecting_ancestral_journals_reads_the_registration_chain_once() {
-    let provider = Provider::new();
-    for epoch in 1u8..=8 {
-        let mut root = active(&provider).await;
-        let mut writer = root.take_journal(QueueLimits::default()).unwrap();
-        let upload = writer.prepare(&[Bytes::from(vec![epoch])]).unwrap();
-        writer.complete(upload.send().await).unwrap();
-        assert!(writer.pop_durable().unwrap().is_some());
-    }
-    let mut root = successor(&provider).await;
-    let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
-    root.files = files.clone();
-    root.select_journals().await.unwrap();
-    assert!(
-        files.registration_reads.load(Ordering::SeqCst) <= 9,
-        "selection must not restart the immutable ancestry after each publication: {} reads",
-        files.registration_reads.load(Ordering::SeqCst)
-    );
-    let mut recovery = root.recovery().unwrap();
-    for epoch in (1u8..=8).rev() {
-        let mut journal = recovery.next().await.unwrap().unwrap();
-        assert!(journal.is_selected());
-        assert_eq!(journal.registration().identity().epoch, u64::from(epoch));
+    for count in [8u8, 17] {
+        let provider = Provider::new();
+        for epoch in 1..=count {
+            let mut root = active(&provider).await;
+            let mut writer = root.take_journal(QueueLimits::default()).unwrap();
+            let upload = writer.prepare(&[Bytes::from(vec![epoch])]).unwrap();
+            writer.complete(upload.send().await).unwrap();
+            assert!(writer.pop_durable().unwrap().is_some());
+        }
+        let mut root = successor(&provider).await;
+        let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
+        root.files = files.clone();
+        let before = provider.calls.load(Ordering::SeqCst);
+        root.select_journals().await.unwrap();
+        let batches = u64::from(count).div_ceil(8);
+        assert_eq!(provider.calls.load(Ordering::SeqCst) - before, batches);
+        // One immutable prefix per journal; one index page and header per batch.
         assert_eq!(
-            journal
-                .read_next()
-                .await
-                .unwrap()
-                .unwrap()
-                .records()
-                .collect::<Vec<_>>(),
-            vec![&[epoch][..]]
+            files.puts.load(Ordering::SeqCst),
+            u64::from(count) + 2 * batches
         );
-        assert!(journal.read_next().await.unwrap().is_none());
-        assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+        assert!(files.registration_reads.load(Ordering::SeqCst) <= u64::from(count) + 1);
+        let mut recovery = root.recovery().unwrap();
+        for epoch in (1..=count).rev() {
+            let mut journal = recovery.next().await.unwrap().unwrap();
+            assert!(journal.is_selected());
+            assert_eq!(journal.registration().identity().epoch, u64::from(epoch));
+            assert_eq!(
+                journal
+                    .read_next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .records()
+                    .collect::<Vec<_>>(),
+                vec![&[epoch][..]]
+            );
+            assert!(journal.read_next().await.unwrap().is_none());
+            assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+        }
+        assert!(recovery.next().await.unwrap().is_none());
     }
-    assert!(recovery.next().await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -137,6 +143,7 @@ async fn lost_selection_reply_and_complete_reopen_never_extend_a_selected_prefix
 async fn selection_revalidates_the_same_owner_and_refuses_a_successor() {
     for takeover in [false, true] {
         let provider = Provider::new();
+        let (_first, first_late) = source(&provider).await;
         let (_old, late) = source(&provider).await;
         let mut root = successor(&provider).await;
         let identity = root.identity().unwrap().unwrap();
@@ -152,6 +159,7 @@ async fn selection_revalidates_the_same_owner_and_refuses_a_successor() {
         assert_eq!(provider.record().identity, identity);
         assert!(provider.record().catalog.is_some());
         let _completion = late.send().await;
+        let _completion = first_late.send().await;
         if takeover {
             let _next = successor(&provider).await;
         }
@@ -165,9 +173,14 @@ async fn selection_revalidates_the_same_owner_and_refuses_a_successor() {
         } else {
             result.unwrap();
             assert_eq!(provider.record().identity, identity);
-            let journal = scan(&mut root).await;
-            assert!(journal.is_selected());
-            assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+            let mut recovery = root.recovery().unwrap();
+            for _ in 0..2 {
+                let mut journal = recovery.next().await.unwrap().unwrap();
+                assert!(journal.is_selected());
+                while journal.read_next().await.unwrap().is_some() {}
+                assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+            }
+            assert!(recovery.next().await.unwrap().is_none());
             assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 1);
         }
     }
@@ -341,6 +354,7 @@ async fn failed_catalog_uploads_never_send_the_conditional_publication() {
         for mode in [1, 2] {
             let provider = Provider::new();
 
+            let (_older, _older_late) = source(&provider).await;
             let (_old, _late) = source(&provider).await;
             let files =
                 super::registration::Faults::fail_at(provider.files.clone(), namespace, mode);
@@ -350,9 +364,15 @@ async fn failed_catalog_uploads_never_send_the_conditional_publication() {
 
             validate(&mut root).await;
             activate(&mut root).await;
-            let journal = scan(&mut root).await;
+            let mut recovery = root.recovery().unwrap();
+            let mut journals = Vec::new();
+            while let Some(mut journal) = recovery.next().await.unwrap() {
+                while journal.read_next().await.unwrap().is_some() {}
+                journals.push(journal);
+            }
+            assert_eq!(journals.len(), 2);
             let calls = provider.calls.load(Ordering::SeqCst);
-            let request = root.select_prefix(journal).unwrap();
+            let request = root.select_prefixes(journals).unwrap();
             assert!(matches!(
                 root.finish(request.execute().await).unwrap(),
                 Outcome::Uncertain(_)
@@ -378,10 +398,8 @@ async fn catalog_splits_index_pages_and_recovers_one_hundred_thirty_decisions() 
     for _ in 0..130 {
         drop(root);
         root = successor(&provider).await;
-        let journal = scan(&mut root).await;
-        assert!(!journal.is_selected());
-        seal(&mut root, journal).await;
     }
+    root.select_journals().await.unwrap();
     let mut recovery = root.recovery().unwrap();
     let mut remaining = 130;
     while let Some(mut journal) = recovery.next().await.unwrap() {
@@ -415,4 +433,49 @@ async fn renewals_during_a_long_scan_do_not_require_restarting_unchanged_history
     let recovered = scan(&mut root).await;
     assert!(recovered.is_selected());
     assert_eq!(recovered.finished_prefix().unwrap().position(), 1);
+}
+
+#[tokio::test]
+async fn batch_selection_rejects_mixed_snapshots_duplicates_and_unbounded_input() {
+    let provider = Provider::new();
+    let (_first, _) = source(&provider).await;
+    let (_second, _) = source(&provider).await;
+    let mut root = successor(&provider).await;
+    let before = provider.calls.load(Ordering::SeqCst);
+    assert!(root.select_prefixes(vec![]).is_err());
+    let mut too_many = Vec::new();
+    for _ in 0..9 {
+        too_many.push(scan(&mut root).await);
+    }
+    assert!(root.select_prefixes(too_many).is_err());
+    let a = scan(&mut root).await;
+    let b = scan(&mut root).await;
+    assert!(root.select_prefixes(vec![a, b]).is_err());
+    for incomplete_first in [false, true] {
+        let mut recovery = root.recovery().unwrap();
+        let mut a = recovery.next().await.unwrap().unwrap();
+        let mut b = recovery.next().await.unwrap().unwrap();
+        let complete = if incomplete_first { &mut b } else { &mut a };
+        while complete.read_next().await.unwrap().is_some() {}
+        assert!(root.select_prefixes(vec![a, b]).is_err());
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+    let mut old = root.recovery().unwrap();
+    let mut a = old.next().await.unwrap().unwrap();
+    let mut b = old.next().await.unwrap().unwrap();
+    while a.read_next().await.unwrap().is_some() {}
+    while b.read_next().await.unwrap().is_some() {}
+    seal(&mut root, a).await;
+    let mut current = root.recovery().unwrap();
+    assert!(current.next().await.unwrap().unwrap().is_selected());
+    let mut fresh = current.next().await.unwrap().unwrap();
+    while fresh.read_next().await.unwrap().is_some() {}
+    let before = provider.calls.load(Ordering::SeqCst);
+    // The first member matches the current snapshot; the second does not.
+    assert!(matches!(
+        root.select_prefixes(vec![fresh, b]),
+        Err(Error::StaleRecovery)
+    ));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+    root.select_journals().await.unwrap();
 }

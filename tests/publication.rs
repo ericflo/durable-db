@@ -474,6 +474,7 @@ async fn lost_bucket_ack_recovers_receipt_after_both_collectors_and_empty_cache(
     );
 }
 #[tokio::test]
+#[ignore = "capacity qualification; CI runs explicitly in release mode"]
 async fn ten_thousand_databases_split_page_recover_and_collect() {
     for limits in [
         None,

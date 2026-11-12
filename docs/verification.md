@@ -445,17 +445,34 @@ The model assumes unique immutable identities and exact register comparisons. It
 
 `RootCatalog.tla` models captured conditional requests, immutable catalog uploads, positive knowledge, provider send, delayed application, timeouts and replies separately. A claim must inherit all selected prefixes. A complete scan can refresh its comparison after renewal only if the catalog is unchanged. Exact comparison prevents a stale publication from dropping or replacing a decision. Late journal uploads remain possible after selection.
 
-After a directly confirmed prefix publication, the implementation retains its
-immutable registration cursor and reloads the newly confirmed catalog. Identity,
-checkpoint and collection generation must still match; uncertain outcomes validate
-and restart from the confirmed catalog. Each new prefix still requires completed
-discovery and the original exact comparison. The eight-journal regression reduces
-registration GETs from 53 to nine and reads every selected frame. Existing lost-
-reply, takeover, stale-scan and failed-upload tests still pass. This optimization
-removes repeated ancestry scans; it does not bound the total retained ancestry or
-change the model's publication actions.
+Recovery groups at most eight complete, unselected journals from the same
+confirmed catalog into one publication. Every prefix upload and the shared
+index/header must complete before the exact conditional write. Mixed snapshots,
+incomplete or duplicate journals and oversized batches are rejected before
+upload. Single-prefix callers use the same implementation. Direct confirmation
+retains the immutable ancestry cursor and loads the new catalog; uncertainty
+validates the same owner and restarts discovery. Checkpoint and collection
+identity checks remain unchanged.
 
-The routine checks use two epochs, three invocations and one frame (**393,513** states, depth 33; 8 seconds locally), plus three epochs and three invocations with empty journals (**102,525** states, depth 26; 3 seconds). Empty selected prefixes still require durable catalog publication and inheritance. The nonempty two-epoch case and fault controls cover frame preservation; the former larger routine instances are removed. Five mandatory unsafe controls detect missing comparison, dropped inheritance, reselection, publication before durable upload and discovery before drain. Two coverage controls witness selection applying after timeout and a third epoch inheriting a prior decision. No symmetry reduction or guided constraint is used. Run `scripts/check-candidate.sh RootCatalog`.
+The eight-journal regression reduces catalog publications from eight to one,
+with ten immutable PUTs and at most nine registration GETs. Seventeen journals
+require three publications, 23 PUTs and at most eighteen registration GETs.
+Tests recover every selected frame, cross an index split, lose a two-journal
+publication reply, deliver late journal bytes, race takeover and fail uploads.
+This removes per-journal catalog/index publication; it does not bound retained
+ancestry, eliminate placement contention or establish a cloud latency speedup.
+
+The model now captures a set of completed scans from one source catalog in each
+seal. Routine checks use two epochs, three invocations and one frame (**393,513**
+states, depth 33; 8 seconds locally), plus three epochs and three invocations with
+empty journals (**156,345** states, depth 26; 5 seconds). The latter includes
+multi-journal publication; the former covers nonempty-prefix preservation.
+Five mandatory unsafe controls detect missing comparison, dropped inheritance,
+reselection, publication before durable upload and discovery before drain.
+Three coverage controls witness a delayed selection, inherited selection and a
+two-journal batch. The eight-entry implementation bound and mixed-snapshot
+validation are checked in Rust. These bounded instances do not prove Rust or
+all nonempty batch interleavings.
 
 The Rust `owned-candidate-3` record carries an immutable catalog identity and rejects earlier candidate formats. Catalogs reuse the existing bounded-page B+tree, with a checksummed header of at most 4 KiB and 112-byte prefixes. `recovery()` requires confirmed activation and drain. Opaque scans bind to that owner and catalog; only a completed unselected scan can be published. The controller captures the exact comparison before any immutable upload. An upload failure prevents publication; a lost publication reply requires exact validation or a winning claim to recover the durable decision. Existing selections replay only their fixed prefix. Missing or corrupt referenced objects never become absent entries.
 

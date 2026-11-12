@@ -7,3 +7,4 @@ unsafe RootCatalogUnsafeEarly.cfg root-catalog-early 768m DurableCatalog
 unsafe RootCatalogUnsafeScan.cfg root-catalog-scan 768m SelectedHistory
 unsafe RootCatalogLate.cfg root-catalog-late 768m NotLateSelection
 unsafe RootCatalogInherited.cfg root-catalog-inherited 768m NotInheritedSelection
+unsafe RootCatalogBatch.cfg root-catalog-batch 768m NotBatchedSelection

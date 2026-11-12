@@ -344,7 +344,7 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
     trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT; \
     cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings \
-    && cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect \
+    && cargo test --locked --all-targets \
     && mkdir -p /test-tools && cp /cache/target/debug/durable-db /test-tools/durable-db \
     && cargo test --locked --lib --no-run --message-format=json > /tmp/native-tests.json \
     && node -e 'const fs = require("node:fs"); const artifacts = fs.readFileSync("/tmp/native-tests.json", "utf8").trim().split("\n").map(JSON.parse); const test = artifacts.find(a => a.executable && a.target.name === "durable_db" && a.profile.test); if (!test) throw Error("missing native test executable"); fs.copyFileSync(test.executable, "/test-tools/native-tests");' \
@@ -357,7 +357,7 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
     trap 'kache daemon stop >/dev/null 2>&1 || true' EXIT; \
-    cargo test --locked --release --target x86_64-unknown-linux-musl --test publication ten_thousand_databases_split_page_recover_and_collect \
+    cargo test --locked --release --target x86_64-unknown-linux-musl --test publication ten_thousand_databases_split_page_recover_and_collect -- --ignored --exact \
     && cargo build --locked --release --target x86_64-unknown-linux-musl \
     && mkdir -p /out \
     && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \

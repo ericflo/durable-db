@@ -372,12 +372,22 @@ impl Root {
     pub async fn select_journals(&mut self) -> Result<(), Error> {
         let mut validations = 4;
         let mut recovery = self.recovery()?;
-        while let Some(mut journal) = recovery.next().await? {
-            if journal.is_selected() {
-                continue;
+        loop {
+            let mut journals = Vec::new();
+            while journals.len() < catalog::SELECT_LIMIT {
+                let Some(mut journal) = recovery.next().await? else {
+                    break;
+                };
+                if journal.is_selected() {
+                    continue;
+                }
+                while journal.read_next().await?.is_some() {}
+                journals.push(journal);
             }
-            while journal.read_next().await?.is_some() {}
-            let select = self.select_prefix(journal)?;
+            if journals.is_empty() {
+                return Ok(());
+            }
+            let select = self.select_prefixes(journals)?;
             let outcome = self.finish(select.execute().await)?;
             let confirmed = matches!(outcome, Outcome::Confirmed);
             self.confirm_outcome(outcome, &mut validations).await?;
@@ -387,7 +397,6 @@ impl Root {
                 recovery = self.recovery()?;
             }
         }
-        Ok(())
     }
 
     /// Confirm this same bound identity by exact comparison, within a caller's
@@ -651,19 +660,25 @@ impl Root {
     /// Validation can refresh the comparison while a scan is running. A changed
     /// catalog requires a new snapshot; an already selected prefix never extends.
     pub fn select_prefix(&mut self, recovered: JournalRecovery) -> Result<Prepared, Error> {
+        self.select_prefixes(vec![recovered])
+    }
+
+    fn select_prefixes(&mut self, recovered: Vec<JournalRecovery>) -> Result<Prepared, Error> {
         let identity = self.identity()?.ok_or(Error::NotReady)?;
-        if recovered.record.identity != identity {
-            return Err(Error::NotOwner);
-        }
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         let confirmed =
             metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?
                 .ok_or(Error::NotReady)?;
-        if !confirmed.same_recovery(recovered.record) {
-            return Err(Error::StaleRecovery);
+        for journal in &recovered {
+            if journal.record.identity != identity {
+                return Err(Error::NotOwner);
+            }
+            if !confirmed.same_recovery(journal.record) {
+                return Err(Error::StaleRecovery);
+            }
         }
         let id = Uuid::new_v4();
-        let catalog = recovered.publication(self.files.clone(), id)?;
+        let catalog = catalog::Publication::new(self.files.clone(), id, recovered)?;
         let mut record = confirmed;
         record.catalog = Some(id);
         let mut prepared = self.begin(raw, record)?;

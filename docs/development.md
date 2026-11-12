@@ -9,8 +9,8 @@ export KACHE_CONFIG="$PWD/.kache.toml"
 
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets -- --skip ten_thousand_databases_split_page_recover_and_collect
-cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect
+cargo test --locked --all-targets
+cargo test --locked --release --test publication ten_thousand_databases_split_page_recover_and_collect -- --ignored --exact
 scripts/check-model.sh
 scripts/check-proof.sh
 ```
@@ -19,7 +19,7 @@ Native client contract checks explicitly provision 1 GiB per database with `DURA
 
 The backup recovery fixture uses a larger bounded request budget so its 16,641-key interrupted restore tests recovery rather than waiting for the default four-commit-per-second allowance. Admission tests retain default-policy coverage and use a controlled clock for exact refill and eviction checks.
 
-The two Rust test commands run the complete required suite: use release mode for the capacity regression to avoid its large directory sweep in debug mode. The local command uses your host target. Woodpecker runs that same regression on musl, sharing the target used by the shipped static binary instead of building a separate optimized GNU target.
+The two Rust test commands run the complete required suite: the capacity regression is opt-in so ordinary `cargo test` does not run its large directory sweep in debug mode. CI runs it explicitly in release mode. The local command uses your host target. Woodpecker runs that same regression on musl, sharing the target used by the shipped static binary instead of building a separate optimized GNU target.
 
 The model command checks every current-engine model and its required controls. The proof command above checks abstract publication safety; journal and research proofs have separate commands below. These checks do not establish that the Rust implementation refines the models. See [verification](verification.md) for each theorem's assumptions and scope.
 

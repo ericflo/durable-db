@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 
 const MAX_HEADER_BYTES: usize = 4096;
+pub(super) const SELECT_LIMIT: usize = 8;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -225,47 +226,62 @@ impl JournalRecovery {
     pub async fn read_next(&mut self) -> anyhow::Result<Option<Batch>> {
         self.reader.read_next().await
     }
-
-    pub(super) fn publication(
-        &self,
-        files: Arc<dyn Storage>,
-        id: Uuid,
-    ) -> anyhow::Result<Publication> {
-        ensure!(!self.selected, "journal prefix was already selected");
-        let prefix = self
-            .reader
-            .finished_prefix()
-            .context("journal recovery is incomplete")?;
-        Ok(Publication {
-            files,
-            id,
-            index: self.index.clone(),
-            registration: self.registration,
-            prefix,
-        })
-    }
 }
 
 pub(super) struct Publication {
     files: Arc<dyn Storage>,
     id: Uuid,
     index: Option<directory::Root>,
-    registration: Registration,
-    prefix: Prefix,
+    prefixes: BTreeMap<String, Prefix>,
 }
 impl Publication {
+    pub(super) fn new(
+        files: Arc<dyn Storage>,
+        id: Uuid,
+        recovered: Vec<JournalRecovery>,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            (1..=SELECT_LIMIT).contains(&recovered.len()),
+            "invalid selection batch size"
+        );
+        let index = recovered[0].index.clone();
+        let mut prefixes = BTreeMap::new();
+        for journal in recovered {
+            ensure!(!journal.selected, "journal prefix was already selected");
+            let prefix = journal
+                .reader
+                .finished_prefix()
+                .context("journal recovery is incomplete")?;
+            ensure!(
+                prefixes
+                    .insert(entry_key(journal.registration.identity()), prefix)
+                    .is_none(),
+                "duplicate journal selection"
+            );
+        }
+        Ok(Self {
+            files,
+            id,
+            index,
+            prefixes,
+        })
+    }
+
     /// Fresh immutable objects; no retries. Any failed upload prevents register
     /// publication, even if the object may arrive later. Orphans need future GC.
     pub async fn execute(self) -> anyhow::Result<()> {
-        let key = entry_key(self.registration.identity());
-        let bytes = self.prefix.encode();
-        let pointer = Pointer {
-            key: format!("manifests/{key}.{}", Uuid::new_v4()),
-            sha256: hex::encode(Sha256::digest(&bytes)),
-        };
-        self.files.put(&pointer.key, bytes).await?;
+        let mut entries = BTreeMap::new();
+        for (key, prefix) in self.prefixes {
+            let bytes = prefix.encode();
+            let pointer = Pointer {
+                key: format!("manifests/{key}.{}", Uuid::new_v4()),
+                sha256: hex::encode(Sha256::digest(&bytes)),
+            };
+            self.files.put(&pointer.key, bytes).await?;
+            entries.insert(key, pointer);
+        }
         let index = Directory::new(self.files.clone())
-            .insert_many(self.index.as_ref(), &BTreeMap::from([(key, pointer)]))
+            .insert_many(self.index.as_ref(), &entries)
             .await?;
         let mut body = serde_json::to_vec(&Header {
             format: 1,

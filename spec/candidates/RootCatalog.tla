@@ -11,6 +11,8 @@ CONSTANTS Epochs, Attempts, LogLength, UnsafeCompare, UnsafeInherit,
 \* its immutable ancestry cursor across that seal, loading the new confirmed
 \* catalog before BeginScan for the next journal. An uncertain reply restarts
 \* discovery after exact validation. No prefix choice or comparison is skipped.
+\* One seal may publish several fully scanned journals from that same snapshot;
+\* every selected cut is immutable and all catalog bytes precede the exact CAS.
 VARIABLES history, active, entered, objects, acknowledged, scans, requests,
           uploaded, known, sent, pending, timedOut, lateApplied
 vars == <<history, active, entered, objects, acknowledged, scans, requests,
@@ -20,7 +22,8 @@ Ids == 1..Attempts
 EmptyCuts == [e \in Owners |-> -1]
 Initial == [owner |-> 1, revision |-> 0, cuts |-> EmptyCuts]
 Current == history[Len(history)]
-Idle == [epoch |-> 0, position |-> 0, finished |-> FALSE, source |-> Initial]
+Idle == [epochs |-> {}, position |-> [e \in Owners |-> 0],
+         finished |-> {}, source |-> Initial]
 Fresh == [status |-> "fresh", kind |-> "fence", owner |-> 1,
           expected |-> 0, cuts |-> EmptyCuts]
 Init == /\ history = <<Initial>> /\ active = {1} /\ entered = {1}
@@ -47,20 +50,22 @@ Drain == /\ Current.owner \notin active
          /\ active' = {Current.owner}
          /\ UNCHANGED <<history, entered, objects, acknowledged, scans, requests,
                         uploaded, known, sent, pending, timedOut, lateApplied>>
-BeginScan(p, e, source) ==
-    /\ scans[p] = Idle /\ e < p /\ source.owner = p
+BeginScan(p, epochs, source) ==
+    /\ scans[p] = Idle /\ epochs # {} /\ epochs \subseteq 1..(p-1)
+    /\ source.owner = p
     /\ p \in active \/ (UnsafeScan /\ p = Current.owner)
-    /\ source.cuts[e] = -1 \/ UnsafeReseal
+    /\ \A e \in epochs: source.cuts[e] = -1 \/ UnsafeReseal
     /\ scans' = [scans EXCEPT ![p] =
-          [epoch |-> e, position |-> 0, finished |-> FALSE, source |-> source]]
+          [Idle EXCEPT !.epochs = epochs, !.source = source]]
     /\ UNCHANGED <<history, active, entered, objects, acknowledged, requests,
                    uploaded, known, sent, pending, timedOut, lateApplied>>
-ReadScan(p) ==
-    /\ scans[p].epoch > 0 /\ ~scans[p].finished
+ReadScan(p, e) ==
+    /\ e \in scans[p].epochs \ scans[p].finished
     /\ LET s == scans[p] IN
          scans' = [scans EXCEPT ![p] =
-           IF s.position + 1 \in objects[s.epoch]
-           THEN [s EXCEPT !.position = @ + 1] ELSE [s EXCEPT !.finished = TRUE]]
+           IF s.position[e] + 1 \in objects[e]
+           THEN [s EXCEPT !.position[e] = @ + 1]
+           ELSE [s EXCEPT !.finished = @ \cup {e}]]
     /\ UNCHANGED <<history, active, entered, objects, acknowledged, requests,
                    uploaded, known, sent, pending, timedOut, lateApplied>>
 ForgetScan(p) == /\ scans[p] # Idle /\ scans' = [scans EXCEPT ![p] = Idle]
@@ -90,13 +95,15 @@ StartRenew(p, a, source) ==
     /\ UNCHANGED <<history, active, entered, objects, acknowledged, scans,
                    uploaded, known, timedOut, lateApplied>>
 StartSeal(p, a, source) ==
-    /\ NextId(a) /\ pending[p] = 0 /\ p \in active /\ scans[p].finished
+    /\ NextId(a) /\ pending[p] = 0 /\ p \in active
+    /\ scans[p].epochs # {} /\ scans[p].finished = scans[p].epochs
     /\ source.owner = p /\ source.cuts = scans[p].source.cuts
     /\ LET s == scans[p] IN
          requests' = [requests EXCEPT ![a] =
            [status |-> "pending", kind |-> "seal", owner |-> p,
             expected |-> source.revision,
-            cuts |-> [s.source.cuts EXCEPT ![s.epoch] = s.position]]]
+            cuts |-> [e \in Owners |->
+                IF e \in s.epochs THEN s.position[e] ELSE s.source.cuts[e]]]]
     /\ scans' = [scans EXCEPT ![p] = Idle]
     /\ pending' = [pending EXCEPT ![p] = a]
     /\ UNCHANGED <<history, active, entered, objects, acknowledged,
@@ -138,11 +145,11 @@ Deliver(a) ==
     /\ UNCHANGED <<history, active, entered, objects, acknowledged, scans,
                    uploaded, known, sent, timedOut, lateApplied>>
 Next == Drain \/ (\E a \in Ids: UploadCatalog(a) \/ ObserveCatalog(a) \/ Send(a) \/ Apply(a) \/ Deliver(a))
-    \/ (\E p \in Owners: ReadScan(p) \/ ForgetScan(p) \/ Timeout(p)
+    \/ (\E p \in Owners: (\E e \in Owners: ReadScan(p,e)) \/ ForgetScan(p) \/ Timeout(p)
          \/ (\E n \in 1..LogLength: Upload(p,n) \/ Ack(p,n))
          \/ (\E a \in Ids, source \in {history[i] : i \in 1..Len(history)}:
               StartSeal(p,a,source) \/ StartFence(p,a,source) \/ StartRenew(p,a,source))
-         \/ (\E e \in Owners, source \in {history[i] : i \in 1..Len(history)}: BeginScan(p,e,source)))
+         \/ (\E epochs \in SUBSET (1..(p-1)), source \in {history[i] : i \in 1..Len(history)}: BeginScan(p,epochs,source)))
 Spec == Init /\ [][Next]_vars
 ImmutableSelection == \A i,j \in 1..Len(history): i <= j =>
     \A e \in Owners: history[i].cuts[e] >= 0 => history[j].cuts[e] = history[i].cuts[e]
@@ -154,4 +161,5 @@ DurableCatalog == \A a \in Ids:
       (requests[a].cuts \in {history[i].cuts : i \in 2..Len(history)} => a \in uploaded)
 NotLateSelection == ~(\E a \in lateApplied: requests[a].kind = "seal" /\ Current.owner = Epochs)
 NotInheritedSelection == ~(Current.owner = 3 /\ Current.cuts[1] >= 0)
+NotBatchedSelection == ~(Current.owner = 3 /\ Current.cuts[1] >= 0 /\ Current.cuts[2] >= 0)
 ========================================================================

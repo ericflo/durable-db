@@ -1,5 +1,29 @@
 # Verification results
 
+## Batched journal selection (unreleased)
+
+Recovery now publishes up to eight completed journal prefixes from one catalog
+snapshot together, using the existing immutable B+tree and exact conditional
+write. Eight ancestral journals require one publication instead of eight; the
+focused fixture verifies ten immutable PUTs and at most nine registration GETs.
+Seventeen journals exercise the bound with three publications and 23 PUTs.
+The single-prefix publication implementation is replaced by this common path;
+there is no new durable format, cache or publication protocol.
+
+The existing RootCatalog model now checks batched seals from a shared snapshot
+(393,513 / 156,345 states); five unsafe and three coverage controls pass. Rust
+checks cover late bytes after an uncertain two-journal selection, takeover, mixed
+snapshots, incomplete/duplicate/oversized batches, upload failures and index
+splitting. Eleven focused catalog tests and strict clippy pass; cloud timing
+qualification is pending. The capacity sweep is now opt-in locally and remains
+mandatory in release-mode CI, removing the routine debug sweep and skip flags.
+
+The v0.23.9 trace places the 90.30-second selection on unused partition 10, and
+a 45.91-second selection on active partition 2. During the two-way isolation hold,
+each active partition (2, 12 and 14) has claim attempts from two processes. This
+identifies both publication overhead and competing placement as targets; batching
+does not resolve disagreement about reachable peers.
+
 ## v0.23.9 operational access during tenant saturation (2026-11-12)
 
 Tenant saturation could block budget inspection and monitoring. Authenticated
