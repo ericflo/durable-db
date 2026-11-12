@@ -17,6 +17,8 @@ Open(n) == /\ n = s.layout /\ n # 0
 Publish == /\ ~s.data
            /\ s' = [s EXCEPT !.data = TRUE,
                        !.layout = IF Fault = "Erase" THEN 0 ELSE @]
+\* DNS and fallible liveness probes may yield any subset, including empty.
+\* These hints affect placement only; neither can remap a database.
 Membership(m) == /\ m \in SUBSET Nodes
                  /\ s' = [s EXCEPT !.members = m]
 Map == /\ s.opened # {}

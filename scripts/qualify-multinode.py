@@ -21,6 +21,29 @@ import yaml
 
 NODE_IMAGE = 'docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4'
 
+# Same-UID sidecar, shared pod PID namespace. Never targets PID 1 or reads args,
+# environment or credentials. Start ticks prevent accepting a replacement PID.
+PROCESS_CONTROL = r"""
+const fs=require('node:fs');
+const pids=fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p)).filter(p=>{
+  try{return fs.readFileSync(`/proc/${p}/comm`,'utf8').trim()==='durable-db'}catch{return false}
+});
+if(pids.length!==1 || Number(pids[0])<=1)throw Error('Expected one non-init database process');
+const pid=Number(pids[0]);
+function state(){const s=fs.readFileSync(`/proc/${pid}/stat`,'utf8');
+  const f=s.slice(s.lastIndexOf(')')+2).trim().split(/\s+/);return {pid,started:f[19],state:f[0]}}
+const before=state(),signal=process.argv[1];
+if(process.argv[2] && (Number(process.argv[2])!==pid || process.argv[3]!==before.started))
+  throw Error('Database process was replaced');
+if(!['STOP','CONT','STATE'].includes(signal))throw Error('Invalid process observation');
+if(signal!=='STATE')process.kill(pid,'SIG'+signal);
+let tries=0;const timer=setInterval(()=>{const s=state();
+  if(signal==='STATE' || (signal==='STOP'?s.state==='T':['R','S','D'].includes(s.state))){
+    clearInterval(timer);console.log(JSON.stringify(s));
+  }else if(++tries===40){throw Error('Process did not change state')}
+},25);
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -58,17 +81,20 @@ def main():
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      rollout_surge=1, rollout_unavailable=0, rollout_deadline_seconds=240,
                                      per_writer_readbacks_before_phase=2,
+                                     process_pause=dict(shared_pid_namespace=True, liveness_probe=False,
+                                                        sidecar_image=NODE_IMAGE,sidecar_cpu_limit='100m',sidecar_memory_limit='64Mi'),
                                      upload_budget=dict(bytes=1073741824, attempts=100000),
                                      tenant_upload_budget=dict(bytes=1073741824, attempts=100000),
                                      steady_seconds=args.steady_seconds, memory_observation=args.observe_memory,
                                      maximum_write_intents=100000),
                   phases=[], budget_observations=[], resource_samples=[], failures=[], limitations=[
                       'Manual replica changes; no CPU-driven HPA claim.',
-                      'Application-pod loss and namespace-scoped egress restriction; no host shutdown, node drain, rack failure or control-plane failure.',
+                      'Application-process pause, pod loss and namespace-scoped egress restriction; no host shutdown, node drain, rack failure or control-plane failure.',
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
     created = False
+    stopped = []
 
     def kube(*command, body=None, timeout=60):
         return subprocess.check_output(['kubectl','--context',args.context,'-n',namespace,*command],
@@ -116,14 +142,15 @@ def main():
             except subprocess.SubprocessError:
                 pass  # A disappearing pod must not prevent the failure report.
 
-    def wait_replicas(count):
+    def wait_replicas(count, ready_count=None):
+        if ready_count is None:ready_count=count
         deadline = time.monotonic()+240
         while time.monotonic()<deadline:
             live = pods()
             active = [p for p in live if not p['metadata'].get('deletionTimestamp')]
             ready = [p for p in active if p['status'].get('containerStatuses') and all(c.get('ready') for c in p['status']['containerStatuses'])]
-            if len(active)==count and len(ready)==count and (count or not live):
-                if count>=3 and len({p['spec']['nodeName'] for p in ready})<3:
+            if len(active)==count and len(ready)==ready_count and (count or not live):
+                if ready_count>=3 and len({p['spec']['nodeName'] for p in ready})<3:
                     raise RuntimeError('Expected API placement across three distinct nodes')
                 return ready
             time.sleep(2)
@@ -131,7 +158,33 @@ def main():
 
     def placement(ready):
         return [dict(pod=p['metadata']['name'],node=p['spec']['nodeName'],
-                     image_id=p['status']['containerStatuses'][0]['imageID']) for p in ready]
+                     image_id=next(c['imageID'] for c in p['status']['containerStatuses'] if c['name']=='database')) for p in ready]
+
+    def process_control(pod, signal, expected=None):
+        args=[] if expected is None else [str(expected['pid']),expected['started']]
+        return json.loads(kube('exec',pod,'-c','fault','--','node','-e',PROCESS_CONTROL,signal,*args))
+
+    def resume_processes():
+        for victim in stopped[:]:
+            process_control(victim['pod'],'CONT',victim['process'])
+            stopped.remove(victim)
+
+    def verify_paused_peers():
+        current={p['metadata']['name']:p for p in pods()}
+        states=[]
+        for victim in stopped:
+            pod=current[victim['pod']]
+            database=next(c for c in pod['status']['containerStatuses'] if c['name']=='database')
+            if pod['metadata']['uid']!=victim['uid'] or database['restartCount']!=victim['restarts']:
+                raise RuntimeError('A frozen database pod restarted or was replaced')
+            state=process_control(victim['pod'],'STATE',victim['process'])
+            if state['state']!='T':raise RuntimeError('Old database process resumed before the progress barrier')
+            states.append(dict(pod=victim['pod'],**state))
+        script="require('node:dns').promises.lookup('durable-db-peers',{all:true}).then(x=>console.log(JSON.stringify(x.map(v=>v.address))))"
+        answers=json.loads(kube('exec','workload','--','node','-e',script))
+        if not {v['ip'] for v in stopped}.issubset(set(answers)):
+            raise RuntimeError('DNS withdrew a frozen peer; stale-DNS takeover was not exercised')
+        return dict(processes=states,dns_addresses=answers)
 
     def budget(stage):
         status = call('/budget',{})
@@ -242,6 +295,15 @@ def main():
                 container['resources']=dict(requests=dict(cpu='25m',memory='96Mi'),limits=dict(cpu='250m',memory='384Mi'))
                 container['volumeMounts']=[m for m in container['volumeMounts'] if m['name']=='keys']
                 template['spec']['volumes']=[v for v in template['spec']['volumes'] if v['name']=='keys']
+                # Only this disposable fixture changes process layout. Disable
+                # liveness restart so recovery must exclude still-advertised,
+                # stopped processes. Readiness and the headless Service remain.
+                container.pop('livenessProbe',None)
+                template['spec']['shareProcessNamespace']=True
+                template['spec']['containers'].append(dict(name='fault',image=NODE_IMAGE,
+                    command=['node','-e','setInterval(()=>{},1<<30)'],
+                    resources=dict(requests=dict(cpu='1m',memory='8Mi'),limits=dict(cpu='100m',memory='64Mi')),
+                    securityContext=dict(allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,capabilities=dict(drop=['ALL']))))
             resources.append(resource)
         for resource in resources:resource['metadata']['namespace']=namespace
         kube('apply','-f','-',body=dict(apiVersion='v1',kind='List',items=resources))
@@ -294,6 +356,24 @@ def main():
                 report['steady_observed_seconds']=now-start;save()
                 time.sleep(min(15,max(0,args.steady_seconds-(time.monotonic()-start))))
             phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=progress())
+        # All old owners stop, but their pod identities and DNS records remain.
+        # Only the new seventh process can satisfy the per-writer barrier.
+        for pod in pods():
+            name=pod['metadata']['name']
+            database=next(c for c in pod['status']['containerStatuses'] if c['name']=='database')
+            state=process_control(name,'STOP')
+            stopped.append(dict(pod=name,uid=pod['metadata']['uid'],ip=pod['status']['podIP'],
+                                restarts=database['restartCount'],process=state))
+        kube('scale','deployment','durable-db','--replicas=7')
+        phase('prior-api-processes-paused',**verify_paused_peers())
+        replacement=wait_replicas(7,ready_count=1)
+        acknowledged=progress()
+        phase('paused-dns-replacement',placement=placement(replacement),
+              writes_acknowledged=acknowledged,**verify_paused_peers())
+        resume_processes()
+        phase('paused-processes-resumed',placement=placement(wait_replicas(7)),writes_acknowledged=progress())
+        kube('scale','deployment','durable-db','--replicas=6')
+        phase('resume-scale-six',placement=placement(wait_replicas(6)),writes_acknowledged=progress())
         victim=pods()[0]
         kube('delete','pod',victim['metadata']['name'],'--grace-period=0','--force','--wait=false')
         phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=placement(wait_replicas(6)),writes_acknowledged=progress())
@@ -338,6 +418,9 @@ def main():
             except Exception:pass
         raise
     finally:
+        if stopped:
+            try:resume_processes()
+            except Exception:report['process_resume_failed']=True
         if forward and forward.poll() is None:forward.terminate();forward.wait(timeout=15)
         if created:
             # The namespace is fresh and task-owned; no other resources are deleted.

@@ -13,6 +13,8 @@ Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
 \* It is independent of response authority, including for direct peer requests.
 \* Local worker health can remain ready during provider errors or maintenance;
 \* neither condition authorizes a response without the fresh permit check.
+\* A false peer-failure suspicion may trigger takeover while the old process
+\* lives. Takeover still revokes its permit; a health observation cannot serve.
 Readiness == s' = [s EXCEPT !.ready = ~@]
 \* Routing observations are hints, including stale ones after takeover.
 Lookup == /\ s.cached = "none" /\ s.phase # "busy"

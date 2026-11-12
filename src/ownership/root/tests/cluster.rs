@@ -1,7 +1,7 @@
 use super::routing::{Server, app, auth};
 use super::*;
 use crate::{
-    api::{Backend, Cluster, ClusterConfig},
+    api::{Backend, Cluster, ClusterConfig, Membership},
     auth::Access,
     cache::Cache,
     engine::Info,
@@ -46,8 +46,33 @@ impl Node {
         peers: Vec<SocketAddr>,
         layout: Layout,
     ) -> Self {
-        let address = listener.local_addr().unwrap();
         let (membership, receiver) = watch::channel(peers);
+        Self::with_membership(directory, listener, layout, membership, receiver).await
+    }
+    async fn monitored(
+        directory: Partitions,
+        listener: TcpListener,
+        membership: watch::Sender<Vec<SocketAddr>>,
+    ) -> (Self, Membership) {
+        let monitor = Membership::observe(membership.subscribe()).unwrap();
+        let node = Self::with_membership(
+            directory,
+            listener,
+            Layout::new(2).unwrap(),
+            membership,
+            monitor.subscribe(),
+        )
+        .await;
+        (node, monitor)
+    }
+    async fn with_membership(
+        directory: Partitions,
+        listener: TcpListener,
+        layout: Layout,
+        membership: watch::Sender<Vec<SocketAddr>>,
+        receiver: watch::Receiver<Vec<SocketAddr>>,
+    ) -> Self {
+        let address = listener.local_addr().unwrap();
         let cluster = Cluster::open(
             directory,
             ClusterConfig {
@@ -129,6 +154,109 @@ async fn settled(nodes: &[&Node], peers: &[SocketAddr]) {
 fn commit(id: usize) -> Value {
     json!({"request_id":"first", "expected_revision":0,
         "writes":[{"key":"x", "value": if id==0 {"b25l"} else {"dHdv"}}]})
+}
+
+#[tokio::test]
+async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenced() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second = loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peers = [address, listener.local_addr().unwrap()];
+        if preferred(0, &peers) != preferred(1, &peers) {
+            break listener;
+        }
+    };
+    let peers = vec![address, second.local_addr().unwrap()];
+    let (dns, _) = watch::channel(peers.clone());
+    let (a, _a_monitor) = Node::monitored(directory(&provider).await, listener, dns.clone()).await;
+    let (b, b_monitor) = Node::monitored(directory(&provider).await, second, dns.clone()).await;
+    settled(&[&a, &b], &peers).await;
+    let id = (0..2)
+        .find(|id| preferred(*id, &peers) == b.address)
+        .unwrap() as usize;
+    let name = &names()[id];
+    let path = format!("/v1/databases/{name}");
+    let token = auth().administrator_token(600).unwrap();
+    a.server
+        .ok(
+            "PUT",
+            &path,
+            &token,
+            json!({"request_id":"create","limits":{"max_keys":20,"max_bytes":10000}}),
+        )
+        .await;
+    let request = commit(id);
+    let mut receipt = a
+        .server
+        .ok("POST", &format!("{path}/commit"), &token, request.clone())
+        .await;
+    assert_eq!(receipt["replayed"], false);
+    receipt["replayed"] = json!(true);
+    let old = b.cluster.resolve(name).await.unwrap().unwrap();
+    let address = b.address;
+    drop(b);
+    drop(b_monitor);
+    tokio::task::yield_now().await;
+    // TCP accepts, but HTTP never responds: a connect-only probe is insufficient.
+    let stalled = Server::serve(
+        TcpListener::bind(address).await.unwrap(),
+        axum::Router::new().route(
+            "/health/live",
+            axum::routing::get(|| async { std::future::pending::<&'static str>().await }),
+        ),
+    );
+    settled(&[&a], &[a.address]).await;
+    assert_eq!(
+        *dns.borrow(),
+        peers,
+        "discovery never withdrew the failed address"
+    );
+    assert_ne!(
+        a.cluster
+            .resolve(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation(),
+        old.owner_incarnation()
+    );
+    assert!(
+        matches!(
+            old.info(name, &Access::Administrator).await,
+            Err(crate::Error::Storage(_))
+        ),
+        "a still-retained old owner must fail durable permit validation"
+    );
+    assert_eq!(
+        a.server
+            .ok("POST", &format!("{path}/commit"), &token, request.clone())
+            .await,
+        receipt
+    );
+    drop(stalled);
+    tokio::task::yield_now().await;
+    let (b, _b_monitor) = Node::monitored(
+        directory(&provider).await,
+        TcpListener::bind(address).await.unwrap(),
+        dns.clone(),
+    )
+    .await;
+    settled(&[&a, &b], &peers).await;
+    // The router still remembers the pre-failure incarnation. Refuse it once;
+    // only the client's identical retry may use the freshly discovered owner.
+    let (status, _) = a
+        .server
+        .call("POST", &format!("{path}/commit"), &token, request.clone())
+        .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        a.server
+            .ok("POST", &format!("{path}/commit"), &token, request)
+            .await,
+        receipt
+    );
 }
 
 #[tokio::test]
