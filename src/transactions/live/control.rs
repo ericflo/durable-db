@@ -89,8 +89,9 @@ impl Control {
         );
         Ok(())
     }
-    /// The caller has already sealed the complete result, including errors.
-    pub(super) async fn validate(&self, identity: root::Identity) -> anyhow::Result<()> {
+    /// Responses must be sealed before validation. Background health checks
+    /// use absence only to retire an owner; they never grant response permission.
+    pub(crate) async fn validate(&self, identity: root::Identity) -> anyhow::Result<()> {
         let permission = self.lock()?.permission();
         if permission.await? != Some(identity) {
             self.lock()?.retire();

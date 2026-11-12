@@ -451,6 +451,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
     }
     let before = controls();
     let gets = calls("object_get");
+    let ranges = calls("object_range");
+    let warm_started = Instant::now();
     let mut elapsed = Vec::new();
     for i in 0..100 {
         let (path, revision, value) = readers[i % readers.len()];
@@ -469,11 +471,11 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         controls(),
         "warm reads do not mutate or fetch authority"
     );
-    assert_eq!(
-        gets + 100,
-        calls("object_get"),
-        "each sealed warm read validates one fresh permit, without refetching values"
-    );
+    let warm_gets = calls("object_get") - gets;
+    // One fresh permit per response plus independent, nonoverlapping health
+    // probes every three seconds. Allow a probe at either measurement boundary.
+    assert!((100..=102 + warm_started.elapsed().as_secs() / 3).contains(&warm_gets));
+    assert_eq!(ranges, calls("object_range"), "warm values stay cached");
     elapsed.sort_by(f64::total_cmp);
 
     // Handoff already covered the previous epoch. Two new frames trigger this
@@ -658,7 +660,7 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "new_rows_only_funding_refused":true,"refusal_and_retry_immutable_puts":0,"automatic_collection":true,
         "ledger_objects_before":initial,"ledger_objects_after":2,"directory_objects_after":1,
         "setup_seconds":setup_seconds,"cleanup_wait_ms":cleanup_ms,"cold_recovery_ms":recovery_ms,
-        "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":100,"warm_read_paths":["checkpoint"],
+        "cold_receipts_and_values_verified":true,"warm_http_reads":100,"warm_read_control_calls":0,"warm_read_object_gets":warm_gets,"warm_read_paths":["checkpoint"],
         "catalog_survived_collection_after_takeover":true,"complete_reopens":2,
         "retention":{"cold_reopen_and_collection":true,"exact_cut_values":true,"release_reclaimed_old_checkpoint":true,"immutable_puts":0},
         "automatic_table_and_manifest_collection":true,"checkpoint_objects_after_first_sweep":retained_tables,"checkpoint_objects_after_takeover_sweep":takeover_tables,
@@ -668,6 +670,8 @@ async fn native_http_budgets_cleanup_and_cold_recovery() {
         "warm_read_ms":{"p50":elapsed[49],"p95":elapsed[94],"p99":elapsed[98]},
         "total_seconds":started.elapsed().as_secs_f64(),
         "scope":"Debug native HTTP composition on local loopback; 4 MiB cache; clock-independent permits; live predecessor refused reads and receipt retries after takeover. Not AWS, Kubernetes placement, arbitrary memory rollback or performance-SLO qualification."});
+    evidence["background_permission_interval_seconds"] = json!(3);
+    evidence["warm_value_range_reads"] = json!(0);
     evidence["live_predecessor_refused_after_takeover"] = json!(true);
     evidence["catalog_admission_bytes"] = json!(creation_admission);
     evidence["maintenance_funding"] = json!({"cold_recovery_claimed_preserved_reserve":true,

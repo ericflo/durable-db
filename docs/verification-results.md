@@ -1,148 +1,82 @@
 # Verification results
 
-## Peer failure, routing and observation deadlines (2026-11-12, release pending)
+## Idle-owner rejoin correction (2026-11-12, release pending)
 
-A newly reproduced local stall explains one way checkpoint recovery can stop:
-a failed refresh clears the cached control confirmation, while the write-once
-permit remains live. Later checkpoint attempts previously reused the missing
-origin and never refreshed it. They now repeat exact metadata validation under
-the existing control lock before staging. This does not grant serving permission,
-change ownership, or retry an uncertain immutable write.
+A revoked owner can remain idle when membership assigns its partition back to
+it. Requests routed through another process then follow stale durable routing
+hints, so no request reaches the old owner to discover revocation. A bounded
+background permit observation now retires that cached owner on confirmed
+absence, allowing the existing controller to reacquire. Errors do not retire
+it or grant authority; ordinary responses still validate their own permits.
 
-The old implementation fails both a lost-refresh regression and a real HTTP
-fixture that fails maintenance funding followed by its metadata refresh. The
-HTTP fixture now resumes background checkpointing in 1.12 seconds without a new
-request or owner, accepts the next write and replays the earlier receipt. All 335
-enabled Rust checks, formatting, strict clippy and the site build pass. The
-RootAcquisition bounds (117,741 / 30,349 states, six negative controls) and
-Checkpoint bound (65,664 states, nine negative controls) still pass. These are
-component checks, not a proof of Rust or confirmation of the failed B2 run's
-cause. The corrected runtime still requires the complete cloud campaign.
+The real HTTP regression fails against the old implementation at its eight-second
+deadline and passes in 6.05 seconds with the correction. All 336 enabled Rust
+checks, formatting and strict clippy pass. The 236-state routing model and seven
+negative controls pass; they do not prove scheduling liveness or Rust refinement.
+This follow-up is not included in v0.23.6 and still needs provider qualification.
 
-Candidate `5e9b5fd` passes [Woodpecker #234](https://ci.eflorenzano.com/repos/18/pipeline/234/1),
-independent executable checks and stale-DNS replacement in a fresh B2 campaign,
-but **fails rejoin**. Writer 2 exhausts its 180-second read-retry deadline while
-its partition has not reached a new ready owner. The partial snapshot records
-1,022 acknowledgements and 1,021 readbacks, without final history/cold recovery.
-The difference is unresolved in this failed run, not a finding of data loss.
-All resources and 788 physical versions were removed. Six of seven diagnostic
-metric reads succeeded; cumulative durations include the deliberate process
-pause and cannot be treated as isolated provider latency.
+## v0.23.6 peer failure and checkpoint recovery (2026-11-12)
 
-The new controller-monotonic measurements put scale-to-three at **61.56 seconds**
-and scale-to-six at **62.24 seconds** for the last writer's two further readbacks.
-Both pass the outer ceiling but miss the 60-second engineering target. Initial
-setup took 231 seconds. The stopped-process phase boundary took 194 seconds,
-including diagnostics. No latency SLO or repeatability claim follows.
+[v0.23.6](https://github.com/ericflo/durable-db/releases/tag/v0.23.6) packages
+`11ded2c`, verified by [Woodpecker #239](https://ci.eflorenzano.com/repos/18/pipeline/239/1).
+The downloaded static executable passes standalone installation, transactions,
+ordered reads, export/restore and forced-stop recovery. It corrects checkpoint
+origins lost after failed metadata refresh, excludes unresponsive peers retained
+in DNS, invalidates cancelled forwarding attempts, removes redundant control-read
+updates, and bounds object-observation retries and response-body waits.
 
-A further local correction bounds a shared-provider wait: the object SDK's
-default ten retries and three-minute retry budget could occupy an acquisition
-slot through the client's entire recovery window. B2 and S3 now share at most
-three read attempts and a ten-second whole-observation deadline covering GET,
-range and listing bodies. Expiration returns an error, never confirmed absence;
-conditional writes and immutable uploads remain single-attempt. The stalled-body TCP regression fails on the
-previous reader. All 332 enabled Rust checks, formatting, strict clippy and the
-site build pass. The unchanged 856-state revocable-owner model passes its nine
-negative controls. These bounded checks do not prove Rust or liveness.
-Candidate `0e31829` passes [Woodpecker #236](https://ci.eflorenzano.com/repos/18/pipeline/236/1)
-and independent executable checks, but its B2/Kubernetes run **fails during the
-steady phase, before fault injection**. Writers 0 and 3 share partition 11 and
-exhaust their unchanged 180-second commit retry limits; writers 1 and 2 continue.
-The partial snapshot has 787 acknowledgements and readbacks. Tenant credits
-remain available. There is no final cold recovery or full history check, and no
-failure metrics were captured before the pods disappeared. All disposable
-resources and 625 physical versions were removed.
+The exact executable passes the complete B2 campaign on the existing Kubernetes
+hosts. All six original processes are stopped while their DNS entries remain;
+a seventh takes over, and every writer progresses before those processes resume.
+Rejoin, return to six, pod loss, rolling replacement, a 40-second provider
+interruption, scale-down to one and total compute replacement also pass.
+**All 1,974 acknowledged writes are recovered**, with four independently checked
+histories. The namespace, bucket, scoped key and 1,505 remaining physical object
+versions were removed. The four writers map to distinct partitions in this run;
+shared-partition coverage is a separate local 400-write/collection regression.
 
-Scale-to-three takes at most 121.73 seconds for every writer's two readbacks;
-scale-to-six takes 61.83 seconds. Both miss the 60-second engineering target.
-The observation policy correction is not established as the stall's cause or
-resolution. The candidate remains unreleased. A two-tenant production-directory
-test completes 400 commits with concurrent collection locally in 2.06 seconds,
-but does not reproduce the cloud stall. Fixed-stage checkpoint warnings and
-bounded metric capture before cleanup now make the next failure diagnosable
-without recording provider error text, credentials, keys or values.
+| Transition | Every writer's recovery upper bound | Engineering target |
+| --- | ---: | ---: |
+| Scale to three | 59.75 s | 60 s — met |
+| Scale to six | 76.42 s | 60 s — missed |
+| Forced pod loss | 16.52 s | 60 s — met |
+| Rolling replacement | 142.79 s | 60 s — missed |
+| Scale to one | 80.76 s | 60 s — missed |
+| Cold recovery after API readiness | 79.24 s | 120 s — met |
 
-Candidate `aa3996f` passes [Woodpecker #233](https://ci.eflorenzano.com/repos/18/pipeline/233/1)
-and the independent executable checks. Its fresh B2/Kubernetes campaign reaches
-all four writers' progress while **all six original database processes remain
-stopped and listed in DNS**. Their process identities are checked before and
-after; only the new seventh process can serve. The original processes then
-resume, and every writer progresses through the return to six replicas.
+These controller-monotonic bounds include readiness and polling until two more
+readbacks per writer, excluding later diagnostics. Stopped-peer replacement and
+rejoin take 136.72 and 125.31 seconds between phase boundaries, including
+diagnostics; they are not direct recovery/SLO measurements. Sampled peak API RSS
+is 5,156,864 bytes during the short steady phase, not a worst-case memory bound.
+This is one passing campaign, not physical-host power-loss, sustained-load,
+AWS, arbitrary-contention or production-SLO qualification.
 
-The subsequent forced pod loss **fails**: writer 3 exhausts its unchanged
-180-second commit-retry limit, although its replacement owner became ready
-about 47 seconds after the preceding phase boundary. The partial snapshot has
-1,540 acknowledgements/readbacks, without final cold recovery/history checking.
-This does not establish lost acknowledgements. The pause-to-replacement phase
-boundary takes 148 seconds; rejoin takes 73 seconds. These include diagnostics,
-not isolated recovery latencies. All disposable resources and 703 physical
-versions were removed; the failed run and exact hashes remain in the evidence.
+Four earlier candidates failed: `689cfcf` during scale-to-six (219 partial
+acknowledgements), `aa3996f` after pod loss (1,540), `5e9b5fd` during rejoin
+(1,022 acknowledgements / 1,021 readbacks), and `0e31829` during steady traffic
+with two writers sharing a partition (787). None completed cold recovery or
+final history checking. The partial readback difference does not establish data
+loss. Their exact hashes, observations, failures and confirmed resource cleanup
+remain in the [campaign evidence](evidence/native-recovery-2026-11-11.json).
+A passing later run does not prove the cause of every earlier stall.
 
-A local HTTP regression reproduces a routing defect consistent with that stall:
-cancelling a forwarded request before its peer timeout skipped cache invalidation,
-so the next explicit retry used the same dead destination. Invalidation now runs
-synchronously when the attempt ends or is dropped, affecting only that route
-instance. A late cancellation cannot erase a replacement or revive a failed peer.
-The interruptible asynchronous invalidation block was removed. Six HTTP routing
-checks pass in 0.19 seconds, including cancellation and delayed failures; the
-138-state routing model passes all six negative controls. All 330 enabled Rust
-checks, formatting, strict clippy and the documentation build pass. These bounded checks
-are not a Rust proof or confirmation of the cloud stall's cause. A complete new
-campaign remains required before release.
+The lost-origin HTTP regression fails before the correction and resumes background
+checkpointing in 1.12 seconds afterward, without a new request or owner. It then
+accepts another write and replays the earlier receipt. All 335 enabled Rust checks,
+99 client/adapter checks, the optimized 10,005-database check, formatting and
+strict clippy pass. RootAcquisition (117,741 / 30,349 states; six negative controls),
+Checkpoint (65,664; nine), RevocableOwner (856; nine) and routing (138; six)
+remain bounded component checks, not a proof of Rust or the integrated cluster.
 
-Versioned MinIO passes the complete native HTTP budget/retention fixture with
-the observation deadline: two cold reopens, live predecessor refusal, automatic
-journal/table/manifest collection, preserved maintenance funding, retained-image
-export and restoration after source collection. Its 100 warm reads perform 100
-permit GETs and zero authority operations. This is local loopback, not AWS or a
-cloud latency SLO. The 182-second run includes three normal collection intervals.
-
-Two failed fixture attempts are retained. The fixture now waits for the handoff
-checkpoint, allows its claim of preserved reserve, and writes two new frames
-before demanding their collection. It still checks the exact final charge,
-unchanged admission ceilings and reclamation; it no longer expects a valid live
-suffix to disappear. All three MinIO buckets/containers and 86 physical versions
-were removed. The B2/Kubernetes failure above remains unresolved.
-
-The earlier candidate and provider checks below remain part of the record.
-
-Candidate `689cfcf` passes [Woodpecker #231](https://ci.eflorenzano.com/repos/18/pipeline/231/1)
-and the independently downloaded static executable checks, but **fails the fresh
-B2/Kubernetes campaign**. Two writers exhaust the unchanged 180-second retry
-limit during scale-to-six; tenant-budget observation also fails. The stopped-peer
-fault is not reached. The partial snapshot records 219 acknowledged/read-back
-writes, without a complete cold recovery or history check. This is a failed
-availability qualification, not a finding of lost acknowledgements.
-
-The auxiliary metrics locate substantial delay in bucket-metadata updates:
-one new pod spent 207.82 seconds across 22 calls, while its 23 list-bucket calls
-took 2.36 seconds in total. These measure client-observed request durations;
-they do not identify a provider rate limit. Four of six metric reads succeeded;
-administrator admission refused the other two. The namespace, bucket, key and
-all 554 remaining physical object versions were removed. The failed run remains
-in the [campaign evidence](evidence/native-recovery-2026-11-11.json).
-
-The follow-up removes redundant conditional writes from raw partition control
-observations. The common manifest reader still validates immutable bytes and
-bounds retries; ordinary storage reads retain their freshness barrier. Claims,
-activation and public budget status still require exact comparisons. Routed data
-responses still require fresh writer-permit validation. No wire or storage format
-changes, special clocks or additional coordinator are introduced.
-
-The stale-observation regression fails on the previous implementation. It now
-reads an intentionally old partition pointer without an authority write, then
-checks that exact validation fails and the revoked owner cannot serve. All nine
-partition tests and 329 enabled Rust checks pass, with formatting and strict
-clippy. The existing acquisition model already permits historical observations:
-117,741 states in its main bound and 30,349 in the three-candidate bound pass,
-along with six negative controls. These are bounded protocol checks, not a proof
-of Rust or a guarantee of liveness.
-The corrected provider-cost assertion requires one raw read and zero updates or
-barriers. Versioned MinIO passes 1→2→1→0→1 handoff and cold recovery in 2.61 seconds.
-The B2 fixture stops on a single-attempt HTTP 503; its failure remains recorded.
-All four provider-fixture buckets, both B2 keys, both MinIO containers and 173
-remaining physical versions were removed. The later Kubernetes run above
-reached the stopped-peer fault but still failed its full availability check.
+Versioned MinIO separately passes native HTTP budgets, two cold reopens, live
+predecessor refusal, automatic journal/table/manifest collection, retained-image
+export and restoration after source collection in 182 seconds. The 100 warm reads
+use 100 permit GETs and no authority operations. Two earlier fixture failures
+incorrectly expected unchanged maintenance allocation and reclamation of a live
+journal suffix after handoff; the corrected assertions retain exact final charges,
+admission limits and collection checks. All three buckets/containers and 86
+physical versions were removed. This local fixture is not an AWS/B2 latency SLO.
 
 ## v0.23.5 independent recovery scheduling (2026-11-12)
 

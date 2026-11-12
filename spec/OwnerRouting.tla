@@ -1,14 +1,14 @@
 ------------------------- MODULE OwnerRouting -------------------------
 EXTENDS Naturals
 CONSTANT Fault
-ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness"}
+ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle"}
 VARIABLE s
 vars == <<s>>
 Owners == {"old", "new", "foreign"}
 Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
              cached |-> "none", expected |-> "none", phase |-> "idle",
              attempts |-> 0, served |-> "none", pinned |-> "none",
-             ready |-> FALSE, authorized |-> FALSE]
+             ready |-> FALSE, authorized |-> FALSE, absent |-> FALSE, retired |-> FALSE]
 \* HTTP readiness keeps routing and administration reachable during recovery.
 \* It is independent of response authority, including for direct peer requests.
 \* Local worker health can remain ready during provider errors or maintenance;
@@ -16,6 +16,12 @@ Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
 \* A false peer-failure suspicion may trigger takeover while the old process
 \* lives. Takeover still revokes its permit; a health observation cannot serve.
 Readiness == s' = [s EXCEPT !.ready = ~@]
+\* A completed background permit observation can retire an idle local owner,
+\* never authorize a response. Errors are stuttering; eventual observation and
+\* scheduling are required for liveness and are not proved by this safety check.
+Probe == s' = [s EXCEPT !.absent = ~s.permit,
+                 !.retired = @ \/ (~s.permit /\ Fault # "Idle")]
+IdleRetires == s.absent => s.retired
 \* Routing observations are hints, including stale ones after takeover.
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
@@ -50,11 +56,11 @@ Cancel == /\ s.phase = "sent"
           /\ s' = [s EXCEPT !.phase = "cancelled",
                      !.cached = IF Fault = "CancelCache" THEN @ ELSE "none"]
 CancelInvalidates == s.phase = "cancelled" => s.cached = "none"
-Next == Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
+Next == Probe \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
 TypeOK == s \in [route: {"old", "new"}, endpoint: Owners,
     permit: BOOLEAN, cached: Owners \cup {"none"}, expected: Owners \cup {"none"},
     phase: {"idle", "sent", "done", "busy", "cancelled"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},
-    ready: BOOLEAN, authorized: BOOLEAN]
+    ready: BOOLEAN, authorized: BOOLEAN, absent: BOOLEAN, retired: BOOLEAN]
 ExpectedOwner == s.served # "none" => s.served = s.expected
 AuthorizedResponse == s.served # "none" => s.authorized
 SingleAttempt == s.attempts <= 1

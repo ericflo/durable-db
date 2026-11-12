@@ -252,6 +252,78 @@ async fn shared_partition_checkpoints_keep_both_writers_progressing() {
 }
 
 #[tokio::test]
+async fn idle_revoked_owner_is_replaced_when_membership_rejoins() {
+    let provider = Provider::new();
+    let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = first.local_addr().unwrap();
+    let second = loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if preferred(0, &[address, listener.local_addr().unwrap()]) == address {
+            break listener;
+        }
+    };
+    let directory = directory(&provider).await;
+    let b = Node::start(directory.clone(), first, vec![address]).await;
+    settled(&[&b], &[address]).await;
+    let name = &names()[0];
+    let path = format!("/v1/databases/{name}");
+    let token = auth().administrator_token(600).unwrap();
+    b.server
+        .ok(
+            "PUT",
+            &path,
+            &token,
+            json!({"request_id":"create","limits":{"max_keys":20,"max_bytes":10000}}),
+        )
+        .await;
+    b.server
+        .ok("POST", &format!("{path}/commit"), &token, commit(0))
+        .await;
+    let old = b
+        .cluster
+        .resolve(name)
+        .await
+        .unwrap()
+        .unwrap()
+        .owner_incarnation();
+    // Divergent hints simulate a replacement while the old process cannot
+    // observe the membership change. Its native worker is otherwise idle.
+    let peers = vec![address, second.local_addr().unwrap()];
+    let a = Node::start(directory, second, vec![peers[1]]).await;
+    settled(&[&a], &[a.address]).await;
+    assert_ne!(
+        a.cluster
+            .resolve(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation(),
+        old
+    );
+    a.members(&peers);
+    b.members(&peers);
+    settled(&[&a, &b], &peers).await;
+    // Requests enter the other node: they must not be needed at the revoked
+    // process to discover that its cached serving state is obsolete.
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let (status, result) = a.server.call("GET", &path, &token, Value::Null).await;
+            if status == StatusCode::OK {
+                assert_eq!(result["revision"], 1);
+                break;
+            }
+            assert!(matches!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+            ));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("idle revoked owner eventually reclaims its assigned partition");
+}
+
+#[tokio::test]
 async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenced() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

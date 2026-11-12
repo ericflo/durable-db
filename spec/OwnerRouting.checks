@@ -5,3 +5,4 @@ unsafe UnsafeRouteRebind.cfg route-rebind 256m ExpectedOwner
 unsafe UnsafeRouteBusy.cfg route-busy 256m BusyInvalidates
 unsafe UnsafeRouteCancel.cfg route-cancel 256m CancelInvalidates
 unsafe UnsafeRouteReadiness.cfg route-readiness 256m AuthorizedResponse
+unsafe UnsafeRouteIdle.cfg route-idle 256m IdleRetires

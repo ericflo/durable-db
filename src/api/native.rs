@@ -308,6 +308,16 @@ async fn run(
     collection: crate::ownership::root::Collection,
     maintenance: Duration,
 ) {
+    let (control, identity) = {
+        let state = owner.read().await;
+        (state.control(), state.identity())
+    };
+    let mut probes = JoinSet::new();
+    let mut health = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(3),
+        Duration::from_secs(3),
+    );
+    health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut uploads = JoinSet::new();
     // At most one bounded sweep per serving worker, outside every owner lock.
     // Dropping the JoinSet on retirement cancels it; no unique collector lease
@@ -325,6 +335,14 @@ async fn run(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = health.tick(), if probes.is_empty() => {
+                // A revoked idle owner may receive no requests after rejoin.
+                // Observe independently of the owner lock and reconciliation;
+                // only confirmed absence retires it. Errors grant no authority.
+                let control = control.clone();
+                probes.spawn(async move { control.validate(identity).await });
+            }
+            _ = probes.join_next(), if !probes.is_empty() => (),
             _ = sweep.tick(), if collections.is_empty() => {
                 let collection = collection.clone();
                 let reservation = owner.reservation.clone();
