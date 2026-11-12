@@ -701,7 +701,7 @@ At `00637a4`, the native HTTP partition fixture passes on B2 in 52.98 seconds an
 
 `Root::advertise` binds an optional socket address to a fresh ownership incarnation in its existing control record. An open observation is a route hint, never serving permission. `api::Forward` caches one route for an explicitly selected partition and sends one authenticated HTTP attempt. The receiving backend checks the incarnation before dispatch; ordinary policy checks and fresh writer-permit validation remain mandatory. Tenant claims keep their expiry, policy generation and revocation identity. Administrator forwarding uses a signed 60-second token, never the signing-key bearer. The forwarder refuses redirects, disables transport retries/proxy inheritance, bounds concurrency and bytes, and clears only the failed cache instance. Readiness indicates the forwarding process's admission state, not owner availability. Deployment still needs a trusted private peer network or transport mesh and a shared signing-key ring.
 
-`OwnerRouting` checks **472 distinct states, 2,149 generated, depth 10**. It covers address reuse, stale discovery, pinned destination identity, one forwarding attempt, synchronous route invalidation on cancellation and retirement after an idle permit observation confirms absence. Eight negative controls detect omitted identity checks, replay after a lost reply, reselecting after admission, retained busy/cancelled routes, readiness substituted for permission, failure to retire an idle revoked owner, and retirement from a preference change alone. The availability subcase assumes a healthy process remains in membership; failure and explicit removal may still stop service. Run `scripts/check-model.sh OwnerRouting`. Errors stutter in the probe model; eventual observation and scheduling remain liveness assumptions. The existing `RevocableOwner` argument supplies response/permit ordering. These separate bounds do not establish composed placement correctness or Rust refinement.
+`OwnerRouting` checks **1,888 distinct states, 12,609 generated, depth 13**. It covers address reuse, stale discovery, pinned destination identity, one forwarding attempt, synchronous route invalidation on cancellation and retirement after an idle permit observation confirms absence. Ten negative controls detect omitted identity checks, replay after a lost reply, reselecting after admission, retained busy/cancelled routes, readiness substituted for permission, failure to retire an idle revoked owner, retirement from a preference change alone, premature elective moves, and delaying excluded-owner recovery behind the settling interval. The availability subcase assumes a healthy process remains in membership; failure and explicit removal may still stop service. Run `scripts/check-model.sh OwnerRouting`. Errors stutter in the probe model; eventual observation and scheduling remain liveness assumptions. The existing `RevocableOwner` argument supplies response/permit ordering. These separate bounds do not establish composed placement correctness or Rust refinement.
 
 Four TCP/root regressions complete in 0.10 seconds after compilation. They cover live takeover, exact receipt replay after a lost response, wrong-partition address reuse, token revocation, cached discovery, delayed failures racing cache replacement, redirect refusal, overload and oversized responses. Two deliberate Rust faults omit the destination check or clear a refreshed route on a late old failure; both are detected. An authentication regression checks unchanged tenant claims across signing-key rotation and rejects expired claims. The common journal-selection loop replaces duplicate local-startup and cloud-fixture implementations.
 
@@ -719,8 +719,13 @@ the same owner and nonce remain. One bounded owner/nonce/deadline descriptor per
 partition records it. Pending waits release their acquisition and resident slots;
 the ordinary three-second scheduler revisits them. Four active acquisitions remain
 the limit. No sleeping future or one-second polling loop holds up later partitions.
-Known healthy peers can still rebalance; reuse of this process's address takes the
-normal fenced recovery path directly.
+Reachable incumbents rebalance after 15 seconds without an observed membership
+change. This single controller deadline releases acquisition slots on deferral
+and is revisited by the existing retry tick. Identical canonical membership
+snapshots do not restart it. Excluded owners, empty partitions and reuse of this
+process's address bypass it. Already submitted claims cannot be recalled; a
+subsequent membership change still cancels only acquisitions whose destination
+changes. This is scheduling policy, not a liveness guarantee or clock contract.
 
 Each confirmed claimant polls once every three seconds, with one request in flight,
 through activation, recovery and serving. It conditionally clears only its own

@@ -1,7 +1,7 @@
 ------------------------- MODULE OwnerRouting -------------------------
 EXTENDS Naturals
 CONSTANT Fault
-ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle", "Placement"}
+ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle", "Placement", "EarlyMove", "DelayFailure"}
 VARIABLE s
 vars == <<s>>
 Owners == {"old", "new", "foreign"}
@@ -9,13 +9,20 @@ Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
              cached |-> "none", expected |-> "none", phase |-> "idle",
              attempts |-> 0, served |-> "none", pinned |-> "none",
              ready |-> FALSE, authorized |-> FALSE, absent |-> FALSE, retired |-> FALSE,
-             preferred |-> TRUE]
+             preferred |-> TRUE, settled |-> FALSE, reachable |-> TRUE, coalesced |-> TRUE]
 \* A healthy process remains in membership while preference changes. Keep its
 \* incumbent available until actual takeover; preference grants no authority.
 \* Process removal/failure is outside this availability subcase.
 Placement == s' = [s EXCEPT !.preferred = ~@,
+                    !.settled = FALSE,
                     !.retired = @ \/ Fault = "Placement"]
 IncumbentAvailable == s.permit => ~s.retired
+\* A local quiet interval delays elective moves only. Reachability is an
+\* advisory membership observation, never proof of life or serving authority.
+\* A pause may finish the interval immediately; no clock bound is assumed.
+Settle == s' = [s EXCEPT !.settled = TRUE]
+Membership == s' = [s EXCEPT !.settled = FALSE, !.reachable = ~@]
+MovesCoalesced == s.coalesced
 \* HTTP readiness keeps routing and administration reachable during recovery.
 \* It is independent of response authority, including for direct peer requests.
 \* Local worker health can remain ready during provider errors or maintenance;
@@ -33,7 +40,11 @@ IdleRetires == s.absent => s.retired
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
 Takeover == /\ s.route = "old"
-            /\ s' = [s EXCEPT !.route = "new", !.permit = FALSE]
+            /\ (~s.reachable \/ s.settled \/ Fault = "EarlyMove")
+            /\ (Fault # "DelayFailure" \/ s.settled)
+            /\ s' = [s EXCEPT !.route = "new", !.permit = FALSE,
+                       !.coalesced = ~s.reachable \/ s.settled]
+FailureNotDelayed == s.route = "old" /\ ~s.reachable => ENABLED Takeover
 \* An address may be reused by a completely different partition/process.
 Reuse == /\ s.endpoint = "old"
          /\ s' = [s EXCEPT !.endpoint = "foreign"]
@@ -63,11 +74,12 @@ Cancel == /\ s.phase = "sent"
           /\ s' = [s EXCEPT !.phase = "cancelled",
                      !.cached = IF Fault = "CancelCache" THEN @ ELSE "none"]
 CancelInvalidates == s.phase = "cancelled" => s.cached = "none"
-Next == Placement \/ Probe \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
+Next == Settle \/ Membership \/ Placement \/ Probe \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
 TypeOK == s \in [route: {"old", "new"}, endpoint: Owners,
     permit: BOOLEAN, cached: Owners \cup {"none"}, expected: Owners \cup {"none"},
     phase: {"idle", "sent", "done", "busy", "cancelled"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},
-    ready: BOOLEAN, authorized: BOOLEAN, absent: BOOLEAN, retired: BOOLEAN, preferred: BOOLEAN]
+    ready: BOOLEAN, authorized: BOOLEAN, absent: BOOLEAN, retired: BOOLEAN, preferred: BOOLEAN,
+    settled: BOOLEAN, reachable: BOOLEAN, coalesced: BOOLEAN]
 ExpectedOwner == s.served # "none" => s.served = s.expected
 AuthorizedResponse == s.served # "none" => s.authorized
 SingleAttempt == s.attempts <= 1

@@ -86,6 +86,8 @@ pub struct Cluster {
     partitions: Vec<Partition>,
     limits: Limits,
     residents: Arc<Semaphore>,
+    // Advisory only: avoid elective moves through transient rollout members.
+    rebalance_at: Mutex<tokio::time::Instant>,
     ready: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -116,6 +118,7 @@ impl Cluster {
         let cluster = Arc::new(Self {
             limits,
             residents,
+            rebalance_at: Mutex::new(tokio::time::Instant::now()),
             directory,
             config,
             cache,
@@ -161,6 +164,7 @@ impl Cluster {
             let mut failed = vec![false; count];
             let mut acquisitions = FuturesUnordered::new();
             let mut cursor = 0;
+            let mut peers = Vec::new();
             loop {
                 tokio::select! {
                     _ = retry.tick() => failed.fill(false),
@@ -174,10 +178,18 @@ impl Cluster {
                         failed[id] = result.is_err();
                     }
                 }
-                let peers = membership(&members.borrow_and_update()).unwrap_or_default();
+                let updated = membership(&members.borrow_and_update()).unwrap_or_default();
                 let Some(cluster) = weak.upgrade() else {
                     return;
                 };
+                if peers != updated {
+                    peers = updated;
+                    *cluster
+                        .rebalance_at
+                        .lock()
+                        .expect("rebalance deadline lock") =
+                        tokio::time::Instant::now() + Duration::from_secs(15);
+                }
                 // Readiness keeps routing/administration reachable; membership
                 // schedules work but cannot authorize a data response.
                 cluster
@@ -299,35 +311,46 @@ impl Cluster {
                 let observed = root.observe().await?;
                 if let Some(incumbent) = observed.incumbent()
                     && incumbent.address != self.config.address
-                    && !members.borrow().contains(&incumbent.address)
                 {
-                    stage = "challenge";
-                    progress(stage);
-                    let challenge = *partition
-                        .challenge
-                        .lock()
-                        .expect("partition challenge lock");
-                    if let Some(challenge) = challenge.filter(|c| {
-                        c.incumbent == incumbent && observed.challenge() == Some(c.nonce)
-                    }) {
+                    if members.borrow().contains(&incumbent.address) {
+                        stage = "settle";
+                        // Keep the reachable incumbent serving while membership
+                        // changes. Empty partitions, excluded owners and address
+                        // reuse bypass this delay. Deferral releases the slot.
                         ensure!(
-                            tokio::time::Instant::now() >= challenge.ready_at,
-                            "owner challenge pending"
+                            tokio::time::Instant::now()
+                                >= *self.rebalance_at.lock().expect("rebalance deadline lock"),
+                            "placement settling"
                         );
                     } else {
-                        let nonce = root
-                            .challenge(observed)
-                            .await?
-                            .context("owner challenge unconfirmed")?;
-                        *partition
+                        stage = "challenge";
+                        progress(stage);
+                        let challenge = *partition
                             .challenge
                             .lock()
-                            .expect("partition challenge lock") = Some(Challenge {
-                            incumbent,
-                            nonce,
-                            ready_at: tokio::time::Instant::now() + Duration::from_secs(15),
-                        });
-                        anyhow::bail!("owner challenge pending");
+                            .expect("partition challenge lock");
+                        if let Some(challenge) = challenge.filter(|c| {
+                            c.incumbent == incumbent && observed.challenge() == Some(c.nonce)
+                        }) {
+                            ensure!(
+                                tokio::time::Instant::now() >= challenge.ready_at,
+                                "owner challenge pending"
+                            );
+                        } else {
+                            let nonce = root
+                                .challenge(observed)
+                                .await?
+                                .context("owner challenge unconfirmed")?;
+                            *partition
+                                .challenge
+                                .lock()
+                                .expect("partition challenge lock") = Some(Challenge {
+                                incumbent,
+                                nonce,
+                                ready_at: tokio::time::Instant::now() + Duration::from_secs(15),
+                            });
+                            anyhow::bail!("owner challenge pending");
+                        }
                     }
                 }
                 stage = "claim";
@@ -385,11 +408,12 @@ impl Cluster {
                 "activation permit revoked",
                 "owner challenge pending",
                 "owner challenge unconfirmed",
+                "placement settling",
             ]
             .into_iter()
             .find(|message| error.chain().any(|cause| cause.to_string() == *message))
             .unwrap_or("provider_or_validation");
-            if reason == "owner challenge pending" {
+            if matches!(reason, "owner challenge pending" | "placement settling") {
                 tracing::info!(
                     partition = id,
                     stage,

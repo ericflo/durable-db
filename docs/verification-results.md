@@ -1,5 +1,32 @@
 # Verification results
 
+## v0.23.14 placement settling (2026-11-12)
+
+Elective takeover from a reachable incumbent now waits for 15 seconds without an
+observed membership change. This coalesces transient rollout destinations while
+the incumbent keeps serving. Empty partitions, excluded owners and reuse of this
+process's address bypass the delay. Identical snapshots do not restart it;
+already submitted claims cannot be recalled. The ordinary retry loop revisits
+deferrals without retaining an acquisition slot. No worker, durable field,
+wire format or serving-authority rule is added.
+
+The three-node TCP regression checks intermediate destinations, uninterrupted
+receipt replay, eventual placement after membership settles, and unchanged
+snapshot handling. It fails against v0.23.13 in 0.09 seconds and passes in
+0.27 seconds. Applying the delay to excluded owners makes the existing
+16-partition recovery deadline fail in 0.25 seconds. OwnerRouting checks 1,888
+states with ten negative controls, including premature elective moves and delayed
+failure recovery. These are bounded scheduling checks, not a proof of Rust or
+a production latency guarantee.
+
+All 345 routine Rust checks, formatting and strict clippy pass. The 19 controller
+checks run in 6.08 seconds after moving two existing timer-driven tests to
+simulated time (57.13 seconds before); their real TCP requests and assertions
+remain. The focused `--scenario rollout` cloud fixture reuses the existing
+scaling, four writers, budget checks, two-readback barriers and cold-history
+verification, and exercises two consecutive six-pod rollouts. The duplicated
+rollout sequence is replaced by one shared function. Cloud results are pending.
+
 ## v0.23.13 incumbent retention (2026-11-12)
 
 A preference change no longer drops a healthy serving backend before a successor

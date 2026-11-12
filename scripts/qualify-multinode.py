@@ -89,8 +89,8 @@ def main():
     parser.add_argument('--signing-key-file', type=Path, required=True)
     parser.add_argument('--admin-token-file', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--scenario', choices=['recovery','peer-isolation'], default='recovery',
-                        help='Focused peer isolation reuses setup, writers, cold verification and cleanup')
+    parser.add_argument('--scenario', choices=['recovery','peer-isolation','rollout'], default='recovery',
+                        help='Focused isolation or repeated rollouts reuse writers, cold verification and cleanup')
     parser.add_argument('--control-port', type=int, default=17840)
     parser.add_argument('--steady-seconds', type=int, default=0,
                         help='Optional bounded steady pilot, at most one hour, before disruption')
@@ -133,6 +133,7 @@ def main():
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
     if args.scenario=='peer-isolation':
         report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=30)
+    if args.scenario=='rollout':report['configuration']['rollout_repetitions']=2
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
     created = False
@@ -310,6 +311,12 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
                     return now['writes_acknowledged']
             time.sleep(3)
         raise RuntimeError('Per-writer acknowledged/readback progress deadline exceeded')
+
+    def rolling(name):
+        timing=recovery(name)
+        kube('rollout','restart','deployment/durable-db')
+        kube('rollout','status','deployment/durable-db','--timeout=240s',timeout=270)
+        phase(name,placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
 
     def sample_resources():
         sample = dict(time_utc=utc(), pods=[])
@@ -593,6 +600,8 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=progress())
         if args.scenario=='peer-isolation':
             peer_isolation(initial,isolated)
+        elif args.scenario=='rollout':
+            for number in range(1,3):rolling(f'rolling-replacement-{number}')
         else:
             # Pause every database process on one host, with no replacement pods.
             # Target the preferred host of writer zero's partition, not a random pod.
@@ -636,10 +645,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             timing=recovery('forced-api-pod-loss')
             kube('delete','pod',victim['metadata']['name'],'--grace-period=0','--force','--wait=false')
             phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
-            timing=recovery('rolling-replacement')
-            kube('rollout','restart','deployment/durable-db')
-            kube('rollout','status','deployment/durable-db','--timeout=240s',timeout=270)
-            phase('rolling-replacement',placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
+            rolling('rolling-replacement')
             restricted=json.loads(json.dumps(policy));restricted['spec']['egress']=restricted['spec']['egress'][:-1]
             kube('apply','-f','-',body=restricted)
             phase('provider-partition-start',probe=provider_probe(False))
