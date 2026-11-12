@@ -370,23 +370,23 @@ impl Root {
     /// then restart discovery from the confirmed catalog. Never replay its PUTs.
     pub async fn select_journals(&mut self) -> Result<(), Error> {
         let mut validations = 4;
-        loop {
-            let mut recovery = self.recovery()?;
-            let mut pending = None;
-            while let Some(mut journal) = recovery.next().await? {
-                if !journal.is_selected() {
-                    while journal.read_next().await?.is_some() {}
-                    pending = Some(journal);
-                    break;
-                }
+        let mut recovery = self.recovery()?;
+        while let Some(mut journal) = recovery.next().await? {
+            if journal.is_selected() {
+                continue;
             }
-            let Some(journal) = pending else {
-                return Ok(());
-            };
+            while journal.read_next().await?.is_some() {}
             let select = self.select_prefix(journal)?;
             let outcome = self.finish(select.execute().await)?;
+            let confirmed = matches!(outcome, Outcome::Confirmed);
             self.confirm_outcome(outcome, &mut validations).await?;
+            if confirmed {
+                recovery.advance(self.recovery_record()?).await?;
+            } else {
+                recovery = self.recovery()?;
+            }
         }
+        Ok(())
     }
 
     /// Confirm this same bound identity by exact comparison, within a caller's

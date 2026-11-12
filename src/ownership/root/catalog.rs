@@ -109,6 +109,23 @@ impl Recovery {
         }
     }
 
+    /// Continue the immutable ancestry only after our own confirmed selection.
+    /// A changed identity, checkpoint or collection generation requires a new
+    /// cursor. Uncertain publication never enters this path.
+    pub(super) async fn advance(&mut self, record: Record) -> anyhow::Result<()> {
+        ensure!(
+            Record {
+                catalog: record.catalog,
+                ..self.record
+            }
+            .same_recovery(record),
+            "recovery changed beyond the confirmed catalog selection"
+        );
+        self.index = load(&self.files, record.catalog).await?;
+        self.record = record;
+        Ok(())
+    }
+
     /// Returns previous journals, newest first. Existing decisions replay their
     /// exact prefix; only previously unselected journals use discovery.
     /// Calling this does not establish transaction or serving readiness.

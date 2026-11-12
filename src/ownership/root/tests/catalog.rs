@@ -42,6 +42,46 @@ pub(super) async fn seal(root: &mut Root, journal: JournalRecovery) {
 }
 
 #[tokio::test]
+async fn selecting_ancestral_journals_reads_the_registration_chain_once() {
+    let provider = Provider::new();
+    for epoch in 1u8..=8 {
+        let mut root = active(&provider).await;
+        let mut writer = root.take_journal(QueueLimits::default()).unwrap();
+        let upload = writer.prepare(&[Bytes::from(vec![epoch])]).unwrap();
+        writer.complete(upload.send().await).unwrap();
+        assert!(writer.pop_durable().unwrap().is_some());
+    }
+    let mut root = successor(&provider).await;
+    let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
+    root.files = files.clone();
+    root.select_journals().await.unwrap();
+    assert!(
+        files.registration_reads.load(Ordering::SeqCst) <= 9,
+        "selection must not restart the immutable ancestry after each publication: {} reads",
+        files.registration_reads.load(Ordering::SeqCst)
+    );
+    let mut recovery = root.recovery().unwrap();
+    for epoch in (1u8..=8).rev() {
+        let mut journal = recovery.next().await.unwrap().unwrap();
+        assert!(journal.is_selected());
+        assert_eq!(journal.registration().identity().epoch, u64::from(epoch));
+        assert_eq!(
+            journal
+                .read_next()
+                .await
+                .unwrap()
+                .unwrap()
+                .records()
+                .collect::<Vec<_>>(),
+            vec![&[epoch][..]]
+        );
+        assert!(journal.read_next().await.unwrap().is_none());
+        assert_eq!(journal.finished_prefix().unwrap().position(), 1);
+    }
+    assert!(recovery.next().await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn lost_selection_reply_and_complete_reopen_never_extend_a_selected_prefix() {
     let provider = Provider::new();
 

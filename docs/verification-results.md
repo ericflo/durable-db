@@ -1,5 +1,20 @@
 # Verification results
 
+## Recovery cursor reuse (2026-11-12, release pending)
+
+Confirmed journal-prefix publications now preserve the immutable ancestry cursor
+and load the newly confirmed catalog before choosing the next prefix. Uncertain
+outcomes still validate the same owner and restart discovery. This removes the
+nested rescan and temporary pending-journal slot without changing the durable
+format or adding a cache, queue or publication algorithm.
+
+Eight ancestral journals previously required 53 registration GETs during selection;
+the focused regression now requires at most nine and verifies every selected
+frame afterward. All 337 enabled Rust checks, formatting and strict clippy pass.
+The existing RootCatalog bounds (393,513 / 102,525 states) and all seven negative/
+coverage controls pass. This is a provider-operation reduction measured locally,
+not a qualified cloud latency improvement or proof of Rust.
+
 ## Idle-owner rejoin correction (2026-11-12, release pending)
 
 A revoked owner can remain idle when membership assigns its partition back to
@@ -13,7 +28,12 @@ The real HTTP regression fails against the old implementation at its eight-secon
 deadline and passes in 6.05 seconds with the correction. All 336 enabled Rust
 checks, formatting and strict clippy pass. The 236-state routing model and seven
 negative controls pass; they do not prove scheduling liveness or Rust refinement.
-This follow-up is not included in v0.23.6 and still needs provider qualification.
+This follow-up is not included in v0.23.6. Versioned MinIO passes the full
+native HTTP budget/retention/cold-recovery fixture in 182.92 seconds: 100 warm
+reads, 100 permit GETs, zero cache misses and no authority operations. The first
+run failed because the new fixture referenced a nonexistent metric; it now reads
+the existing cache-miss counter. Both buckets/containers and 66 physical versions
+were removed. Full B2/Kubernetes qualification remains pending.
 
 ## v0.23.6 peer failure and checkpoint recovery (2026-11-12)
 

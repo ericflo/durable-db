@@ -11,6 +11,7 @@ pub(super) struct Faults {
     mode: AtomicU64,
     fail_prefix: Option<&'static str>,
     pub(super) puts: AtomicU64,
+    pub(super) registration_reads: AtomicU64,
     delayed: Mutex<Option<(String, Bytes)>>,
 }
 impl Faults {
@@ -20,6 +21,7 @@ impl Faults {
             mode: AtomicU64::new(mode),
             fail_prefix: None,
             puts: AtomicU64::new(0),
+            registration_reads: AtomicU64::new(0),
             delayed: Mutex::new(None),
         })
     }
@@ -29,6 +31,7 @@ impl Faults {
             mode: AtomicU64::new(mode),
             fail_prefix: Some(prefix),
             puts: AtomicU64::new(0),
+            registration_reads: AtomicU64::new(0),
             delayed: Mutex::new(None),
         })
     }
@@ -42,6 +45,9 @@ impl Faults {
 #[async_trait]
 impl Storage for Faults {
     async fn get(&self, key: &str, limit: usize) -> anyhow::Result<Option<Object>> {
+        if key.starts_with("ownership/") {
+            self.registration_reads.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.get(key, limit).await
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {

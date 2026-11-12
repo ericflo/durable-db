@@ -7,6 +7,10 @@ CONSTANTS Epochs, Attempts, LogLength, UnsafeCompare, UnsafeInherit,
 \* Drain is an abstraction boundary: RootRequests/GrantBounds must establish
 \* that all earlier acknowledgement permission has ended before it completes.
 \* Ordered winning epochs and durable journal registrations are assumed here.
+\* A confirmed seal preserves all prior cuts. The implementation may retain
+\* its immutable ancestry cursor across that seal, loading the new confirmed
+\* catalog before BeginScan for the next journal. An uncertain reply restarts
+\* discovery after exact validation. No prefix choice or comparison is skipped.
 VARIABLES history, active, entered, objects, acknowledged, scans, requests,
           uploaded, known, sent, pending, timedOut, lateApplied
 vars == <<history, active, entered, objects, acknowledged, scans, requests,
