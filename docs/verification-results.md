@@ -1,5 +1,21 @@
 # Verification results
 
+## Deferred challenge scheduling (v0.23.12 candidate)
+
+An idle challenge wait no longer occupies one of four acquisition slots. The
+scheduler retains its owner, nonce and deadline and revisits it on the existing
+retry tick. An answer or ownership change invalidates it; actual takeover still
+uses the ordinary conditional claim and permit protocol. The blocking sleep/poll
+loop and redundant retry warning are removed.
+
+A paused-time regression replaces one owner of all 16 partitions and requires
+all replacements within 25 simulated seconds. v0.23.11 fails this check in 0.24
+seconds of real time; the new scheduling passes all five challenge checks in
+0.37 seconds. The existing policy model and its controls pass unchanged (3,518
+states). All 343 routine Rust checks, strict clippy and formatting pass. Real B2
+failure and peer-isolation qualification remains pending.
+
+
 ## v0.23.11 storage-path placement challenges (2026-11-12)
 
 Before replacing an unreachable incumbent, the controller asks it to answer an

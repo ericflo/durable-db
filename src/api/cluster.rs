@@ -60,9 +60,14 @@ struct Partition {
     connection: Connection,
     forward: Arc<Forward>,
     local: RwLock<Option<Local>>,
-    // Only an exact owner/nonce match reuses a completed advisory wait after
-    // cancellation or provider failure. This never grants serving authority.
-    suspected: Mutex<Option<(Route, uuid::Uuid)>>,
+    // Advisory wait state survives acquisition retries without retaining a slot.
+    challenge: Mutex<Option<Challenge>>,
+}
+#[derive(Clone, Copy)]
+struct Challenge {
+    incumbent: Route,
+    nonce: uuid::Uuid,
+    ready_at: tokio::time::Instant,
 }
 // Advisory replies stop when placement retires this slot, even if in-flight
 // requests retain the old backend. Its permit remains the response authority.
@@ -104,7 +109,7 @@ impl Cluster {
                 connection,
                 forward,
                 local: RwLock::new(None),
-                suspected: Mutex::new(None),
+                challenge: Mutex::new(None),
             });
         }
         let residents = Arc::new(Semaphore::new(config.layout.partitions() as usize));
@@ -167,9 +172,6 @@ impl Cluster {
                         let result: anyhow::Result<()> = result;
                         pending[id] = false;
                         failed[id] = result.is_err();
-                        if failed[id] {
-                            tracing::warn!(partition = id, "native placement incomplete; retrying");
-                        }
                     }
                 }
                 let peers = membership(&members.borrow_and_update()).unwrap_or_default();
@@ -296,40 +298,39 @@ impl Cluster {
                 let mut root = connection.root()?.advertise(self.config.address)?;
                 stage = "observe";
                 progress(stage);
-                let mut observed = root.observe().await?;
-                let suspected = *partition
-                    .suspected
-                    .lock()
-                    .expect("partition challenge lock");
+                let observed = root.observe().await?;
                 if let Some(incumbent) = observed.incumbent()
                     && incumbent.address != self.config.address
                     && !members.borrow().contains(&incumbent.address)
-                    && (suspected.is_none()
-                        || suspected != observed.challenge().map(|nonce| (incumbent, nonce)))
                 {
                     stage = "challenge";
                     progress(stage);
-                    let nonce = root
-                        .challenge(observed)
-                        .await?
-                        .context("owner challenge unconfirmed")?;
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        observed = root.observe().await?;
-                        ensure!(
-                            observed.incumbent() == Some(incumbent)
-                                && observed.challenge() == Some(nonce),
-                            "owner answered or changed during storage challenge"
-                        );
-                        if tokio::time::Instant::now() >= deadline {
-                            break;
-                        }
-                    }
-                    *partition
-                        .suspected
+                    let challenge = *partition
+                        .challenge
                         .lock()
-                        .expect("partition challenge lock") = Some((incumbent, nonce));
+                        .expect("partition challenge lock");
+                    if let Some(challenge) = challenge.filter(|c| {
+                        c.incumbent == incumbent && observed.challenge() == Some(c.nonce)
+                    }) {
+                        ensure!(
+                            tokio::time::Instant::now() >= challenge.ready_at,
+                            "owner challenge pending"
+                        );
+                    } else {
+                        let nonce = root
+                            .challenge(observed)
+                            .await?
+                            .context("owner challenge unconfirmed")?;
+                        *partition
+                            .challenge
+                            .lock()
+                            .expect("partition challenge lock") = Some(Challenge {
+                            incumbent,
+                            nonce,
+                            ready_at: tokio::time::Instant::now() + Duration::from_secs(15),
+                        });
+                        anyhow::bail!("owner challenge pending");
+                    }
                 }
                 stage = "claim";
                 progress(stage);
@@ -380,19 +381,28 @@ impl Cluster {
                 "partition changed after publication; outcome uncertain",
                 "published manifest changed repeatedly or is unavailable",
                 "activation permit revoked",
-                "owner answered or changed during storage challenge",
+                "owner challenge pending",
                 "owner challenge unconfirmed",
             ]
             .into_iter()
             .find(|message| error.chain().any(|cause| cause.to_string() == *message))
             .unwrap_or("provider_or_validation");
-            tracing::warn!(
-                partition = id,
-                stage,
-                reason,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "native acquisition failed"
-            );
+            if reason == "owner challenge pending" {
+                tracing::info!(
+                    partition = id,
+                    stage,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "native acquisition deferred"
+                );
+            } else {
+                tracing::warn!(
+                    partition = id,
+                    stage,
+                    reason,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "native acquisition failed"
+                );
+            }
         } else {
             progress("ready");
         }

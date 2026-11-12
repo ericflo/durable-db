@@ -380,6 +380,52 @@ async fn uncertain_claim_retry_reuses_only_the_completed_owner_challenge() {
         .expect("a provider error must not restart the unchanged challenge wait");
 }
 
+#[tokio::test(start_paused = true)]
+async fn one_replacement_waits_for_all_partition_challenges_without_serial_waves() {
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    let layout = Layout::new(16).unwrap();
+    let names: Vec<_> = (0..16)
+        .map(|id| {
+            (0..1000)
+                .map(|n| format!("app-{n}"))
+                .find(|name| layout.partition(name).unwrap() == id)
+                .unwrap()
+        })
+        .collect();
+    async fn all_owned(node: &Node, names: &[String]) {
+        for name in names {
+            while node
+                .cluster
+                .resolve(name)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let old = Node::with_layout(directory.clone(), listener, vec![address], layout).await;
+    tokio::time::timeout(Duration::from_secs(10), all_owned(&old, &names))
+        .await
+        .unwrap();
+    drop(old);
+    tokio::task::yield_now().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let replacement = Node::with_layout(directory, listener, vec![address], layout).await;
+    // Four active acquisitions remain the bound. Sixteen idle waits must not
+    // serialize into four fifteen-second waves before recovery can start.
+    tokio::time::timeout(Duration::from_secs(25), all_owned(&replacement, &names))
+        .await
+        .expect("waiting for a challenge must release its acquisition slot");
+}
+
 #[tokio::test]
 async fn unreachable_peer_in_unchanged_dns_is_replaced_and_its_old_owner_is_fenced() {
     let provider = Provider::new();

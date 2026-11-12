@@ -18,6 +18,9 @@ Challenge(c) == /\ s.owner = 0 /\ s.revision < 4
     !.coalesced = @ /\ (s.nonce = 0 \/ s.nonce = c \/ Fault # "Coalesce")]
 Join(c) == /\ s.owner = 0 /\ s.nonce # 0 /\ s.joined[c] = 0
   /\ s' = [s EXCEPT !.joined[c] = s.nonce]
+\* Join and Wait are separate scheduler visits. Waiting keeps only the owner,
+\* nonce and local deadline; it needs no acquisition slot or private recovery.
+\* The finite policy check abstracts scheduling/rate, not a latency guarantee.
 Wait(c) == /\ s.joined[c] # 0
   /\ s' = [s EXCEPT !.waited = @ \cup {c}]
 Prepare(c) == /\ s.owner = 0 /\ s.nonce # 0 /\ s.nonce = s.joined[c]
