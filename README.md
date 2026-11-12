@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.4. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.5. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,15 +142,15 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.4 removes the metadata readback after a confirmed control publication,
-returning its exact pointer directly. The exact release binary recovers all 884
-acknowledged B2 writes through scaling, two rollouts and cold restart. Scale and
-cold targets pass; rollouts still miss at 130.96 / 128.10 seconds against 60
-seconds. This run establishes no overall latency improvement. Selection rescans
-and checkpoint funding remain substantial costs. Continuous split availability,
-worst-case memory, sustained performance and public multitenancy remain open.
-See the [measured results and limits](docs/verification-results.md) and the
-[ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
+v0.24.5 reuses completed journal scans when exact validation confirms an unchanged
+recovery snapshot. The exact release binary recovers all 839 acknowledged B2
+writes through scaling, two rollouts and cold restart. Scale-to-three and cold
+targets pass; scale-to-six and both rollouts miss. Rollouts take 112.38 / 161.83
+seconds against 60 seconds, so no overall recovery speedup is established.
+Checkpoint funding and control publication remain substantial costs. Continuous
+split availability, worst-case memory, sustained performance and public
+multitenancy remain open. See the [measured results and limits](docs/verification-results.md)
+and the [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 
 ## Verification
 

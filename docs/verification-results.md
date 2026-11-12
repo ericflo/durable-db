@@ -1,6 +1,6 @@
 # Verification results
 
-## Reusing completed journal discovery (v0.24.5 candidate, 2026-11-12)
+## Reusing completed journal discovery (v0.24.5, 2026-11-12)
 
 After an unconfirmed selection, exact validation can retain a completed scan if
 its full recovery snapshot is unchanged. The retry uploads fresh catalog objects
@@ -13,10 +13,54 @@ path needs only the original two. Thirteen focused catalog tests pass in 0.52
 seconds, covering comparison conflicts, unknown replies, both outcomes of lost
 PUT replies, metadata/data sweeps and existing takeover cases. RootCatalog checks
 455,553 and 173,635 states, five fault controls and four coverage controls.
-All 357 routine Rust checks, formatting and strict clippy pass.
 Collection remains outside that model and is guarded by the Rust snapshot
-comparison and sweep test; this is not a composed proof. Cloud qualification is
-pending, and no cloud speedup is claimed.
+comparison and sweep test; this is not a composed proof. All **357 routine Rust
+checks**, formatting and strict clippy pass.
+
+[Woodpecker #294](https://ci.eflorenzano.com/repos/18/pipeline/294/1) passes at
+`79c5f0f`, including JavaScript/Pi contracts and the optimized 10,005-database
+regression (199.87 seconds). Versioned MinIO membership/recovery passes in
+40.52 seconds; its bucket, container and 80 versions are removed. The static
+executable passes installation without a toolchain, transactions, backup/restore
+and forced-stop recovery. The exact static executable recovers **all 839 B2
+acknowledgements**, independently checked across four histories:
+
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 18.43 s | 60 s | Pass |
+| Scale to six | 61.52 s | 60 s | Miss |
+| First rolling replacement | 112.38 s | 60 s | Miss |
+| Second rolling replacement | 161.83 s | 60 s | Miss |
+| Cold API readiness | 79.95 s | 120 s | Pass |
+
+Rollout bounds include rollout/readiness completion and the subsequent per-writer
+readback barrier. Maximum acknowledgement gaps in the recorded rollout slices
+are **65.76 / 88.02 seconds**; these slices include intervening diagnostics and
+are not exact fault windows or readback latencies. **This run does not establish
+an overall recovery speedup.** The namespace, bucket, scoped key and all 1,442
+physical B2 versions are removed.
+
+Bounded samples retain 87 owner bindings, 88 complete activation calls, 86
+selections and 70 checkpoints. Two sampled retries retain empty scans without
+restarting discovery; these do not quantify nonempty-frame savings in the cloud.
+The longest sampled activation takes 18.68 seconds, including 18.05 in
+publication. An empty selection takes 34.56 seconds, including 33.95 in
+publication. A checkpoint takes 45.41 seconds: 18.81 funding, 1.13 staging,
+17.96 confirmation and further publication work. These are separate sampled
+calls, not a combined critical path or latency distribution. The next target is
+checkpoint funding and its extra control work: funding changes the record and
+leaves the cached checkpoint comparison stale. Continuous split availability,
+physical-host failures, worst-case memory and sustained performance remain open.
+
+Verification-only cleanup after the binary candidate reduces six fault/coverage
+controls from 1,119,253 to 113,591 distinct states while retaining every expected
+violation. Positive safety bounds are unchanged. The original tagged checks and
+the reduced checks both pass locally; the cleanup changes no production code.
+Obsolete unconditional-restart descriptions are replaced, and model scratch
+files are removed automatically by the existing check script.
+
+Evidence: [native recovery record](evidence/native-recovery-2026-11-11.json),
+`completed_selection_reuse` and `release_0_24_5`.
 
 ## Control publication receipts (v0.24.4, 2026-11-12)
 
