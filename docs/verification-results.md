@@ -1,36 +1,80 @@
 # Verification results
 
-## Acquisition costs and overlapping table uploads (v0.24.3 candidate, 2026-11-12)
+## v0.24.3 acquisition costs and overlapping table uploads (2026-11-12)
 
-Acquisition logs distinguish revocation, conditional publication, journal
-discovery, immutable catalogue uploads, validation and checkpoint
-allowance/funding/staging. Fixed counters and opaque owner IDs avoid database
-names, keys, values and provider errors. Owner-to-partition binding is emitted
-after activation; before activation the root has no active identity.
+Table builds now overlap their two fresh immutable PUTs using buffers already
+encoded in memory. Both replies must succeed before returning a reference.
+Errors and cancellation can leave either object orphaned and charged; there is
+no retry or refund. This removes a serial upload dependency without adding a
+worker, queue, storage format or authority mechanism. Checkpoint construction
+still holds its owner's serving write lock during I/O.
 
-The first isolated B2 diagnostic run (`f76dc68`, debug binary) recovers 32 then
-64 acknowledged writes after forced stops with empty caches. Exact receipt
-replays pass. Activation takes about 1.47 seconds each, journal selection
-5.12 / 3.50 seconds and handoff checkpoints 10.71 / 6.47 seconds. The serving
-checkpoint holds its owner's write lock through I/O. These single-partition,
-small-value observations exclude Kubernetes and collection; they are not a
-production latency measurement. The bucket, scoped key and 153 physical object
-versions are removed. Versioned MinIO membership/recovery passes in 40.44 seconds.
+Fixed-field logs separate activation revocation/publication, journal discovery,
+immutable catalogue uploads, validation and checkpoint allowance/funding/staging.
+Opaque owner IDs bind those records to partitions after activation. The harness
+retains only documented fields; logs exclude database names, keys, values and
+provider errors. Bounded samples may omit calls. Cumulative stage timings do not
+establish a complete client critical path or a latency distribution.
 
-The next change overlaps each table's two immutable uploads, using buffers that
-are already encoded in memory. Both replies must succeed before returning a
-reference. Errors and cancellation can leave either object orphaned and charged;
-there is no retry or refund. This removes one serial upload dependency without
-adding a worker, queue, storage format or authority mechanism. It does not remove
-the checkpoint's serving lock or control publications.
+The paired-upload regression fails against serial uploads, then passes success,
+either lost reply and cancellation after both objects arrive. All **353 routine
+Rust checks**, formatting and strict clippy pass. The existing external-file
+model checks grouped references in **2,197 states**, with two fault controls and
+two reachability controls; it does not prove Rust or provider behavior.
+[Woodpecker #287](https://ci.eflorenzano.com/repos/18/pipeline/287/1) passes at
+`4fc6266`, including JavaScript/Pi contracts and the optimized 10,005-database
+regression (199.16 seconds). Versioned MinIO membership/recovery passes in
+40.56 seconds; its bucket, container and 79 versions are removed. The static
+executable passes installation without a toolchain, transactions, backup/restore
+and forced-stop recovery. The exact static executable recovers **all 753 B2
+acknowledgements**, independently checked across four histories:
 
-The existing external-file model now covers grouped references: **2,197 states**,
-two fault controls and two reachability controls. The paired-upload regression
-fails against the serial implementation, then covers success, either lost reply
-and cancellation. All **353 routine Rust checks**, formatting and strict clippy pass. Updated cloud qualification is pending;
-v0.24.2's missed rollout targets remain open. The diagnostic baseline has **352
-routine Rust checks**, strict clippy and formatting passing, plus five fixed-field
-parser checks. [Sources, timings and limitations](evidence/native-recovery-2026-11-11.json).
+| Recovery | Every writer progresses within | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 58.66 s | 60 s | Pass |
+| Scale to six | 20.17 s | 60 s | Pass |
+| First rolling replacement | 116.23 s | 60 s | Miss |
+| Second rolling replacement | 139.21 s | 60 s | Miss |
+| Cold API readiness | 51.68 s | 120 s | Pass |
+
+Rollout bounds include rollout/readiness completion and the subsequent per-writer
+readback barrier. Maximum acknowledgement gaps in the recorded rollout slices
+are **99.33 / 92.29 seconds**; these slices include intervening diagnostics and
+are not exact fault windows or readback latencies. **This run does not establish
+an overall latency improvement.** All test resources are removed, including the
+namespace, bucket, scoped key and 1,573 physical B2 versions.
+
+The updated run retains 87 owner bindings. Its longest complete sampled
+activation takes 9.90 seconds, including 9.40 seconds in conditional publication.
+One selection takes **15.65 seconds with two empty journal scans**, mostly
+publication and validation. The counters include rescans, so this does not
+establish two distinct journals. A busy-partition checkpoint takes 14.37 seconds: 4.54 funding,
+1.19 staging and the remainder mainly publication/confirmation. These are
+separate calls; the evidence identifies repeated control work as a larger target
+than the paired upload itself.
+
+The earlier diagnostic-only candidate (`f76dc68`, Woodpecker #286) establishes
+why these costs matter. An isolated debug B2 run recovers 32 then 64 acknowledged
+writes and exact receipt replays after forced stops with empty caches. Activation
+takes about 1.47 seconds each, selection 5.12 / 3.50 seconds and handoff checkpoints
+10.71 / 6.47 seconds. It excludes Kubernetes and collection. Its static Kubernetes
+run recovers **848 acknowledgements** but misses both rollouts at **135.24 /
+141.48 seconds** against 60 seconds; scale and cold targets pass. The longest
+complete sampled activation spends 6.27 of 6.79 seconds in conditional
+publication; selection spends 10.79 of 17.92 seconds in discovery; a checkpoint
+spends 4.38 of 13.21 seconds funding and 1.27 seconds staging. These are separate
+sampled calls. The initial pre-activation binding emits no records and is fixed
+in the followup. Both B2 buckets and keys, the test namespace and 153 / 1,221
+physical versions are removed. That candidate was not released; its binaries
+and completed model scratch directories are removed.
+
+[v0.24.3](https://github.com/ericflo/durable-db/releases/tag/v0.24.3) ships the checked
+static executable. The next targets are repeated control work during acquisition
+and checkpointing, then serial journal scanning within bounded recovery memory. It does not establish an overall
+latency improvement, continuous split availability, peak memory, sustained
+performance or complete cost isolation. Stale proposed-serving, timed-renewal and
+unfinished retained-export descriptions are removed. [Sources, artifacts,
+timings and limits](evidence/native-recovery-2026-11-11.json).
 
 ## v0.24.2 graceful routing withdrawal (2026-11-12)
 
