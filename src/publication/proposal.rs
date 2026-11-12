@@ -191,19 +191,30 @@ impl Published {
         let queue_ms = queued.elapsed().as_millis() as u64;
         // Fixed outcomes and a random invocation identity only; never log a
         // database name, key, manifest body or provider error.
-        let progress = |outcome: &'static str, attempt: u64, prepare_ms: u64, compare_ms: u64| {
-            tracing::info!(%publication, outcome, attempt, queue_ms, prepare_ms, compare_ms,
+        let progress = |outcome: &'static str,
+                        attempt: u64,
+                        prepare_ms: u64,
+                        compare_ms: u64,
+                        reused_pages: bool| {
+            tracing::info!(%publication, outcome, attempt, queue_ms, prepare_ms, compare_ms, reused_pages,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "shared publication progress");
         };
-        progress("admitted", 0, 0, 0);
+        progress("admitted", 0, 0, 0, false);
         let mut discovery = None;
+        let mut staged: Option<(Option<Root>, BTreeMap<String, Pointer>, Root)> = None;
         for attempt in 0..8 {
             let preparing = std::time::Instant::now();
             let before = self.authority.read().await?;
             if self.proposal_result(&proposal, &before).await? {
                 self.proposal_cleanup.committed(name.clone());
-                progress("helped", attempt, preparing.elapsed().as_millis() as u64, 0);
+                progress(
+                    "helped",
+                    attempt,
+                    preparing.elapsed().as_millis() as u64,
+                    0,
+                    false,
+                );
                 return self.head_version(&proposal.next, &before).map(Some);
             }
             // One bounded discovery per invocation. A comparison conflict can
@@ -260,7 +271,13 @@ impl Published {
                 let observed = self.authority.read().await?;
                 if self.proposal_result(&proposal, &observed).await? {
                     self.proposal_cleanup.committed(name.clone());
-                    progress("helped", attempt, preparing.elapsed().as_millis() as u64, 0);
+                    progress(
+                        "helped",
+                        attempt,
+                        preparing.elapsed().as_millis() as u64,
+                        0,
+                        false,
+                    );
                     return self.head_version(&proposal.next, &observed).map(Some);
                 }
                 observed
@@ -270,61 +287,72 @@ impl Published {
             let (next_cursor, pending) = discovery.as_ref().unwrap();
             // Raw observations may be stale; only the exact CAS can publish.
             let observed_root = root(&observed.info)?;
-            let mut selected = BTreeMap::new();
-            selected.insert(proposal.database.clone(), proposal.next.clone());
-            if !self.manifest_available(&proposal.next).await? {
-                bail!("submitted manifest unavailable; outcome is uncertain");
-            }
-            let eligible: Vec<Option<&Proposal>> = stream::iter(0..pending.len())
-                .map(|index| {
-                    let candidate = &pending[index];
-                    let observed_root = &observed_root;
-                    let eligible = candidate.database != proposal.database
-                        && candidate.fence.as_ref() == observed.info.get("durable-db-fence");
-                    async move {
-                        if !eligible {
-                            return Ok(None);
-                        }
-                        let current = match self
-                            .directory
-                            .get(observed_root.as_ref(), &candidate.database)
-                            .await
-                        {
-                            Err(e) if e.is::<MissingNode>() => {
-                                return Ok::<Option<&Proposal>, anyhow::Error>(None);
-                            }
-                            other => other?,
-                        };
-                        if current == candidate.expected
-                            && self.manifest_available(&candidate.next).await?
-                        {
-                            Ok(Some(candidate))
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                })
-                .buffer_unordered(8)
-                .try_collect::<Vec<_>>()
-                .await?;
-            for candidate in eligible.into_iter().flatten() {
-                if selected.len() == MAX_SELECTION {
-                    break;
+            // A metadata-only conflict does not invalidate immutable pages.
+            // proposal_result checked the original fence above; a different
+            // directory root requires a new selection and a fresh path copy.
+            let reused_pages = staged
+                .as_ref()
+                .is_some_and(|(base, _, _)| base == &observed_root);
+            if !reused_pages {
+                staged = None;
+                let mut selected = BTreeMap::new();
+                selected.insert(proposal.database.clone(), proposal.next.clone());
+                if !self.manifest_available(&proposal.next).await? {
+                    bail!("submitted manifest unavailable; outcome is uncertain");
                 }
-                selected
-                    .entry(candidate.database.clone())
-                    .or_insert_with(|| candidate.next.clone());
+                let eligible: Vec<Option<&Proposal>> = stream::iter(0..pending.len())
+                    .map(|index| {
+                        let candidate = &pending[index];
+                        let observed_root = &observed_root;
+                        let eligible = candidate.database != proposal.database
+                            && candidate.fence.as_ref() == observed.info.get("durable-db-fence");
+                        async move {
+                            if !eligible {
+                                return Ok(None);
+                            }
+                            let current = match self
+                                .directory
+                                .get(observed_root.as_ref(), &candidate.database)
+                                .await
+                            {
+                                Err(e) if e.is::<MissingNode>() => {
+                                    return Ok::<Option<&Proposal>, anyhow::Error>(None);
+                                }
+                                other => other?,
+                            };
+                            if current == candidate.expected
+                                && self.manifest_available(&candidate.next).await?
+                            {
+                                Ok(Some(candidate))
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                    })
+                    .buffer_unordered(8)
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                for candidate in eligible.into_iter().flatten() {
+                    if selected.len() == MAX_SELECTION {
+                        break;
+                    }
+                    selected
+                        .entry(candidate.database.clone())
+                        .or_insert_with(|| candidate.next.clone());
+                }
+                let updated = match self
+                    .directory
+                    .insert_many(observed_root.as_ref(), &selected)
+                    .await
+                {
+                    Err(e) if e.is::<MissingNode>() => continue,
+                    other => other?,
+                };
+                staged = Some((observed_root, selected, updated));
             }
-            let updated = match self
-                .directory
-                .insert_many(observed_root.as_ref(), &selected)
-                .await
-            {
-                Err(e) if e.is::<MissingNode>() => continue,
-                other => other?,
-            };
+            let (_, selected, updated) = staged.as_ref().expect("staged directory");
             let mut info = observed.info.clone();
-            write_root(&mut info, updated)?;
+            write_root(&mut info, updated.clone())?;
             info.insert(HELP_CURSOR.into(), next_cursor.clone());
             budget(&info)?;
             // Errors may have committed the whole group. Preserve uncertainty.
@@ -340,6 +368,7 @@ impl Published {
                 attempt + 1,
                 prepare_ms,
                 comparing.elapsed().as_millis() as u64,
+                reused_pages,
             );
             if let Some(published) = result? {
                 metrics::REGISTRY.event(Event::PublicationGroups, 1);

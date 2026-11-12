@@ -153,6 +153,11 @@ split availability, worst-case memory, sustained performance and public
 multitenancy remain open. See the [measured results and limits](docs/verification-results.md)
 and the [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 
+Current source also reuses completed directory pages after a metadata-only
+publication conflict. Focused checks reduce three uploads to one while retaining
+exact comparisons and collection fences; cloud qualification is pending. The
+rollout harness now timestamps validated readbacks directly.
+
 ## Verification
 
 Protocol changes start as TLA+ models, which ship with deliberately broken variants that must produce counterexamples. An [unbounded TLAPS proof](docs/proof-publication.md) covers abstract page reachability. The Rust implementation faces adversarial and failure-injection tests against real B2, MinIO and Kubernetes, including SIGKILL, OOM, provider partitions and removal of every server.

@@ -960,6 +960,16 @@ async fn publication_retries_reuse_discovery_without_replaying_uploads() {
         }
         assert_eq!(metadata.proposal_gets.load(Ordering::SeqCst), 1);
         assert_eq!(metadata.proposal_lists.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            metadata
+                .files
+                .list("indexes/", None, 16)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "metadata-only conflicts must reuse the completed directory upload"
+        );
         for (name, value) in [("a", b"a"), ("b", b"b")] {
             let object = store
                 .get(&format!("heads/{name}.json"), 16)
@@ -1184,18 +1194,42 @@ async fn publication_retries_read_barriers_and_rebases_unrelated_database_writes
             metadata.read_fresh().await.unwrap();
         }
         if change_root {
+            // Keep the other helper's bounded scan past this proposal so the
+            // pending writer must actually rebase, rather than receive help.
+            let cursor = metadata.files.list("proposals/", None, 128).await.unwrap();
+            let before = metadata.read().await.unwrap();
+            let mut info = before.info.clone();
+            info.insert(
+                "durable-db-proposal-scan".into(),
+                cursor.last().unwrap().clone(),
+            );
+            assert!(metadata.replace(&before, info).await.unwrap().is_some());
             assert!(
                 other
                     .cas("heads/b.json", None, Bytes::from_static(b"other"))
                     .await
                     .unwrap()
             );
+            assert_eq!(
+                store.get("heads/a.json", 100).await.unwrap().unwrap().bytes,
+                b"one"[..]
+            );
         }
         metadata.resume.notify_one();
         assert!(writer.await.unwrap().unwrap());
         let value = store.get("heads/a.json", 100).await.unwrap().unwrap().bytes;
         assert_eq!(value, &b"two"[..]);
-        // Rebase rewrites the path, not the immutable transaction manifest.
+        assert_eq!(
+            metadata
+                .files
+                .list("indexes/", None, 100)
+                .await
+                .unwrap()
+                .len(),
+            if change_root { 4 } else { 2 },
+            "only a changed directory needs another path copy"
+        );
+        // A changed root rewrites the path, not the transaction manifest.
         assert_eq!(
             metadata
                 .files

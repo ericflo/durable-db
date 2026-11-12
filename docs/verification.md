@@ -124,7 +124,7 @@ The default two-revision instance now permits helpers to select retained
 metadata from any previously submitted proposal, even after proposal deletion.
 This overapproximates the runtime's one bounded discovery batch per invocation;
 every selection still rechecks the target and original collection fence. It
-checks **1,736,213 distinct states** (11,377,184 generated, depth 25) in 47 seconds
+checks **1,736,213 distinct states** (15,818,936 generated, depth 25) in 60 seconds
 on the development host. Five fault controls and the superseded-receipt coverage
 control still produce their expected counterexamples. A one-revision coverage
 check restricts receipt delivery to when a helper is already busy. Its one-job,
@@ -137,10 +137,17 @@ Publication retries retain at most 64 loaded proposal records. A definite bucket
 comparison conflict no longer repeats listing and proposal downloads, or the
 duplicate authority read and target lookup after reusing that batch. Current
 heads, collection fences and manifest availability are rechecked before each
-fresh directory rewrite and exact comparison; neither target eligibility nor
-uncertain PUTs are replayed. Proposals arriving after discovery can be helped by
-a later invocation. The regression forces two conflicts and checks one LIST and
-one proposal GET, with both acknowledged and applied-but-lost final responses.
+fresh directory rewrite and exact comparison. If a definite conflict changed
+only register metadata, retries retain the completed directory and selected
+pointers while the exact directory root and original fence remain unchanged.
+They preserve the new metadata and compare its exact revision. A changed root
+requires selection and path copying again; a changed fence refuses publication.
+No uncertain PUT is replayed. `Refresh` models this same-heads/same-fence step
+without adding protocol state. The regression forces two conflicts and checks
+one LIST, one proposal GET and one directory upload, with both acknowledged and
+applied-but-lost final responses. The previous code uploads three directory
+pages. Omitting the root comparison fails the strengthened competing-directory
+regression. Proposals arriving after discovery can be helped by a later invocation.
 The existing suite covers competing writes, collected selections, abandoned
 origins, bounded batches and subsequent progress. Fixed diagnostic fields split
 initial work, local helper queueing, preparation and comparison duration without
@@ -181,6 +188,7 @@ The historical three-revision run checked all 13,049,720 symmetry-reduced states
 | --- | --- |
 | Upload / Submit | `publication::proposal::Published::publish` uploads a fresh manifest, then a bounded immutable proposal |
 | Select | Bounded listing, strict proposal namespace/schema checks, target/fence comparison, and manifest existence/digest checks |
+| Refresh | Retain the completed directory across a metadata-only conflict; recheck the original fence and exact base root before comparing fresh metadata |
 | Publish | `Directory::insert_many` completes all final reachable uploads, then `Authority::replace` compares the observed authority version |
 | Ack / Unknown | Success requires the selected unique identity or an acknowledged group CAS; every other outcome after proposal submission remains uncertain |
 | List / Fence / Delete | `Published::collect_manifests` lists all three namespaces before fencing and deletes only authorized candidates |

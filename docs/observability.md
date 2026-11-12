@@ -60,6 +60,11 @@ incarnation after activation succeeds. The same owner ID links the following fix
   calculation, funding, staging and publication. `completed` and `deferred`
   records retain the final stage and whole-call duration. No-op polls emit none.
 
+Shared-publication logs additionally record `reused_pages` on helper attempts.
+It means a completed directory upload survived a metadata-only comparison
+conflict; it does not mean the comparison was skipped. Queued-receipt events
+have no staged directory. Older samples omit this field.
+
 Progress timestamps are cumulative monotonic elapsed milliseconds within one
 call; subtract adjacent values from that call for stage duration. Catalogue
 completion has its own interval. A failed or cancelled call may have no terminal
