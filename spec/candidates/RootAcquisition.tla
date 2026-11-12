@@ -14,6 +14,8 @@ ASSUME /\ IsFiniteSet(Candidates) /\ Candidates # {} /\ 0 \notin Candidates
 \* completed predecessor revocation, checked separately by RootRegistration.
 \* Validation preserves phase: a lost activation that applied can be recovered;
 \* a still-fenced owner needs another fresh activation, never another claim.
+\* An open serving owner's checkpoint origin also becomes unknown on a lost
+\* refresh. Start(validate) remains enabled without a prior confirmed result.
 \* No serving intervals, journal data, fairness or clock contract here.
 VARIABLES history, target, requests, active, confirmed, timedOut, applied, lateApplied
 vars == <<history, target, requests, active, confirmed, timedOut, applied, lateApplied>>

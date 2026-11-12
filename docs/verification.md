@@ -817,6 +817,22 @@ namespace, bucket, key and 611 physical versions were removed. See the
 [configuration and bounded timing evidence](evidence/native-recovery-2026-11-11.json).
 
 
+## Checkpoint origin recovery
+
+A lost or cancelled control refresh clears local confirmation; a live permit can
+still authorize a sealed response. Checkpoint reconstruction now retries exact
+metadata validation under the serialized control lock when its origin is unknown.
+It then reads the confirmed origin and uses the existing conditional publication.
+This follows RootAcquisition's existing `Start(validate)` transition without a
+prior confirmation; no new serving grant or ownership mechanism is introduced.
+The existing Checkpoint model abstracts successful refresh as stuttering.
+
+The lost-refresh regression and real HTTP funding-then-refresh failure both fail
+on the old implementation. The HTTP check requires idle maintenance to resume,
+a subsequent write to succeed and the previous receipt to replay. The bounded
+models retain their state counts and negative controls. Timing, complete liveness
+and correspondence to the cloud stall remain separate qualification obligations.
+
 ## Bounded remote observations
 
 The failed B2 runs are retained in the recovery evidence. Local shared-partition

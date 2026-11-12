@@ -579,6 +579,45 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
 }
 
 #[tokio::test]
+async fn native_http_recovers_checkpoint_after_funding_and_refresh_fail() {
+    let (router, provider, _, token) = fixture(4, 2).await;
+    create(&router, &token, "app").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/v1/databases/app/commit",
+        listener.local_addr().unwrap()
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    // Journal credits already exist. Fail checkpoint funding, then its exact
+    // metadata refresh; permission is valid but the cached origin is unknown.
+    provider.fail_replacements.store(2, Ordering::SeqCst);
+    assert_eq!(
+        tcp_call(&client, "POST", &url, &token, commit()).await.0,
+        StatusCode::OK
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.record().checkpoint.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background checkpoint resumes without a new request or owner");
+    let mut next = commit();
+    next["expected_revision"] = json!(1);
+    next["request_id"] = json!("next");
+    assert_eq!(
+        tcp_call(&client, "POST", &url, &token, next).await.0,
+        StatusCode::OK
+    );
+    let replay = tcp_call(&client, "POST", &url, &token, commit()).await;
+    assert_eq!(replay.0, StatusCode::OK);
+    assert_eq!(replay.1["replayed"], true);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn native_http_retries_idle_checkpoint_and_survives_disconnect_during_cold_admission() {
     let (router, provider, faults, token) = fixture(2, 2).await;
     create(&router, &token, "app").await;

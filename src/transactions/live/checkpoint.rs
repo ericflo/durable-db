@@ -131,6 +131,13 @@ impl Owner {
             self.validate().await?;
             let origin = {
                 let _request = self.control.request.lock().await;
+                // A failed/cancelled refresh clears the cached confirmation,
+                // while the live permit can remain valid. Retry the exact
+                // comparison instead of getting stuck on the missing origin.
+                if self.control.lock()?.recovery_record().is_err() {
+                    *stage = "confirmation";
+                    let _ = self.control.refresh_locked().await?;
+                }
                 self.control.lock()?.recovery_record()?
             };
             let cut = root::Cut {

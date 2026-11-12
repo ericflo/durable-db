@@ -42,6 +42,47 @@ fn request<'a>(
 }
 
 #[tokio::test]
+async fn live_checkpoint_recovers_after_control_confirmation_is_lost() {
+    let provider = Provider::new();
+    let mut owner = open(
+        active(&provider).await,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let write = serde_json::from_str(
+        r#"{"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":"eA=="}]}"#,
+    )
+    .unwrap();
+    let prepared = owner.prepare_request(database("a"), &write).await.unwrap();
+    // The metadata comparison applied, but its reply did not arrive. A fresh
+    // permit still authorizes serving; the cached checkpoint origin is unknown.
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        owner.control().refresh().await.unwrap(),
+        Outcome::Uncertain(_)
+    ));
+    owner.validate().await.unwrap();
+    owner
+        .complete(prepared.upload.unwrap().send().await)
+        .await
+        .unwrap();
+    assert!(!owner.checkpoint_due());
+    assert_eq!(
+        owner
+            .commit_result(prepared.tickets[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+    assert!(provider.record().checkpoint.is_some());
+}
+
+#[tokio::test]
 async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries() {
     let provider = Provider::new();
 

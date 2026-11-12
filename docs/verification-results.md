@@ -2,6 +2,23 @@
 
 ## Peer failure, routing and observation deadlines (2026-11-12, release pending)
 
+A newly reproduced local stall explains one way checkpoint recovery can stop:
+a failed refresh clears the cached control confirmation, while the write-once
+permit remains live. Later checkpoint attempts previously reused the missing
+origin and never refreshed it. They now repeat exact metadata validation under
+the existing control lock before staging. This does not grant serving permission,
+change ownership, or retry an uncertain immutable write.
+
+The old implementation fails both a lost-refresh regression and a real HTTP
+fixture that fails maintenance funding followed by its metadata refresh. The
+HTTP fixture now resumes background checkpointing in 1.12 seconds without a new
+request or owner, accepts the next write and replays the earlier receipt. All 335
+enabled Rust checks, formatting, strict clippy and the site build pass. The
+RootAcquisition bounds (117,741 / 30,349 states, six negative controls) and
+Checkpoint bound (65,664 states, nine negative controls) still pass. These are
+component checks, not a proof of Rust or confirmation of the failed B2 run's
+cause. The corrected runtime still requires the complete cloud campaign.
+
 Candidate `5e9b5fd` passes [Woodpecker #234](https://ci.eflorenzano.com/repos/18/pipeline/234/1),
 independent executable checks and stale-DNS replacement in a fresh B2 campaign,
 but **fails rejoin**. Writer 2 exhausts its 180-second read-retry deadline while

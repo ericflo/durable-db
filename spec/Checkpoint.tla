@@ -38,6 +38,8 @@ Prepare == /\ published = None /\ owner = 1 /\ built # None /\ pending = <<>> /\
 \* durable reference only if publication won the register race.
 \* Local renewal and checkpoint callers serialize control invocations. Renewal
 \* is a stuttering step for checkpoint data; cancellation preserves uncertainty.
+\* If the local origin is unknown, reconstruction first repeats exact metadata
+\* validation (RootAcquisition), including after a lost maintenance refresh.
 Publish == /\ pending # <<>>
            /\ (pending[1] = owner /\ pending[2] = register) \/ UnsafeCompare
            /\ published' = pending[3] /\ register' = register + 1
