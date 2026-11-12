@@ -71,8 +71,8 @@ Select(h, selected, r) ==
 \* Reuse an already prepared directory only when an observation changes no
 \* directory heads or collection fence. Accounting/barriers may change rev.
 \* Publication still compares that exact revision; observation grants nothing.
-Refresh(h,r) == /\ helping[h] /\ r \in 1..Len(history)
-                /\ seen[h].heads = history[r].heads
+Refresh(h,r,compareHeads) == /\ helping[h] /\ r \in 1..Len(history)
+                /\ (~compareHeads \/ seen[h].heads = history[r].heads)
                 /\ seen[h].fence = history[r].fence
                 /\ seen' = [seen EXCEPT ![h].rev = history[r].rev]
                 /\ UNCHANGED <<history, files, proposals, phase, target, base, response,
@@ -180,7 +180,7 @@ Next == Barrier \/ List \/ Fence \/ AbandonGC
              \/ Delete(j) \/ DeleteProposal(j) \/ (\E r \in 1..Len(history): Ack(j,r))
              \/ (\E d \in Databases, r \in 1..Len(history): Begin(j,d,r)))
         \/ (\E h \in Helpers: Publish(h) \/ Reset(h)
-             \/ (\E r \in 1..Len(history): Refresh(h,r))
+             \/ (\E r \in 1..Len(history): Refresh(h,r,TRUE))
              \/ (\E selected \in SUBSET Jobs, r \in 1..Len(history): Select(h,selected,r)))
 
 RootType == [rev: 0..MaxRevision, fence: 0..MaxRevision, heads: [Databases -> Jobs \cup {0}]]
@@ -222,4 +222,6 @@ QueuedReceiptSpec == Init /\ [][Next /\
     ((\E j \in Jobs: response[j] # "success" /\ response'[j] = "success")
      => \E h \in Helpers: helping[h])]_vars
 UnsafeReceiptSpec == Init /\ [][Next \/ (\E j \in Jobs: PrematureReceipt(j))]_vars
+UnsafeRefreshSpec == Init /\ [][Next \/
+    (\E h \in Helpers, r \in 1..Len(history): Refresh(h,r,FALSE))]_vars
 =============================================================================

@@ -125,7 +125,7 @@ metadata from any previously submitted proposal, even after proposal deletion.
 This overapproximates the runtime's one bounded discovery batch per invocation;
 every selection still rechecks the target and original collection fence. It
 checks **1,736,213 distinct states** (15,818,936 generated, depth 25) in 60 seconds
-on the development host. Five fault controls and the superseded-receipt coverage
+on the development host. Six fault controls and the superseded-receipt coverage
 control still produce their expected counterexamples. A one-revision coverage
 check restricts receipt delivery to when a helper is already busy. Its one-job,
 one-database instance reaches that interleaving in 582 states (depth 9). `Ack`
@@ -143,7 +143,8 @@ pointers while the exact directory root and original fence remain unchanged.
 They preserve the new metadata and compare its exact revision. A changed root
 requires selection and path copying again; a changed fence refuses publication.
 No uncertain PUT is replayed. `Refresh` models this same-heads/same-fence step
-without adding protocol state. The regression forces two conflicts and checks
+without adding protocol state. A one-helper fault configuration omits the
+directory equality and detects lost unrelated writes. The regression forces two conflicts and checks
 one LIST, one proposal GET and one directory upload, with both acknowledged and
 applied-but-lost final responses. The previous code uploads three directory
 pages. Omitting the root comparison fails the strengthened competing-directory

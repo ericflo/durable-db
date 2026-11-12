@@ -5,5 +5,6 @@ unsafe UnsafeCombiningTarget.cfg combining-Target 1g ExpectedTargetsCompared
 unsafe UnsafeCombiningMerge.cfg combining-Merge 1g UnrelatedWritesPreserved
 unsafe UnsafeCombiningAbort.cfg combining-Abort 1g NoCommitAfterDefiniteAbort
 unsafe UnsafeCombiningReceipt.cfg combining-receipt 512m AcknowledgedHistory
+unsafe UnsafeCombiningRefresh.cfg combining-refresh 512m UnrelatedWritesPreserved
 unsafe PublicationCombiningReceipt.cfg combining-superseded 512m NotSupersededReceipt
 unsafe PublicationCombiningQueuedReceipt.cfg combining-queued-receipt 512m NotReceiptWhileHelperBusy
