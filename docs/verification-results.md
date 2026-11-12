@@ -1,5 +1,78 @@
 # Verification results
 
+## Bounded publication discovery and contention timing (v0.24.7, 2026-11-12)
+
+A publication now loads at most 64 proposals once, reusing that metadata after
+confirmed comparison conflicts. Each retry still checks current targets, the
+original collection fence and manifest availability, uploads fresh directory
+objects and compares the exact observed authority. New arrivals can be helped by
+the next invocation. Repeated listing/downloads and a duplicate authority
+read/target lookup are removed; there is no new cache, storage format or parallel
+implementation. Fixed timing fields expose helper queueing, preparation and
+conditional provider calls without logging database names, keys or values.
+
+The 0.06-second regression forces two conflicts and checks both acknowledged and
+applied-but-lost final replies. It needs one proposal listing and one proposal
+GET; the previous implementation fails with two GETs after the first conflict.
+All **360 routine Rust checks**, formatting and strict clippy pass; 20 focused
+publication tests take 1.33 seconds. PublicationCombining checks 1,736,213 states
+with retained proposal observations, five fault controls and a reachability
+control. This is a bounded component check, not a proof of Rust or the deployment.
+[Woodpecker #300](https://ci.eflorenzano.com/repos/18/pipeline/300/1) passes,
+including the optimized 10,005-database regression (200.31 seconds). Versioned
+MinIO membership/recovery passes in 40.41 seconds; its bucket, container and
+80 versions are removed.
+
+The exact static executable recovers **all 682 B2 acknowledgements**, readbacks
+and keys across four independently checked histories on the existing Kubernetes
+hosts. The workload, fault schedule and targets are unchanged; the harness adds
+only bounded timing capture. The namespace, bucket, scoped key and all
+**1,663 physical versions** are removed.
+
+| Recovery observation | Bound | Target | Result |
+| --- | ---: | ---: | --- |
+| Scale to three | 15.93s | 60s | Pass |
+| Scale to six | 38.06s | 60s | Pass |
+| First rolling replacement | 119.85s | 60s | Miss |
+| Second rolling replacement | 161.72s | 60s | Miss |
+| Cold three-node recovery, after readiness | 58.22s | 120s | Pass |
+
+The bounded logs include 521 complete publication calls: 253 confirm their own
+comparison and 268 observe a result supplied by another helper. They record
+135 conflicts across 120 calls. These are samples, not population rates; log
+rotation/deletion, incomplete calls and failures before helper admission are not
+represented by the complete-call totals. The following maxima are separate calls:
+
+| Sample | Observation |
+| --- | --- |
+| Longest publication, 18.71s | 12.81s before helper admission, 3.31s queued, 1.51s preparation and 1.08s comparison; one conflict, then a helped result |
+| Longest helper wait, 13.81s | A 14.78s call observes a helped result without making a conditional call |
+| Longest conditional call, 15.10s | A 17.55s publication succeeds on its first comparison; no comparison conflict |
+| Longest preparation total, 4.09s | A 5.97s call has one conflict, then observes a helped result |
+
+Same-pod timestamps place the entire 13.81-second queue interval inside another
+helper's operation, whose successful first conditional call takes 15.096 seconds.
+This exposes the local delay behind a slow call; it does not show when the waiting
+proposal became visible.
+
+Initial work includes observations and immutable uploads; preparation includes
+proposal discovery, target checks and directory uploads. These timings distinguish
+queueing and local conflict retries from the conditional call, but do not separate
+network transit from provider processing or establish the cause of the previous
+31.91-second activation. The longest sampled activation here is **8.16s**,
+including 7.54s publication; selection reaches 19.60s and a checkpoint 22.41s.
+One of 69 sampled checkpoints needs confirmation, and funding reaches 5.88s.
+A lower activation maximum alongside a higher checkpoint maximum is not an
+overall recovery speedup. Rollout history slices have 69.52 / 91.62s maximum
+acknowledgement gaps, including intervening diagnostics; they are not exact fault
+windows or readback latencies.
+
+The next targets are queue delay before observing helped proposals and the slow
+conditional-call path. Continuous split availability, physical-host failures,
+worst-case memory, full tenant accounting and sustained performance remain open.
+[Source, model, exact runtime, measurements and cleanup](evidence/native-recovery-2026-11-11.json),
+`shared_publication_discovery` and `release_0_24_7`.
+
 ## Checkpoint publication supplies its own validation (v0.24.6, 2026-11-12)
 
 Funding changes the partition register while leaving the recovery origin intact.
