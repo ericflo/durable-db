@@ -1,5 +1,23 @@
 # Verification results
 
+## Acquisition cost diagnostics (v0.24.3 candidate, 2026-11-12)
+
+The existing acquisition and checkpoint logs now distinguish revocation,
+conditional publication, journal discovery, immutable catalogue uploads,
+validation, checkpoint allowance/funding and checkpoint staging. Opaque owner
+IDs connect those records to partition placement. Fixed counters report
+predecessors, discovered journals and frames without logging database names,
+keys, values or provider errors. The harness accepts only the documented fields
+and stages. No provider call, storage format, authority rule or memory allowance
+changes; the existing model obligations are unchanged.
+
+The serving checkpoint still holds its owner's write lock during I/O. This
+instrumentation measures that cost rather than claiming to remove it. All 352
+routine Rust checks, formatting and strict clippy pass. Five diagnostic parsing
+checks accept the fixed fields, discard appended provider text and reject an
+unknown checkpoint stage. Cloud qualification is pending; v0.24.2's missed
+rollout targets remain open.
+
 ## v0.24.2 graceful routing withdrawal (2026-11-12)
 
 Shutdown closes admission, stops the cluster scheduler, retires every local

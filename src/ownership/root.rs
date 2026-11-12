@@ -372,9 +372,18 @@ impl Root {
     /// unconfirmed publication by exact validation of this same incarnation,
     /// then restart discovery from the confirmed catalog. Never replay its PUTs.
     pub async fn select_journals(&mut self) -> Result<(), Error> {
+        let started = std::time::Instant::now();
+        let owner = self.incarnation;
+        let progress = |stage: &'static str, journals: u64, frames: u64| {
+            tracing::info!(owner = %owner, stage, journals, frames,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "native selection progress");
+        };
         let mut validations = 4;
         let mut recovery = self.recovery()?;
+        let (mut discovered, mut frames) = (0u64, 0u64);
         loop {
+            progress("discovery", discovered, frames);
             let mut journals = Vec::new();
             while journals.len() < catalog::SELECT_LIMIT {
                 let Some(mut journal) = recovery.next().await? else {
@@ -383,16 +392,23 @@ impl Root {
                 if journal.is_selected() {
                     continue;
                 }
-                while journal.read_next().await?.is_some() {}
+                while journal.read_next().await?.is_some() {
+                    frames = frames.saturating_add(1);
+                }
+                discovered = discovered.saturating_add(1);
                 journals.push(journal);
             }
             if journals.is_empty() {
+                progress("complete", discovered, frames);
                 return Ok(());
             }
+            progress("publication", discovered, frames);
             let select = self.select_prefixes(journals)?;
             let outcome = self.finish(select.execute().await)?;
             let confirmed = matches!(outcome, Outcome::Confirmed);
+            progress("validation", discovered, frames);
             self.confirm_outcome(outcome, &mut validations).await?;
+            progress("advance", discovered, frames);
             if confirmed {
                 recovery.advance(self.recovery_record()?).await?;
             } else {
@@ -723,6 +739,7 @@ struct Revocation {
 impl Prepared {
     pub async fn execute(self) -> Completed {
         let raw = async {
+            let mut activation = None;
             if let Some(registration) = self.registration {
                 registration.execute().await?;
             }
@@ -736,11 +753,17 @@ impl Prepared {
                 cut,
             }) = self.revoke
             {
+                let started = std::time::Instant::now();
                 // Keep registrations: deleting permission must not erase ancestry.
                 let own = registrations.next().await?.ok_or(Error::NotReady)?;
+                let mut predecessors = 0u64;
+                tracing::info!(owner = %own.identity().incarnation, stage = "revocation",
+                    predecessors, elapsed_ms = started.elapsed().as_millis() as u64,
+                    "native activation progress");
                 let mut reached = cut.is_none();
                 let mut revocations = FuturesUnordered::new();
                 while let Some(old) = registrations.next().await? {
+                    predecessors = predecessors.saturating_add(1);
                     if revocations.len() == 4 {
                         revocations.next().await.expect("revocation in flight")?;
                     }
@@ -767,11 +790,21 @@ impl Prepared {
                     permit::live(&files, own.identity().incarnation).await?,
                     "activation permit revoked"
                 );
+                tracing::info!(owner = %own.identity().incarnation, stage = "publication",
+                    predecessors, elapsed_ms = started.elapsed().as_millis() as u64,
+                    "native activation progress");
+                activation = Some((own.identity().incarnation, started, predecessors));
             }
             if let Some(catalog) = self.catalog {
                 catalog.execute().await?;
             }
-            Ok(self.raw.execute().await)
+            let completed = self.raw.execute().await;
+            if let Some((owner, started, predecessors)) = activation {
+                tracing::info!(owner = %owner, stage = "submitted", predecessors,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "native activation progress");
+            }
+            Ok(completed)
         }
         .await;
         Completed { id: self.id, raw }

@@ -188,6 +188,10 @@ def main():
         # Fixed fields only; provider messages may contain secrets or data.
         samples = report.setdefault('acquisition_events', {})
         maintenance = report.setdefault('checkpoint_events', {})
+        owners = report.setdefault('acquisition_owners', {})
+        activations = report.setdefault('activation_events', {})
+        selections = report.setdefault('selection_events', {})
+        catalogs = report.setdefault('catalog_events', {})
         for pod in pods():
             name = pod['metadata']['name']
             identity = name + '/' + pod['metadata']['uid']
@@ -201,7 +205,22 @@ def main():
                 maintenance[identity] = [dict(time_utc=stamp, outcome=outcome, owner=owner,
                     stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, owner, stage, elapsed in re.findall(
-                        r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint (deferred|completed).*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
+                        r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint (progress|deferred|completed).*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
+                owners[identity] = [dict(time_utc=stamp, partition=int(partition), owner=owner)
+                    for stamp, partition, owner in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native acquisition owner.*?partition=(\d+)\s+owner=([0-9a-f-]{36})\b', log)]
+                activations[identity] = [dict(time_utc=stamp, owner=owner, stage=stage,
+                    predecessors=int(predecessors), elapsed_ms=int(elapsed))
+                    for stamp, owner, stage, predecessors, elapsed in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native activation progress.*?owner=([0-9a-f-]{36})\s+stage="?(revocation|publication|submitted)"?\s+predecessors=(\d+)\s+elapsed_ms=(\d+)', log)]
+                selections[identity] = [dict(time_utc=stamp, owner=owner, stage=stage,
+                    journals=int(journals), frames=int(frames), elapsed_ms=int(elapsed))
+                    for stamp, owner, stage, journals, frames, elapsed in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native selection progress.*?owner=([0-9a-f-]{36})\s+stage="?(discovery|publication|validation|advance|complete)"?\s+journals=(\d+)\s+frames=(\d+)\s+elapsed_ms=(\d+)', log)]
+                catalogs[identity] = [dict(time_utc=stamp, owner=owner,
+                    prefixes=int(prefixes), elapsed_ms=int(elapsed))
+                    for stamp, owner, prefixes, elapsed in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native catalog completed.*?owner=([0-9a-f-]{36})\s+prefixes=(\d+)\s+elapsed_ms=(\d+)', log)]
             except subprocess.SubprocessError:
                 pass  # A disappearing pod must not prevent the failure report.
 

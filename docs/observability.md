@@ -43,6 +43,32 @@ HTTP operations include body decoding, admission, and handler execution. Health 
 
 These are operational measurements, **not a provider billing meter**. Object-store SDK retries can occur inside a measured call. A successful physical-deletion call can remove several versions, and a failed response can hide a successful deletion. Candidate counts are scan activity, not an estimate of the whole garbage backlog. A cancelled publication may have committed; metrics cannot resolve its transaction outcome.
 
+Acquisition logs expose the work inside the larger recovery stages. `native
+acquisition owner` connects a partition ID to its confirmed claimant's opaque
+incarnation. The same owner ID links the following fixed-field records:
+
+- `native activation progress`: `revocation` starts after reading the claimant's
+  registration; `publication` follows predecessor revocation and the claimant's
+  permit check; `submitted` follows the conditional publication attempt. The
+  predecessor count includes the checkpoint owner. Submission is not confirmation.
+- `native selection progress`: discovery, publication, exact validation, cursor
+  advance and completion. Journal/frame counts are cumulative discovery work,
+  including rescans after uncertainty; they are not unique durable totals.
+- `native catalog completed`: time spent uploading the immutable prefix records,
+  index and header, independently of the subsequent conditional publication.
+- `native checkpoint progress`: permission, confirmation when needed, allowance
+  calculation, funding, staging and publication. `completed` and `deferred`
+  records retain the final stage and whole-call duration. No-op polls emit none.
+
+Progress timestamps are cumulative monotonic elapsed milliseconds within one
+call; subtract adjacent values from that call for stage duration. Catalogue
+completion has its own interval. A failed or cancelled call may have no terminal
+record. The qualification harness retains only these fixed fields from bounded
+pod-log samples; disappearance and rotation can omit events. These timings add
+no provider calls and grant no authority. Checkpoint construction currently holds
+the serving owner's write lock through I/O, including an opportunistic handoff
+checkpoint; its duration can therefore delay foreground requests after readiness.
+
 For example, inspect the publication-register conflict fraction:
 
 ```promql

@@ -230,6 +230,7 @@ impl JournalRecovery {
 
 pub(super) struct Publication {
     files: Arc<dyn Storage>,
+    owner: Uuid,
     id: Uuid,
     index: Option<directory::Root>,
     prefixes: BTreeMap<String, Prefix>,
@@ -245,6 +246,7 @@ impl Publication {
             "invalid selection batch size"
         );
         let index = recovered[0].index.clone();
+        let owner = recovered[0].record.identity.incarnation;
         let mut prefixes = BTreeMap::new();
         for journal in recovered {
             ensure!(!journal.selected, "journal prefix was already selected");
@@ -261,6 +263,7 @@ impl Publication {
         }
         Ok(Self {
             files,
+            owner,
             id,
             index,
             prefixes,
@@ -270,6 +273,8 @@ impl Publication {
     /// Fresh immutable objects; no retries. Any failed upload prevents register
     /// publication, even if the object may arrive later. Orphans need future GC.
     pub async fn execute(self) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        let prefixes = self.prefixes.len();
         let mut entries = BTreeMap::new();
         for (key, prefix) in self.prefixes {
             let bytes = prefix.encode();
@@ -296,6 +301,10 @@ impl Publication {
         );
         self.files
             .put(&header_key(self.id), Bytes::from(body))
-            .await
+            .await?;
+        tracing::info!(owner = %self.owner, prefixes,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "native catalog completed");
+        Ok(())
     }
 }

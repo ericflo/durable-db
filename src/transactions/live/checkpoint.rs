@@ -78,7 +78,7 @@ impl Owner {
     pub async fn maintain(&mut self) -> anyhow::Result<bool> {
         let mut stage = "prepare";
         let started = Instant::now();
-        let result = self.maintain_checkpoint(&mut stage).await;
+        let result = self.maintain_checkpoint(&mut stage, started).await;
         if result.is_err() {
             // Fixed stages only: provider errors may contain credentials or data.
             tracing::warn!(owner = %self.identity.incarnation, stage,
@@ -94,7 +94,18 @@ impl Owner {
         result
     }
 
-    async fn maintain_checkpoint(&mut self, stage: &mut &'static str) -> anyhow::Result<bool> {
+    async fn maintain_checkpoint(
+        &mut self,
+        stage: &mut &'static str,
+        started: Instant,
+    ) -> anyhow::Result<bool> {
+        let identity = self.identity;
+        let progress = |current: &mut &'static str, next: &'static str| {
+            *current = next;
+            tracing::info!(owner = %identity.incarnation, stage = next,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "native checkpoint progress");
+        };
         self.check()?;
         if (!self.checkpoint_due() && !self.maintenance.handoff)
             || self.writer.pending_batches() != 0
@@ -103,7 +114,8 @@ impl Owner {
         }
         // Even an idle, empty successor needs its own durable cut, otherwise
         // every replacement revisits all earlier owners. This uses the normal
-        // checkpoint path and funding; it does not block admission by itself.
+        // checkpoint path and funding. Handoff alone does not mark capacity as
+        // exhausted, but maintain() holds the serving write lock through I/O.
         // Retries/refusals can fill the receipt cache without advancing history.
         // Drop only that disposable state: no new checkpoint or authority CAS.
         if self.maintenance.publishing.is_none()
@@ -133,7 +145,7 @@ impl Owner {
             self.maintenance.retry = Some((now + delay, delay));
             // Avoid spending maintenance credit for a permanently revoked owner.
             // Publication still requires its exact conditional comparison.
-            *stage = "permission";
+            progress(stage, "permission");
             self.validate().await?;
             let origin = {
                 let _request = self.control.request.lock().await;
@@ -141,7 +153,7 @@ impl Owner {
                 // while the live permit can remain valid. Retry the exact
                 // comparison instead of getting stuck on the missing origin.
                 if self.control.lock()?.recovery_record().is_err() {
-                    *stage = "confirmation";
+                    progress(stage, "confirmation");
                     let _ = self.control.refresh_locked().await?;
                 }
                 self.control.lock()?.recovery_record()?
@@ -152,7 +164,7 @@ impl Owner {
             };
             let mut files = self.maintenance.files.clone();
             if self.database_budget(catalog::CATALOG.name)?.is_some() {
-                *stage = "allowance";
+                progress(stage, "allowance");
                 let costs = self.projection.checkpoint_charges().await?;
                 let mut total = 0u64;
                 let mut tenants = BTreeMap::<String, u64>::new();
@@ -181,7 +193,7 @@ impl Owner {
                         ))
                     })
                     .collect::<anyhow::Result<_>>()?;
-                *stage = "funding";
+                progress(stage, "funding");
                 if let Err(error) =
                     crate::upload_budget::Allocator::fund_maintenance(&charges, |before| {
                         self.control.lock()?.check_funding_origin(before, origin)
@@ -196,7 +208,7 @@ impl Owner {
                 }
                 files = crate::upload_budget::Attempt::bounded(files, total);
             }
-            *stage = "staging";
+            progress(stage, "staging");
             let staged = checkpoint::write_projection(&self.projection, files, origin, cut).await?;
             let snapshot = checkpoint::Snapshot::new(
                 self.maintenance.files.clone(),
@@ -209,7 +221,7 @@ impl Owner {
                 attempted: false,
             });
         }
-        *stage = "publication";
+        progress(stage, "publication");
         let _request = self.control.request.lock().await;
         let pending = self.maintenance.publishing.as_ref().unwrap();
         if !pending.attempted
@@ -224,7 +236,7 @@ impl Owner {
         let pending = self.maintenance.publishing.as_mut().unwrap();
         for attempt in 0..2 {
             if !pending.attempted {
-                *stage = "publication";
+                progress(stage, "publication");
                 let publication = self.control.lock()?.publish_checkpoint(Staged {
                     origin: pending.staged.origin,
                     reference: pending.staged.reference,
@@ -242,7 +254,7 @@ impl Owner {
                 .ok()
                 .is_some_and(|r| r.checkpoint == Some(pending.staged.reference));
             if !published {
-                *stage = "confirmation";
+                progress(stage, "confirmation");
                 let _outcome = self.control.refresh_locked().await?;
                 let record = self.control.lock()?.recovery_record()?;
                 if record.checkpoint != Some(pending.staged.reference) {

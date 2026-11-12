@@ -347,6 +347,10 @@ impl Cluster {
                     .await
                     .context("ownership claim unconfirmed")?;
                 claimed.store(true, Ordering::Release);
+                if let Ok(Some(identity)) = root.identity() {
+                    tracing::info!(partition = id, owner = %identity.incarnation,
+                        "native acquisition owner");
+                }
                 let mut challenges = JoinSet::new();
                 let answering_members = members.clone();
                 let address = self.config.address;
