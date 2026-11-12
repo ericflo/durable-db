@@ -316,75 +316,127 @@ async fn forwarding_refuses_redirects_and_bounds_inflight_work() {
 }
 
 #[tokio::test]
-async fn delayed_failure_does_not_clear_a_refreshed_route() {
+async fn delayed_failure_or_cancellation_does_not_clear_a_refreshed_route() {
+    for cancel in [false, true] {
+        let provider = Provider::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _root = advertised(&provider, listener.local_addr().unwrap()).await;
+        let calls = Arc::new(AtomicU64::new(0));
+        let entered = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let (count, a, b) = (calls.clone(), entered.clone(), resume.clone());
+        let _server = Server::serve(
+            listener,
+            Router::new().fallback(move || {
+                let (count, a, b) = (count.clone(), a.clone(), b.clone());
+                async move {
+                    match count.fetch_add(1, Ordering::SeqCst) {
+                        0 => {
+                            a.notify_one();
+                            b.notified().await;
+                            crate::Error::Busy.into_response()
+                        }
+                        1 => crate::Error::Storage(anyhow::anyhow!("immediate failure"))
+                            .into_response(),
+                        4 => (StatusCode::OK, vec![b'x'; 1024 * 1024 + 1]).into_response(),
+                        _ => crate::Error::NotFound.into_response(),
+                    }
+                }
+            }),
+        );
+        let forward = Arc::new(Forward::new(&provider.connection("test"), auth(), 4).unwrap());
+        let first = forward.clone();
+        let pending =
+            tokio::spawn(
+                async move { first.info("app", &crate::auth::Access::Administrator).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        assert!(matches!(
+            forward
+                .info("app", &crate::auth::Access::Administrator)
+                .await,
+            Err(crate::Error::Storage(_))
+        ));
+        assert!(matches!(
+            forward
+                .info("app", &crate::auth::Access::Administrator)
+                .await,
+            Err(crate::Error::NotFound)
+        ));
+        let reads = provider.reads.load(Ordering::SeqCst);
+        if cancel {
+            pending.abort();
+            assert!(pending.await.unwrap_err().is_cancelled());
+        } else {
+            resume.notify_one();
+            assert!(matches!(pending.await.unwrap(), Err(crate::Error::Busy)));
+        }
+        assert!(matches!(
+            forward
+                .info("app", &crate::auth::Access::Administrator)
+                .await,
+            Err(crate::Error::NotFound)
+        ));
+        assert_eq!(
+            provider.reads.load(Ordering::SeqCst),
+            reads,
+            "late failure erased the new cache instance"
+        );
+        let error = forward
+            .info("app", &crate::auth::Access::Administrator)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::Error::Storage(e) if e.to_string() == "owner response exceeds bound")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_stalled_forward_cannot_pin_the_old_route() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let _root = advertised(&provider, listener.local_addr().unwrap()).await;
+    let _old = advertised(&provider, listener.local_addr().unwrap()).await;
     let calls = Arc::new(AtomicU64::new(0));
     let entered = Arc::new(Notify::new());
-    let resume = Arc::new(Notify::new());
-    let (count, a, b) = (calls.clone(), entered.clone(), resume.clone());
-    let _server = Server::serve(
+    let (count, seen) = (calls.clone(), entered.clone());
+    let _stalled = Server::serve(
         listener,
         Router::new().fallback(move || {
-            let (count, a, b) = (count.clone(), a.clone(), b.clone());
-            async move {
-                match count.fetch_add(1, Ordering::SeqCst) {
-                    0 => {
-                        a.notify_one();
-                        b.notified().await;
-                        crate::Error::Busy.into_response()
-                    }
-                    1 => {
-                        crate::Error::Storage(anyhow::anyhow!("immediate failure")).into_response()
-                    }
-                    4 => (StatusCode::OK, vec![b'x'; 1024 * 1024 + 1]).into_response(),
-                    _ => crate::Error::NotFound.into_response(),
-                }
-            }
+            count.fetch_add(1, Ordering::SeqCst);
+            seen.notify_one();
+            std::future::pending::<StatusCode>()
         }),
     );
-    let forward = Arc::new(Forward::new(&provider.connection("test"), auth(), 4).unwrap());
+    let forward = Arc::new(Forward::new(&provider.connection("test"), auth(), 1).unwrap());
     let first = forward.clone();
     let pending =
         tokio::spawn(async move { first.info("app", &crate::auth::Access::Administrator).await });
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    assert!(matches!(
-        forward
-            .info("app", &crate::auth::Access::Administrator)
-            .await,
-        Err(crate::Error::Storage(_))
-    ));
-    assert!(matches!(
-        forward
-            .info("app", &crate::auth::Access::Administrator)
-            .await,
-        Err(crate::Error::NotFound)
-    ));
-    let reads = provider.reads.load(Ordering::SeqCst);
-    resume.notify_one();
-    assert!(matches!(pending.await.unwrap(), Err(crate::Error::Busy)));
-    assert!(matches!(
-        forward
-            .info("app", &crate::auth::Access::Administrator)
-            .await,
-        Err(crate::Error::NotFound)
-    ));
-    assert_eq!(
-        provider.reads.load(Ordering::SeqCst),
-        reads,
-        "late failure erased the new cache instance"
+    pending.abort(); // Upstream cancellation precedes the 25-second peer timeout.
+    assert!(pending.await.unwrap_err().is_cancelled());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _new = advertised(&provider, listener.local_addr().unwrap()).await;
+    let _replacement = Server::serve(
+        listener,
+        Router::new().fallback(|| async { crate::Error::NotFound.into_response() }),
     );
-    let error = forward
-        .info("app", &crate::auth::Access::Administrator)
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            forward.info("app", &crate::auth::Access::Administrator)
+        )
         .await
-        .unwrap_err();
-    assert!(
-        matches!(error, crate::Error::Storage(e) if e.to_string() == "owner response exceeds bound")
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 5);
+        .expect("explicit retry must refresh the cancelled route"),
+        Err(crate::Error::NotFound)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "no stale replay");
 }
 
 #[tokio::test]

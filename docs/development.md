@@ -69,7 +69,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 
 Build the debug executable before running the client script. Its focused SDK mode still checks types, formatting, the application example and benchmark accounting. Its default mode runs the full client and Pi suite, including both adapters, the 32 upstream Pi cases, indexed-adapter fault/resource tests and real Harness workflows.
 
-Research models live in `spec/candidates/`. They are separate from the implemented serving protocol and do not authorize runtime assumption changes.
+`spec/candidates/` retains both the ownership/control models used by native serving and unselected research alternatives. Its directory name is historical; [verification](verification.md) identifies the implemented protocols and their assumptions. An unselected design does not authorize runtime assumption changes.
 
 ```sh
 scripts/check-candidate.sh PartitionControl

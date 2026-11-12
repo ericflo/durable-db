@@ -24,12 +24,32 @@ Sizes describe remaining engineering scope: **medium** means a few focused imple
 
 | Order | Gate and rough size | What must be true for 1.0 |
 | --- | --- | --- |
-| **1** | **Native clustered serving — medium to large, integrated campaign passed** | The exact v0.23.5 executable passes the complete B2 campaign on the existing hosts: 1→3→6→1, pod loss, rolling replacement, provider interruption and total compute replacement. Every writer must progress before the next fault; all 1,350 acknowledged writes were recovered. Independent recovery slots and preservation of unchanged placement remove unnecessary waiting. Observed rolling recovery fell from 165 to 141 seconds, scale-down from 177 to 134 seconds and cold replacement from 127 to 106 seconds; initial setup rose from 121 to 184 seconds. Different placements, histories, provider conditions and the included health patch prevent an isolated performance attribution. The next candidate failed scale-to-six before its stopped-peer/DNS fault: two writers exhausted their 180-second retry limit. Raw partition observations now avoid redundant bucket-metadata updates; fresh qualification is pending. Next: repeatability and declared recovery targets, worst-case memory, exhausted-credit administration during churn, and host failures, including unreachable peers still advertised by DNS. |
+| **1** | **Native clustered serving — medium to large, recovery not yet repeatable** | v0.23.5 passes the complete existing-host B2 campaign; the next candidate passes stopped-peer/DNS replacement and rejoin, then fails later pod-loss progress. Raw control reads avoid redundant updates, and cancelled forwarding now invalidates stale routes; complete fresh qualification is pending. Meet the recovery targets below, qualify unreachable advertised peers and network/host faults, measure worst-case memory, and keep funded administration available during churn. [Measurements and failed runs](verification-results.md). |
 | **2** | **Tenant isolation and lifecycle — medium to large** | Finish charging administrative work and retries, reduce unused tenant-credit loss across handoffs, bound creation/request/egress costs across replicas, and prevent an exhausted tenant from stopping funded neighbors' ordinary operation. Verify credential rotation/revocation, tenant deletion and data isolation. Existing logical quotas and durable admission/reserve funding cover only part of this. |
 | **3** | **Automatic maintenance and recovery — medium** | Bound growth of every physical object class, including registrations and catalog headers; qualify large-image cleanup and concurrent readers. Schedule bounded backups to independently protected storage, recover interrupted jobs and demonstrate restore after source loss. The retained checkpoint/export primitives already exist. |
 | **4** | **Performance and autoscaling qualification — large, plus a 72-hour run** | Declare workload and latency/throughput targets, then measure the native serving path on B2 and AWS S3 using the same algorithm. Exercise Pi and web-app workloads, contention, provider failures, scale up/down, rolling replacement and whole-host loss. Check histories, memory, object growth and cost throughout a sustained run. Earlier shared-engine tests do not qualify the replacement. |
 | **5** | **Composed correctness and security review — large** | Connect the TLA+ ownership, journal, transaction, admission, retention and collection arguments under explicit provider/platform assumptions. Keep bounded checks and negative controls small; verify the implementation's corresponding boundaries with adversarial tests. Resolve independent protocol and tenant-isolation review findings. Do not present bounded exploration as an unbounded proof or as a proof of Rust. |
 | **6** | **Operational release — medium** | Verify installation, supported-version upgrades, interruption/rollback or export/restore, alert delivery and operator recovery procedures on the existing Kubernetes hosts. Keep dependency audits, kache/Woodpecker builds, checked release artifacts, README and Pages current. Publish the supported operating envelope and remaining exclusions. |
+
+The next engineering targets for the existing four-writer failure fixture are
+**60 seconds for every writer to resume acknowledged/read-back progress after
+single-process loss or a replica change**, and **120 seconds after a cold API
+process becomes ready following total compute loss**. These are targets to test,
+not achieved SLOs. Measure from fault injection or readiness to each writer's
+progress, separately from budget inspection and diagnostic collection. Provider
+outage recovery starts when connectivity is restored; the outage duration must
+also remain visible. Broader production targets still need a declared workload,
+region, provider conditions and repeatability.
+
+The current harness retains its outer 180-second identical-request retry limit
+and 240-second readiness/progress checks, with two further verified readbacks
+from every writer before each next fault. Passing those ceilings alone does not
+meet the engineering targets. New reports record controller-monotonic upper bounds from the fault command
+(or cold readiness) to two further readbacks per writer after readiness. They
+include readiness and polling delay, exclude subsequent budget/diagnostic work,
+and report target attainment separately from campaign success. Earlier
+phase-to-phase durations include diagnostics and are not direct measurements
+of the new targets.
 
 Gate 1 now follows [revocable writer permits](design-owned-partitions.md#revocable-writer-permits): fresh per-writer object validation, permanent revocation before journal recovery, no bounded-clock assumption and no bucket-wide conditional update for ordinary requests. The ownership, routing, layout and residency models establish separate bounded properties; their composition and implementation correspondence remain open. The integrated CLI has completed per-writer handoff, provider-interruption and cold-replacement checks on B2. Repeatability, host failures and declared latency/concurrency targets remain decisive checks. Restricted-profile and ClockBound findings remain [fallback evidence](design-owned-partitions.md#serving-authority-remains-the-central-decision); they do not narrow the required hosts.
 

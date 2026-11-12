@@ -2,6 +2,36 @@
 
 ## Peer failure and raw control observations (2026-11-12, release pending)
 
+Candidate `aa3996f` passes [Woodpecker #233](https://ci.eflorenzano.com/repos/18/pipeline/233/1)
+and the independent executable checks. Its fresh B2/Kubernetes campaign reaches
+all four writers' progress while **all six original database processes remain
+stopped and listed in DNS**. Their process identities are checked before and
+after; only the new seventh process can serve. The original processes then
+resume, and every writer progresses through the return to six replicas.
+
+The subsequent forced pod loss **fails**: writer 3 exhausts its unchanged
+180-second commit-retry limit, although its replacement owner became ready
+about 47 seconds after the preceding phase boundary. The partial snapshot has
+1,540 acknowledgements/readbacks, without final cold recovery/history checking.
+This does not establish lost acknowledgements. The pause-to-replacement phase
+boundary takes 148 seconds; rejoin takes 73 seconds. These include diagnostics,
+not isolated recovery latencies. All disposable resources and 703 physical
+versions were removed; the failed run and exact hashes remain in the evidence.
+
+A local HTTP regression reproduces a routing defect consistent with that stall:
+cancelling a forwarded request before its peer timeout skipped cache invalidation,
+so the next explicit retry used the same dead destination. Invalidation now runs
+synchronously when the attempt ends or is dropped, affecting only that route
+instance. A late cancellation cannot erase a replacement or revive a failed peer.
+The interruptible asynchronous invalidation block was removed. Six HTTP routing
+checks pass in 0.19 seconds, including cancellation and delayed failures; the
+138-state routing model passes all six negative controls. All 330 enabled Rust
+checks, formatting, strict clippy and the documentation build pass. These bounded checks
+are not a Rust proof or confirmation of the cloud stall's cause. A complete new
+campaign remains required before release.
+
+The earlier candidate and provider checks below remain part of the record.
+
 Candidate `689cfcf` passes [Woodpecker #231](https://ci.eflorenzano.com/repos/18/pipeline/231/1)
 and the independently downloaded static executable checks, but **fails the fresh
 B2/Kubernetes campaign**. Two writers exhaust the unchanged 180-second retry
@@ -37,8 +67,8 @@ The corrected provider-cost assertion requires one raw read and zero updates or
 barriers. Versioned MinIO passes 1→2→1→0→1 handoff and cold recovery in 2.61 seconds.
 The B2 fixture stops on a single-attempt HTTP 503; its failure remains recorded.
 All four provider-fixture buckets, both B2 keys, both MinIO containers and 173
-remaining physical versions were removed. A fresh Kubernetes campaign with the
-existing bounded identical retries must qualify this correction before release.
+remaining physical versions were removed. The later Kubernetes run above
+reached the stopped-peer fault but still failed its full availability check.
 
 ## v0.23.5 independent recovery scheduling (2026-11-12)
 

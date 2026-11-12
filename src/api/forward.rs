@@ -15,7 +15,13 @@ use crate::{
 use async_trait::async_trait;
 use reqwest::{Client, Method, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::{Mutex, Semaphore};
 
 pub(super) const OWNER_HEADER: &str = "x-durable-db-owner";
@@ -33,6 +39,20 @@ pub struct Forward {
 struct Peer {
     route: Route,
     client: Client,
+    usable: AtomicBool,
+}
+// Cancellation must invalidate the same route instance as a failed response.
+// A late failure cannot invalidate a refreshed peer or revive an old one.
+struct Attempt<'a> {
+    peer: &'a Peer,
+    keep_route: bool,
+}
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        if !self.keep_route {
+            self.peer.usable.store(false, Ordering::Release);
+        }
+    }
 }
 impl Forward {
     pub fn new(
@@ -52,7 +72,9 @@ impl Forward {
     }
     async fn peer(&self) -> Result<Arc<Peer>> {
         let mut cached = self.peer.lock().await;
-        if let Some(peer) = &*cached {
+        if let Some(peer) = &*cached
+            && peer.usable.load(Ordering::Acquire)
+        {
             return Ok(peer.clone());
         }
         let route = self
@@ -72,7 +94,11 @@ impl Forward {
             .map_err(anyhow::Error::from)?;
         // A client belongs to this route instance. Replacing the route drops
         // its pool when the last bounded in-flight request completes.
-        let peer = Arc::new(Peer { route, client });
+        let peer = Arc::new(Peer {
+            route,
+            client,
+            usable: AtomicBool::new(true),
+        });
         *cached = Some(peer.clone());
         Ok(peer)
     }
@@ -90,6 +116,10 @@ impl Forward {
         }
         let token = self.auth.relay(access)?;
         let peer = self.peer().await?;
+        let mut attempt = Attempt {
+            peer: &peer,
+            keep_route: false,
+        };
         let result = async {
             let mut response = peer
                 .client
@@ -119,15 +149,7 @@ impl Forward {
         .await;
         // Overload can precede the destination identity check, so it cannot
         // establish that this cached route is still current.
-        if matches!(result, Err(Error::Storage(_) | Error::Busy)) {
-            let mut cached = self.peer.lock().await;
-            if cached
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &peer))
-            {
-                *cached = None;
-            }
-        }
+        attempt.keep_route = !matches!(result, Err(Error::Storage(_) | Error::Busy));
         result
     }
 }

@@ -1,7 +1,7 @@
 ------------------------- MODULE OwnerRouting -------------------------
 EXTENDS Naturals
 CONSTANT Fault
-ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "Readiness"}
+ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness"}
 VARIABLE s
 vars == <<s>>
 Owners == {"old", "new", "foreign"}
@@ -17,7 +17,7 @@ Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
 \* lives. Takeover still revokes its permit; a health observation cannot serve.
 Readiness == s' = [s EXCEPT !.ready = ~@]
 \* Routing observations are hints, including stale ones after takeover.
-Lookup == /\ s.cached = "none" /\ s.phase # "busy"
+Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
 Takeover == /\ s.route = "old"
             /\ s' = [s EXCEPT !.route = "new", !.permit = FALSE]
@@ -44,10 +44,16 @@ Busy == /\ s.phase = "sent" /\ s.pinned = "none"
         /\ s' = [s EXCEPT !.phase = "busy",
                    !.cached = IF Fault = "BusyCache" THEN @ ELSE "none"]
 BusyInvalidates == s.phase = "busy" => s.cached = "none"
-Next == Readiness \/ Busy \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
+\* The caller can cancel before the peer deadline, without learning whether
+\* its request applied. Retire that route hint; never replay the request here.
+Cancel == /\ s.phase = "sent"
+          /\ s' = [s EXCEPT !.phase = "cancelled",
+                     !.cached = IF Fault = "CancelCache" THEN @ ELSE "none"]
+CancelInvalidates == s.phase = "cancelled" => s.cached = "none"
+Next == Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
 TypeOK == s \in [route: {"old", "new"}, endpoint: Owners,
     permit: BOOLEAN, cached: Owners \cup {"none"}, expected: Owners \cup {"none"},
-    phase: {"idle", "sent", "done", "busy"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},
+    phase: {"idle", "sent", "done", "busy", "cancelled"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},
     ready: BOOLEAN, authorized: BOOLEAN]
 ExpectedOwner == s.served # "none" => s.served = s.expected
 AuthorizedResponse == s.served # "none" => s.authorized

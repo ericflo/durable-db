@@ -3,4 +3,5 @@ unsafe UnsafeRouteIdentity.cfg route-identity 256m ExpectedOwner
 unsafe UnsafeRouteRetry.cfg route-retry 256m SingleAttempt
 unsafe UnsafeRouteRebind.cfg route-rebind 256m ExpectedOwner
 unsafe UnsafeRouteBusy.cfg route-busy 256m BusyInvalidates
+unsafe UnsafeRouteCancel.cfg route-cancel 256m CancelInvalidates
 unsafe UnsafeRouteReadiness.cfg route-readiness 256m AuthorizedResponse

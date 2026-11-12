@@ -202,12 +202,31 @@ def main():
                 raise RuntimeError('Tenant allocation decreased or exceeded its ceiling')
         earlier.append(dict(stage=stage,status=status,tenants=tenants));save()
 
-    def progress():
-        start = snapshot()['verified'];deadline=time.monotonic()+240
+    def recovery(name, target=60, basis='before fault or replica change'):
+        observation=dict(name=name,started_at=utc(),basis=basis,target_seconds=target,
+                         writer_progress_upper_bound_seconds=[None]*4)
+        began=time.monotonic()
+        report.setdefault('recovery_observations',[]).append(observation);save()
+        return began,observation
+
+    def progress(recovery=None):
+        began,observation=recovery if recovery else (None,None)
+        # Keep the original post-readiness barrier: every writer must complete
+        # two more readbacks, even if it progressed earlier during the fault.
+        start=snapshot()['verified']
+        deadline=time.monotonic()+240
         while time.monotonic()<deadline:
             now=snapshot()
-            if len(start)==4 and len(now['verified'])==4 and all(after>=before+2 for before,after in zip(start,now['verified'])):
-                return now['writes_acknowledged']
+            if len(start)==4 and len(now['verified'])==4:
+                elapsed=time.monotonic()-began if observation else None
+                for writer,(before,after) in enumerate(zip(start,now['verified'])):
+                    if observation and after>=before+2 and observation['writer_progress_upper_bound_seconds'][writer] is None:
+                        observation['writer_progress_upper_bound_seconds'][writer]=elapsed
+                if observation:save()
+                if all(after>=before+2 for before,after in zip(start,now['verified'])):
+                    if observation:
+                        observation['observed_within_target']=elapsed<=observation['target_seconds'];save()
+                    return now['writes_acknowledged']
             time.sleep(3)
         raise RuntimeError('Per-writer acknowledged/readback progress deadline exceeded')
 
@@ -335,9 +354,11 @@ def main():
         budget('initial-one');call('/resume',{})
         phase('one-progress',writes_acknowledged=progress())
         for count in (3,6):
+            timing=recovery(f'scale-{count}')
             kube('scale','deployment','durable-db',f'--replicas={count}')
-            located=placement(wait_replicas(count));budget(f'scale-{count}')
-            phase(f'scale-{count}',placement=located,writes_acknowledged=progress())
+            located=placement(wait_replicas(count))
+            phase(f'scale-{count}',placement=located,writes_acknowledged=progress(timing))
+            budget(f'scale-{count}')
         if args.steady_seconds:
             start=time.monotonic();last_progress=start;previous=snapshot()['writes_acknowledged']
             steady_uids={p['metadata']['uid'] for p in pods() if not p['metadata'].get('deletionTimestamp')}
@@ -375,26 +396,31 @@ def main():
         kube('scale','deployment','durable-db','--replicas=6')
         phase('resume-scale-six',placement=placement(wait_replicas(6)),writes_acknowledged=progress())
         victim=pods()[0]
+        timing=recovery('forced-api-pod-loss')
         kube('delete','pod',victim['metadata']['name'],'--grace-period=0','--force','--wait=false')
-        phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=placement(wait_replicas(6)),writes_acknowledged=progress())
+        phase('forced-api-pod-loss',victim_node=victim['spec']['nodeName'],placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
+        timing=recovery('rolling-replacement')
         kube('rollout','restart','deployment/durable-db')
         kube('rollout','status','deployment/durable-db','--timeout=240s',timeout=270)
-        phase('rolling-replacement',placement=placement(wait_replicas(6)),writes_acknowledged=progress())
+        phase('rolling-replacement',placement=placement(wait_replicas(6)),writes_acknowledged=progress(timing))
         restricted=json.loads(json.dumps(policy));restricted['spec']['egress']=restricted['spec']['egress'][:-1]
         kube('apply','-f','-',body=restricted)
         phase('provider-partition-start',probe=provider_probe(False))
         time.sleep(40)
         kube('apply','-f','-',body=policy)
         phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress())
+        timing=recovery('scale-one')
         kube('scale','deployment','durable-db','--replicas=1')
-        phase('scale-one',placement=placement(wait_replicas(1)),writes_acknowledged=progress())
+        phase('scale-one',placement=placement(wait_replicas(1)),writes_acknowledged=progress(timing))
         budget('scale-one')
         # Writers remain active: pending mutations resolve after the cold restart.
         kube('scale','deployment','durable-db','--replicas=0');wait_replicas(0)
         phase('zero-api-pods',writes_acknowledged=snapshot()['writes_acknowledged'])
         time.sleep(5)
         kube('scale','deployment','durable-db','--replicas=3')
-        phase('cold-three',placement=placement(wait_replicas(3)),writes_acknowledged=progress())
+        located=placement(wait_replicas(3))
+        timing=recovery('cold-three',120,'after cold API readiness')
+        phase('cold-three',placement=located,writes_acknowledged=progress(timing))
         call('/pause',{});call('/verify',{});budget('cold-three')
         state=call('/status?history=1',timeout=60);history=state.pop('history')
         raw=''.join(json.dumps(record,separators=(',',':'))+'\n' for record in history).encode()
