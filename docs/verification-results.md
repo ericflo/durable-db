@@ -38,7 +38,7 @@ remain unchanged for ten seconds after thirty seconds of settling. This replaces
 the blind sleep and detects policies that leave the workload connected. All-process
 pause, replacement, pod loss, rolling replacement, scale-down and cold recovery
 also pass. These are process faults on existing hosts and a provider-egress fault;
-physical host shutdown and peer-only/asymmetric network isolation remain open.
+physical host shutdown remains open. Peer-only faults are checked separately below.
 The focused `peer-isolation` experiment first failed **fault injection**, not a
 database correctness check: new connections were blocked while established peer
 connections remained usable. Its 111 acknowledgements/readbacks are partial;
@@ -46,8 +46,32 @@ no final cold/history check ran. The namespace, bucket, scoped key and 492 objec
 versions were removed. The harness replaces those policy mutations with packet
 drops inside disposable pod network namespaces. A local real-TCP check of the
 actual injector passes both directions, retained sockets, an unrelated port and
-healing; its containers/network were removed. B2 packet-fault qualification is
-pending.
+healing; its containers/network were removed.
+
+The replacement packet-fault harness at `4b127ad` passes a focused B2 campaign
+using the **same verified v0.23.8 executable**: **495 acknowledged writes** survive
+both peer splits and total compute replacement, with all keys and four sequential
+append histories independently checked. Three original processes on three hosts
+keep their identities/restart counts throughout both splits. Fresh and retained
+peer connections match each intended fault matrix; all three processes complete
+fresh provider-backed administrative reads before and after each thirty-second
+hold. Two writers enter through the isolated process and two through the other
+side, including shared-partition writers on opposite sides.
+
+| Focused peer fault | Writers advancing during the hold | Every-writer recovery upper bound | Target |
+| --- | ---: | ---: | ---: |
+| One-way isolation, then healing | 2 of 4 | 20.84 s | 60 s |
+| Two-way isolation, then healing | 1 of 4 | 60.02 s | 60 s |
+| Cold replacement after API readiness | — | 75.80 s | 120 s |
+
+The two-way healing result **misses** its target (60.0219 seconds, before rounding).
+Progress during the split means two further verified readbacks within the hold;
+it is separate from campaign completion. This run establishes data recovery and
+post-healing progress for this bounded fixture, **not availability throughout a
+partition**, a repeatable SLO or general workload linearizability. It does not
+repeat the full autoscaling/host-pause campaign. Its namespace, bucket and scoped
+key were removed, along with 959 remaining physical object versions. The first
+failed injector and this completed run remain in the same evidence record.
 
 Every-writer recovery upper bounds, in seconds:
 
