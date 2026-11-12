@@ -16,7 +16,12 @@ coverage controls pass. This is a provider-operation reduction measured locally,
 not a qualified cloud latency improvement or proof of Rust. Versioned MinIO
 passes the full native HTTP budget/retention/cold-recovery fixture at `8a82346`
 in 182.76 seconds, including zero warm cache misses and automatic collection.
-The disposable bucket/container and 31 physical versions were removed.
+The disposable bucket/container and 31 physical versions were removed. The B2 campaign is pending.
+
+The maintained fault harness now adds a targeted one-host process pause before
+the all-process fault: surviving hosts must recover every writer without adding
+pods, while stopped process identities and DNS entries remain unchanged. This
+new phase is not yet qualified; it does not simulate a peer-only network partition.
 
 ## v0.23.7 idle-owner rejoin recovery (2026-11-12)
 

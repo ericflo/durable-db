@@ -89,7 +89,7 @@ def main():
                                      maximum_write_intents=100000),
                   phases=[], budget_observations=[], resource_samples=[], failures=[], limitations=[
                       'Manual replica changes; no CPU-driven HPA claim.',
-                      'Application-process pause, pod loss and namespace-scoped egress restriction; no host shutdown, node drain, rack failure or control-plane failure.',
+                      'All database processes on one host paused while other hosts remain available, then all-process pause, pod loss and namespace-scoped egress restriction; no host shutdown, node drain, rack failure, peer-only network partition or control-plane failure.',
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
@@ -167,7 +167,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
             active = [p for p in live if not p['metadata'].get('deletionTimestamp')]
             ready = [p for p in active if p['status'].get('containerStatuses') and all(c.get('ready') for c in p['status']['containerStatuses'])]
             if len(active)==count and len(ready)==ready_count and (count or not live):
-                if ready_count>=3 and len({p['spec']['nodeName'] for p in ready})<3:
+                if ready_count==count and count>=3 and len({p['spec']['nodeName'] for p in ready})<3:
                     raise RuntimeError('Expected API placement across three distinct nodes')
                 return ready
             time.sleep(2)
@@ -180,6 +180,14 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
     def process_control(pod, signal, expected=None):
         args=[] if expected is None else [str(expected['pid']),expected['started']]
         return json.loads(kube('exec',pod,'-c','fault','--','node','-e',PROCESS_CONTROL,signal,*args))
+
+    def pause_processes(victims):
+        for pod in victims:
+            name=pod['metadata']['name']
+            database=next(c for c in pod['status']['containerStatuses'] if c['name']=='database')
+            state=process_control(name,'STOP')
+            stopped.append(dict(pod=name,uid=pod['metadata']['uid'],ip=pod['status']['podIP'],
+                                restarts=database['restartCount'],process=state))
 
     def resume_processes():
         for victim in stopped[:]:
@@ -394,14 +402,36 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
                 report['steady_observed_seconds']=now-start;save()
                 time.sleep(min(15,max(0,args.steady_seconds-(time.monotonic()-start))))
             phase('steady-complete',elapsed_seconds=time.monotonic()-start,writes_acknowledged=progress())
+        # Pause every database process on one host, with no replacement pods.
+        # Target the preferred host of writer zero's partition, not a random pod.
+        # This is process unavailability on a host; the host kernel stays alive.
+        live=pods()
+        partition=int.from_bytes(hashlib.sha256(b'durable-db.partition.v1\0'+
+            f'physical-{run}-writer-0'.encode()).digest()[:4],'big')%report['configuration']['partitions']
+        def rank(pod):
+            ip=pod['status']['podIP'];address=f'[{ip}]:7654' if ':' in ip else f'{ip}:7654'
+            return hashlib.sha256(b'durable-db.placement.v1\0'+partition.to_bytes(4,'big')+address.encode()).digest()
+        preferred=max(live,key=rank)
+        host=preferred['spec']['nodeName']
+        victims=[p for p in live if p['spec']['nodeName']==host]
+        if not victims or len(victims)==len(live):raise RuntimeError('Expected other hosts to remain available')
+        timing=recovery('one-host-process-pause')
+        pause_processes(victims)
+        phase('one-host-processes-paused',node=host,preferred_partition=partition,
+              preferred_pod=preferred['metadata']['name'],**verify_paused_peers())
+        remaining=wait_replicas(len(live),ready_count=len(live)-len(victims))
+        if any(p['spec']['nodeName']==host for p in remaining):
+            raise RuntimeError('A paused host still has a ready database process')
+        acknowledged=progress(timing)
+        phase('one-host-pause-recovered',placement=placement(remaining),
+              writes_acknowledged=acknowledged,**verify_paused_peers())
+        timing=recovery('one-host-processes-resumed')
+        resume_processes()
+        phase('one-host-processes-resumed',placement=placement(wait_replicas(len(live))),
+              writes_acknowledged=progress(timing))
         # All old owners stop, but their pod identities and DNS records remain.
         # Only the new seventh process can satisfy the per-writer barrier.
-        for pod in pods():
-            name=pod['metadata']['name']
-            database=next(c for c in pod['status']['containerStatuses'] if c['name']=='database')
-            state=process_control(name,'STOP')
-            stopped.append(dict(pod=name,uid=pod['metadata']['uid'],ip=pod['status']['podIP'],
-                                restarts=database['restartCount'],process=state))
+        pause_processes(pods())
         kube('scale','deployment','durable-db','--replicas=7')
         phase('prior-api-processes-paused',**verify_paused_peers())
         replacement=wait_replicas(7,ready_count=1)
