@@ -4,8 +4,8 @@ CONSTANTS Epochs, Attempts, LogLength, UnsafeCompare, UnsafeInherit,
           UnsafeReseal, UnsafeEarly, UnsafeScan
 
 \* Conditional prefix catalogs with explicit captured requests and late apply.
-\* Drain is an abstraction boundary: RootRequests/GrantBounds must establish
-\* that all earlier acknowledgement permission has ended before it completes.
+\* Drain is an abstraction boundary: RevocableOwner establishes the required
+\* response ordering after permanent predecessor revocation. No clock here.
 \* Ordered winning epochs and durable journal registrations are assumed here.
 \* A confirmed seal preserves all prior cuts. The implementation may retain
 \* its immutable ancestry cursor across that seal, loading the new confirmed

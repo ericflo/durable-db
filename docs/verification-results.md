@@ -13,7 +13,10 @@ the focused regression now requires at most nine and verifies every selected
 frame afterward. All 337 enabled Rust checks, formatting and strict clippy pass.
 The existing RootCatalog bounds (393,513 / 102,525 states) and all seven negative/
 coverage controls pass. This is a provider-operation reduction measured locally,
-not a qualified cloud latency improvement or proof of Rust.
+not a qualified cloud latency improvement or proof of Rust. Versioned MinIO
+passes the full native HTTP budget/retention/cold-recovery fixture at `8a82346`
+in 182.76 seconds, including zero warm cache misses and automatic collection.
+The disposable bucket/container and 31 physical versions were removed.
 
 ## Idle-owner rejoin correction (2026-11-12, release pending)
 
