@@ -13390,7 +13390,7 @@
         },
         {
           "name": "publish-docs",
-          "state": "running"
+          "state": "success"
         }
       ]
     },
