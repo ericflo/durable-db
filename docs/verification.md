@@ -502,6 +502,13 @@ that boundary. The eight-entry implementation bound and mixed-snapshot validatio
 are checked in Rust. These bounded instances do not prove Rust, collection
 composition or all nonempty batch interleavings.
 
+Six fault/coverage controls use smaller bounds while retaining their same expected
+violations: empty journals suffice for comparison, inheritance, early publication,
+late application and scan-retry controls; early publication and late application
+need only two invocations. Discovery-before-drain still uses a frame, with two
+invocations. Together these six checks explore 113,591 distinct states instead of
+1,119,253. Positive safety bounds and the nonempty reselection control are unchanged.
+
 The root record carries an immutable catalog identity and rejects incompatible formats. Catalogs reuse the existing bounded-page B+tree, with a checksummed header of at most 4 KiB and 112-byte prefixes. `recovery()` requires confirmed activation and drain. Opaque scans bind to that owner and catalog; only a completed unselected scan can be published. The controller captures the exact comparison before any immutable upload. An upload failure prevents publication; a lost publication reply requires exact validation or a winning claim to recover the durable decision. Existing selections replay only their fixed prefix. Missing or corrupt referenced objects never become absent entries.
 
 The original loopback qualification used the earlier `owned-candidate-3`
