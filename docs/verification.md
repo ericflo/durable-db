@@ -658,7 +658,7 @@ Checkpoint tables are shared across databases. Composite keys contain the databa
 
 `Root::publish_checkpoint` compares the staging controller's exact recovery snapshot before conditionally publishing its inline descriptor after all referenced objects are uploaded. New claims preserve that reference. An uncertain or abandoned comparison requires exact revalidation, and a stale staged result cannot replace a newer checkpoint. Takeover discovers from an inherited checkpoint even when its writer has no selected end yet. Recovery then verifies the cut's selected identity and prefix and checks the remaining journal hash chain through that end. A checkpoint can lie within a selected journal. The ancestry walk stops at its owner instead of revisiting earlier registrations. Unknown uploads produce no publishable handle; neither construction nor recovery deletes physical objects.
 
-`Checkpoint.tla` checks all **216** three-record histories over two keys and three values, two owners, upload-before-publication, a delayed captured conditional update, exact-cut restoration and selected suffix application: **65,664 distinct states**, 147,744 generated, depth 12. Nine negative controls detect early publication, a mismatched cut, omitted receipts, omitted values, a comparison bypass, exposing incomplete recovery, selecting a takeover suffix below an inherited checkpoint, collecting from an unpublished cut, and collecting its later suffix. The safe instance completes in one second. It abstracts selected epochs into an ordered history and assumes monotone checkpoint publication, durable immutable images and atomic comparisons. This is not a Rust-refinement, manifest-format, physical-clock, checkpoint-object collection, whole-protocol or liveness proof. The existing transaction/receipt model is rerun separately; composition remains an obligation.
+`Checkpoint.tla` checks all **216** three-record histories over two keys and three values, two owners, one unrelated funding update, upload-before-publication, a freshly observed or delayed captured conditional update, exact-cut restoration and selected suffix application: **144,288 distinct states**, 386,208 generated, depth 13. Nine negative controls detect early publication, a mismatched cut, omitted receipts, omitted values, a comparison bypass, exposing incomplete recovery, selecting a takeover suffix below an inherited checkpoint, collecting from an unpublished cut, and collecting its later suffix. The safe instance completes in one second. It abstracts selected epochs into an ordered history and assumes monotone checkpoint publication, durable immutable images and atomic comparisons. This is not a Rust-refinement, manifest-format, physical-clock, checkpoint-object collection, whole-protocol or liveness proof. The existing transaction/receipt model is rerun separately; composition remains an obligation.
 
 Thirteen additional Rust checks cover lost replies at every upload stage, cancellation after manifest upload, incomplete receipts/counts, corrupt/missing pages, malformed routing bounds, failed-reader retirement, maximum keys and manifest levels, local-directory reopening, checkpoint/claim races, abandoned publication, stale cuts, selected-chain mismatch and missing suffixes. Tests remove covered frames and older registration records to establish that recovery does not read them. Repeated checkpoints recover 140 revisions with a two-version resident budget, retaining the declared 128-receipt window. **10,005 database generations** fit eight shared tables plus one manifest node (17 physical objects), and reconstruct after the journals are removed. This is component capacity, not serving concurrency. The initial checkpoint validation passed **233** tests with 12 opt-in cases ignored and the existing release-capacity check reserved for CI.
 
@@ -1015,6 +1015,24 @@ namespace, bucket, key and 611 physical versions were removed. See the
 
 
 ## Checkpoint origin recovery
+
+Checkpoint publication now reads a fresh comparison after funding and staging,
+checks the complete recovery origin, and validates that comparison with the
+checkpoint CAS itself. The uncontended funded regression uses two replacements
+(funding and publication), down from four (including a stale attempt and separate
+validation). Observations grant no permission or confirmation. A conflict, lost
+reply or cancelled publication still uses exact validation before reusing bytes;
+a changed collection fence discards staging. A cancelled prior control validation
+is abandoned under the same request gate before preparing the checkpoint.
+
+The regression checks durable funding and the original receipt. Existing live
+cancellation and collected-staging checks exercise the new path; an additional
+check covers stale observations, retained metadata changed after staging, an
+applied-but-lost checkpoint reply and a successor observed by an old owner.
+`Checkpoint` includes one unrelated register update before or after preparation;
+its nine unsafe controls still fail. The origin collection boundary remains in
+`GlobalCollection` and the Rust races, not an expanded combined model. These
+checks do not establish deployment latency, liveness or Rust refinement.
 
 A lost or cancelled control refresh clears local confirmation; a live permit can
 still authorize a sealed response. Checkpoint reconstruction now retries exact

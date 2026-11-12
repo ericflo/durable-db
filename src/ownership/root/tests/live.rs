@@ -42,6 +42,85 @@ fn request<'a>(
 }
 
 #[tokio::test]
+async fn funded_checkpoint_publishes_without_redundant_validation() {
+    use crate::upload_budget::UploadLimits;
+    let provider = Provider::new();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 16 * 1024 * 1024,
+            attempts: 256,
+        })
+        .await
+        .unwrap();
+    let mut owner = open(
+        super::checkpoint::budgeted_active(&connection).await,
+        live::Limits {
+            checkpoint_frames: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    let budget = owner.database_budget("a").unwrap().unwrap();
+    budget.initialize_database().await.unwrap();
+    let write = serde_json::from_str(
+        r#"{"expected_revision":0,"request_id":"write","writes":[{"key":"x","value":"eA=="}]}"#,
+    )
+    .unwrap();
+    let prepared = owner.prepare_request(database("a"), &write).await.unwrap();
+    let completed = prepared.upload.unwrap().send().await;
+    assert!(matches!(
+        owner.control().refresh().await.unwrap(),
+        Outcome::Confirmed
+    ));
+    let calls = provider.calls.load(Ordering::SeqCst);
+    let start = provider.history.lock().unwrap().len() - 1;
+    owner.complete(completed).await.unwrap();
+    let calls = provider.calls.load(Ordering::SeqCst) - calls;
+    {
+        let history = provider.history.lock().unwrap();
+        let changes = &history[start..];
+        assert_eq!(
+            calls as usize,
+            changes.len() - 1,
+            "funding must not cause a predictable checkpoint conflict"
+        );
+        for pair in changes.windows(2) {
+            let mut before = pair[0].info.clone();
+            let mut after = pair[1].info.clone();
+            before.remove("durable-db-probe");
+            after.remove("durable-db-probe");
+            assert_ne!(
+                before, after,
+                "checkpoint publication supplies its own validation"
+            );
+        }
+    }
+    assert!(provider.record().checkpoint.is_some());
+    assert!(!owner.checkpoint_due());
+    assert_eq!(
+        budget
+            .status()
+            .await
+            .unwrap()
+            .maintenance
+            .unwrap()
+            .allocated
+            .attempts,
+        1
+    );
+    assert_eq!(
+        owner
+            .commit_result(prepared.tickets[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+}
+
+#[tokio::test]
 async fn live_checkpoint_recovers_after_control_confirmation_is_lost() {
     let provider = Provider::new();
     let mut owner = open(

@@ -655,15 +655,37 @@ impl Root {
         staged: crate::index::recovery::checkpoint::Staged,
     ) -> Result<Prepared, Error> {
         let record = self.recovery_record()?;
-        if record.identity != staged.origin.identity {
+        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
+        self.publish_checkpoint_observed(
+            Observation {
+                raw,
+                record: Some(record),
+            },
+            staged,
+        )
+    }
+
+    /// Funding/upload grants can change the register without changing the
+    /// recovery origin. The checkpoint CAS itself validates a fresh comparison;
+    /// observing it alone grants neither confirmation nor serving permission.
+    pub(crate) fn publish_checkpoint_observed(
+        &mut self,
+        observed: Observation,
+        staged: crate::index::recovery::checkpoint::Staged,
+    ) -> Result<Prepared, Error> {
+        let identity = self.identity()?.ok_or(Error::NotReady)?;
+        let record = observed.record.ok_or(Error::NotOwner)?;
+        if record.identity != identity || record.identity != staged.origin.identity {
             return Err(Error::NotOwner);
+        }
+        if record.phase != Phase::Open {
+            return Err(Error::NotReady);
         }
         if !record.same_recovery(staged.origin) {
             return Err(Error::StaleRecovery);
         }
-        let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
         self.begin(
-            raw,
+            observed.raw,
             Record {
                 checkpoint: Some(staged.reference),
                 ..record

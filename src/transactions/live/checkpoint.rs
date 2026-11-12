@@ -223,29 +223,41 @@ impl Owner {
         }
         progress(stage, "publication");
         let _request = self.control.request.lock().await;
-        let pending = self.maintenance.publishing.as_ref().unwrap();
-        if !pending.attempted
-            && self.control.lock()?.recovery_record()?.collection
-                != pending.staged.origin.collection
-        {
-            // A sweep may have deleted freshly staged objects. The published
-            // base is still retained; rebuild from it with fresh identities.
-            self.maintenance.publishing = None;
-            return Ok(false);
-        }
         let pending = self.maintenance.publishing.as_mut().unwrap();
         for attempt in 0..2 {
             if !pending.attempted {
                 progress(stage, "publication");
-                let publication = self.control.lock()?.publish_checkpoint(Staged {
+                let staged = Staged {
                     origin: pending.staged.origin,
                     reference: pending.staged.reference,
-                })?;
-                // A cancelled future may have sent its CAS. Retain this state until
-                // a fresh exact validation confirms the new or old reference.
-                pending.attempted = true;
-                let completed = publication.execute().await;
-                let _outcome = self.control.lock()?.finish(completed)?;
+                };
+                let publication = if attempt == 0 {
+                    // Funding and staging can advance the register. Read their
+                    // result and let publication validate it in the same CAS.
+                    let observed = self.control.lock()?.observe();
+                    let observed = observed.await?;
+                    let mut root = self.control.lock()?;
+                    // The request gate excludes live control calls. Only a
+                    // cancelled earlier validation can still be pending here.
+                    root.abandon();
+                    root.publish_checkpoint_observed(observed, staged)
+                } else {
+                    // The retry below already confirmed a fresh comparison.
+                    self.control.lock()?.publish_checkpoint(staged)
+                };
+                match publication {
+                    Ok(publication) => {
+                        // Cancellation may leave a sent CAS. Retain uncertainty
+                        // until exact validation confirms the new or old reference.
+                        pending.attempted = true;
+                        let completed = publication.execute().await;
+                        let _outcome = self.control.lock()?.finish(completed)?;
+                    }
+                    // Resolve a changed origin through the same confirmation
+                    // path, which discards collected staging before rebuilding.
+                    Err(root::Error::StaleRecovery) => (),
+                    Err(error) => return Err(error.into()),
+                }
             }
             let published = self
                 .control

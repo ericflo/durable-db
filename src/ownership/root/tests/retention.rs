@@ -42,6 +42,64 @@ async fn initial(provider: &Arc<Provider>) -> Root {
 }
 
 #[tokio::test]
+async fn checkpoint_observation_preserves_retention_and_requires_its_exact_comparison() {
+    use crate::index::recovery::checkpoint::Staged;
+    let provider = Provider::new();
+    let mut root = initial(&provider).await;
+    let recovery = Recovering::begin(root.replay().unwrap(), Limits::default())
+        .await
+        .unwrap()
+        .advance(10)
+        .await
+        .unwrap();
+    let staged = recovery.checkpoint().await.unwrap();
+    let origin = staged.origin;
+    let reference = staged.reference;
+    let stale = root.observe().await.unwrap();
+    // A backup is retained after staging. Its unrelated metadata must survive
+    // the fresh publication, even if the old comparison has been forgotten.
+    let (retained, retain) = root.retain_checkpoint().unwrap();
+    assert!(matches!(
+        root.finish(retain.execute().await).unwrap(),
+        Outcome::Confirmed
+    ));
+    let publish = root.publish_checkpoint_observed(stale, staged).unwrap();
+    assert!(matches!(
+        root.finish(publish.execute().await).unwrap(),
+        Outcome::Conflict
+    ));
+    assert!(
+        root.recovery_record().is_err(),
+        "a read never confirms ownership"
+    );
+    let observed = root.observe().await.unwrap();
+    let publish = root
+        .publish_checkpoint_observed(observed, Staged { origin, reference })
+        .unwrap();
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        root.finish(publish.execute().await).unwrap(),
+        Outcome::Uncertain(_)
+    ));
+    assert!(
+        root.recovery_record().is_err(),
+        "a lost publication reply stays unknown"
+    );
+    validate(&mut root).await;
+    assert!(root.recovery_record().unwrap().checkpoint == Some(reference));
+    assert!(root.retained_checkpoint().unwrap() == Some(retained));
+    // A fresh read of another incarnation cannot authorize this old owner.
+    let _successor = super::catalog::successor(&provider).await;
+    let observed = root.observe().await.unwrap();
+    let calls = provider.calls.load(Ordering::SeqCst);
+    assert!(matches!(
+        root.publish_checkpoint_observed(observed, Staged { origin, reference }),
+        Err(Error::NotOwner)
+    ));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+}
+
+#[tokio::test]
 async fn retained_checkpoint_survives_lost_reply_takeover_collection_and_identity_checked_release()
 {
     let provider = Provider::new();
