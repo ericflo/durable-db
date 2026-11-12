@@ -1,22 +1,36 @@
 # Verification results
 
-## Acquisition cost diagnostics (v0.24.3 candidate, 2026-11-12)
+## Acquisition costs and overlapping table uploads (v0.24.3 candidate, 2026-11-12)
 
-The existing acquisition and checkpoint logs now distinguish revocation,
-conditional publication, journal discovery, immutable catalogue uploads,
-validation, checkpoint allowance/funding and checkpoint staging. Opaque owner
-IDs connect those records to partition placement. Fixed counters report
-predecessors, discovered journals and frames without logging database names,
-keys, values or provider errors. The harness accepts only the documented fields
-and stages. No provider call, storage format, authority rule or memory allowance
-changes; the existing model obligations are unchanged.
+Acquisition logs distinguish revocation, conditional publication, journal
+discovery, immutable catalogue uploads, validation and checkpoint
+allowance/funding/staging. Fixed counters and opaque owner IDs avoid database
+names, keys, values and provider errors. Owner-to-partition binding is emitted
+after activation; before activation the root has no active identity.
 
-The serving checkpoint still holds its owner's write lock during I/O. This
-instrumentation measures that cost rather than claiming to remove it. All 352
-routine Rust checks, formatting and strict clippy pass. Five diagnostic parsing
-checks accept the fixed fields, discard appended provider text and reject an
-unknown checkpoint stage. Cloud qualification is pending; v0.24.2's missed
-rollout targets remain open.
+The first isolated B2 diagnostic run (`f76dc68`, debug binary) recovers 32 then
+64 acknowledged writes after forced stops with empty caches. Exact receipt
+replays pass. Activation takes about 1.47 seconds each, journal selection
+5.12 / 3.50 seconds and handoff checkpoints 10.71 / 6.47 seconds. The serving
+checkpoint holds its owner's write lock through I/O. These single-partition,
+small-value observations exclude Kubernetes and collection; they are not a
+production latency measurement. The bucket, scoped key and 153 physical object
+versions are removed. Versioned MinIO membership/recovery passes in 40.44 seconds.
+
+The next change overlaps each table's two immutable uploads, using buffers that
+are already encoded in memory. Both replies must succeed before returning a
+reference. Errors and cancellation can leave either object orphaned and charged;
+there is no retry or refund. This removes one serial upload dependency without
+adding a worker, queue, storage format or authority mechanism. It does not remove
+the checkpoint's serving lock or control publications.
+
+The existing external-file model now covers grouped references: **2,197 states**,
+two fault controls and two reachability controls. The paired-upload regression
+fails against the serial implementation, then covers success, either lost reply
+and cancellation. All **353 routine Rust checks**, formatting and strict clippy pass. Updated cloud qualification is pending;
+v0.24.2's missed rollout targets remain open. The diagnostic baseline has **352
+routine Rust checks**, strict clippy and formatting passing, plus five fixed-field
+parser checks. [Sources, timings and limitations](evidence/native-recovery-2026-11-11.json).
 
 ## v0.24.2 graceful routing withdrawal (2026-11-12)
 

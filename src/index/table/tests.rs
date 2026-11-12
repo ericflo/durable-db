@@ -12,6 +12,9 @@ struct Files {
     reads: AtomicUsize,
     puts: AtomicUsize,
     fail_index: AtomicBool,
+    fail_data: AtomicBool,
+    uploads: Option<tokio::sync::Barrier>,
+    hold_replies: bool,
     fail_read: AtomicBool,
     ranges: std::sync::Mutex<Vec<std::ops::Range<u64>>>,
 }
@@ -24,6 +27,9 @@ impl Files {
             reads: AtomicUsize::new(0),
             puts: AtomicUsize::new(0),
             fail_index: AtomicBool::new(false),
+            fail_data: AtomicBool::new(false),
+            uploads: None,
+            hold_replies: false,
             fail_read: AtomicBool::new(false),
             ranges: std::sync::Mutex::new(Vec::new()),
         })
@@ -49,9 +55,19 @@ impl Storage for Files {
         let is_index = bytes.starts_with(b"DDBIDX01");
         self.puts.fetch_add(1, AtomicOrder::SeqCst);
         self.inner.put(key, bytes).await?;
+        if let Some(uploads) = &self.uploads {
+            uploads.wait().await;
+        }
+        if self.hold_replies {
+            std::future::pending::<()>().await;
+        }
         ensure!(
             !(is_index && self.fail_index.swap(false, AtomicOrder::SeqCst)),
             "lost index upload reply"
+        );
+        ensure!(
+            is_index || !self.fail_data.swap(false, AtomicOrder::SeqCst),
+            "lost data upload reply"
         );
         Ok(())
     }
@@ -70,6 +86,60 @@ impl Storage for Files {
 }
 fn cache() -> Arc<Cache> {
     Arc::new(Cache::new(256 * 1024, None).unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn paired_uploads_overlap_and_require_both_replies() {
+    for outcome in ["success", "lost data", "lost index", "cancelled"] {
+        let mut files = Files::new();
+        let setup = Arc::get_mut(&mut files).unwrap();
+        // Neither PUT can reply until both objects exist. Serial uploads stall.
+        setup.uploads = Some(tokio::sync::Barrier::new(2));
+        setup.hold_replies = outcome == "cancelled";
+        setup
+            .fail_data
+            .store(outcome == "lost data", AtomicOrder::SeqCst);
+        setup
+            .fail_index
+            .store(outcome == "lost index", AtomicOrder::SeqCst);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            build(
+                files.clone(),
+                [Row {
+                    key: b"key",
+                    revision: 1,
+                    value: Some(b"value"),
+                }],
+            ),
+        )
+        .await;
+        if outcome == "cancelled" {
+            assert!(result.is_err());
+        } else {
+            let result = result.expect("both uploads must start without waiting for either reply");
+            if outcome == "success" {
+                let table = Table::open(files.clone(), cache(), result.unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    table.get(b"key", 1).await.unwrap().unwrap().value.unwrap(),
+                    &b"value"[..]
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "unknown uploads must not return a reference"
+                );
+            }
+        }
+        // Cancelled/lost replies leave orphan bytes, never a retry.
+        assert_eq!(files.puts.load(AtomicOrder::SeqCst), 2);
+        assert_eq!(
+            files.inner.list("tables/", None, 10).await.unwrap().len(),
+            2
+        );
+    }
 }
 
 #[tokio::test]

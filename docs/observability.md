@@ -44,8 +44,8 @@ HTTP operations include body decoding, admission, and handler execution. Health 
 These are operational measurements, **not a provider billing meter**. Object-store SDK retries can occur inside a measured call. A successful physical-deletion call can remove several versions, and a failed response can hide a successful deletion. Candidate counts are scan activity, not an estimate of the whole garbage backlog. A cancelled publication may have committed; metrics cannot resolve its transaction outcome.
 
 Acquisition logs expose the work inside the larger recovery stages. `native
-acquisition owner` connects a partition ID to its confirmed claimant's opaque
-incarnation. The same owner ID links the following fixed-field records:
+acquisition owner` connects a partition ID to its activated owner's opaque
+incarnation after activation succeeds. The same owner ID links the following fixed-field records:
 
 - `native activation progress`: `revocation` starts after reading the claimant's
   registration; `publication` follows predecessor revocation and the claimant's

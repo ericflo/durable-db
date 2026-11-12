@@ -96,8 +96,8 @@ impl Reference {
 }
 
 /// Build at most 64 MiB of data plus 8 MiB of index before uploading either.
-/// Each object has one PUT attempt. A second-upload error can strand the first;
-/// the caller must reserve and retain physical credit for both attempts.
+/// The two fresh PUTs overlap; a reference requires both successful replies.
+/// Errors or cancellation can strand either object, so retain both credits.
 pub async fn build<'a>(
     storage: Arc<dyn Storage>,
     rows: impl IntoIterator<Item = Row<'a>>,
@@ -153,8 +153,10 @@ pub async fn build<'a>(
         index.len() <= MAX_INDEX_BYTES,
         "table index size limit exceeded"
     );
-    let data = Blob::upload(storage.clone(), data.into()).await?;
-    let index = Blob::upload(storage, index).await?;
+    let (data, index) = tokio::try_join!(
+        Blob::upload(storage.clone(), data.into()),
+        Blob::upload(storage, index),
+    )?;
     Ok(Reference { data, index })
 }
 struct Inner {
