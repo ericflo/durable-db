@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.23.10. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.23.11. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -143,9 +143,9 @@ This is the contract the first production release must qualify:
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
 Completed B2/Kubernetes campaigns recover acknowledged histories through process
-loss, peer/provider isolation, rolling replacement and cold recovery. The latest
-candidate avoids claims during the measured peer-isolation holds, but cold recovery
-misses its target; the retry correction is under qualification. Worst-case memory,
+loss, peer/provider isolation, rolling replacement and cold recovery. v0.23.11
+records no claims during either measured peer-isolation hold and meets all three
+recovery targets in its qualification run. Broader recovery remains unqualified. Worst-case memory,
 sustained performance and public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the
 [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).

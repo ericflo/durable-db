@@ -1,6 +1,6 @@
 # Verification results
 
-## Storage-path placement challenges (v0.23.11 candidate)
+## v0.23.11 storage-path placement challenges (2026-11-12)
 
 Before replacing an unreachable incumbent, the controller asks it to answer an
 incarnation-bound challenge through the existing conditional metadata record.
@@ -29,9 +29,25 @@ loses a claim after completing the challenge wait, then its next acquisition wai
 again on the same unchanged owner/nonce. The current retry correction retains
 that completed wait across acquisitions while still requiring an exact match.
 Its regression fails on the first candidate; all 342 routine Rust checks, strict
-clippy and formatting pass with the correction. Fresh cloud qualification is pending.
+clippy and formatting pass with the correction. The repeated qualification is recorded below.
 The policy model checks 3,518 states with five negative and two coverage controls.
 [Exact candidate, configuration and failed target](evidence/native-recovery-2026-11-11.json).
+
+The corrected `f842fdc` binary, built by [Woodpecker #262](https://ci.eflorenzano.com/repos/18/pipeline/262/1),
+completes the repeated campaign with **558 acknowledgements recovered and independently
+checked**. All three targets pass: **10.68 seconds** after one-way healing,
+**14.99 seconds** after two-way healing, and **83.72 seconds** after cold readiness.
+Both holds again record zero claim attempts. Three / two writers progress,
+matching the routes reachable under this run's initial placement. All 18
+administrative probes return 200. The namespace, bucket, scoped key and 975
+remaining versions were removed. This is a short qualification run, not a causal
+latency estimate or production SLO. Genuine host loss, rolling replacement and
+scale-down still need requalification with this policy.
+
+[v0.23.11](https://github.com/ericflo/durable-db/releases/tag/v0.23.11) ships this exact
+static binary. Standalone checks cover installation without a toolchain, scoped
+creation, transactions, ordered reads, export/restore and crash/reopen. The failed
+first candidate and both image/binary hashes remain in the linked evidence.
 
 ## v0.23.10 batched journal recovery (2026-11-12)
 

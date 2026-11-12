@@ -752,8 +752,10 @@ non-owner metadata work, malformed hints and old-writer preservation. An injecte
 provider failure after the wait requires replacement within eight seconds after
 service returns; discarding the completed wait makes this check fail in 0.13
 seconds of real time. The first B2 campaign below preserves acknowledgements and
-avoids claims during peer isolation, but misses the cold-recovery target; retry
-qualification remains open.
+avoids claims during peer isolation, but misses the cold-recovery target. The
+corrected v0.23.11 campaign recovers all 558 acknowledgements with zero claims
+in either hold and all three targets met; broader failure qualification remains
+open. See [measurements and exact binaries](verification-results.md).
 
 ## Membership-driven native placement
 
