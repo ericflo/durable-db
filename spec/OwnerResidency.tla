@@ -10,7 +10,9 @@ Init == s = [live |-> {}, reserved |-> {}, retired |-> {}]
 \* Reserve before acquisition/recovery, not just before entering the map.
 \* Acquisitions may overlap: no live owner must finish before another starts.
 \* Completed/canceled work frees its own slot; unrelated membership changes
-\* need not retire an owner. Placement is scheduling, never serving authority.
+\* need not retire an owner. A preference change can leave the incumbent live
+\* until revoked; its reservation remains occupied throughout that overlap.
+\* Placement is scheduling, never serving authority.
 Acquire(o) == /\ o \notin s.live
               /\ (Cardinality(s.reserved) < Capacity \/ Fault = "Acquire")
               /\ s' = [s EXCEPT !.live = @ \cup {o}, !.reserved = @ \cup {o}]

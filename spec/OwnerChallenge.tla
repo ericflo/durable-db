@@ -44,6 +44,10 @@ PrepareAnswer == /\ s.owner = 0 /\ s.nonce # 0 /\ s.alive
 Answer == /\ s.owner = 0 /\ s.revision < 4
   /\ ((s.answer = s.revision /\ s.answer >= 0) \/ Fault = "Answer")
   /\ s' = [s EXCEPT !.nonce = 0, !.revision = @ + 1, !.answered = TRUE]
+\* Stop also abstracts yielding placement: the responder becomes inactive
+\* while the incumbent may continue serving under its unchanged permit.
+\* Ordinary metadata publication is Other, never an implicit Answer. A later
+\* resumed responder starts another interval outside this one-round bound.
 Stop == s' = [s EXCEPT !.alive = FALSE]
 \* Unrelated metadata work can invalidate a comparison, never answer a probe.
 Other == /\ s.revision < 4 /\ s' = [s EXCEPT !.revision = @ + 1]

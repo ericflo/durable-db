@@ -36,7 +36,7 @@ async fn challenges_coalesce_without_authority_and_answers_invalidate_captured_c
     assert_eq!(first.observe().await.unwrap().challenge(), Some(nonce));
     let claim = second.claim(second.observe().await.unwrap()).unwrap();
     let mut replies = JoinSet::new();
-    replies.spawn(owner.answer_challenges());
+    replies.spawn(owner.answer_challenges(|| true));
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(first.observe().await.unwrap().challenge().is_none());
     assert!(before.same_recovery(provider.record()));
@@ -83,15 +83,29 @@ async fn uncertain_challenges_defer_and_stale_owner_markers_are_not_answers() {
         .unwrap();
     assert_ne!(nonce, nonce2);
     let mut replies = JoinSet::new();
-    replies.spawn(owner.answer_challenges());
+    replies.spawn(owner.answer_challenges(|| true));
     tokio::time::sleep(Duration::from_secs(4)).await;
     assert_eq!(
         challenger.observe().await.unwrap().challenge(),
         Some(nonce2)
     );
     assert!(owner.validate(owner.observe().await.unwrap()).is_err());
-    // The matching owner's normal metadata publication answers as well.
+    // Ordinary publication must not answer for an owner yielding placement.
     validate(&mut candidate).await;
+    assert_eq!(
+        challenger.observe().await.unwrap().challenge(),
+        Some(nonce2)
+    );
+    let wanted = Arc::new(AtomicBool::new(false));
+    let answering = wanted.clone();
+    replies.spawn(candidate.answer_challenges(move || answering.load(Ordering::SeqCst)));
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(
+        challenger.observe().await.unwrap().challenge(),
+        Some(nonce2)
+    );
+    wanted.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(4)).await;
     assert!(challenger.observe().await.unwrap().challenge().is_none());
     for malformed in [
         "bad".to_owned(),

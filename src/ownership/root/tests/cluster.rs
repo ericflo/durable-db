@@ -686,6 +686,81 @@ async fn membership_scales_one_two_one_then_recovers_without_compute() {
     .expect("closed membership retires owners");
 }
 
+#[tokio::test(start_paused = true)]
+async fn placement_hint_keeps_incumbent_until_takeover_or_removal() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let a = Node::start(directory(&provider).await, listener, vec![address]).await;
+    settled(&[&a], &[address]).await;
+    let second = loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if (0..2).all(|id| preferred(id, &[address, listener.local_addr().unwrap()]) != address) {
+            break listener;
+        }
+    };
+    // A newly discovered peer has not yet admitted itself to placement.
+    let b = Node::start(directory(&provider).await, second, vec![address]).await;
+    let peers = [address, b.address];
+    let name = &names()[0];
+    let path = format!("/v1/databases/{name}");
+    let token = auth().administrator_token(600).unwrap();
+    a.server
+        .ok(
+            "PUT",
+            &path,
+            &token,
+            json!({"request_id":"create","limits":{"max_keys":20,"max_bytes":10000}}),
+        )
+        .await;
+    let old = a.cluster.resolve(name).await.unwrap().unwrap();
+    a.members(&peers);
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert_eq!(
+        a.cluster
+            .resolve(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation(),
+        old.owner_incarnation(),
+        "a preference hint must not discard the unrevoked serving owner"
+    );
+    a.server
+        .ok("POST", &format!("{path}/commit"), &token, commit(0))
+        .await;
+
+    // A transient preference disappears without ever creating a successor.
+    a.members(&[address]);
+    settled(&[&a], &[address]).await;
+    assert_eq!(
+        a.cluster
+            .resolve(name)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation(),
+        old.owner_incarnation(),
+        "returning preference must not manufacture another owner incarnation"
+    );
+
+    // The successor cannot reach A, while A prefers the successor. Yielding
+    // must stop answers without dropping service before the actual takeover.
+    a.members(&peers);
+    b.members(&[b.address]);
+    settled(&[&a, &b], &peers).await;
+    assert!(old.info(name, &Access::Administrator).await.is_err());
+    assert_eq!(
+        b.server
+            .ok("POST", &format!("{path}/commit"), &token, commit(0))
+            .await["replayed"],
+        true
+    );
+    b.members(&[]);
+    settled(&[&b], &[]).await;
+    assert!(!b.cluster.ready().await);
+}
+
 #[tokio::test]
 async fn unconfirmed_acquisition_stays_unserved_and_recovers_without_a_new_claim() {
     let provider = Provider::new();
@@ -1305,8 +1380,8 @@ async fn slow_acquisition_survives_elapsed_time_but_cancels_on_placement_change(
             .unwrap()
             .unwrap()
             .owner_incarnation()
-            .is_none(),
-        "moved owner must retire without waiting for recovery"
+            .is_some(),
+        "a preferred-peer change must preserve the healthy incumbent"
     );
     node.members(&[]);
     // Let the controller observe removal before restoring the same address;

@@ -183,9 +183,16 @@ impl Cluster {
                 cluster
                     .ready
                     .store(peers.contains(&cluster.config.address), Ordering::Release);
-                for (id, partition) in cluster.partitions.iter().enumerate() {
-                    if preferred(id as u32, &peers) != Some(cluster.config.address) {
-                        partition.local.write().await.take();
+                for partition in &cluster.partitions {
+                    let mut local = partition.local.write().await;
+                    // A preference change schedules the successor; it does not
+                    // revoke this incumbent. Keep serving until actual takeover
+                    // or removal, retaining the resident reservation throughout.
+                    // Native health checks are local and never wait for I/O.
+                    if !peers.contains(&cluster.config.address)
+                        || matches!(&*local, Some(local) if !local.backend.ready().await)
+                    {
+                        local.take();
                     }
                 }
                 for _ in 0..count {
@@ -201,18 +208,9 @@ impl Cluster {
                         continue;
                     }
                     let partition = &cluster.partitions[id];
-                    let local = partition
-                        .local
-                        .read()
-                        .await
-                        .as_ref()
-                        .map(|local| local.backend.clone());
-                    if let Some(local) = local
-                        && local.ready().await
-                    {
+                    if partition.local.read().await.is_some() {
                         continue;
                     }
-                    partition.local.write().await.take();
                     pending[id] = true;
                     let cluster = cluster.clone();
                     let members = members.clone();
@@ -343,7 +341,11 @@ impl Cluster {
                     .await
                     .context("ownership claim unconfirmed")?;
                 let mut challenges = JoinSet::new();
-                challenges.spawn(root.answer_challenges());
+                let answering_members = members.clone();
+                let address = self.config.address;
+                challenges.spawn(root.answer_challenges(move || {
+                    preferred(id, &answering_members.borrow()) == Some(address)
+                }));
                 stage = "activate";
                 progress(stage);
                 root.activate_confirmed(&mut validations).await?;

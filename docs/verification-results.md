@@ -1,5 +1,34 @@
 # Verification results
 
+## Incumbent retention (v0.23.13 candidate)
+
+A preference change no longer drops a healthy serving backend before a successor
+claims ownership. Local removal and confirmed retirement still clear it; fresh
+permits still authorize every response. The same resident reservation remains
+held. This removes early shutdown and duplicate health checks without adding a
+handoff timer, worker or storage format.
+
+A yielding incumbent stops answering storage challenges while continuing to serve
+until revoked. This matters when it prefers a successor that cannot reach it.
+The responder is now the only answer path; ordinary metadata writes preserve
+challenges. A delayed submitted answer can still complete. Returning preference
+re-enables the same responder.
+
+The TCP regression first detects early retirement on v0.23.12 in 0.05 seconds.
+The asymmetric successor case then detects an always-answering retained owner in
+0.73 seconds. The corrected test passes in 0.55 seconds, with the five existing
+challenge checks passing in 0.48 seconds. It also checks unchanged incarnation after a transient preference,
+receipt replay after actual takeover, old-owner refusal and explicit removal.
+OwnerRouting checks 472 states with eight negative controls; OwnerResidency and
+OwnerChallenge retain 19 / 3,518 states and their controls. These bounded checks
+are not a proof of the Rust implementation or permanent-partition liveness.
+
+Successful checkpoints now report whole-call elapsed time alongside deferrals,
+using the same bounded diagnostic collection. This will distinguish post-readiness
+maintenance from acquisition time in the next exact-binary cloud campaign.
+All 344 routine Rust checks, formatting and strict clippy pass. Cloud
+qualification is pending; v0.23.12 remains the latest release.
+
 ## v0.23.12 deferred challenge scheduling (2026-11-12)
 
 An idle challenge wait no longer occupies one of four acquisition slots. The

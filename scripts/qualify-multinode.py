@@ -186,7 +186,7 @@ def main():
         # Preserve bounded progress from earlier pods before rolling deletion.
         # Fixed fields only; provider messages may contain secrets or data.
         samples = report.setdefault('acquisition_events', {})
-        maintenance = report.setdefault('checkpoint_failures', {})
+        maintenance = report.setdefault('checkpoint_events', {})
         for pod in pods():
             name = pod['metadata']['name']
             try:
@@ -196,10 +196,10 @@ def main():
                     partition=int(partition), stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, partition, stage, elapsed in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native acquisition (progress|failed|deferred).*?partition=(\d+)\s+stage="?(resident|budget|observe|challenge|claim|activate|select_journals|recover|serve|ready)"?\b.*?elapsed_ms=(\d+)', log)]
-                maintenance[name] = [dict(time_utc=stamp, owner=owner,
+                maintenance[name] = [dict(time_utc=stamp, outcome=outcome, owner=owner,
                     stage=stage, elapsed_ms=int(elapsed))
-                    for stamp, owner, stage, elapsed in re.findall(
-                        r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint deferred.*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
+                    for stamp, outcome, owner, stage, elapsed in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint (deferred|completed).*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
             except subprocess.SubprocessError:
                 pass  # A disappearing pod must not prevent the failure report.
 

@@ -47,9 +47,12 @@ impl Root {
     }
 
     /// Bounded background work for this incarnation, from confirmed claim until
-    /// its placement slot is retired. A separate comparison keeps recovery and
-    /// ordinary response permission checks independent of this advisory work.
-    pub(crate) fn answer_challenges(&self) -> impl Future<Output = ()> + Send + use<> {
+    /// its placement slot is retired. A yielding incumbent stops answering but
+    /// can still serve until revoked. The callback is only a scheduling hint.
+    pub(crate) fn answer_challenges<F>(&self, wanted: F) -> impl Future<Output = ()> + Send + use<F>
+    where
+        F: Fn() -> bool + Send,
+    {
         let identity = self.epoch.map(|epoch| Identity {
             epoch,
             incarnation: self.incarnation,
@@ -64,6 +67,9 @@ impl Root {
             };
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
+                if !wanted() {
+                    continue;
+                }
                 let answer = async {
                     let observed = authority.read().await?;
                     let Some(mut record) =

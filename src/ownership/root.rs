@@ -341,15 +341,10 @@ impl Root {
         Ok(prepared)
     }
 
-    fn begin(
-        &mut self,
-        observed: control::Observation,
-        mut record: Record,
-    ) -> Result<Prepared, Error> {
+    fn begin(&mut self, observed: control::Observation, record: Record) -> Result<Prepared, Error> {
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
-        record.challenge = None;
         let metadata = metadata::encode(
             observed.metadata(),
             &self.prefix,

@@ -84,6 +84,12 @@ impl Owner {
             tracing::warn!(owner = %self.identity.incarnation, stage,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "native checkpoint deferred");
+        } else if matches!(result, Ok(true)) && stage != "prepare" {
+            // Exclude no-op polls and discarded warm caches. This is the whole
+            // checkpoint call's elapsed time, not the last stage's duration.
+            tracing::info!(owner = %self.identity.incarnation, stage,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "native checkpoint completed");
         }
         result
     }

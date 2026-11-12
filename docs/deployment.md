@@ -41,6 +41,12 @@ can still cause false suspicions. This adds failure-detection latency and does
 not make every partition reachable through every isolated pod. Upgrade all
 servers before relying on this behavior; older binaries do not answer challenges.
 
+A preference change keeps the current healthy backend serving until actual
+revocation; leaving membership still removes it. While yielding to another
+preferred process, the incumbent stops answering challenges so asymmetric peer
+reachability cannot prevent that successor from taking over. The existing
+resident budget covers this overlap; no extra handoff timer is introduced.
+
 `scripts/qualify-multinode.py` is the maintained native deployment/fault campaign.
 It uses a stable client Service through scaling and replacement and requires two
 new verified readbacks from every writer before each fault. Fixed writer names

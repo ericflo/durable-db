@@ -1,14 +1,21 @@
 ------------------------- MODULE OwnerRouting -------------------------
 EXTENDS Naturals
 CONSTANT Fault
-ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle"}
+ASSUME Fault \in {"None", "Identity", "Retry", "Rebind", "BusyCache", "CancelCache", "Readiness", "Idle", "Placement"}
 VARIABLE s
 vars == <<s>>
 Owners == {"old", "new", "foreign"}
 Init == s = [route |-> "old", endpoint |-> "old", permit |-> TRUE,
              cached |-> "none", expected |-> "none", phase |-> "idle",
              attempts |-> 0, served |-> "none", pinned |-> "none",
-             ready |-> FALSE, authorized |-> FALSE, absent |-> FALSE, retired |-> FALSE]
+             ready |-> FALSE, authorized |-> FALSE, absent |-> FALSE, retired |-> FALSE,
+             preferred |-> TRUE]
+\* A healthy process remains in membership while preference changes. Keep its
+\* incumbent available until actual takeover; preference grants no authority.
+\* Process removal/failure is outside this availability subcase.
+Placement == s' = [s EXCEPT !.preferred = ~@,
+                    !.retired = @ \/ Fault = "Placement"]
+IncumbentAvailable == s.permit => ~s.retired
 \* HTTP readiness keeps routing and administration reachable during recovery.
 \* It is independent of response authority, including for direct peer requests.
 \* Local worker health can remain ready during provider errors or maintenance;
@@ -56,11 +63,11 @@ Cancel == /\ s.phase = "sent"
           /\ s' = [s EXCEPT !.phase = "cancelled",
                      !.cached = IF Fault = "CancelCache" THEN @ ELSE "none"]
 CancelInvalidates == s.phase = "cancelled" => s.cached = "none"
-Next == Probe \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
+Next == Placement \/ Probe \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
 TypeOK == s \in [route: {"old", "new"}, endpoint: Owners,
     permit: BOOLEAN, cached: Owners \cup {"none"}, expected: Owners \cup {"none"},
     phase: {"idle", "sent", "done", "busy", "cancelled"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},
-    ready: BOOLEAN, authorized: BOOLEAN, absent: BOOLEAN, retired: BOOLEAN]
+    ready: BOOLEAN, authorized: BOOLEAN, absent: BOOLEAN, retired: BOOLEAN, preferred: BOOLEAN]
 ExpectedOwner == s.served # "none" => s.served = s.expected
 AuthorizedResponse == s.served # "none" => s.authorized
 SingleAttempt == s.attempts <= 1
