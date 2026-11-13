@@ -15,7 +15,7 @@ and the preceding acknowledgement within one second. A second case revokes the
 permit while paused and requires refusal. Receipt replay survives publication.
 The old exclusive path fails that deadline; the new regression takes **0.24s**.
 All **370 routine Rust checks**, formatting, strict clippy and Woodpecker **320**
-pass. LiveTransactions checks **19,220 states**, nine fault controls and a
+pass; tag pipeline **322** also passes. LiveTransactions checks **19,220 states**, nine fault controls and a
 concurrent-read reachability case; Checkpoint and PublicationSafety controls
 also pass. These are bounded component checks, not a Rust or deployment proof.
 

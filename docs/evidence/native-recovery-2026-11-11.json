@@ -21265,7 +21265,13 @@
         }
       ]
     },
-    "release_url": "https://github.com/ericflo/durable-db/releases/tag/v0.24.13"
+    "release_url": "https://github.com/ericflo/durable-db/releases/tag/v0.24.13",
+    "tag_pipeline": {
+      "pipeline": 322,
+      "status": "success",
+      "url": "https://ci.eflorenzano.com/repos/18/pipeline/322/1"
+    },
+    "release_asset_digests_verified": true
   },
   "eight_acquisition_slots": {
     "status": "Rejected and removed; first rollout readback gap worsened; four-slot bound restored",
