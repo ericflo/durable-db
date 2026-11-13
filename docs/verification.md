@@ -855,6 +855,41 @@ At `00637a4`, the native HTTP partition fixture passes on B2 in 52.98 seconds an
 
 ## Owner discovery and forwarding
 
+Peer sockets on Linux now set a two-second TCP user timeout in addition to the
+existing two-second connect timeout. This bounds unacknowledged traffic on reused
+connections without reducing the 25-second response deadline for acknowledged
+requests. Other platforms retain their supported transport behavior; the released
+binary and stock Kubernetes qualification use Linux. A transport timeout still
+has an uncertain outcome, invalidates only its route instance and releases its
+admission slot; only an explicit caller retry can repeat the operation. It never
+revokes an owner. Acknowledged requests can still stall until the response deadline.
+
+An opt-in real-kernel test warms one connection, drops its outgoing packets with
+nftables, publishes a replacement route, verifies the slot remains occupied during
+the attempt, and requires a transport error followed by successful rediscovery.
+The old path fails the five-second guard; the fixed path returns in **2.24–2.28s**.
+Firewall counters confirm dropped traffic, and the error must come from the
+retained connection rather than a new handshake. The existing delayed-response
+fixture still passes with a **2.1-second** acknowledged operation. Reducing the
+overall deadline to two seconds fails its connection-error classification check.
+All **380 routine Rust checks**, formatting and strict clippy pass. OwnerRouting's
+unchanged transitions check **728 states** and nine negative controls; socket
+options and kernel timing remain implementation obligations, not a model proof.
+
+Run the packet-loss fixture in an isolated Linux user/network namespace with
+`nft`, `ip` and unprivileged user namespaces available. Prepare the test executable
+through kache first; the isolated run needs no network or provider credentials:
+
+```sh
+cargo test --lib unacknowledged_pooled_forward --no-run
+unshare -Urn sh -c 'ip link set dev lo up && cargo test --offline --lib unacknowledged_pooled_forward -- --ignored --nocapture'
+```
+
+The fixture refuses namespaces containing interfaces other than loopback and
+removes its dedicated firewall table on exit. It stays opt-in because ordinary
+CI containers may forbid user/network namespaces. Real-cloud timing and complete
+partition availability require separate evidence in the [results](verification-results.md).
+
 HTTP/1 API 503 responses now close their connection after the complete error
 reply, allowing explicit client retries to select another ingress. A real TCP
 test selects an unavailable endpoint for the first connection and an available

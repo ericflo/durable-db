@@ -47,6 +47,10 @@ IdleRetires == s.absent => s.retired
 \* explicit retry reach another ingress through a connection-based Service.
 \* This transport step stutters: it neither replays the operation nor revokes
 \* an owner. Socket reuse and HTTP-version handling are Rust test obligations.
+\* Expiring unacknowledged peer TCP traffic is another transport failure, not
+\* evidence of revocation or non-commit. It takes LoseReply, never replays, and
+\* leaves acknowledged requests their existing response deadline. Kernel TCP
+\* timing and retained-connection packet loss are implementation obligations.
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
 Takeover == /\ s.route = "old"

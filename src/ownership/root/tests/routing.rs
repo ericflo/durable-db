@@ -523,6 +523,145 @@ async fn admission_rejection_cannot_pin_a_stale_owner_route() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "requires nft and an isolated network namespace; see docs/verification.md"]
+async fn unacknowledged_pooled_forward_releases_capacity_and_refreshes_route() {
+    use std::process::Command;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn nft(command: &str) {
+        assert!(
+            Command::new("nft")
+                .args(command.split_ascii_whitespace())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    struct Firewall(String);
+    impl Drop for Firewall {
+        fn drop(&mut self) {
+            nft(&format!("delete table inet {}", self.0));
+        }
+    }
+    // Only loopback may exist: run this opt-in fixture under unshare -Urn.
+    let interfaces = std::fs::read_to_string("/proc/net/dev").unwrap();
+    assert!(
+        interfaces
+            .lines()
+            .skip(2)
+            .all(|line| line.split(':').next().unwrap().trim() == "lo")
+    );
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _old = advertised(&provider, address).await;
+    let forward = Forward::new(&provider.connection("test"), auth(), 1).unwrap();
+    let access = crate::auth::Access::Administrator;
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        // Consume the complete GET (including its JSON null body), then keep
+        // this socket alive. No second connection is accepted by the fixture.
+        while !bytes.ends_with(b"\r\n\r\nnull") {
+            bytes.push(socket.read_u8().await.unwrap());
+            assert!(bytes.len() < 4096);
+        }
+        let body = br#"{"error":"not_found","message":"missing"}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.write_all(body).await.unwrap();
+        // A dropped request must not reach the old peer or be replayed here.
+        let mut byte = [0];
+        assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+    });
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::NotFound)
+    ));
+    let reads = provider.reads.load(Ordering::SeqCst);
+    let table = format!("durable_db_forward_{}", std::process::id());
+    nft(&format!("add table inet {table}"));
+    let firewall = Firewall(table);
+    nft(&format!(
+        "add chain inet {} output {{ type filter hook output priority 0; policy accept; }}",
+        firewall.0
+    ));
+    nft(&format!(
+        "add rule inet {} output ip daddr 127.0.0.1 tcp dport {} counter drop",
+        firewall.0,
+        address.port()
+    ));
+    let started = std::time::Instant::now();
+    let pending = forward.info("app", &access);
+    tokio::pin!(pending);
+    tokio::select! {
+        _ = &mut pending => panic!("the retained connection must stall"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => (),
+    }
+    assert_eq!(
+        provider.reads.load(Ordering::SeqCst),
+        reads,
+        "must reuse the cached route"
+    );
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::Busy)
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _new = advertised(&provider, listener.local_addr().unwrap()).await;
+    let _replacement = Server::serve(
+        listener,
+        Router::new().fallback(|| async { crate::Error::NotFound.into_response() }),
+    );
+    let error = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("unacknowledged traffic must fail before the 25-second response deadline")
+        .unwrap_err();
+    let crate::Error::Storage(error) = error else {
+        panic!("expected a transport error");
+    };
+    let error = error.downcast_ref::<reqwest::Error>().unwrap();
+    assert!(
+        !error.is_connect(),
+        "must fail on the existing connection, not a new handshake"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    let counters = Command::new("nft")
+        .args(["list", "table", "inet", &firewall.0])
+        .output()
+        .unwrap();
+    let counters = String::from_utf8(counters.stdout).unwrap();
+    assert!(counters.contains("counter packets ") && !counters.contains("counter packets 0 "));
+    assert!(
+        matches!(
+            forward.info("app", &access).await,
+            Err(crate::Error::NotFound)
+        ),
+        "explicit retry must release capacity and rediscover the replacement"
+    );
+    println!(
+        "Retained-connection packet loss returned in {:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(
+        tasks.try_join_next().is_none(),
+        "the old connection must remain open without receiving a replay"
+    );
+    drop(firewall);
+    // JoinSet aborts the retained server task on exit, including assertion failure.
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn stalled_connect_releases_capacity_and_discovers_the_replacement() {
     use tokio::net::{TcpSocket, TcpStream};
 

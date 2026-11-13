@@ -101,9 +101,13 @@ impl Forward {
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .no_proxy()
-            .pool_max_idle_per_host(2)
-            .build()
-            .map_err(anyhow::Error::from)?;
+            .pool_max_idle_per_host(2);
+        // Bound blackholed traffic on reused sockets without shortening the
+        // response deadline for requests acknowledged by the peer's TCP stack.
+        // Failure still has an uncertain outcome; only the caller may retry.
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        let client = client.tcp_user_timeout(Duration::from_secs(2));
+        let client = client.build().map_err(anyhow::Error::from)?;
         // A client belongs to this route instance. Replacing the route drops
         // its pool when the last bounded in-flight request completes.
         let peer = Arc::new(Peer {
