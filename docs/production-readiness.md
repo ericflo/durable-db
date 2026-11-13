@@ -58,13 +58,19 @@ per-writer readback gaps below to assess observed silence during a rollout;
 retain the controller bounds as separate rollout/recovery diagnostics.
 
 Schema 2 records each successful readback only after validating its revision
-and value. Rollout windows use the workload's own monotonic clock and per-writer
+and value. Rollout, peer-isolation and host-process pause/resume windows use the workload's own monotonic clock and per-writer
 counters. The independent checker reports the largest completed readback gap
 per writer, including the last readback before the window, and the unfinished
 gap at window close. That final gap is right-censored: later silence is unknown.
 The windows end before subsequent diagnostics. These observations do not compare
 clocks across hosts or attribute all delay to the rollout. Older schema 1
 histories remain checkable but cannot supply verified readback timings.
+
+The host-process fixture stops every database process placed on one host while
+retaining its pod identities and DNS records, then resumes those same processes.
+Its two readback windows include the fault or resumption through verified progress
+from every writer. The host kernel, kubelet and unrelated services stay running;
+this does not qualify physical power loss or node-controller replacement.
 
 Gate 1 now follows [revocable writer permits](design-owned-partitions.md#revocable-writer-permits): fresh per-writer object validation, permanent revocation before journal recovery, no bounded-clock assumption and no bucket-wide conditional update for ordinary requests. The ownership, routing, layout and residency models establish separate bounded properties; their composition and implementation correspondence remain open. The integrated CLI has completed per-writer handoff, provider-interruption and cold-replacement checks on B2. Repeatability, host failures and declared latency/concurrency targets remain decisive checks. Restricted-profile and ClockBound findings remain [fallback evidence](design-owned-partitions.md#serving-authority-remains-the-central-decision); they do not narrow the required hosts.
 

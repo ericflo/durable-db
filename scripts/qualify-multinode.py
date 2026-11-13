@@ -767,20 +767,26 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             host=preferred['spec']['nodeName']
             victims=[p for p in live if p['spec']['nodeName']==host]
             if not victims or len(victims)==len(live):raise RuntimeError('Expected other hosts to remain available')
+            window=start_readbacks('one-host-process-pause')
             timing=recovery('one-host-process-pause')
             pause_processes(victims)
             phase('one-host-processes-paused',node=host,preferred_partition=partition,
-                  preferred_pod=preferred['metadata']['name'],**verify_paused_peers())
+                  preferred_pod=preferred['metadata']['name'],readback_window=window['name'],**verify_paused_peers())
             remaining=wait_replicas(len(live),ready_count=len(live)-len(victims))
             if any(p['spec']['nodeName']==host for p in remaining):
                 raise RuntimeError('A paused host still has a ready database process')
             acknowledged=progress(timing)
+            window['end']=readback_point();save()
             phase('one-host-pause-recovered',placement=placement(remaining),
                   writes_acknowledged=acknowledged,**verify_paused_peers())
+            window=start_readbacks('one-host-processes-resumed')
             timing=recovery('one-host-processes-resumed')
             resume_processes()
-            phase('one-host-processes-resumed',placement=placement(wait_replicas(len(live))),
-                  writes_acknowledged=progress(timing))
+            located=placement(wait_replicas(len(live)))
+            acknowledged=progress(timing)
+            window['end']=readback_point();save()
+            phase('one-host-processes-resumed',placement=located,
+                  writes_acknowledged=acknowledged,readback_window=window['name'])
             # All old owners stop, but their pod identities and DNS records remain.
             # Only the new seventh process can satisfy the per-writer barrier.
             pause_processes(pods())
