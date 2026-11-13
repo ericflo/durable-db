@@ -1,5 +1,54 @@
 # Verification results
 
+## Failed owner connections pause before another send (2026-11-13)
+
+**v1.0.5**, the exact `3c37099` artifact from Woodpecker **400**,
+recovers all **383/383 acknowledged writes** in the unchanged B2/Kubernetes
+scale-down campaign on the existing hosts.
+
+| Release | Acknowledged writes recovered | Largest scale-down readback gap | Cold progress bound after readiness |
+| --- | ---: | ---: | ---: |
+| v1.0.4 | 375 / 375 | 41.98s | 40.41s |
+| v1.0.5 | 383 / 383 | 41.55s | 44.08s |
+
+The candidate **meets the 60-second direct scale-down target**. All four
+independent histories pass after every API process is replaced. The sampled
+scale-down trace contains **0 connection timeouts**, compared with **10**
+in the preceding run. Separate short samples on shared hosts do not isolate a
+causal improvement or establish sustained performance or an SLO. Earlier misses
+remain recorded.
+
+After a connection failure, the existing per-partition forwarder pauses sends to
+that exact route for three seconds. Each explicit retry still discovers the owner;
+a new incarnation or address bypasses the pause immediately. The same owner can
+retry after expiry. This adds one timestamp to the route cache, with no retry
+worker, hidden replay, extra cache allowance or serving authority. HTTP refusals
+alone do not start the pause, and connected requests keep their response deadline.
+
+The old implementation fails the new regression in **0.04s**. All **10 focused
+routing checks pass in 4.22s**, including a real saturated TCP listen queue,
+replacement discovery, same-owner recovery, no hidden sends, bounded admission,
+exact retries and late cancellation. Formatting and strict Clippy pass.
+The unchanged `OwnerRouting` model checks **728 distinct states** and all
+**nine negative controls**; local timing and Rust behavior remain implementation
+obligations. Woodpecker passes the required Rust/client/Pi, audit, capacity and
+formal checks. The downloaded static archive independently passes API,
+export/restore and kill/reopen verification.
+
+The worst direct gap contains **4.80s in requests** and **36.50s
+in caller backoff**. The [exact evidence](evidence/forward-pause-2026-11-13.json)
+retains per-writer RPC timings, failures, artifact hashes and the unchanged fixture
+reference. The scoped 1.0 support contract is unchanged. The next investigation is the
+recovery refusals behind backoff: one partition records six challenge deferrals,
+then an 18.47-second acquisition. Its stage timings are cumulative, and do not
+attribute all client delay to that partition.
+
+The existing cache, model, TCP fixtures and campaign harness are reused. Ten
+generated model-state directories are removed. The disposable namespace, bucket,
+scoped key and **1,245 physical object versions**
+are removed. Cleanup retried a truncated B2 version listing; the final empty
+listing, bucket removal and key revocation are confirmed.
+
 ## Tenant funding reuses bounded metadata cache (2026-11-13)
 
 **v1.0.4**, the exact `1640827` artifact from Woodpecker **397**, recovers all
