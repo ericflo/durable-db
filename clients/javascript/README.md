@@ -80,8 +80,9 @@ the server's admission limits, and are not an RSS bound across Node workers.
 Requests retain the 35-second deadline, including response body reads. Request
 and response bodies are bounded to 1 MiB. HTTPS verifies certificates and host
 identity using Node's trust configuration. The client uses Node's built-in HTTP
-transport, not a global fetch dispatcher. A server's HTTP/1 503 closes the failed
-connection; an explicit retry may obtain a different Service endpoint. No owner
+transport, not a global fetch dispatcher. On HTTP 429 or 503 it discards that
+request's connection, without cancelling other active requests; an explicit
+retry may obtain a different Service endpoint. No owner
 address is trusted or cached by the client, and transport errors never trigger
 an automatic replay. Pooling is a routing optimization, not an availability
 guarantee under permanent isolation or an arbitrary external proxy.

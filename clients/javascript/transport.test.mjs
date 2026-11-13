@@ -188,6 +188,38 @@ it('keeps database paths separate, moves after 503, and never replays a lost ack
   expect(new Set(calls.filter((c) => c.body.includes('lost')).map((c) => c.body)).size).toBe(1);
 });
 
+for (const status of [429, 503])
+  it(`discards a ${status} socket without disturbing another active request`, async () => {
+    const ids = new WeakMap(),
+      calls = [];
+    let connections = 0,
+      held;
+    const server = await listen(
+      createServer((request, response) => {
+        request.resume();
+        if (!ids.has(request.socket)) ids.set(request.socket, ++connections);
+        const id = ids.get(request.socket);
+        calls.push(id);
+        if (request.url === '/hold') {
+          held = response;
+          return;
+        }
+        // Deliberately keep this connection alive, as an overloaded ingress or
+        // an external proxy may do. A whole-pool reset would kill the held request.
+        response.writeHead(id === 2 ? status : 200).end(JSON.stringify({ error: 'busy' }));
+      }),
+    );
+    const url = `http://127.0.0.1:${server.port}`;
+    const pending = requestJson(url + '/hold', 'shared', options());
+    await until(() => held !== undefined);
+    await expect(requestJson(url, 'shared', options())).rejects.toMatchObject({ status });
+    expect(await requestJson(url, 'shared', options())).toEqual({ error: 'busy' });
+    expect(await requestJson(url, 'shared', options())).toEqual({ error: 'busy' });
+    held.end('{}');
+    expect(await pending).toEqual({});
+    expect(calls).toEqual([1, 2, 3, 3]);
+  });
+
 it('bounds active scopes, evicts only idle scopes and releases capacity after cancellation', async () => {
   const held = [];
   const server = await listen(

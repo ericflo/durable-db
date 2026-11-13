@@ -64,6 +64,10 @@ export async function requestJson(address, database, { method, headers, body, si
           agent: pool.agent,
         },
         async (response) => {
+          const discarded = [429, 503].includes(response.statusCode) ? response.socket : undefined;
+          // Detach at headers, before Agent can offer this socket to a queued
+          // request. Finish only this response; never reset the whole pool.
+          discarded?.emit('agentRemove');
           try {
             if (response.statusCode >= 300 && response.statusCode < 400)
               throw new TypeError('Database redirects are refused');
@@ -85,6 +89,8 @@ export async function requestJson(address, database, { method, headers, body, si
                 ? error
                 : new TypeError('Database response failed', { cause: error }),
             );
+          } finally {
+            discarded?.destroy();
           }
         },
       );
