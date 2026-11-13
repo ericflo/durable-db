@@ -144,11 +144,13 @@ This is the contract the first production release must qualify:
 
 v0.24.13 allows reads during checkpoint funding and immutable uploads, and
 acknowledges commits before starting maintenance. Publication remains exclusive.
-The exact release binary recovers all **676 acknowledged writes** through B2
-scaling, two rollouts, total compute loss and cold restart. Scale-up and cold
-recovery meet their test targets, but rollout readback gaps of **74.41 / 83.96
-seconds** still miss 60 seconds. Doubling recovery concurrency worsened one
-rollout and was removed. No overall availability improvement is established.
+The exact release binary recovers all **1,405 acknowledged writes** across two
+B2 campaigns through scaling, rollouts, total compute loss and cold restart.
+Largest readback gaps per rollout range from **62.78 to 90.53 seconds**, still
+missing 60 seconds; scale-to-six also misses in the second run. New timing
+evidence separates repeated unavailability from long request waits. Doubling
+recovery concurrency worsened one rollout and was removed. No overall
+availability improvement is established.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

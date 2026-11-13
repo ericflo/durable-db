@@ -49,6 +49,26 @@ during staging fixes the controlled blocking case but leaves publication,
 routing and acquisition delays to isolate. Open gaps are right-censored; the
 workload monotonic clock does not attribute all delay to the rollout.
 
+A second rollout campaign uses the same released binary with the updated
+workload's per-operation timing summaries. All **729 additional acknowledgements**
+recover, for **1,405 across the two release-binary campaigns**. Its direct rollout
+gaps are **62.78 / 90.53s**; whole-rollout bounds are **115.49 / 141.18s**. Scale-up
+takes **16.64 / 66.09s**, so scale-to-six misses 60s this time. Cold recovery takes
+**69.37s**. Its namespace, bucket, scoped key and **1,387 physical versions**
+are removed. These repeated misses keep the gate open.
+
+The diagnostic run distinguishes two causes of elapsed client time. One **31.92s**
+post-acknowledgement read spends **5.42s** in requests and **26.50s** backing off
+after 25 unavailable and six overload responses. Another **72.04s** read spends
+**52.54s** in requests, including two transport/decode failures, and **19.50s**
+backing off. The largest first-rollout gap is mostly a **62.28s commit**; the
+largest second gap includes a **36.48s commit plus 53.80s readback**. These summaries
+do not identify whether a long attempt waits on connection, forwarding, owner
+locking or provider I/O. The next target is separating those waits from the
+interval with no recovered owner; changing concurrency or deadlines without
+that distinction has not earned a performance claim. The diagnostic fields
+leave history acceptance and retry behavior unchanged.
+
 The earlier one-minute acquisition queue was occupied by other recoveries,
 not an idle timer. An eight-slot experiment at `cb2b54e` keeps the same aggregate
 resident budget and recovers all **786 acknowledgements**, but direct rollout
@@ -56,7 +76,7 @@ gaps worsen to **115.38 / 81.58s** (whole bounds **162.96 / 129.65s**). Scale-up
 improves to **15.59 / 19.74s** and cold recovery takes **66.27s**. The tradeoff does
 not justify doubling concurrency: the experiment and its expanded fixture are
 **removed**, restoring four slots. Its namespace, bucket, key and **1,346 versions**
-are removed. Those writes belong to a different binary and are not added to the
+are removed, along with the rejected local binary artifacts. Those writes belong to a different binary and are not added to the
 release's recovery count. [Artifacts, measurements and scope](evidence/native-recovery-2026-11-11.json).
 
 Cleanup also removes the implicit foreground maintenance helper and all six
