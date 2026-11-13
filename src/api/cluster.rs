@@ -337,14 +337,18 @@ impl Cluster {
                         .challenge
                         .lock()
                         .expect("partition challenge lock");
-                    if let Some(challenge) = challenge.filter(|c| {
-                        c.incumbent == incumbent && observed.challenge() == Some(c.nonce)
-                    }) {
+                    let challenge = challenge.filter(|c| c.incumbent == incumbent);
+                    if let Some(challenge) = challenge {
+                        // An answer leaves this deadline intact. Immediately
+                        // publishing another challenge disrupts a live owner's
+                        // checkpoint/funding comparisons. Time grants no claim:
+                        // a changed nonce below still starts its own full wait.
                         ensure!(
                             tokio::time::Instant::now() >= challenge.ready_at,
                             "owner challenge pending"
                         );
-                    } else {
+                    }
+                    if challenge.is_none_or(|c| observed.challenge() != Some(c.nonce)) {
                         let nonce = root
                             .challenge(observed)
                             .await?

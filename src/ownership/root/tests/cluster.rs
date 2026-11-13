@@ -383,6 +383,98 @@ async fn storage_challenges_preserve_split_owners_then_recover_without_dns_chang
 }
 
 #[tokio::test(start_paused = true)]
+async fn answered_challenge_leaves_checkpoint_comparison_quiet_then_recovers_a_stopped_owner() {
+    use crate::index::recovery::{Projection, checkpoint};
+    let provider = Provider::new();
+    let directory = directory(&provider).await;
+    directory.configure(Layout::new(1).unwrap()).await.unwrap();
+    let connection = directory.partition(0, budget()).await.unwrap();
+    connection.fund_claim().await.unwrap();
+    let incumbent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut owner = connection
+        .root()
+        .unwrap()
+        .advertise(incumbent.local_addr().unwrap())
+        .unwrap();
+    claim(&mut owner).await;
+    activate(&mut owner).await;
+    owner.select_journals().await.unwrap();
+    let writer = owner.take_journal(QueueLimits::default()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let candidate =
+        Node::with_layout(directory, listener, vec![address], Layout::new(1).unwrap()).await;
+    let observer = connection.root().unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(nonce) = observer.observe().await.unwrap().challenge() {
+                break nonce;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut replies = tokio::task::JoinSet::new();
+    replies.spawn(owner.answer_challenges(|| true));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while observer.observe().await.unwrap().challenge().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    replies.abort_all();
+    while replies.join_next().await.is_some() {}
+    validate(&mut owner).await;
+    let staged = checkpoint::write_projection(
+        &Projection::new(Default::default()).unwrap(),
+        connection.objects(),
+        owner.recovery_record().unwrap(),
+        Cut {
+            identity: owner.identity().unwrap().unwrap(),
+            prefix: writer.durable_prefix(),
+        },
+    )
+    .await
+    .unwrap();
+    let reference = staged.reference();
+    let publication = owner.publish_checkpoint(staged).unwrap();
+    // Capture a real checkpoint comparison across two scheduler ticks. A new
+    // challenge immediately after the answer needlessly invalidates this work.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(
+        matches!(
+            owner.finish(publication.execute().await).unwrap(),
+            Outcome::Confirmed
+        ),
+        "an answered challenge must leave room for checkpoint publication"
+    );
+    assert!(owner.checkpoint_reference().unwrap() == Some(reference));
+
+    // The responder stopped after answering. No DNS change announces its loss;
+    // retry pacing must still yield a fresh challenge with its own full wait.
+    let next = tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            if let Some(nonce) = observer.observe().await.unwrap().challenge() {
+                break nonce;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(next, first);
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert!(
+        owner.permission().await.unwrap().is_some(),
+        "a new probe needs a new wait"
+    );
+    settled(&[&candidate], &[address]).await;
+    assert!(owner.permission().await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
 async fn uncertain_claim_retry_reuses_only_the_completed_owner_challenge() {
     let provider = Provider::new();
     let directory = directory(&provider).await;
@@ -1959,7 +2051,15 @@ enum Handoff {
 }
 async fn withdrawn_replacement(mode: Handoff) {
     let provider = Provider::new();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut replacement = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peers = [
+        listener.local_addr().unwrap(),
+        replacement.local_addr().unwrap(),
+    ];
+    if preferred(0, &peers) != peers[0] {
+        std::mem::swap(&mut listener, &mut replacement);
+    }
     let address = listener.local_addr().unwrap();
     let directory = directory(&provider).await;
     let first = Node::start(directory.clone(), listener, vec![address]).await;
@@ -2005,12 +2105,7 @@ async fn withdrawn_replacement(mode: Handoff) {
         .unwrap()
         .unwrap()
         .allocated;
-    let listener = loop {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        if preferred(0, &[first.address, listener.local_addr().unwrap()]) == first.address {
-            break listener;
-        }
-    };
+    let listener = replacement;
     let address = listener.local_addr().unwrap();
     let member = Member {
         id: if mode != Handoff::Replacement {

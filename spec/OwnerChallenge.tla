@@ -24,6 +24,10 @@ Join(c) == /\ s.owner = 0 /\ s.nonce # 0 /\ s.joined[c] = 0
 \* Responder polling uses a fixed cadence, skipping missed ticks after slow I/O.
 \* Errors/conflicts may retry a fresh observation; they never answer a challenge
 \* or make elapsed time authority. Cadence and provider delays stutter here.
+\* A challenger keeps this round's deadline after an answer before starting
+\* another round against the same owner. This pacing also stutters here; a new
+\* nonce must still be joined and waited on. Rust checks the quiet interval and
+\* recovery after an answered owner stops; the model bounds one round only.
 Wait(c) == /\ s.joined[c] # 0
   /\ s' = [s EXCEPT !.waited = @ \cup {c}]
 Prepare(c) == /\ s.owner = 0
