@@ -236,7 +236,7 @@ Catalog admission uses the target database key as the payer for protected creati
 
 The native connection now supports the same cumulative allocator through `Connection::with_upload_budget`. It conditionally initializes budgeted `owned-candidate-23` before any registration PUT. Lost initialization replies and reopen preserve the installed limits and allocation; unbudgeted and older namespaces refuse activation. Every registration, journal, table, checkpoint and catalog upload uses the wrapped object interface. Grants can invalidate a previously captured root comparison: that claim conflicts and a fresh incarnation retries using retained confirmed credit. Neither abandoned registrations nor lost connection-local rights are refunded. Metadata admission reserves space for the full receipt window, root and read probes within B2's ten fields.
 
-Five focused native checks cover initialization loss, namespace/mode refusal, bootstrap conflicts, exhaustion before journal upload, refill/replay, lost allocation acknowledgements, delayed arrivals after replacement, and B2/S3 HTTP comparisons. The existing native HTTP fixtures now enable budgeting, including uncached checkpoint reads, cancellation and automatic checkpoint retries. The TCP lifecycle test exercises administrator-only budget status and idempotent ceiling increases. The existing allocator and its earlier regressions are reused; there is no second accounting algorithm. The immutable-upload ceiling remains namespace-wide; separate database write admission is described below. Non-upload control traffic remains outside the allowance. Automatic reclamation is described below. Shared maintenance attribution, sustained cloud qualification and the host-timing CLI gate remain open.
+Five focused native checks cover initialization loss, namespace/mode refusal, bootstrap conflicts, exhaustion before journal upload, refill/replay, lost allocation acknowledgements, delayed arrivals after replacement, and B2/S3 HTTP comparisons. The existing native HTTP fixtures now enable budgeting, including uncached checkpoint reads, cancellation and automatic checkpoint retries. The TCP lifecycle test exercises administrator-only budget status and idempotent ceiling increases. The existing allocator and its earlier regressions are reused; there is no second accounting algorithm. The immutable-upload ceiling remains namespace-wide; separate database write admission is described below. Non-upload control traffic remains outside the allowance. Automatic reclamation is described below. Full administrative accounting and sustained cloud qualification remain open; the clock-independent cloud CLI is integrated.
 
 `native_http_refill_resumes_unsent_journal_without_replacing_the_owner` exhausts the allowance on registrations and database ledger initialization, leaves a creation waiting without issuing its journal PUT, then funds the ledger through the administrator route. Creation completes on the same owner with exactly one data PUT (1.01 seconds locally). A private admission witness returns the original upload handle only before the object provider was called; its buffer reservation and position survive. Existing ambiguous/missing-response tests require that no retry handle is returned. The worker retries at most one unsent position per second and does not issue resolving GETs for it. This is a stutter before `Upload` in the existing journal model; its bounds and negative controls remain unchanged.
 
@@ -1287,3 +1287,15 @@ capacity, rediscovers the owner on explicit retry and accepts its response after
 2.1 seconds of server work. All eight routing checks take 4.20 seconds. The
 unchanged OwnerRouting model checks 728 states and nine fault controls; it models
 cancellation and route invalidation, not physical timing or network latency.
+
+Cluster acquisition now funds its two claim uploads before observing the target.
+The same allocator still charges every PUT; unused credit is volatile and an
+unknown grant reply creates no local rights. No comparison, predecessor or
+collection fence is rebased. A TCP cluster regression reproduces the old
+self-conflict (two registrations instead of one) and passes in 0.03s with one
+registration and permit. The existing lost-grant test also covers prefunding.
+All 372 routine Rust checks pass. The unchanged UploadCredits transition system
+checks 11,006 states, 41,209 generated, depth 17, and five fault controls; its
+Reserve transition already permits allocation before use. This is a bounded
+credit check, not composed acquisition or Rust refinement. Exact-runtime cloud
+qualification remains pending.

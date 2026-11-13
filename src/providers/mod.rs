@@ -55,7 +55,7 @@ pub struct Connection {
     files: Arc<dyn Storage>,
     authority: Arc<dyn Authority>,
     prefix: String,
-    budgeted: bool,
+    allocator: Option<Arc<crate::upload_budget::Allocator>>,
     measured: bool,
 }
 
@@ -69,7 +69,7 @@ impl Connection {
             files,
             authority: Arc::new(register::Register(authority)),
             prefix: prefix.into(),
-            budgeted: false,
+            allocator: None,
             measured: false,
         }
     }
@@ -99,21 +99,36 @@ impl Connection {
     // A controller must expose administrative refill even when creating the
     // first partition record is unfunded. Attach admission now, initialize later.
     pub(crate) fn with_lazy_upload_budget(mut self) -> anyhow::Result<Self> {
-        anyhow::ensure!(!self.budgeted, "connection already has an upload budget");
-        let authority = self.authority();
+        anyhow::ensure!(
+            self.allocator.is_none(),
+            "connection already has an upload budget"
+        );
+        let allocator = Arc::new(crate::upload_budget::Allocator::new(self.authority()));
         self.files = Arc::new(crate::upload_budget::Files {
             inner: self.files,
-            allocator: Arc::new(crate::upload_budget::Allocator::new(authority)),
+            allocator: allocator.clone(),
         });
-        self.budgeted = true;
+        self.allocator = Some(allocator);
         Ok(self)
     }
     pub(crate) async fn initialize_upload_budget(
         &self,
         limits: UploadLimits,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.budgeted, "connection has no upload admission");
+        anyhow::ensure!(
+            self.allocator.is_some(),
+            "connection has no upload admission"
+        );
         crate::upload_budget::initialize_native(&self.authority(), &self.prefix, limits).await
+    }
+
+    pub(crate) async fn fund_claim(&self) -> anyhow::Result<()> {
+        if let Some(allocator) = &self.allocator {
+            allocator
+                .prefund(crate::ownership::root::CLAIM_UPLOADS)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Raw observations may be stale. A successful replacement is durable, but
@@ -143,7 +158,7 @@ impl Connection {
             self.control(),
             &self.prefix,
             crate::ownership::root::Encoding::REMOTE,
-            self.budgeted,
+            self.allocator.is_some(),
             None,
         )
     }
@@ -170,7 +185,7 @@ impl Connection {
         cache: Arc<crate::cache::Cache>,
     ) -> anyhow::Result<partitions::Partitions> {
         anyhow::ensure!(
-            !self.budgeted,
+            self.allocator.is_none(),
             "partition directory requires an uninitialized connection"
         );
         partitions::Partitions::open(self, limits, cache).await

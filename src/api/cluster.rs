@@ -296,6 +296,9 @@ impl Cluster {
             connection
                 .initialize_upload_budget(self.config.upload_limits)
                 .await?;
+            // Funding changes the same control record as ownership. Obtain
+            // credit before observing it; both claim PUTs still charge normally.
+            connection.fund_claim().await?;
             // Definite claim conflicts use a fresh candidate. Resolve unknown
             // outcomes on the same identity, without replaying its claim PUTs.
             let mut validations = 4;

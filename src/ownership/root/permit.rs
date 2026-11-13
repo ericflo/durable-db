@@ -6,7 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const MAGIC: &[u8; 8] = b"DDBPER01";
-const SIZE: usize = 24;
+pub(super) const SIZE: usize = 24;
 pub(super) fn key(id: Uuid) -> String {
     format!("permits/{}", id.simple())
 }

@@ -232,17 +232,14 @@ async fn native_budget_unknown_grant_and_late_upload_never_refund_credit() {
     let provider = Provider::new();
     let connection = provider
         .connection("test")
-        .with_upload_budget(limits(1))
+        .with_upload_budget(limits(2))
         .await
         .unwrap();
     provider.lose_reply.store(true, Ordering::SeqCst);
-    assert!(
-        connection
-            .objects()
-            .put("tables/lost", Bytes::new())
-            .await
-            .is_err()
-    );
+    // Prefunding can apply remotely while its reply is lost. It must not
+    // create any local upload rights, objects, or permission to claim.
+    assert!(connection.fund_claim().await.is_err());
+    assert!(!provider.lose_reply.load(Ordering::SeqCst));
     assert!(
         connection
             .objects()
@@ -267,7 +264,7 @@ async fn native_budget_unknown_grant_and_late_upload_never_refund_credit() {
             .unwrap()
             .allocated
             .attempts,
-        1
+        2
     );
 
     let provider = Provider::new();

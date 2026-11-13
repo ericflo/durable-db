@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 const MAGIC: &[u8; 8] = b"DDBREG01";
 const FIXED_BYTES: usize = 106;
-const MAX_BYTES: usize = FIXED_BYTES + 128;
+pub(super) const MAX_BYTES: usize = FIXED_BYTES + 128;
 
 /// A durable identity, not a selected journal prefix or permission to serve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

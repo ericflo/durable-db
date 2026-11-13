@@ -172,6 +172,42 @@ fn commit(id: usize) -> Value {
 }
 
 #[tokio::test]
+async fn fresh_cluster_claim_does_not_conflict_with_its_own_upload_funding() {
+    use crate::storage::Storage;
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peers = vec![listener.local_addr().unwrap()];
+    let node = Node::with_layout(
+        directory(&provider).await,
+        listener,
+        peers.clone(),
+        Layout::new(1).unwrap(),
+    )
+    .await;
+    settled(&[&node], &peers).await;
+    let token = auth().administrator_token(60).unwrap();
+    assert_eq!(
+        node.server
+            .call("GET", "/v1/databases/absent", &token, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    for prefix in ["ownership/", "permits/"] {
+        assert_eq!(
+            provider
+                .files
+                .list(&format!("partitions/00000000/{prefix}"), None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "claim funding must not strand a second {prefix} upload"
+        );
+    }
+}
+
+#[tokio::test]
 async fn shared_partition_checkpoints_keep_both_writers_progressing() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

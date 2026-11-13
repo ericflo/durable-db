@@ -26,6 +26,9 @@ Initialize == /\ (~initialized \/ UnsafeInitializeReset)
 
 \* The authority spends the entire grant before any local credit is usable.
 \* A lost acknowledgement can strand the grant; it cannot create more credit.
+\* Reserve may precede a root observation: pre-funding avoids invalidating the
+\* claim's comparison with its own grant. Charge still precedes every upload;
+\* unused prefunded rights remain volatile and disappear on Crash/Restart.
 Reserve(n,g,units,ack) ==
     /\ initialized /\ n \in running /\ g \notin issued
     /\ units \in 1..Capacity /\ allocated + units <= ceiling

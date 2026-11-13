@@ -151,6 +151,8 @@ one still misses the 60-second target. Both scale-up steps and cold recovery
 meet their targets. Sampled connection timeouts end at 2.000–2.002s, but repeated
 unavailable/overload responses still delay clients. These short runs establish
 no overall availability guarantee.
+Main also funds claim uploads before observing their target, removing a
+reproduced self-conflict; release qualification for that change is underway.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

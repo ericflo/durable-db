@@ -257,17 +257,33 @@ impl Allocator {
     }
     pub(crate) async fn charge(&self, bytes: u64) -> anyhow::Result<()> {
         let mut remaining = self.remaining.lock().await;
-        if remaining.bytes >= bytes && remaining.attempts > 0 {
-            remaining.bytes -= bytes;
-            remaining.attempts -= 1;
-            self.charged(bytes);
+        self.allocate(&mut remaining, UploadLimits { bytes, attempts: 1 })
+            .await?;
+        // No await between confirmed allocation and spending this charge.
+        remaining.bytes -= bytes;
+        remaining.attempts -= 1;
+        self.charged(bytes);
+        Ok(())
+    }
+    /// Fund upcoming uploads before capturing a metadata comparison. This does
+    /// not spend or reserve local rights for a caller; every PUT still charges.
+    pub(crate) async fn prefund(&self, minimum: UploadLimits) -> anyhow::Result<()> {
+        self.allocate(&mut *self.remaining.lock().await, minimum)
+            .await
+    }
+    async fn allocate(
+        &self,
+        remaining: &mut UploadLimits,
+        minimum: UploadLimits,
+    ) -> anyhow::Result<()> {
+        if remaining.bytes >= minimum.bytes && remaining.attempts >= minimum.attempts {
             return Ok(());
         }
         // Replenish only the deficient dimensions. Existing rights remain
         // confirmed and usable even if the additional grant response is lost.
         let needed = UploadLimits {
-            bytes: bytes.saturating_sub(remaining.bytes),
-            attempts: u64::from(remaining.attempts == 0),
+            bytes: minimum.bytes.saturating_sub(remaining.bytes),
+            attempts: minimum.attempts.saturating_sub(remaining.attempts),
         };
         for attempt in 0..8 {
             let before = self.authority.read().await?;
@@ -295,7 +311,7 @@ impl Allocator {
                     0
                 },
                 attempts: if needed.attempts > 0 {
-                    GRANT_ATTEMPTS.min(available.attempts)
+                    GRANT_ATTEMPTS.max(needed.attempts).min(available.attempts)
                 } else {
                     0
                 },
@@ -307,18 +323,16 @@ impl Allocator {
             }
             record.status.allocated.attempts += grant.attempts;
             if self.publish(&before, &record).await? {
-                // No await/cancellation point between confirmed allocation
-                // and spending this request's charge. An unknown CAS result
-                // exits above without adding any unconfirmed local rights.
+                // An unknown CAS result exits above without adding any
+                // unconfirmed local rights. Unused rights remain volatile.
                 *remaining = UploadLimits {
-                    bytes: remaining.bytes + grant.bytes - bytes,
-                    attempts: remaining.attempts + grant.attempts - 1,
+                    bytes: remaining.bytes + grant.bytes,
+                    attempts: remaining.attempts + grant.attempts,
                 };
                 if self.database.is_none() {
                     REGISTRY.event(Event::UploadGrantBytes, grant.bytes as usize);
                     REGISTRY.event(Event::UploadGrantAttempts, grant.attempts as usize);
                 }
-                self.charged(bytes);
                 return Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;

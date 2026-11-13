@@ -23078,5 +23078,59 @@
       "number": 329,
       "status": "success"
     }
+  },
+  "claim_upload_prefunding": {
+    "status": "Local checks pass; exact-runtime cloud qualification pending",
+    "change": "Allocate volatile rights before observing the claim target, using the existing allocator. Each registration and permit still charges before PUT; no target or fence rebase. Concurrent writers may still invalidate an observation.",
+    "regression": {
+      "old_registration_objects": 2,
+      "new_registration_objects": 1,
+      "new_permit_objects": 1,
+      "real_http_absent_database_refusal": 404,
+      "seconds": 0.03
+    },
+    "routine_rust_checks_passed": 372,
+    "ignored_opt_in_checks": 20,
+    "formatting_and_strict_clippy_passed": true,
+    "model": {
+      "name": "UploadCredits",
+      "transition_system_unchanged": true,
+      "distinct_states": 11006,
+      "generated_states": 41209,
+      "depth": 17,
+      "negative_controls": 5,
+      "scope": "Allocation, spending, cancellation/restart and late arrivals; not composed acquisition, physical timing or Rust refinement."
+    },
+    "removed": [
+      "Redundant Connection budgeted boolean; presence of the shared allocator now supplies that fact",
+      "Duplicated charge/debit branches in allocator",
+      "Obsolete host-timing CLI gate sentence in verification record"
+    ],
+    "tlc_scratch_directories_removed": [
+      "tlc-upload-credits",
+      "tlc-upload-refund",
+      "tlc-upload-restore",
+      "tlc-upload-before-charge",
+      "tlc-upload-refill-reset",
+      "tlc-upload-initialize-reset"
+    ],
+    "source_sha256": {
+      "src/upload_budget.rs": "b8a902a6c59337f00aa9b35e44fa18e18875308d55f724f1831e09fb2caf8f7f",
+      "src/providers/mod.rs": "184dfdc16a7c982286e0582498a7ef235a5d3ccba32c7099bb92fc3009d1bea1",
+      "src/api/cluster.rs": "6170fba33b93e3684699058e4ca86facde67e36eec79ce177ef5873a91f00bf5",
+      "src/ownership/root.rs": "ce92671500da1bbf43373074e2afca1c0d654cbfcc65e7893153ae31ae3bda03",
+      "src/ownership/root/registration.rs": "8a76e6d3404281953b995d1b1062290122ae2ae9df5584edee25e7752cf02942",
+      "src/ownership/root/permit.rs": "3ac29d4cd034663a13cd1b21d2e8d3345f5f9875933359753787efaacae8aa6d",
+      "src/ownership/root/tests/budget.rs": "43594b8b4021dcb4bcbe402f70479800dc1c60e4ed906d22cc4c446492020b7e",
+      "src/ownership/root/tests/cluster.rs": "9602cd9f0408dc463adc64356366ef626d821c76ac7eaae7b14758b583a4bde8",
+      "spec/UploadCredits.tla": "136161c31fe016e2f4b62a0698e363735aeaf28c334f8714d53807006db6df4b"
+    },
+    "raw_log_sha256": {
+      "claim-funding-before.log": "cfb3a654c047fddf43c45133504c463590e0f59b72e490f17668e598c429328c",
+      "claim-funding-after.log": "ed5fe506c3fb4062742c623b75ba7e190797d5895cb484d29ea817177063b11b",
+      "claim-funding-model.log": "b9ede89fc7d99f2f8b2af34e6317ce72373fb1e222f9095d252d70539254fbd5",
+      "claim-funding-clippy.log": "f0510336555de94c932892f4e90bb781e84d1e1ccab3e71ebe32931b3579245e",
+      "claim-funding-tests.log": "29eb46a6d701314f50a9e82de2cd8b6ba9ba5f36ec09a6d94d826a6c3f5fabbe"
+    }
   }
 }

@@ -29,6 +29,12 @@ pub use registration::{Registration, Registrations};
 pub(crate) use replay::Cut;
 pub use replay::{Replay, ReplayBatch};
 
+pub(crate) const CLAIM_UPLOADS: crate::upload_budget::UploadLimits =
+    crate::upload_budget::UploadLimits {
+        bytes: (registration::MAX_BYTES + permit::SIZE) as u64,
+        attempts: 2,
+    };
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid or incompatible ownership metadata, prefix or storage format")]

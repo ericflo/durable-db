@@ -162,6 +162,11 @@ Remote formats `owned-candidate-23` (budgeted) and `owned-candidate-23-unbudgete
 
 A root cannot overwrite its predecessor's only journal identity and rely on process memory to recover it. Before its conditional claim, the controller persists an immutable registration naming its own journal and the predecessor registration. The comparison and predecessor are captured before the upload. A lost upload response requires a positive exact-byte read; an absent or failed read leaves publication unattempted. Each registration has one PUT attempt. Unknown or losing uploads may remain unreferenced and do not create refund rights.
 
+Cluster acquisition funds credit for its registration and permit before observing
+the claim target. This avoids invalidating that observation with its own grant.
+Every upload still spends credit normally; unused rights are volatile, lost
+replies grant nothing, and concurrent metadata changes still require a fresh claim.
+
 The current format requires this discipline and rejects the earlier unregistered candidate format. The root's fresh incarnation also names its reserved coordinator journal. `take_journal` opens that writer only once after activation; it cannot reset an old log's sequence. A new controller follows the current registration's immutable parent chain to discover previous journals after all prior controllers have disappeared. Missing, corrupt, wrong-namespace or incompatible registrations fail recovery without advancing its cursor. Records are checksummed and at most 234 bytes; traversal keeps fixed bookkeeping, while callers must bound retained results.
 
 The [registration model and tests](verification.md#durable-root-registrations) establish this discovery property. The catalog below adds durable prefix selection. Recovery walks the chain only as far as the checkpoint owner; its I/O grows with uncheckpointed ownership history. The optional native upload ledger charges registrations before their first PUT; registration collection remains open. Those are implementation gates, not properties inferred from the existing publication collector.
