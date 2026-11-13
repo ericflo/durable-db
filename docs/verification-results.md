@@ -1,5 +1,72 @@
 # Verification results
 
+## Separate connection, forwarding and owner waits (v0.24.14, 2026-11-13)
+
+The forwarder now allows two seconds to establish a peer connection within its
+unchanged 25-second overall request deadline. Failure releases capacity and
+invalidates that route; the caller explicitly retries. No request is silently
+replayed. Fixed metrics separate route discovery, forwarded requests, native
+read-lock waits and native reads. Existing provider timers also emit slow-call
+records; transport failures expose only connect/timeout flags and an opaque
+owner identity. No authority or storage-format change is involved.
+
+A real Linux TCP regression fills a loopback accept queue, advertises a replacement
+while the first request is pending, and checks capacity release and rediscovery.
+The previous implementation misses its three-second bound. The replacement
+accepts a response after 2.1 seconds of server work, confirming that only the
+handshake allowance was shortened. All eight routing checks take **4.20s**;
+**371 routine Rust checks**, formatting and strict clippy pass. The unchanged
+OwnerRouting model checks **728 states** and nine fault controls; this does not
+prove physical timing or the Rust implementation.
+
+[Woodpecker 328](https://ci.eflorenzano.com/repos/18/pipeline/328/1) passes audits,
+client/Pi contracts, models and the 10,005-entry capacity check in both budget
+formats. CI now finishes client checks before optimized compilation. This removes
+their CPU contention after pipeline 326 exceeded the client's aggregate deadline;
+all assertions and deadlines remain. A Docker stage-order mistake in pipeline
+327 was corrected and checked locally. The native client contract passes locally
+in **28.74s** and in CI in **101.89s**. The duplicate final-stage success-marker
+copy and ten local TLC scratch directories are removed.
+
+The exact static binary from `5b54de2` passes standalone installation,
+transactions, export/restore and kill/reopen. Versioned MinIO passes HTTP
+membership 1→2→1→0→1, funding, metadata collection, receipt recovery and retired
+owner refusal in **40.39s**; its container, bucket and **80 versions** are removed.
+On B2, the existing three Kubernetes hosts run 16 partitions and four sequential
+writers through 1→3→6, two rollouts, zero compute and cold recovery at three.
+All **791 acknowledgements, verified readbacks and recovered keys** pass the
+independent four-history check. Its namespace, bucket, scoped key and **1,512
+physical versions** are removed. Release tag pipeline **329** also passes.
+
+| Observation | v0.24.14 |
+| --- | ---: |
+| Largest direct readback gap, rollout 1 / 2 | 74.80s / 49.11s |
+| Whole-rollout progress bound, rollout 1 / 2 | 105.93s / 107.68s |
+| Scale to three / six | 48.18s / 18.36s |
+| Cold recovery after API readiness | 60.73s |
+
+Scale-up and cold recovery meet their targets. One direct rollout gap still
+misses 60s; whole-rollout bounds also miss. These are short, different-history
+samples, not an overall availability improvement or production SLO.
+
+The bounded logs capture **21 connection timeouts at 2.000–2.002s**. Separate
+maxima are **1.30s** for route discovery, **14.56s** for forwarding, **4.82s** for
+read-lock acquisition, **5.12s** for an object GET and **4.68s** for a PUT.
+The longest complete activation, selection and checkpoint samples take
+**7.76s / 15.90s / 11.27s**. These nested boundaries overlap; the maxima are not
+one request and must not be summed. Deleted or rotated pod logs can omit calls.
+
+The largest first-rollout gap contains **49.54s in commit** and **25.01s after
+acknowledgement**. That readback spends just **3.50s in requests** and **21.51s
+in retry backoff**, with 26 unavailable responses. The second rollout's largest
+gap contains a 48.53s commit, including 34.51s of backoff after 13 overload and
+26 unavailable responses. These observations point to the remaining recovery
+and refusal intervals, not solely slow value reads. Completed gaps include the
+last readback before the window; open gaps are right-censored. The
+[evidence record](evidence/native-recovery-2026-11-11.json) retains the source,
+artifact, workload and raw-report hashes. Broader failure, AWS, memory, sustained
+performance and tenant-isolation qualification remain open.
+
 ## Reads continue during checkpoint staging (v0.24.13, 2026-11-13)
 
 The native worker now acknowledges validated commits before starting maintenance.

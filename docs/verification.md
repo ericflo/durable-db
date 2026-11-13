@@ -1272,7 +1272,11 @@ operations retain cancellation outcomes; provider operations use their existing
 boundaries. Forward transport failures expose only connect/timeout flags and an
 opaque owner ID. The instrumentation adds no authority, retry or storage-format changes.
 The existing routing/cancellation tests and native TCP regressions exercise these
-boundaries; exact-runtime cloud attribution remains pending for this candidate.
+boundaries. The v0.24.14 B2 rollout captures 21 classified connection timeouts at
+2.000–2.002s and separate forwarding, provider and read-lock waits. Logs are bounded
+samples without cross-host request correlation; nested durations cannot be added.
+All 791 acknowledgements recover. One of two direct rollout gaps still misses
+60 seconds; see the [measured results](verification-results.md).
 
 The forwarder's connection deadline is now two seconds within the unchanged
 25-second overall request deadline. A Linux TCP fixture fills a loopback listen
