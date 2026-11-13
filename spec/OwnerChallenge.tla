@@ -8,6 +8,10 @@ Candidates == {1, 2}
 \* One incumbent, two challengers, one takeover, at most four metadata writes.
 \* The register's exact CAS and unique revision assumptions are checked by the
 \* existing provider/ownership models. No hint grants response permission here.
+\* Reachable incumbents use this same challenge before rebalancing. A recovering
+\* owner may answer once per completed recovery stage even while yielding;
+\* a stalled stage cannot renew that credit. This one-round model abstracts an
+\* available answer as alive; bounded multi-round progress is checked in Rust.
 Init == s = [owner |-> 0, nonce |-> 0, revision |-> 0, alive |-> TRUE,
   joined |-> [c \in Candidates |-> 0], waited |-> {},
   captured |-> [c \in Candidates |-> -1], answer |-> -1,

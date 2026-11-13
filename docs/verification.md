@@ -818,7 +818,7 @@ At `80841e5`, the expanded four-server/two-partition fixture passes on B2 in **5
 
 ## Storage-path owner challenges
 
-Before replacing an advertised owner excluded by local peer health, the controller
+Before replacing another advertised owner, including a reachable one, the controller
 publishes or joins an incarnation-bound random challenge in the existing partition
 metadata. It waits 15 seconds for that same owner and nonce to remain unanswered;
 only then does it attempt the ordinary exact conditional claim. A response, changed
@@ -828,17 +828,25 @@ the same owner and nonce remain. One bounded owner/nonce/deadline descriptor per
 partition records it. Pending waits release their acquisition and resident slots;
 the ordinary three-second scheduler revisits them. Four active acquisitions remain
 the limit. No sleeping future or one-second polling loop holds up later partitions.
-Known healthy peers can still rebalance; reuse of this process's address takes the
+Healthy peers rebalance after the same challenge wait; reuse of this process's address takes the
 normal fenced recovery path directly. Confirmed acquisition continues while this
 process remains in membership, even after preference changes; an unconfirmed
 candidate still yields immediately. Actual takeover can fence either stage.
-No extra settling interval delays reachable-owner moves.
+The existing 15-second challenge now also delays reachable-owner moves. This
+lets a returning preferred pod observe useful recovery before fencing it;
+graceful route withdrawal still skips the wait.
 
 Each confirmed claimant polls once every three seconds, with one request in flight,
 through activation, recovery and serving. It conditionally clears only its own
 challenge. Removing the local placement stops this responder even when an in-flight request
-retains the old backend. A retained incumbent that prefers another process stops
+retains the old backend. A serving incumbent that prefers another process stops
 answering, allowing that successor to take over even with asymmetric peer reachability.
+A recovering incumbent can also answer once after confirmed claim, once after
+activation and once after journal selection. These credits coalesce into one
+boolean and are consumed only for an actual challenge. Finishing recovery clears
+the credit. A stalled stage cannot renew it indefinitely; observation errors or
+an uncertain answer may consume it without delaying takeover. These are advisory
+opportunities to finish work, never authority or a guarantee against interruption.
 Ordinary owner publication, collection, budget operations and read barriers
 preserve the hint; the responder is the sole answer path. An already submitted
 answer may still complete after preference changes. No extra storage object or
@@ -864,6 +872,18 @@ apply after owner death or lost replies. This finite policy check assumes the
 existing exact register/permit protocol; it is neither Rust refinement nor a proof
 of arbitrary-round liveness. RootAcquisition and OwnerRouting remain separate
 checks of acquisition and response authority.
+
+The returning-member HTTP regressions pause a confirmed owner's activation,
+then start a real preferred peer with both processes still reachable. The first
+requires the original claimant to finish, accept a write, and hand off its value
+and identical receipt; the retained predecessor must refuse after takeover.
+The second keeps activation stalled and requires takeover without a membership
+change. Restoring the reachable-owner bypass fails the first; allowing repeated
+answers without new progress fails the second. Both pass in 0.42 seconds with
+paused scheduling time. They replace the older simulated-peer recovery test;
+membership retirement, unrelated-partition progress and cold restart retain
+their existing independent coverage. The one-round model remains unchanged in
+state space; these checks do not establish cloud handoff latency.
 
 The CLI now closes admission, aborts and joins the cluster scheduler and
 maintenance task, retires every local resident before storage I/O, and

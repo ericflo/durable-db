@@ -308,7 +308,6 @@ impl Cluster {
                 let observed = root.observe().await?;
                 if let Some(incumbent) = observed.incumbent()
                     && incumbent.address != self.config.address
-                    && !contains(&members.borrow(), incumbent.address)
                 {
                     stage = "challenge";
                     progress(stage);
@@ -353,12 +352,18 @@ impl Cluster {
                 let mut challenges = JoinSet::new();
                 let answering_members = members.clone();
                 let address = self.config.address;
+                // Give useful recovery time to finish before rebalancing.
+                // One answer per stage buys time; stalled work cannot renew it.
+                let recovery_progress = Arc::new(AtomicBool::new(true));
+                let answering_progress = recovery_progress.clone();
                 challenges.spawn(root.answer_challenges(move || {
                     preferred(id, &answering_members.borrow()) == Some(address)
+                        || answering_progress.swap(false, Ordering::AcqRel)
                 }));
                 stage = "activate";
                 progress(stage);
                 root.activate_confirmed(&mut validations).await?;
+                recovery_progress.store(true, Ordering::Release);
                 if let Ok(Some(identity)) = root.identity() {
                     tracing::info!(partition = id, owner = %identity.incarnation,
                         "native acquisition owner");
@@ -366,11 +371,13 @@ impl Cluster {
                 stage = "select_journals";
                 progress(stage);
                 root.select_journals().await?;
+                recovery_progress.store(true, Ordering::Release);
                 stage = "recover";
                 progress(stage);
                 let owner = Opening::new(root, self.limits, self.cache.clone())?
                     .recover()
                     .await?;
+                recovery_progress.store(false, Ordering::Release);
                 stage = "serve";
                 progress(stage);
                 let native = Native::start_reserved(

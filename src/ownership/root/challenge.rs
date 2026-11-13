@@ -72,11 +72,14 @@ impl Root {
     }
 
     /// Bounded background work for this incarnation, from confirmed claim until
-    /// its placement slot is retired. A yielding incumbent stops answering but
-    /// can still serve until revoked. The callback is only a scheduling hint.
-    pub(crate) fn answer_challenges<F>(&self, wanted: F) -> impl Future<Output = ()> + Send + use<F>
+    /// its placement slot is retired. The callback decides whether to answer an
+    /// actual pending challenge; neither its decision nor the reply grants authority.
+    pub(crate) fn answer_challenges<F>(
+        &self,
+        mut wanted: F,
+    ) -> impl Future<Output = ()> + Send + use<F>
     where
-        F: Fn() -> bool + Send,
+        F: FnMut() -> bool + Send,
     {
         let identity = self.epoch.map(|epoch| Identity {
             epoch,
@@ -92,9 +95,6 @@ impl Root {
             };
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                if !wanted() {
-                    continue;
-                }
                 let answer = async {
                     let observed = authority.read().await?;
                     let Some(mut record) =
@@ -102,7 +102,7 @@ impl Root {
                     else {
                         return Ok::<_, anyhow::Error>(());
                     };
-                    if record.identity == identity && record.challenge.is_some() {
+                    if record.identity == identity && record.challenge.is_some() && wanted() {
                         record.challenge = None;
                         let info =
                             metadata::encode(&observed.info, &prefix, encoding, record, budgeted)?;

@@ -1394,7 +1394,16 @@ async fn paused_acquisition_does_not_block_queued_partitions() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn confirmed_recovery_survives_preference_changes_and_retires_on_removal() {
+async fn returning_member_preserves_recovery_then_rebalances_over_http() {
+    returning_member_during_recovery(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn returning_member_replaces_stalled_recovery_without_membership_change() {
+    returning_member_during_recovery(true).await;
+}
+
+async fn returning_member_during_recovery(stalled: bool) {
     let provider = Provider::new();
     let files = Arc::new(PausedPermit {
         inner: provider.files.clone(),
@@ -1403,153 +1412,142 @@ async fn confirmed_recovery_survives_preference_changes_and_retires_on_removal()
         entered: Default::default(),
         release: Default::default(),
     });
-    let directory = Connection::new(files.clone(), provider.clone(), "test")
+    let directory = Connection::new(files.clone(), provider, "test")
         .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
         .await
         .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let node = Node::start(directory, listener, vec![]).await;
-    node.members(&[node.address]);
+    let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a = Node::start(directory.clone(), first, vec![]).await;
+    a.members(&[a.address]);
     files.entered.notified().await;
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let paused = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            for db in names() {
-                let backend = node.cluster.resolve(&db).await.unwrap().unwrap();
-                if backend.owner_incarnation().is_some() && backend.ready().await {
-                    return;
+            for (id, name) in names().iter().enumerate() {
+                if a.cluster
+                    .resolve(name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .owner_incarnation()
+                    .is_some()
+                {
+                    return 1 - id;
                 }
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("a paused partition cannot block another acquisition");
-    assert!(
-        node.cluster.ready().await,
-        "one paused partition cannot hide the HTTP router"
-    );
-    let calls = provider.calls.load(Ordering::SeqCst);
-    tokio::time::advance(Duration::from_secs(40)).await;
-    // Repeated identical membership must not abort useful acquisition either.
-    node.members(&[node.address]);
-    for _ in 0..4 {
-        tokio::task::yield_now().await;
-    }
-    // A new peer that owns neither local partition must not restart recovery.
-    let peer = (1..=u16::MAX)
-        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
-        .find(|peer| {
-            *peer != node.address
-                && (0..2).all(|id| preferred(id, &[node.address, *peer]) == node.address)
-        })
+    .unwrap();
+    let name = &names()[paused];
+    let observer = directory
+        .partition(paused as u32, budget())
+        .await
+        .unwrap()
+        .root()
         .unwrap();
-    node.members(&[peer, node.address]);
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
-    assert!(files.blocked.try_lock().is_err(), "recovery was canceled");
-    tokio::time::advance(Duration::from_secs(10)).await;
-    for _ in 0..4 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        provider.calls.load(Ordering::SeqCst),
-        calls,
-        "elapsed time or unchanged local placement restarted the paused operation"
-    );
-    let mut paused = None;
-    for (id, name) in names().iter().enumerate() {
-        if node
-            .cluster
-            .resolve(name)
-            .await
-            .unwrap()
-            .unwrap()
-            .owner_incarnation()
-            .is_none()
-        {
-            paused = Some(id as u32);
+    let incumbent = observer.observe().await.unwrap().incumbent().unwrap();
+    // Polling without a challenge must not consume recovery progress.
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    let second = loop {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        if preferred(paused as u32, &[a.address, listener.local_addr().unwrap()]) != a.address {
+            break listener;
         }
-    }
-    let paused = paused.unwrap();
-    let peer = (1..=u16::MAX)
-        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
-        .find(|peer| {
-            *peer != node.address
-                && preferred(paused, &[node.address, *peer]) == node.address
-                && preferred(1 - paused, &[node.address, *peer]) == *peer
-        })
-        .unwrap();
-    node.members(&[peer, node.address]);
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        files.blocked.try_lock().is_err(),
-        "another partition's move canceled recovery"
-    );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
-    assert!(
-        node.cluster
-            .resolve(&names()[(1 - paused) as usize])
-            .await
-            .unwrap()
-            .unwrap()
-            .owner_incarnation()
-            .is_some(),
-        "a preferred-peer change must preserve the healthy incumbent"
-    );
-    let successor = (1..=u16::MAX)
-        .map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
-        .find(|peer| *peer != node.address && preferred(paused, &[node.address, *peer]) == *peer)
-        .unwrap();
-    node.members(&[node.address, successor]);
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        files.blocked.try_lock().is_err(),
-        "confirmed recovery cancelled by a preference hint"
-    );
-    // Releasing activation must install this owner despite the new preference.
-    // Otherwise its durable route would advertise a backend that never served.
-    files.release.notify_one();
-    let name = &names()[paused as usize];
+    };
+    let b = Node::start(directory, second, vec![]).await;
+    let peers = [a.address, b.address];
+    a.members(&peers);
+    b.members(&peers);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while node
-            .cluster
-            .resolve(name)
-            .await
-            .unwrap()
-            .unwrap()
-            .owner_incarnation()
-            .is_none()
-        {
+        while observer.observe().await.unwrap().challenge().is_none() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("confirmed incumbent finishes recovery after preference changes");
+    .expect("returning preferred member challenges the recovering incumbent");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        observer.observe().await.unwrap().incumbent(),
+        Some(incumbent)
+    );
+    assert!(
+        files.blocked.try_lock().is_err(),
+        "useful recovery was interrupted"
+    );
+
+    let path = format!("/v1/databases/{name}");
     let token = auth().administrator_token(600).unwrap();
-    node.server
-        .ok(
-            "PUT",
-            &format!("/v1/databases/{name}"),
-            &token,
-            json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
-        )
-        .await;
-    node.members(&[]);
-    // Let the controller observe removal before restoring the same address;
-    // watch snapshots intentionally coalesce unobserved intermediate changes.
-    for _ in 0..4 {
-        tokio::task::yield_now().await;
+    let mut retained = None;
+    if !stalled {
+        files.release.notify_one();
+        let backend = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let backend = a.cluster.resolve(name).await.unwrap().unwrap();
+                if backend.owner_incarnation() == Some(incumbent.identity.incarnation) {
+                    break backend;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the original claimant finishes before rebalancing");
+        a.server
+            .ok(
+                "PUT",
+                &path,
+                &token,
+                json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+            )
+            .await;
+        a.server
+            .ok("POST", &format!("{path}/commit"), &token, commit(0))
+            .await;
+        retained = Some(backend);
     }
-    settled(&[&node], &[]).await;
-    // Explicit removal still retires owners; restoring this process requires
-    // new acquisition, rather than reviving a removed placement slot.
-    node.members(&[node.address]);
-    settled(&[&node], &[node.address]).await;
+    // A stalled stage gets only one answer; health and unchanged membership
+    // cannot keep it alive forever. A completed stage stops answering on yield.
+    settled(&[&a, &b], &peers).await;
+    assert_ne!(
+        observer.observe().await.unwrap().incumbent(),
+        Some(incumbent)
+    );
+    if let Some(old) = retained {
+        assert_eq!(
+            b.server
+                .ok("POST", &format!("{path}/commit"), &token, commit(0))
+                .await["replayed"],
+            true
+        );
+        assert_eq!(
+            b.server
+                .ok(
+                    "POST",
+                    &format!("{path}/read"),
+                    &token,
+                    json!({"keys":["x"]})
+                )
+                .await["values"][0],
+            "b25l"
+        );
+        assert!(matches!(
+            old.info(name, &Access::Administrator).await,
+            Err(crate::Error::Storage(_))
+        ));
+    } else {
+        files.release.notify_one();
+        b.server
+            .ok(
+                "PUT",
+                &path,
+                &token,
+                json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+            )
+            .await;
+        b.server
+            .ok("POST", &format!("{path}/commit"), &token, commit(0))
+            .await;
+    }
 }
 
 #[tokio::test(start_paused = true)]
