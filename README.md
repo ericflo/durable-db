@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.10. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.11. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,14 +142,14 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.10 reuses validated journal frames during selected replay within the
-existing bounded memory cache. All **784 acknowledged B2 writes** recover through
-scaling, two rollouts and cold restart. The largest sampled selection had 103
-frames and recovered in **1.03 seconds**; the preceding 86-frame sample took
-11.26 seconds. This does **not** establish faster rollouts: direct readback gaps
-reached **87.91 / 97.91 seconds**, missing 60 seconds and exceeding the preceding
-run. Scaling and cold-recovery targets pass. Next reduce selection publication
-and validation work: one zero-frame selection still took 21.23 seconds.
+v0.24.11 removes a redundant conditional write when journal selection retries
+an unchanged snapshot. The focused regression needs **two comparisons instead
+of three**. All **886 acknowledged B2 writes** recover through scaling, two
+rollouts and cold restart. The slowest sampled empty selection is **9.94 seconds**
+(previously 21.23s); direct readback gaps reach **71.10 / 72.29 seconds**, still
+missing 60 seconds. Whole-rollout bounds worsen, so these samples do not establish
+an overall rollout improvement. Scaling and cold-recovery targets pass. Next
+resolve the remaining commit and readback stalls during ownership handoffs.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

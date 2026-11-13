@@ -1,5 +1,73 @@
 # Verification results
 
+## Validating selection retries in publication (v0.24.11, 2026-11-13)
+
+When a failed or uncertain selection leaves the recovery snapshot unchanged,
+the next publication now validates the freshly observed state with its own
+comparison. It no longer performs a separate no-op validation first. Each retry
+captures that observation before uploading fresh immutable catalog objects.
+Changed catalog, checkpoint or collection state still requires explicit
+validation and rediscovery; an observed successor refuses ownership. Observing
+or preparing a request cannot authorize serving. The same four-retry budget
+remains, including fresh uploads after uncertain outcomes.
+
+The focused failure regressions reduce failed-comparison/success from **three
+comparisons to two**, and failed-upload/success from **two to one**. Tests cover
+lost replies, delayed uploads, collection and takeover races, preserved challenge
+and administrative metadata, bounded repeated uncertainty and real TCP recovery
+with refusal by the predecessor. Restoring the old loop fails the operation-count
+regression. All **367 routine Rust checks**, formatting and strict clippy pass;
+five focused retry checks take **0.04 seconds** after compilation. RootCatalog
+adds no model state: its positive bounds remain **455,553 / 173,635 states**
+(two/three epochs, three invocations, one/zero frames), with six fault controls
+and four reachability controls. The new unsafe-refresh control violates immutable
+selection when changed cuts are accepted. These are bounded component checks,
+not a proof of Rust or of the full collection/permission composition.
+
+Woodpecker **313** passes the audited kache build, client/Pi contracts and
+10,005-database capacity check; tag pipeline **314** passes. Versioned MinIO
+passes membership and cold recovery in **40.39 seconds**. The exact static binary
+from `517c7705356c6ce3342a3738b9b0f1f167678e80` runs the same B2 fixture as
+v0.24.10: four writers, 16 partitions, 8 MiB memory cache, 1→3→6 nodes, two
+rollouts and total compute loss before cold recovery. All **886 acknowledgements,
+readbacks and recovered keys** pass the independent four-history checker.
+The Kubernetes namespace, bucket, scoped key and **1,482 B2 versions** are
+removed, along with the MinIO bucket, container and **80 versions**.
+
+| Observation | v0.24.10 | v0.24.11 |
+| --- | ---: | ---: |
+| Longest sampled empty selection | 21.230s, two journals | 9.939s, one journal |
+| First / second rollout: largest completed readback gap | 87.91 / 97.91s | **71.10 / 72.29s** |
+| First / second rollout: readiness/progress upper bounds | 150.06 / 127.99s | **157.08 / 147.59s** |
+| Scale to three / six: progress upper bounds | 23.02 / 15.96s | 46.09 / 19.43s |
+| Cold recovery after readiness: progress upper bound | 44.37s | 67.77s |
+
+The empty-selection and completed-gap samples improve, but whole-rollout bounds
+worsen and both gap samples still miss **60 seconds**. Scale and cold targets
+pass. Different histories and bounded traces do not establish an overall
+rollout speedup or production SLO. Unfinished gaps at window close are
+right-censored (up to 9.88s / 0.50s); completed gaps include the preceding readback
+and do not attribute all delay to the fault or compare clocks across hosts.
+
+Of 80 complete sampled selections, one retries publication; its observation-only
+retry takes **74ms**. The longest empty selection spends 0.53s discovering,
+**9.32s publishing** and 0.09s advancing. The longest overall selection takes
+18.33s with 114 frames, including 14.19s discovery. The largest selected batch
+has 117 frames and recovers in 1.01s. Maximum sampled activation, recovery and
+checkpoint calls are 6.62s, 2.50s and 13.82s. These are different calls, not one
+combined critical path.
+
+The next investigation is the remaining **commit and readback stalls during
+handoffs**. The largest two rollout gaps contain **70.77s / 68.98s inside commit
+calls**; their subsequent readbacks take 0.07s / 3.06s. Other writers also have
+long waits after acknowledgement, so neither selection nor commits alone explain
+every gap. The history's single monotonic clock supplies this decomposition;
+it does not yet identify the underlying delay. Tenant-cost, retention, broader
+failures and operating-envelope gates remain open. The obsolete shared-engine
+microbenchmark and its Docker copy were removed from main; current server
+measurements use the maintained HTTP harness.
+[Exact artifacts, checked bounds, traces and cleanup](evidence/native-recovery-2026-11-11.json).
+
 ## Reusing journal reads during selected replay (v0.24.10, 2026-11-13)
 
 Validated small journal frames now share the existing memory LRU with index
@@ -1925,7 +1993,10 @@ One release-build run on an AMD Ryzen AI Max+ 395 laptop, local filesystem with 
 | Durable local write | 200 | 13.962 ms | 22.998 ms | 25.913 ms |
 | Cached local key read | 2,000 | 0.313 ms | 0.346 ms | 0.486 ms |
 
-Reproduce with `cargo run --locked --release --example bench` using the pinned kache wrapper. The results expose an optimization target: synchronous publication and page rewriting currently dominate small writes.
+This is historical evidence from the retired shared-engine serving path, not
+native-engine performance. Its obsolete Rust microbenchmark has been removed.
+Use the maintained HTTP workload in `scripts/benchmark-http.mjs` to measure the
+current server; keep its provider, workload and resource limits with the results.
 
 ## B2 contention baseline: release gate failed
 

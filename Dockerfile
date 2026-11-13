@@ -351,8 +351,6 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml .kache.toml ./
 COPY .cargo .cargo
 COPY src src
 COPY tests tests
-# Rust examples belong to the Rust check stage; application examples stay below.
-COPY examples/*.rs examples/
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
