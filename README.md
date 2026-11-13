@@ -142,15 +142,17 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.21 bounds unacknowledged peer traffic on reused connections while retaining
-the 25-second HTTP operation deadline. The exact binary recovers **608 acknowledged
-writes** through shared-Service B2 isolation and another **838** through scaling,
-two rollouts and cold restart. Direct rollout readback gaps are **66.73s / 51.97s**;
-the first misses the 60-second fixture target. Only two of four writers pass the
-progress check during two-way isolation. Faster transport failure has not solved
-repeated reachability refusals; the next experiment compares Service endpoint
-readiness with direct per-pod reads during the split.
-These short samples establish neither an overall performance improvement nor an SLO.
+v0.24.21 bounds unacknowledged peer traffic while retaining the 25-second HTTP
+operation deadline. Its latest B2 isolation campaign recovers **643 acknowledged
+writes**. All four writers progress during both holds, but direct probes expose
+the remaining routing gap: **all three pods stay Ready while different databases
+are reachable through opposite sides of the split**. One known value reads in
+85 ms through the isolated pod; the other two pods return 503 for it. Shared
+connections can work for one database and fail for another, causing repeated
+retries. Readiness alone cannot select a usable path for every database.
+Earlier rollout readback gaps remain **66.73s / 51.97s**; the first misses the
+60-second fixture target. These short samples establish neither an overall
+performance improvement nor an SLO.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

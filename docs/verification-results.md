@@ -1,5 +1,70 @@
 # Verification results
 
+## Service readiness versus database reachability (2026-11-13)
+
+The exact **v0.24.21** binary passes another shared-Service B2 isolation and cold
+recovery campaign: **643 acknowledgements, verified readbacks and recovered
+keys**, with all four independent histories passing. No runtime or protocol
+change is included. New probes compare Service EndpointSlices with fresh,
+serialized readiness and known-key reads through each pod and the Service.
+They run outside the measured 30-second holds, extend total isolation, and use
+administrator authorization rather than the workload's tenant tokens. This is
+not an unchanged-harness performance comparison with previous campaigns.
+
+All three pods answer readiness with 200 and remain Ready, serving, nonterminating
+Service endpoints before and after every probe round. Connected baselines return
+valid reads everywhere. During the two-way split, the results diverge by database:
+
+| Fresh request path | Writer 0 read | Writer 1 read |
+| --- | ---: | ---: |
+| Pod 0, paired side | 503 / 2,090 ms | valid 200 / 211 ms |
+| Pod 1, paired side | 503 / 2,275 ms | valid 200 / 102 ms |
+| Pod 2, isolated side | valid 200 / 85 ms | 503 / 2,089 ms |
+| Ordinary Service | valid 200 / 86 ms | 503 / 2,092 ms |
+
+Fresh and retained peer probes validate the cut, every pod completes a
+provider-backed administrative read, and pod identities/restart counts stay
+unchanged. These sampled data remain available through the correct side;
+readiness does not tell the Service which endpoint can reach each database.
+Direct pod requests can themselves forward, so these observations do not label
+authoritative owners. Endpoint snapshots and requests are not atomic and do not
+establish uninterrupted availability throughout the hold.
+
+The existing socket observer also detects cross-database reuse. Writer 0's
+revision-115 read takes **14.98s**, including **2.10s** of backoff and six HTTP
+503 replies on six distinct sockets. Five of those sockets successfully serve
+writers 1 or 2 within that read's invocation interval. A connection that works
+for a neighbor can repeatedly put this database on the wrong side of the split.
+No identified socket returns 503 twice across the run; 52 further 503 replies
+fall into the bounded overflow bucket. Socket IDs do not identify backend pods,
+and per-RPC aggregates do not supply individual attempt timestamps. This narrows
+the next experiment to bounded reuse of a working path per database, preserving
+identical uncertain-write retries. Making readiness require all peers could
+remove both sides; no such change has been made.
+
+Readback increments during the asymmetric hold are **13 / 21 / 22 / 13** and
+during the two-way hold **2 / 16 / 17 / 3**. All writers pass both two-readback
+checks in this run. Healing progress bounds are **22.24s / 10.69s**; cold recovery
+is **48.23s** after API readiness. This does not erase earlier failed hold checks
+or qualify continuous split availability. There is no new rollout or AWS result.
+
+The first probe implementation ran reads in parallel and exhausted the
+administrator data principal's concurrency allowance even in its connected
+baseline. That run was interrupted and is retained as a failed diagnostic
+attempt, with no full recovery claim. Replacing parallel reads with one-at-a-time
+probes removes this observer-induced overload. Three local harness tests pass in
+**7.49s**; negative controls detect accepting a wrong value and restoring parallel
+probes. [Woodpecker 355](https://ci.eflorenzano.com/repos/18/pipeline/355/1) and
+[356](https://ci.eflorenzano.com/repos/18/pipeline/356/1) pass. Runtime and TLA+
+sources are unchanged, so this adds no implementation proof claim or binary
+release. The latest release remains v0.24.21.
+
+Both disposable namespaces, buckets and scoped keys are removed, including
+**572 + 1,308 physical versions**. Removed parallel diagnostic fan-out, duplicate
+observation copies and generated Python bytecode. The
+[evidence record](evidence/native-recovery-2026-11-11.json) pins the harness,
+unchanged runtime, probe matrices, history hashes, socket example and cleanup.
+
 ## Bound unacknowledged peer traffic (v0.24.21, 2026-11-13)
 
 Forwarding now configures a two-second TCP user timeout on Linux peer sockets.

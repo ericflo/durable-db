@@ -16,6 +16,15 @@ For S3, every pod receives the same bucket, prefix, and administrator signing ke
 
 Use `/health/live` for liveness and `/health/ready` for readiness. On SIGTERM the server closes admission, drops readiness and signals graceful HTTP shutdown without waiting for provider I/O. HTTP acceptance and idle connections close while admitted requests and routing withdrawal drain concurrently. Withdrawal retains its five-second bound; process exit waits for both drains. The cluster retires every local resident before starting storage I/O; up to four conditional withdrawals run concurrently. In-flight requests may retain their backend until completion. A confirmed withdrawal records the departing stable member: its replacement skips the 15-second challenge wait, while another member waits before fallback. A replacement that still observes the address uses the ordinary challenge path, including after a crash or failed hint. The successor still revokes old permits and recovers journals. Shutdown hooks are never a correctness dependency. Completed cloud writes survive pod removal because their authority is object storage; clients retry ambiguous writes with identical request bodies and IDs. Local readiness checks its worker and recovered ownership. Cloud readiness exposes routing and administration once this process appears in valid discovery membership, even while partitions recover or upload credit is exhausted. Unavailable partitions return retryable errors; healthy partitions remain reachable. Data responses still require recovered ownership and fresh permit validation. Readiness is not a guarantee of continuous provider reachability.
 
+During peer isolation, a Ready pod can serve its own databases yet fail to reach
+another owner. All pods can therefore remain eligible for the shared Service
+while only some can serve a particular request. An HTTP/1 503 closes its client
+connection so an explicit retry can select another endpoint, but a shared pool
+can reuse connections that work for other databases. Readiness and connection
+reuse do not currently guarantee availability through an arbitrary ingress.
+Requiring every peer to be reachable would risk removing all endpoints during a
+split. The [isolation measurements](verification-results.md) retain this open gate.
+
 Set pod CPU/memory limits and concurrency/cache limits together. Memory cache bytes are a payload budget, not a process RSS ceiling. Bound ingress body size, authenticate at the service, terminate TLS at trusted ingress, and retain provider credentials only on the service side. See [security](security.md) for the remaining cluster-wide abuse protection work.
 
 Provider HTTP requests do not follow redirects. Configure the final regional S3 endpoint directly. The shared S3 connector preserves the SDK's environment-configured timeouts, connection pooling, HTTP version, randomized DNS, proxy/exclusions/proxy CA, content type, and certificate validation settings. It uses system trust roots; `disable_system_certificates` fails startup because this CLI has no replacement-root configuration. SDK-only programmatic custom resolvers, root certificates, and default headers are not exposed. AWS credential providers and server-side encryption configuration remain handled by the SDK. Immutable uploads have one attempt per invocation; reads retain bounded SDK retries.
@@ -121,9 +130,11 @@ probes through each pod and the Service. Reads use administrator authorization;
 200 replies must contain the expected synthetic value, which is never logged.
 Diagnostic reads run one at a time to avoid exhausting per-principal admission.
 Each probe has a five-second deadline and 64 KiB response bound, with no retries
-or redirect following. Statuses and elapsed times distinguish ingress selection
+or redirect following. Status zero denotes an incomplete/failed probe, not an
+HTTP status. Statuses and elapsed times distinguish ingress selection
 from availability through each pod; a direct pod request can itself forward and
-does not identify the owner. Endpoint and request observations are not atomic. The workload observes fetch's actual pooled sockets through
+does not identify the owner. Endpoint and request observations are not atomic;
+probes prolong isolation outside the measured hold. The workload observes fetch's actual pooled sockets through
 [Undici diagnostics](https://undici.nodejs.org/api/DiagnosticsChannel), recording
 response counts for at most eight numeric connection identities per RPC, plus
 an overflow bucket. `unobserved` means no socket assignment was seen. It does not
