@@ -102,17 +102,32 @@ impl Root {
             let Some(identity) = identity else {
                 return;
             };
+            let interval = Duration::from_secs(3);
+            let mut poll =
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut answering = None;
             loop {
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                if !wanted() {
+                // Provider latency consumes this period, not an additional sleep.
+                // Missed ticks never queue overlapping observations or answers.
+                poll.tick().await;
+                let eligible = wanted();
+                if answering != Some(eligible) {
+                    tracing::info!(owner = %identity.incarnation, eligible,
+                        "native owner challenge eligibility");
+                    answering = Some(eligible);
+                }
+                if !eligible {
                     continue;
                 }
+                let started = tokio::time::Instant::now();
+                let mut stage = "observe";
                 let answer = async {
                     let observed = authority.read().await?;
                     let Some(mut record) =
                         metadata::decode(&observed.info, &prefix, encoding, budgeted)?
                     else {
-                        return Ok::<_, anyhow::Error>(());
+                        return Ok::<_, anyhow::Error>("idle");
                     };
                     if record.identity == identity && record.challenge.is_some() {
                         record.challenge = None;
@@ -120,11 +135,21 @@ impl Root {
                             metadata::encode(&observed.info, &prefix, encoding, record, budgeted)?;
                         // Lost replies and conflicts are harmless. A subsequent
                         // pass re-observes; it never replays an old comparison.
-                        authority.replace(&observed, info).await?;
+                        stage = "answer";
+                        return Ok(if authority.replace(&observed, info).await?.is_some() {
+                            "confirmed"
+                        } else {
+                            "conflict"
+                        });
                     }
-                    Ok(())
+                    Ok("idle")
                 };
-                let _ = answer.await;
+                let outcome = answer.await.unwrap_or("error");
+                if outcome != "idle" {
+                    tracing::info!(owner = %identity.incarnation, stage, outcome,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "native owner challenge reply");
+                }
             }
         }
     }

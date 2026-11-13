@@ -2,6 +2,47 @@ use super::*;
 use tokio::task::JoinSet;
 
 #[tokio::test(start_paused = true)]
+async fn slow_failed_challenge_answers_do_not_add_a_poll_delay_after_io() {
+    let provider = Provider::new();
+    let owner = active(&provider).await;
+    let mut candidate = provider.root();
+    candidate
+        .challenge(candidate.observe().await.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let captured = candidate.claim(candidate.observe().await.unwrap()).unwrap();
+    let calls = provider.calls.load(Ordering::SeqCst);
+    provider.pause_all_reads.store(true, Ordering::SeqCst);
+    provider.fail_replacements.store(2, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let mut replies = JoinSet::new();
+    replies.spawn(owner.answer_challenges(|| true));
+    // Three slow reads, two failed answers, then success. There must be one
+    // observation in flight, no catch-up queue and no replayed comparison.
+    for completed in 1..=3 {
+        provider.entered.notified().await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        provider.release.notify_one();
+        while provider.calls.load(Ordering::SeqCst) < calls + completed {
+            tokio::task::yield_now().await;
+        }
+    }
+    replies.abort_all();
+    assert!(provider.record().challenge.is_none());
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "provider I/O plus an extra sleep needlessly expires the challenge"
+    );
+    provider.pause_all_reads.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        candidate.finish(captured.execute().await).unwrap(),
+        Outcome::Conflict
+    ));
+    assert!(owner.permission().await.unwrap().is_some());
+}
+
+#[tokio::test(start_paused = true)]
 async fn challenges_coalesce_without_authority_and_answers_invalidate_captured_claims() {
     let provider = Provider::new();
     let mut owner = provider

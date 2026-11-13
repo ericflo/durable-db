@@ -989,8 +989,9 @@ process remains in membership, even after preference changes; an unconfirmed
 candidate still yields immediately. Actual takeover can fence either stage.
 No extra settling interval delays reachable-owner moves.
 
-Each confirmed claimant polls once every three seconds, with one request in flight,
-through activation, recovery and serving. It conditionally clears only its own
+Each confirmed claimant polls on a three-second cadence, skipping missed ticks
+after slow I/O instead of adding another sleep. At most one responder round runs
+at a time through activation, recovery and serving. It conditionally clears only its own
 challenge. Removing the local placement stops this responder even when an in-flight request
 retains the old backend. A retained incumbent that prefers another process stops
 answering, allowing that successor to take over even with asymmetric peer reachability.
@@ -1000,6 +1001,16 @@ answer may still complete after preference changes. No extra storage object or
 collector is introduced. The opaque `ddb-challenge` field binds two canonical UUIDs;
 older readers preserve it, so mixed-version placement convergence is not qualified.
 The remote metadata budget reserves its space. Local-directory serving is unchanged.
+
+A paused-clock regression injects three three-second reads and two failed answer
+attempts. Sleeping after I/O exceeds the challenger's 15-second grace period;
+the fixed cadence answers within it and invalidates a captured stale claim.
+Eight focused challenge/HTTP cluster tests pass in 0.36 seconds. This removes an
+avoidable delay, not the possibility of false takeover under arbitrary provider
+delays. Eligibility changes and answer outcomes now log only the incarnation,
+fixed stage/outcome, and elapsed time; the cloud harness retains those samples.
+The unchanged model below abstracts polling and I/O failures as stuttering;
+the test is not a timing guarantee on deployment hosts.
 
 A timeout is a failure suspicion, never serving authority or a clock-error bound.
 Pauses, delayed storage or inaccurate clocks may still cause a safe false takeover.

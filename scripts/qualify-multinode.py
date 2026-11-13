@@ -244,12 +244,20 @@ def main():
         publications = report.setdefault('publication_events', {})
         slow = report.setdefault('slow_operations', {})
         transports = report.setdefault('forward_transport_errors', {})
+        challenges = report.setdefault('challenge_events', {})
         for pod in pods():
             name = pod['metadata']['name']
             identity = name + '/' + pod['metadata']['uid']
             try:
                 log = kube('logs', name, '--tail=1024').decode(errors='replace')
                 log = re.sub(r'\x1b\[[0-9;]*m', '', log)
+                challenges[identity] = dict(
+                    eligibility=[dict(time_utc=stamp, owner=owner, eligible=eligible=='true')
+                        for stamp,owner,eligible in re.findall(
+                            r'(?m)^([0-9TZ:.+\-]+).*?native owner challenge eligibility.*?owner=([0-9a-f-]{36})\s+eligible=(true|false)',log)],
+                    replies=[dict(time_utc=stamp, owner=owner, stage=stage, outcome=outcome, elapsed_ms=int(elapsed))
+                        for stamp,owner,stage,outcome,elapsed in re.findall(
+                            r'(?m)^([0-9TZ:.+\-]+).*?native owner challenge reply.*?owner=([0-9a-f-]{36})\s+stage="?(observe|answer)"?\s+outcome="?(confirmed|conflict|error)"?\s+elapsed_ms=(\d+)',log)])
                 slow[identity] = [dict(time_utc=stamp, operation=operation,
                     outcome=outcome, elapsed_ms=int(elapsed))
                     for stamp, operation, outcome, elapsed in re.findall(
