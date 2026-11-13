@@ -44,6 +44,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Native sorted tables | `cargo test --locked --lib index::table` and `scripts/check-model.sh SortedTable` |
 | Warm point-read CPU cost | `DURABLE_DB_INDEX_READ_REPORT=/tmp/index-reads.json cargo test --release --locked --test index_read_bench -- --ignored --exact cached_native_point_read_cost` |
 | Rust journal | `cargo test --locked --lib journal` |
+| Upload failure classification | `cargo test --locked --lib providers::transport::tests`, `cargo test --locked --lib native_http_refill_resumes_unsent`, `cargo test --locked --lib absent_uncertain_journal` and `scripts/check-model.sh Journal` / `UploadCredits` |
 | Common provider register | `cargo test --locked --lib providers::` and `scripts/check-model.sh ProviderRegister` |
 | Control request session | `cargo test --locked --lib providers::` and `scripts/check-candidate.sh PlacementRequests` |
 | Physical process pause (Linux) | `cargo test --locked --lib physical_owner_pause` (about eight seconds, including the frozen-clock control) |

@@ -59,6 +59,13 @@ incarnation after activation succeeds. The same owner ID links the following fix
 - `native checkpoint progress`: permission, confirmation when needed, allowance
   calculation, funding, staging and publication. `completed` and `deferred`
   records retain the final stage and whole-call duration. No-op polls emit none.
+- `journal upload failed`: owner, position, fixed error class and `unsent`.
+  Only `unsent=true` preserves the original handle for retry; spent credit is
+  never refunded. `other` includes admission errors and unclassified provider
+  errors, so it does not identify an HTTP status or prove a write reached storage.
+- `native worker retired`: the fixed retirement reason, linked to subsequent
+  resident removal and acquisition by owner/partition. Process readiness does
+  not establish availability of every database during recovery.
 
 Shared-publication logs additionally record `reused_pages` on helper attempts.
 It means a completed directory upload survived a metadata-only comparison

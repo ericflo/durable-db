@@ -112,11 +112,11 @@ const milestones = tocs.get('verification-results').slice(0, 5).map(([id, headin
 const directory = sections
   .map(([section, entries]) => `<section><h3>${section}</h3><ul>${entries.map(([name, label, summary]) => `<li><a href="${name}.html"><strong>${label}</strong><span>${summary}</span></a></li>`).join('')}</ul></section>`)
   .join('');
-// Keep the release evidence in one place; the template retains its status cards.
+// Share current status with the README; dated evidence stays in the record.
 const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 const status = readme.split('\n## Status\n')[1]?.split('\n## ')[0]
   .split('\n').filter((line) => !line.startsWith('|')).join('\n').trim();
-if (!status?.startsWith(`${version} `)) throw new Error('README status must describe the installer release');
+if (!status || !readme.includes(`Latest release: ${version}.`)) throw new Error('README release must match the installer');
 const home = (await readFile(new URL('home.html', import.meta.url), 'utf8'))
   .replaceAll('{{version}}', version)
   .replace('{{status}}', render(status, { headingIds: new Map(), toc: [] }))

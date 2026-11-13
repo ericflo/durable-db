@@ -1,5 +1,79 @@
 # Verification results
 
+## Proven-unsent journal uploads (v0.24.24, 2026-11-13)
+
+A connection refusal used to enter the same recovery path as a lost upload
+reply. The shared B2/S3 binding now preserves the original journal handle when
+its single-attempt client reports a typed connection failure. The existing
+bounded queue retries that handle at most once per second, keeping its bytes,
+position and owner. Each attempt spends fresh upload credit; none is refunded.
+This adds no storage object, format, dependency or background worker.
+
+The distinction requires SDK retries, transport retries and redirects all to be
+disabled. An arbitrary storage client gets no such exemption. Timeouts, resets,
+HTTP responses and cancellation remain ambiguous; a missing object does not
+prove abort or permit another PUT. Those cases still resolve exact bytes or
+reacquire ownership. Bounded diagnostics retain only the owner UUID, journal
+position, a fixed error class and whether the upload was proven unsent. Provider
+messages, URLs, object keys and bodies are not exported.
+
+The real TCP regression fails on the preceding implementation. With the fix,
+a refused connection preserves the original handle and the restarted endpoint
+receives exactly one PUT. Companion fixtures receive the complete body before
+dropping or stalling the reply: neither returns a retryable handle. Redirects
+and HTTP failures also remain ambiguous. Ten focused transport, journal and
+native HTTP checks pass in **6.08s**; formatting, Clippy and three harness checks
+pass. The unchanged Journal transition system checks **4,134 states**, depth 26,
+with six negative controls; UploadCredits checks **11,006 states**, depth 17,
+with five controls. These models do not prove the transport's classification or
+continuous availability.
+
+The isolation harness now reuses the rollout readback measurement, on the
+workload's single monotonic clock. Each window starts before cutting peer
+traffic and ends after every writer progresses following healing. The checker
+reports each writer's largest completed gap against the existing 60-second
+fixture target, plus its right-censored open gap. An adversarial history makes
+every writer progress twice but still exceeds its gap target; deleting a
+declared window is rejected. Three harness checks pass in **7.78s**, and the
+earlier isolation history still validates without inventing missing windows.
+
+The exact static candidate from `a288612` (Woodpecker **372**) and harness
+`ccd0b02` (**373**) recover all **1,023 acknowledged writes** on B2 after
+90-second asymmetric/two-way splits and total API replacement. All four
+independent histories validate. The largest completed readback gaps are
+**51.21s / 88.99s**: the two-way split **fails** the 60-second fixture target,
+despite every writer progressing during both holds. Recovery after healing is
+bounded by **21.58s / 28.88s**, and cold recovery by **47.83s** after API
+readiness; those are different measurements from the gaps across the fault.
+
+One upload reports `other`, `unsent=false` and retires its owner after an absent
+resolution. The diagnostic does not identify the HTTP status or establish
+whether bytes reached storage. Its successor is ready **21.48s** after retirement:
+**5.52s** before acquisition, then **4.69s** claiming, **4.28s** activating,
+**6.51s** selecting journals and **0.33s** rebuilding the view. Fourteen other
+failures carry the existing admission witness; no connection-failure witness is
+sampled. The TCP fixture establishes the new path, not a causal cloud speedup.
+
+The longest gap belongs to a different database, on partition 12. Its commit
+spends **72.16s** in requests and **16.51s** in backoff, receiving 18 HTTP 429s
+and three 503s before success. That owner's checkpoint trace spans **82.16s**
+through repeated funding/confirmation attempts. These clocks cannot attribute
+every client delay to that checkpoint, but the trace identifies a concrete next
+target: checkpoint retries and shared control-publication pressure. Serial
+ingress probes still show differing reachable paths while every pod is Ready.
+
+Woodpecker 372's audited artifact checks pass; its Pages delivery times out.
+The next run, **373**, passes including confirmed public delivery. The downloaded
+static binary passes exact retries, ordered reads, export/restore and kill/reopen
+with no toolchain on PATH. Cleanup removes **1,628 physical versions**, the test
+bucket, scoped key and namespace. There is no new AWS or rollout qualification.
+See the [source, artifact, failed-target and cleanup evidence](evidence/native-recovery-2026-11-11.json).
+
+Moved the budget-only unsent marker to the storage boundary and removed the
+duplicated default upload-client reference. Deleted 13 model scratch directories
+while retaining results. The previous ambiguous-write failure remains in the
+evidence; avoiding unnecessary recovery does not resolve every upload failure.
+
 ## Owner challenge polling and journal retirement (v0.24.23, 2026-11-13)
 
 A challenge responder used to sleep three seconds **after** provider I/O. Slow

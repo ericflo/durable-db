@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.23. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.24. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,20 +142,14 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.23 removes the extra sleep after slow owner-challenge I/O and records
-bounded diagnostics for owner retirement. A B2 run with **90-second peer splits**
-recovers all **1,015 acknowledged writes** after replacing every API pod. It also
-reproduces an unresolved journal upload that retires the local worker: one
-database returns **503 through all three pods and the Service while every pod
-reports Ready**. This availability failure is identified, not resolved. All four
-writers progressing over a hold does not establish uninterrupted service.
-
-The SDK retains bounded per-database connections and explicit, identical retries.
-The previous v0.24.22 rollout recovered 773 writes with **47.54s / 45.74s** readback
-gaps, below its 60-second fixture target; that rollout has not been repeated for
-v0.24.23. Continuous split availability, worst-case memory, sustained performance
-and public multitenancy remain open. These samples establish no production SLO.
-See the
+Clustered availability remains the immediate gate. B2 testing has reproduced a
+database returning **503 through every path while all pods report Ready**, after
+an ambiguous journal upload retires its owner. Proven-unsent connection failures
+now retain their original upload for bounded retry; uncertain writes still need
+safe recovery. Checkpoint retries can also stall writes during peer isolation.
+Continuous split availability, worst-case memory, sustained
+performance and public multitenancy remain open. Short passing runs establish no
+production SLO. See the
 [measured results and limits](docs/verification-results.md) and the
 [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 
