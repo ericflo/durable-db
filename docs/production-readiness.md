@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.1, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.2, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -23,7 +23,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 2. **Supported boundary.** Woodpecker **384** passed dependency audits, Rust formatting/Clippy/tests, client and native Pi contracts, capacity checks, existing small TLA+ models/negative controls and abstract publication/journal proofs. Those are component checks, not a composed proof of the entire protocol or of Rust. The Pi adapters remain experimental pending broader cloud Harness/upgrade qualification; the supported application interface is HTTP/TypeScript KV.
 3. **Checked executable and operations.** The downloaded static archive independently passed protected creation, exact retries, ordered reads, export/restore and kill/reopen with an empty toolchain path. The installer pins the release and verifies its checksum. The operating instructions specify funding, private networking, resource bounds and manual backups. Both campaigns' buckets, keys and namespaces, plus the disposable worker cluster, were removed. Experimental-version migration uses export/restore; mixed-version rolling upgrades are not a 1.0 guarantee.
 
-[Exact release and campaign evidence](evidence/release-1.0.0-2026-11-13.json) records artifact hashes, source, histories, failed timing targets and cleanup. [Verification results](verification-results.md) explain their limits. The initial v1.0.0 runtime matched v0.24.26. v1.0.1 prioritizes requested recovery; the [focused B2 comparison](verification-results.md#requested-partitions-recover-first-2026-11-13) observed a 68.27s scale-down gap versus 111.92s on v1.0.0 in separate short runs, still above the target. These patches do not complete the deferred features or establish an SLO.
+[Exact release and campaign evidence](evidence/release-1.0.0-2026-11-13.json) records artifact hashes, source, histories, failed timing targets and cleanup. [Verification results](verification-results.md) explain their limits. The initial v1.0.0 runtime matched v0.24.26. v1.0.2 reserves recovery capacity for requested retries. The [fresh B2 comparison](verification-results.md#recovery-slots-stay-available-for-requested-retries-2026-11-13) observed a 54.67s scale-down gap versus 57.20s on v1.0.1; both short runs met the fixture target and recovered every acknowledged write. One writer's gap increased. Earlier missed targets remain in the evidence, and these patches neither complete deferred features nor establish an SLO.
 
 ## Changes to the previous six-gate plan
 

@@ -1,5 +1,55 @@
 # Verification results
 
+## Recovery slots stay available for requested retries (2026-11-13)
+
+**v1.0.2**, the exact `4e8b32f` artifact from Woodpecker **390**, passes the
+focused B2/Kubernetes campaign on the existing hosts. The baseline and candidate
+use the same maintained harness, transport, retry policy and configuration:
+
+| Release | Acknowledged writes recovered | Largest scale-down readback gap | Cold progress bound after readiness |
+| --- | ---: | ---: | ---: |
+| v1.0.1 | 466 / 466 | 57.20s | 61.36s |
+| v1.0.2 | 393 / 393 | 54.67s | 44.13s |
+
+All four histories pass, including exact identity, invocation order, value hashes
+and recovered totals after every API process is replaced. Both scale-down samples
+meet the 60-second fixture target; both cold bounds meet 120 seconds. These are
+sequential short runs on shared hosts, with the baseline overlapping candidate CI.
+One writer's gap increased from **35.71s to 45.52s**. The lower maximum does not
+establish a causal speedup, sustained performance or an SLO. Earlier missed targets
+remain recorded below.
+
+The previous 68.27s trace exposed unused partitions filling recovery slots while
+requested partitions waited for their retry window. They then waited another nine
+seconds for a slot. The scheduler now permits one background acquisition while
+requested partitions remain outstanding on their preferred member. Requested work
+can use the remaining slots, within the same four-acquisition bound. Existing
+acquisitions are not preempted, and unused partitions still make progress. The
+change adds no stored state, task, provider operation, authority or storage-format change;
+it replaces unrestricted background filling between requested retries.
+
+The new paused-provider regression fails on the old scheduler (four slots filled
+instead of two) and checks that subsequent requests enter recovery while other
+work is stalled. All **27 controller tests pass in 6.11s**, with formatting and
+strict Clippy. The unchanged `OwnerResidency` transition system checks **19 states**,
+depth 5, and detects both reservation faults. Woodpecker passes the required Rust,
+client/Pi, audit, capacity and formal checks. The downloaded static archive also
+passes exact retries, ordered reads, export/restore and kill/reopen independently.
+
+The workload now retains each RPC's longest attempt alongside aggregate request
+and backoff time, without changing retries. All four adversarial harness tests
+pass in **8.66s**. The candidate's worst gap contains **17.91s in requests** and
+**36.51s in backoff**; its longest attempt succeeds after **13.42s**. The baseline's
+longest attempt within its worst gap also succeeds, after **22.37s**. Blanket
+shortening of the response deadline would turn valid writes into uncertain outcomes.
+The remaining recovery/refusal interval and successful write completion costs
+need further qualification; the lower request total alone does not close them.
+
+[Exact artifacts, all four writer gaps, request timing and cleanup](evidence/recovery-slots-2026-11-13.json)
+record both runs. Their namespaces, buckets, scoped keys and **2,237 physical object
+versions** are removed, along with three local generated model-state directories. The existing model, harness
+and report page are reused. The scoped 1.0 support contract is unchanged.
+
 ## Requested partitions recover first (2026-11-13)
 
 **v1.0.1**, the exact `b441e2c` static artifact from Woodpecker **387**, passes
