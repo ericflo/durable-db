@@ -6,6 +6,7 @@ import {parseArgs} from 'node:util';
 import {randomUUID, createHash} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
 import {setTimeout as sleep} from 'node:timers/promises';
+import {requestJson, DbError} from '../clients/javascript/transport.mjs';
 
 const {values: args} = parseArgs({options: {
   urls: {type:'string', default:'http://127.0.0.1:7654'},
@@ -13,6 +14,8 @@ const {values: args} = parseArgs({options: {
   databases: {type:'string', default:'70'}, workers: {type:'string', default:'1,4'},
   operations: {type:'string', default:'20'}, 'value-bytes': {type:'string', default:'1024'},
   binary: {type:'string'}, context: {type:'string', default:'Unspecified deployment'},
+  'upload-budget-bytes': {type:'string'}, 'upload-budget-attempts': {type:'string'},
+  'max-attempts': {type:'string', default:'128'},
 }});
 function integer(value, min, max) {
   const n = Number(value);
@@ -23,6 +26,13 @@ const count = integer(args.databases, 1, 100_000);
 const workers = args.workers.split(',').map(n => integer(n, 1, Math.min(count,128)));
 const operations = integer(args.operations, 1, 10_000);
 const valueBytes = integer(args['value-bytes'], 32, 64*1024);
+const maxAttempts = integer(args['max-attempts'],1,256);
+if (Boolean(args['upload-budget-bytes']) !== Boolean(args['upload-budget-attempts']))
+  throw Error('Provide both per-database upload budget ceilings');
+const uploadLimits = args['upload-budget-bytes'] ? {
+  bytes:integer(args['upload-budget-bytes'],1,Number.MAX_SAFE_INTEGER),
+  attempts:integer(args['upload-budget-attempts'],1,Number.MAX_SAFE_INTEGER),
+} : null;
 if (workers.reduce((s,n)=>s+n,0)*operations*2 > 1_000_000) throw Error('Too many samples');
 if (!args['token-file']) throw Error('--token-file is required');
 const admin = (await readFile(args['token-file'],'utf8')).trim();
@@ -37,7 +47,8 @@ const report = {
   schema:1, started_at:new Date().toISOString(), context:args.context,
   binary_sha256:args.binary ? createHash('sha256').update(await readFile(args.binary)).digest('hex') : null,
   configuration:{databases:count,workers,operations_per_worker:operations,value_bytes:valueBytes,
-    endpoints:urls.length,max_attempts:12,operation_deadline_seconds:120,load_model:'closed-loop'},
+    endpoints:urls.length,max_attempts:maxAttempts,operation_deadline_seconds:120,load_model:'closed-loop',
+    transport:'SDK per-database HTTP/1 pools',node:process.version,tenant_upload_budget:uploadLimits},
   limitations:['Small samples are descriptive, not an SLO guarantee.',
     'Closed-loop load does not measure queue growth at a fixed arrival rate.',
     'Provider request counts, billed storage, and cost are not measured.',
@@ -57,25 +68,23 @@ function distribution(samples) {
 }
 async function request(url, path, token, body, counts, method='POST') {
   const started = performance.now();
-  for (let attempt=0; attempt<12; attempt++) {
+  const encoded=body===undefined ? undefined : JSON.stringify(body);
+  const database=path.match(/^\/v1\/databases\/([^/]+)/)?.[1]??'administration';
+  for (let attempt=0; attempt<maxAttempts; attempt++) {
     const remaining = 120_000-(performance.now()-started);
     if (remaining<=0) break;
-    let status, result;
+    let status;
     try {
-      const response = await fetch(url+path, {method,
+      const result = await requestJson(url+path,database,{method,
         headers:{authorization:'Bearer '+token,'content-type':'application/json'},
-        ...(body===undefined ? {} : {body:JSON.stringify(body)}),
+        body:encoded,
         signal:AbortSignal.timeout(Math.max(1,Math.ceil(Math.min(35_000,remaining)))),
       });
-      status=response.status;
-      bump(counts,String(status));
-      if (response.ok) {
-        result=await response.json();
-        return result;
-      }
-      await response.body?.cancel();
-    } catch {
-      bump(counts,'transport_or_decode_error');
+      bump(counts,'200');
+      return result;
+    } catch (error) {
+      if (error instanceof DbError) status=error.status;
+      bump(counts,status ? String(status) : 'transport_or_decode_error');
     }
     // A single worker owns each database; 409 is publication contention here.
     // Ambiguous writes retry the EXACT same revision, ID, and body.
@@ -83,7 +92,7 @@ async function request(url, path, token, body, counts, method='POST') {
     const delay=Math.min(1000,50*2**attempt)*(0.5+Math.random()/2);
     const left=120_000-(performance.now()-started);
     if (left<=0) break;
-    if (attempt<11) await sleep(Math.min(left,delay));
+    if (attempt+1<maxAttempts) await sleep(Math.min(left,delay));
   }
   throw Error('retry_budget_exhausted');
 }
@@ -97,6 +106,8 @@ try {
   const prefix = 'bench-'+randomUUID();
   for (let n=0;n<count;n++) {
     const db={name:`${prefix}-${String(n).padStart(6,'0')}`,revision:0,value:payload(n,0)};
+    if (uploadLimits) await request(urls[0],`/v1/databases/${db.name}/upload-budget`,admin,
+      {request_id:randomUUID(),expected_configuration_revision:0,limits:uploadLimits},report.setup.attempt_statuses);
     await request(urls[0],'/v1/databases/'+db.name,admin,
       {request_id:randomUUID(),limits:{max_bytes:1048576,max_keys:1000}},report.setup.attempt_statuses,'PUT');
     const {token}=await request(urls[0],'/v1/tokens',admin,{database:db.name,write:true,ttl_seconds:86400},report.setup.attempt_statuses);
@@ -112,7 +123,7 @@ try {
   let phaseFailed=false;
   phases: for (const concurrency of workers) {
     for (const mode of ['write','read']) {
-      const phase={mode,workers:concurrency,planned:concurrency*operations,started:0,succeeded:0,failed:0,
+      const phase={mode,workers:concurrency,started_at:new Date().toISOString(),planned:concurrency*operations,started:0,succeeded:0,failed:0,
         attempt_statuses:{},failure_reasons:{},samples:[]};
       const begin=performance.now();
       await Promise.all(Array.from({length:concurrency},async (_,worker)=>{
@@ -145,6 +156,7 @@ try {
         }
       }));
       phase.elapsed_seconds=Number(((performance.now()-begin)/1000).toFixed(6));
+      phase.finished_at=new Date().toISOString();
       phase.not_started=phase.planned-phase.started;
       phase.successful_operations_per_second=Number((phase.succeeded/phase.elapsed_seconds).toFixed(3));
       phase.all_started_latency=distribution(phase.samples.map(s=>s.elapsed_ms));

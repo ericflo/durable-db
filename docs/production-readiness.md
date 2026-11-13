@@ -54,12 +54,25 @@ Native ownership uses [revocable writer permits](design-owned-partitions.md#revo
 node scripts/benchmark-http.mjs \
   --urls http://127.0.0.1:7654 \
   --token-file /path/to/test-admin-token \
-  --databases 70 --workers 1,4 --operations 20 --value-bytes 1024 \
+  --databases 32 --workers 1,4,16,32 --operations 20 --value-bytes 1024 \
+  --upload-budget-bytes 67108864 --upload-budget-attempts 10000 \
   --binary target/release/durable-db --output benchmark.json \
   --context 'Describe provider region, server placement, caches, concurrency, and maintenance'
 ```
 
-Each worker owns one database so publication conflicts can retry the same request without recomputing application state. Ambiguous retries retain the exact ID, revision, and body. Reports include attempted/failed/not-started operations, HTTP statuses, full operation latency including backoff, successful latency separately, elapsed throughput, verification, and binary hash. A failed worker stops instead of issuing a new write ID after an unresolved outcome. The harness writes partial results and exits unsuccessfully on any failed phase or verification.
+Each worker owns one database so publication conflicts can retry the same request without recomputing application state. The benchmark uses the SDK's bounded per-database connection pools and a 120-second operation deadline, with at most 128 attempts (`--max-attempts` can reduce this). Ambiguous retries retain the exact ID, revision, and body. Reports include attempted/failed/not-started operations, HTTP statuses, full operation latency including backoff, successful latency separately, phase timestamps, elapsed throughput, verification, and binary hash. A failed worker stops instead of issuing a new write ID after an unresolved outcome. The harness writes partial results and exits unsuccessfully on any failed phase or verification. Cloud deployments require the explicit per-database upload ceilings above; omit them for a local directory.
+
+`scripts/benchmark-kubernetes.py` runs this workload inside a fresh namespace using the maintained StatefulSet and Service manifests, three distinct Kubernetes hosts, and an image pinned by digest. It samples database-container RSS, working set and CPU counters every ten seconds and rejects unexpected pod replacements or restarts. It removes its namespace on completion or failure; **the caller must remove the dedicated bucket and revoke its test key**.
+
+```sh
+python3 scripts/benchmark-kubernetes.py --disposable \
+  --context test-cluster --image registry/durable-db@sha256:IMAGE_DIGEST \
+  --storage-env-file /private/test-storage.json \
+  --signing-key-file /private/admin.key --admin-token-file /private/admin.token \
+  --output load-results
+```
+
+This fixture uses 64 MiB memory caches, no disk cache, 128 MiB resident allowances, eight admitted requests per process, and the manifest's two-CPU/768 MiB container limits. Maintenance runs every 60 seconds. Its 32 databases each receive a 64 MiB/10,000-attempt upload budget; the namespace has a 1 GiB/100,000-attempt ceiling. These are upload admission allowances, not measurements of billed storage. Sampling can miss transient resource peaks, and RSS is not bounded by cache allowances alone.
 
 After a failed measured phase, the harness still checks final state, allowing an uncertain write to be either visible or absent at that read. This does not turn the timed-out operation into a success or establish that a delayed write can never arrive later. A lost-acknowledgement fixture checks failure accounting and identical retry bodies.
 

@@ -3,10 +3,10 @@ FROM docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca256
 FROM node AS autoscaling-check
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY scripts/cluster-workload.mjs scripts/check-autoscaling-history.py scripts/test-autoscaling.mjs scripts/qualify-multinode.py scripts/
+COPY scripts/cluster-workload.mjs scripts/check-autoscaling-history.py scripts/test-autoscaling.mjs scripts/qualify-multinode.py scripts/benchmark-kubernetes.py scripts/
 COPY clients/javascript/transport.mjs clients/javascript/transport.mjs
 RUN node --test scripts/test-autoscaling.mjs \
-    && python3 -m py_compile scripts/qualify-multinode.py \
+    && python3 -m py_compile scripts/qualify-multinode.py scripts/benchmark-kubernetes.py \
     && mkdir -p /checks && touch /checks/autoscaling.passed
 FROM docker.io/prom/prometheus:v3.16.0-distroless@sha256:e8b8fb0e336fe0affce6f9ea347b11d24975465fd3ba8119420186679c3efd5f AS alert-check
 WORKDIR /rules

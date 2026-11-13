@@ -11,6 +11,7 @@ import {once} from 'node:events';
 const root=await mkdtemp(join(tmpdir(),'durable-db-benchmark-test-'));
 const databases=new Map();
 let retries=0, changedRetry=false, firstBody;
+const funded=new Set();
 const server=createServer(async (req,res)=>{
   const chunks=[]; for await (const chunk of req) chunks.push(chunk);
   const text=Buffer.concat(chunks).toString();
@@ -18,7 +19,13 @@ const server=createServer(async (req,res)=>{
   res.setHeader('content-type','application/json');
   if (req.url==='/v1/tokens') return res.end(JSON.stringify({token:'fixture-only'}));
   const [,name,action]=req.url.match(/^\/v1\/databases\/([^/]+)(?:\/(.+))?$/);
+  if (action==='upload-budget') {
+    assert.equal(body.expected_configuration_revision,0);
+    assert.deepEqual(body.limits,{bytes:67108864,attempts:10000});
+    funded.add(name); return res.end('{}');
+  }
   if (!action) {
+    assert.ok(funded.has(name));
     if (req.method!=='PUT' || !body.request_id || !body.limits) {
       res.statusCode=400; return res.end('{}');
     }
@@ -42,7 +49,8 @@ try {
   await writeFile(token,'fixture-only',{mode:0o600});
   const child=spawn(process.execPath,[new URL('./benchmark-http.mjs',import.meta.url).pathname,
     '--urls',`http://127.0.0.1:${server.address().port}`,'--token-file',token,'--output',output,
-    '--databases','2','--workers','2','--operations','2'],{stdio:'ignore',timeout:60_000});
+    '--databases','2','--workers','2','--operations','2','--max-attempts','12',
+    '--upload-budget-bytes','67108864','--upload-budget-attempts','10000'],{stdio:'ignore',timeout:60_000});
   const [code]=await once(child,'exit');
   assert.equal(code,1);
   assert.equal(retries,12); assert.equal(changedRetry,false);
@@ -56,7 +64,9 @@ try {
   assert.equal(p.attempt_statuses['503'],12);
   assert.equal(result.verification.checked,2); assert.equal(result.verification.failed,0);
   assert.equal(result.verification.uncertain_write_observed,1);
-  console.log('Benchmark exhausted-retry accounting, identity, and recovery verification passed');
+  assert.equal(funded.size,2);
+  assert.ok(Date.parse(p.finished_at)>=Date.parse(p.started_at));
+  console.log('Benchmark funding, SDK retries, failure accounting and recovery verification passed');
 } finally {
   server.closeAllConnections(); server.close();
   await rm(root,{recursive:true,force:true});
