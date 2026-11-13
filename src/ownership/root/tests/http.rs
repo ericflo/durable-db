@@ -759,6 +759,11 @@ async fn native_http_handoff_staging_yields_to_writes_but_required_checkpoints_d
             .unwrap();
         assert!(provider.record().checkpoint.is_none());
         let client = reqwest::Client::new();
+        if !required {
+            // Hold the retry after the first stage is cancelled. Even a queued
+            // exact retry must let this second attempt finish.
+            faults.pause_checkpoint.store(true, Ordering::SeqCst);
+        }
         let mut write = commit();
         write["request_id"] = json!("after-handoff");
         write["expected_revision"] = json!(1);
@@ -790,7 +795,35 @@ async fn native_http_handoff_staging_yields_to_writes_but_required_checkpoints_d
             .unwrap();
         assert_eq!(reply.0, StatusCode::OK);
         assert_eq!(reply.1["revision"], 2);
-        let replay = tcp_call(&client, "POST", &format!("{url}/commit"), &token, write).await;
+        if !required {
+            tokio::time::timeout(Duration::from_secs(3), faults.entered.notified())
+                .await
+                .unwrap();
+        }
+        let (writer, endpoint, credential) = (client.clone(), url.clone(), token.clone());
+        let mut replay = tokio::spawn(async move {
+            tcp_call(
+                &writer,
+                "POST",
+                &format!("{endpoint}/commit"),
+                &credential,
+                write,
+            )
+            .await
+        });
+        if !required {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut replay)
+                    .await
+                    .is_err(),
+                "repeated queued work must not starve handoff maintenance"
+            );
+            faults.release.notify_one();
+        }
+        let replay = tokio::time::timeout(Duration::from_secs(1), replay)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(replay.0, StatusCode::OK);
         assert_eq!(replay.1["replayed"], true);
         tokio::time::timeout(Duration::from_secs(3), async {

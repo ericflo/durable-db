@@ -326,6 +326,7 @@ async fn validate_response(owner: &Owner) -> Result<()> {
 async fn maintain(
     owner: &Resident,
     queue: &mut mpsc::Receiver<Command>,
+    may_yield: bool,
 ) -> anyhow::Result<Option<Command>> {
     let mut state = owner.write().await;
     let required = state.checkpoint_due();
@@ -333,7 +334,7 @@ async fn maintain(
         return Ok(None);
     };
     let state = RwLockWriteGuard::downgrade(state);
-    let staged = if required {
+    let staged = if required || !may_yield {
         checkpoint.stage(&state).await
     } else {
         // Handoff-only work may yield before publication. Immutable uploads
@@ -384,6 +385,7 @@ async fn run(
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending: Vec<Pending> = Vec::new();
     let mut queued = None;
+    let mut may_yield = true;
     let mut unknown = BTreeSet::new();
     let mut unsent = BTreeMap::new();
     let mut admission = tokio::time::interval(Duration::from_secs(1));
@@ -533,7 +535,11 @@ async fn run(
         // Reply before maintenance starts, then quiesce new admissions until
         // its cut is published. The retry tick also drives idle/paced work.
         if queued.is_none() {
-            queued = maintain(&owner, &mut queue).await.unwrap_or_default();
+            queued = maintain(&owner, &mut queue, may_yield)
+                .await
+                .unwrap_or_default();
+            // One yield per owner: a busy queue cannot starve the next attempt.
+            may_yield &= queued.is_none();
         }
     }
 }

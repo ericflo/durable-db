@@ -60,7 +60,8 @@ Expire == /\ live /\ live' = FALSE
    Ending also abstracts cancellation before publication: it grants no authority.
    Optional handoff staging may end when a foreground command arrives. Its
    abandoned immutable PUTs may still finish; publication never starts for that
-   cut. Rust retains charges/retry pacing and never yields a required checkpoint.
+   cut. Rust allows one yield per owner, retains charges/retry pacing and never
+   yields a required checkpoint, so a busy queue cannot keep cancelling staging.
    Those scheduling/resource rules are implementation obligations; no new
    authority or transition is introduced here. *)
 BeginCheckpoint == /\ checkpoint.phase = "idle" /\ live
