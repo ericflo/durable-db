@@ -20,6 +20,10 @@ pub enum Operation {
     HttpAccess,
     HttpToken,
     HttpOther,
+    ForwardDiscovery,
+    ForwardRequest,
+    NativeReadLock,
+    NativeRead,
     AuthorityRead,
     AuthorityReplace,
     ReadBarrier,
@@ -37,7 +41,7 @@ pub enum Operation {
     NativeAuthorize,
     NativeOther,
 }
-const OPERATIONS: [&str; 24] = [
+const OPERATIONS: [&str; 28] = [
     "http_info",
     "http_create",
     "http_read",
@@ -46,6 +50,10 @@ const OPERATIONS: [&str; 24] = [
     "http_access",
     "http_token",
     "http_other",
+    "forward_discovery",
+    "forward_request",
+    "native_read_lock",
+    "native_read",
     "authority_read",
     "authority_replace",
     "read_barrier",
@@ -187,6 +195,7 @@ impl Registry {
         series.inflight.fetch_add(1, Ordering::Relaxed);
         Timer {
             series,
+            operation,
             started: Instant::now(),
             outcome: Outcome::Cancelled,
         }
@@ -236,6 +245,7 @@ impl Registry {
 }
 pub struct Timer<'a> {
     series: &'a Series,
+    operation: Operation,
     started: Instant,
     outcome: Outcome,
 }
@@ -256,6 +266,14 @@ impl Drop for Timer<'_> {
         self.series.count.fetch_add(1, Ordering::Relaxed);
         self.series.outcomes[self.outcome as usize].fetch_add(1, Ordering::Relaxed);
         self.series.inflight.fetch_sub(1, Ordering::Relaxed);
+        if elapsed >= 1_000_000 {
+            tracing::info!(
+                operation = OPERATIONS[self.operation as usize],
+                outcome = OUTCOMES[self.outcome as usize],
+                elapsed_ms = elapsed / 1000,
+                "slow operation"
+            );
+        }
     }
 }
 pub async fn measure<T, E>(

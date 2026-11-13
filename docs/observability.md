@@ -39,7 +39,7 @@ Upload admission adds `upload_grant_bytes`, `upload_grant_attempts`, `upload_cha
 | `durable_db_rejected_total` | Legacy count of rate/concurrency rejections; the operation outcomes cover additional rejection paths |
 | `durable_db_cache_bytes` | Current accounted memory-cache usage, including estimated entry overhead; not process RSS |
 
-HTTP operations include body decoding, admission, and handler execution. Health probes are excluded. Publication timing includes retries and path rebuilding. Provider-boundary operations cover authority reads/replacements, immutable object GET/PUT/list, and physical version reclamation. B2 native operations additionally expose each native API attempt; a refreshed authorization retry appears as another attempt. Startup bucket discovery is included in native listing counters after the bounded-read-retry change. Earlier profiling reports predate that instrumentation. Read-only native retries have three attempts and a ten-second deadline; each actual native request appears in the counters. Conditional publication errors are never retried as if their outcome were known.
+HTTP operations include body decoding, admission, and handler execution. Health probes are excluded. `forward_discovery` covers cached-route lookup, its lock and any authoritative discovery; `forward_request` covers one peer request including its response body. `native_read_lock` isolates the wait for the serving view, while `native_read` covers authorization, value retrieval and fresh permit validation after that lock is acquired. Publication timing includes retries and path rebuilding. Provider-boundary operations cover authority reads/replacements, immutable object GET/PUT/list, and physical version reclamation. B2 native operations additionally expose each native API attempt; a refreshed authorization retry appears as another attempt. Startup bucket discovery is included in native listing counters after the bounded-read-retry change. Earlier profiling reports predate that instrumentation. Read-only native retries have three attempts and a ten-second deadline; each actual native request appears in the counters. Conditional publication errors are never retried as if their outcome were known.
 
 These are operational measurements, **not a provider billing meter**. Object-store SDK retries can occur inside a measured call. A successful physical-deletion call can remove several versions, and a failed response can hide a successful deletion. Candidate counts are scan activity, not an estimate of the whole garbage backlog. A cancelled publication may have committed; metrics cannot resolve its transaction outcome.
 
@@ -70,9 +70,18 @@ call; subtract adjacent values from that call for stage duration. Catalogue
 completion has its own interval. A failed or cancelled call may have no terminal
 record. The qualification harness retains only these fixed fields from bounded
 pod-log samples; disappearance and rotation can omit events. These timings add
-no provider calls and grant no authority. Checkpoint construction currently holds
-the serving owner's write lock through I/O, including an opportunistic handoff
-checkpoint; its duration can therefore delay foreground requests after readiness.
+no provider calls and grant no authority. Checkpoint funding and immutable uploads
+allow concurrent reads; publication and projection replacement remain exclusive.
+
+Measured operations lasting at least one second also emit `slow operation` with
+fixed operation/outcome labels and elapsed milliseconds. Cancellation emits a
+terminal sample when the future is dropped; abrupt process death may prevent it.
+These records separate discovery, forwarding, lock contention and provider work,
+but nested durations overlap and must not be summed. `forward transport failed`
+adds only the opaque owner incarnation, connect/timeout classification and
+elapsed time for failed peer sends; it never logs the URL, request or raw error.
+A cancelled send has no transport-error classification. Pod logs are bounded
+samples, not complete request traces or cross-host clock measurements.
 
 For example, inspect the publication-register conflict fraction:
 

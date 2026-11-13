@@ -10,6 +10,7 @@ use crate::{
         PolicyResult, ReadRequest, ReadResult,
     },
     journal::{self, Resolution},
+    metrics::{self, Operation, Outcome},
     transactions::live::{AuthorizedTicket, CatalogChange, CatalogResult, Owner},
 };
 use async_trait::async_trait;
@@ -235,11 +236,14 @@ impl Backend for Native {
     }
     async fn read(&self, db: &str, request: &ReadRequest, access: &Access) -> Result<ReadResult> {
         self.check()?;
-        self.owner
-            .read()
-            .await
-            .read_authorized(db, request, access)
-            .await
+        let timer = metrics::REGISTRY.start(Operation::NativeReadLock);
+        let owner = self.owner.read().await;
+        timer.finish(Outcome::Ok);
+        metrics::measure(
+            Operation::NativeRead,
+            owner.read_authorized(db, request, access),
+        )
+        .await
     }
     async fn commit(
         &self,

@@ -8,6 +8,7 @@ use crate::{
         self, CommitRequest, CommitResult, CreateRequest, CreateResult, GcResult, Info, Limits,
         PolicyRequest, PolicyResult, ReadRequest, ReadResult,
     },
+    metrics::{self, Operation},
     ownership::root::{Root, Route},
     providers::Connection,
     upload_budget::{UploadRequest, UploadResult, UploadStatus},
@@ -115,12 +116,13 @@ impl Forward {
             return Err(Error::Limit("forwarded request exceeds 1 MiB".into()));
         }
         let token = self.auth.relay(access)?;
-        let peer = self.peer().await?;
+        let peer = metrics::measure(Operation::ForwardDiscovery, self.peer()).await?;
         let mut attempt = Attempt {
             peer: &peer,
             keep_route: false,
         };
-        let result = async {
+        let result = metrics::measure(Operation::ForwardRequest, async {
+            let started = std::time::Instant::now();
             let mut response = peer
                 .client
                 .request(method, format!("http://{}{path}", peer.route.address))
@@ -130,6 +132,15 @@ impl Forward {
                 .body(bytes)
                 .send()
                 .await
+                .inspect_err(|error| {
+                    tracing::info!(
+                        owner = %peer.route.identity.incarnation,
+                        connect = error.is_connect(),
+                        timeout = error.is_timeout(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "forward transport failed"
+                    );
+                })
                 .map_err(anyhow::Error::from)?;
             let status = response.status();
             let mut bytes = Vec::new();
@@ -145,7 +156,7 @@ impl Forward {
                 return Ok(serde_json::from_slice(&bytes).map_err(anyhow::Error::from)?);
             }
             Err(remote_error(status, &bytes))
-        }
+        })
         .await;
         // Overload can precede the destination identity check, so it cannot
         // establish that this cached route is still current.

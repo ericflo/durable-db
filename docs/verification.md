@@ -1265,3 +1265,11 @@ the temporary image and 1,073 physical versions were removed. This is one short
 B2 run, before the local-health patch; AWS, HPA, host loss, peak memory and
 sustained-load qualification remain open. See the
 [completed campaign evidence](evidence/native-recovery-2026-11-11.json).
+
+The serving-delay diagnostics reuse the fixed metric registry for route discovery,
+forwarded requests, native read-lock waits and native read execution. Slow
+operations retain cancellation outcomes; provider operations use their existing
+boundaries. Forward transport failures expose only connect/timeout flags and an
+opaque owner ID. No authority rule, deadline, retry or storage format changes.
+The existing routing/cancellation tests and native TCP regressions exercise these
+boundaries; exact-runtime cloud attribution remains pending for this candidate.

@@ -150,7 +150,8 @@ Largest readback gaps per rollout range from **62.78 to 90.53 seconds**, still
 missing 60 seconds; scale-to-six also misses in the second run. New timing
 evidence separates repeated unavailability from long request waits. Doubling
 recovery concurrency worsened one rollout and was removed. No overall
-availability improvement is established.
+availability improvement is established. Main adds separate timings for route
+discovery, forwarding, read-lock waits and provider work to isolate those delays.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the
