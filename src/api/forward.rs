@@ -1,6 +1,6 @@
 //! One bounded forwarding hop to an advertised native owner. Discovery is a
 //! hint; the receiving backend checks its incarnation and serving permission.
-use super::Backend;
+use super::{Backend, Member};
 use crate::{
     Error, Result,
     auth::{Access, Auth},
@@ -24,7 +24,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, watch};
 
 pub(super) const OWNER_HEADER: &str = "x-durable-db-owner";
 const MAX_RESPONSE: usize = 1024 * 1024;
@@ -38,6 +38,7 @@ pub struct Forward {
     peer: Mutex<Option<Arc<Peer>>>,
     permits: Semaphore,
     pub(super) local_address: Option<SocketAddr>,
+    pub(crate) members: Option<watch::Receiver<Vec<Member>>>,
 }
 struct Peer {
     route: Route,
@@ -72,15 +73,24 @@ impl Forward {
             peer: Mutex::new(None),
             permits: Semaphore::new(capacity),
             local_address: None,
+            members: None,
         })
     }
     async fn peer(&self) -> Result<Arc<Peer>> {
         let mut cached = self.peer.lock().await;
         if let Some(peer) = &*cached
             && peer.usable.load(Ordering::Acquire)
+            && self.members.as_ref().is_none_or(|members| {
+                members
+                    .borrow()
+                    .iter()
+                    .any(|m| m.address == peer.route.address)
+            })
         {
             return Ok(peer.clone());
         }
+        // Health exclusion expires only the cached hint. A fresh observation
+        // may still name that peer; its backend remains the response authority.
         let route = self
             .observation
             .observe()

@@ -441,6 +441,74 @@ async fn delayed_failure_or_cancellation_does_not_clear_a_refreshed_route() {
 }
 
 #[tokio::test]
+async fn excluded_cached_peer_refreshes_before_sending_without_refusing_a_live_hint() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _old = advertised(&provider, address).await;
+    let stalled = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicU64::new(0));
+    let (blocked, count) = (stalled.clone(), calls.clone());
+    let _server = Server::serve(
+        listener,
+        Router::new().fallback(move || {
+            let (blocked, count) = (blocked.clone(), count.clone());
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                if blocked.load(Ordering::SeqCst) {
+                    std::future::pending::<()>().await;
+                }
+                crate::Error::NotFound.into_response()
+            }
+        }),
+    );
+    let (members, view) = tokio::sync::watch::channel(vec![api::Member::from(address)]);
+    let mut forward = Forward::new(&provider.connection("test"), auth(), 1).unwrap();
+    forward.members = Some(view);
+    let access = crate::auth::Access::Administrator;
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::NotFound)
+    ));
+    let reads = provider.reads.load(Ordering::SeqCst);
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::NotFound)
+    ));
+    assert_eq!(
+        provider.reads.load(Ordering::SeqCst),
+        reads,
+        "healthy routes stay cached"
+    );
+
+    // A false suspicion only expires the hint. The fresh root may still name
+    // this reachable owner, so exclusion alone must not refuse its response.
+    members.send_replace(Vec::new());
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::NotFound)
+    ));
+    stalled.store(true, Ordering::SeqCst);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _next = advertised(&provider, listener.local_addr().unwrap()).await;
+    let _replacement = Server::serve(
+        listener,
+        Router::new().fallback(|| async { crate::Error::NotFound.into_response() }),
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), forward.info("app", &access))
+            .await
+            .expect("an excluded cached peer must not consume another response deadline"),
+        Err(crate::Error::NotFound)
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "no stale send or hidden replay"
+    );
+}
+
+#[tokio::test]
 async fn cancelled_stalled_forward_cannot_pin_the_old_route() {
     let provider = Provider::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

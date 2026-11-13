@@ -53,6 +53,12 @@ IdleRetires == s.absent => s.retired
 \* timing and retained-connection packet loss are implementation obligations.
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
+\* Excluding a peer may discard its cached route before the next attempt.
+\* A fresh lookup may still name that peer; membership is neither a response
+\* authority nor proof that a sent mutation aborted. In-flight attempts stay
+\* pinned. Rust checks the membership trigger and the healthy-cache fast path.
+Forget == /\ s.phase = "idle" /\ s.cached # "none"
+          /\ s' = [s EXCEPT !.cached = "none"]
 Takeover == /\ s.route = "old"
             /\ s' = [s EXCEPT !.route = "new", !.permit = FALSE]
 \* An address may be reused by a completely different partition/process.
@@ -84,7 +90,7 @@ Cancel == /\ s.phase = "sent"
           /\ s' = [s EXCEPT !.phase = "cancelled",
                      !.cached = IF Fault = "CancelCache" THEN @ ELSE "none"]
 CancelInvalidates == s.phase = "cancelled" => s.cached = "none"
-Next == Activate \/ Placement \/ Probe \/ ValidationFailure \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
+Next == Activate \/ Placement \/ Probe \/ ValidationFailure \/ Readiness \/ Busy \/ Cancel \/ Lookup \/ Forget \/ Takeover \/ Reuse \/ Move \/ Send \/ Select \/ Serve \/ LoseReply
 TypeOK == s \in [route: {"old", "new"}, endpoint: Owners,
     activated: BOOLEAN, permit: BOOLEAN, cached: Owners \cup {"none"}, expected: Owners \cup {"none"},
     phase: {"idle", "sent", "done", "busy", "cancelled"}, attempts: 0..2, served: Owners \cup {"none"}, pinned: Owners \cup {"none"},

@@ -107,6 +107,7 @@ impl Cluster {
             let connection = directory.lazy_partition(id)?;
             let mut forward = Forward::new(&connection, auth.clone(), config.capacity)?;
             forward.local_address = Some(config.address);
+            forward.members = Some(members.clone());
             partitions.push(Partition {
                 connection,
                 forward: Arc::new(forward),

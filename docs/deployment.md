@@ -164,7 +164,12 @@ for unacknowledged traffic, including reused connections. This is a kernel timer
 not a hard real-time guarantee or a health/ownership signal. Acknowledged requests
 retain their operation deadline; a missing response still leaves writes uncertain.
 The forwarder returns the failure and releases its slot without replaying. Clients
-must retry the identical write identity. See the [transport checks](verification.md#owner-discovery-and-forwarding).
+must retry the identical write identity. Before a new attempt, cluster forwarders
+expire cached routes to peers excluded by the existing health view. A fresh
+storage observation can still route to an excluded peer; health does not grant
+or revoke serving authority. This avoids repeatedly spending the operation
+deadline on a stale cached owner, but cannot cancel an already-sent request.
+See the [transport checks](verification.md#owner-discovery-and-forwarding).
 
 `--concurrency` bounds admitted tenant HTTP requests. Two additional slots are
 reserved for authenticated budget, access-policy, token and metrics operations; these requests
