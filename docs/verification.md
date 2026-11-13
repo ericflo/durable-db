@@ -844,8 +844,12 @@ requests produce two admissions, zero rejections and HTTP 503; unpausing recover
 resumes local service. This changes no authority, deadline or admission limit.
 The unchanged 728-state OwnerRouting model and nine controls pass; socket identity
 and request-slot counts are Rust test obligations, not properties of that model.
-All **376 routine Rust checks**, formatting and strict clippy pass. Exact-runtime
-cloud qualification is pending.
+All **376 routine Rust checks**, formatting and strict clippy pass. The exact
+v0.24.17 binary recovers 749 acknowledged B2 writes through scaling, two rollouts
+and cold restart; versioned MinIO membership also passes. Direct rollout gaps are
+52.11s / 74.31s, and 429s remain. This qualifies the functional change in those
+fixtures, not all refusal paths or a production latency bound. See the
+[measured results](verification-results.md).
 
 `Root::advertise` binds an optional socket address to a fresh ownership incarnation in its existing control record. An open observation is a route hint, never serving permission. `api::Forward` caches one route for an explicitly selected partition and sends one authenticated HTTP attempt. The receiving backend checks the incarnation before dispatch; ordinary policy checks and fresh writer-permit validation remain mandatory. Tenant claims keep their expiry, policy generation and revocation identity. Administrator forwarding uses a signed 60-second token, never the signing-key bearer. The forwarder refuses redirects, disables transport retries/proxy inheritance, bounds concurrency and bytes, and clears only the failed cache instance. Readiness indicates the forwarding process's admission state, not owner availability. Deployment still needs a trusted private peer network or transport mesh and a shared signing-key ring.
 

@@ -1,5 +1,62 @@
 # Verification results
 
+## Refuse self-forwarding during recovery (v0.24.17, 2026-11-13)
+
+Activation can publish an owner's address before local recovery installs its
+backend. Cluster forwarders now refuse that address before opening an HTTP
+connection or caching it. The caller receives unavailable, without consuming a
+second tenant request slot. No authority, admission limit, deadline or format
+changes. A real paused-acquisition regression fails on the old path with HTTP
+429 and passes in **0.05s** with one or two tenant slots: two requests produce
+two admissions and zero rejections, then local service resumes after recovery.
+All **376 routine Rust checks**, formatting and strict clippy pass. OwnerRouting
+retains **728 states** and nine fault controls; socket identity and slot use
+remain implementation obligations, not new model properties.
+
+[Woodpecker 339](https://ci.eflorenzano.com/repos/18/pipeline/339/1) builds the exact
+static binary from `285cc59` and checks audits, models, client/Pi contracts and
+both budget formats' 10,005-entry capacity fixtures. Standalone installation,
+transactions, export/restore and kill/reopen pass. Versioned MinIO passes the
+membership/recovery fixture in **40.37s**; its bucket, container and **68 versions**
+are removed.
+
+B2 runs the unchanged three-host, 16-partition, four-writer profile through
+1→3→6, two rollouts, zero compute and cold restart. All **749 acknowledgements,
+verified readbacks and recovered keys** pass the independent four-history check.
+
+| Observation | v0.24.16 | v0.24.17 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 / 2 | 57.56s / 49.21s | 52.11s / 74.31s |
+| Whole-rollout progress bound, rollout 1 / 2 | 98.74s / 108.93s | 103.73s / 115.44s |
+| Scale to three / six | 16.20s / 21.72s | 24.98s / 40.69s |
+| Cold recovery after API readiness | 58.61s | 43.53s |
+
+One direct gap and both whole-rollout bounds miss 60s. The recorded acknowledged
+write/readback RPCs still contain **153 HTTP 429 responses**, versus 119 in the
+preceding 651-acknowledgement run. These different histories do not establish
+an overall latency or refusal-rate improvement. The second rollout's largest
+gap contains a **73.97s commit**, including **30.50s backoff** after 9 overload
+and 26 unavailable responses. The first includes **50.07s after acknowledgement**,
+with 27.57s in read requests and 22.50s of backoff. Separate boundaries and samples
+cannot be added into one critical path. Completed gaps include the preceding
+readback; unfinished gaps are right-censored.
+
+The namespace is removed. Physical cleanup lost a connection; a fresh pass
+removed the remaining **1,201 versions**, scoped key and bucket. The initial
+pass's completed-deletion count is unknown. The campaign passed; its wrapper
+exited during that cleanup error, followed by the independently successful retry.
+
+A separate virtual-time probe reproduces a remaining publication wait: a second
+replica publishes the exact proposal, but its caller stays blocked for two seconds
+behind its already-admitted helper's comparison. Releasing that comparison lets
+it confirm the existing receipt. This identifies a possible optimization, not
+the cause of every cloud wait. Next keep bounded receipt confirmation available
+after helper admission. Removed the redundant self HTTP hop, temporary probe
+and ten TLC scratch directories. The existing
+[evidence record](evidence/native-recovery-2026-11-11.json) pins source, artifact,
+workload and reports. Broader failures, AWS, sustained performance, memory and
+public multitenancy remain unqualified.
+
 ## Overlap ordered journal discovery (v0.24.16, 2026-11-13)
 
 Recovery now overlaps four journal GETs after the first epoch probe. It consumes
