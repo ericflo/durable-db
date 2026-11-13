@@ -138,6 +138,7 @@ await mkdir(new URL('evidence/', out), { recursive: true });
 for (const file of [
   'requested-recovery-2026-11-13.json',
   'recovery-slots-2026-11-13.json',
+  'handoff-yield-2026-11-13.json',
   'release-1.0.0-2026-11-13.json',
   'release-0.2.0-2026-11-10.json',
   'release-0.3.0-2026-11-10.json',

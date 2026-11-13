@@ -1,5 +1,67 @@
 # Verification results
 
+## Handoff staging yields once to queued work (2026-11-13)
+
+**v1.0.3**, the exact `fae7dee` artifact from Woodpecker **394**, recovers every
+acknowledged write in two unchanged B2/Kubernetes scale-down campaigns on the
+existing hosts. Both use the same harness, transport, retries and configuration
+as the preceding v1.0.2 sample:
+
+| Release / run | Acknowledged writes recovered | Largest scale-down readback gap | Cold progress bound after readiness |
+| --- | ---: | ---: | ---: |
+| v1.0.2 reference | 393 / 393 | 54.67s | 44.13s |
+| v1.0.3 first | 410 / 410 | 68.44s | 47.16s |
+| v1.0.3 repeat | 415 / 415 | 41.96s | 43.47s |
+
+**The first candidate run misses the 60-second scale-down target.** All four
+independent histories pass in each run, including identity, invocation order,
+value hashes and recovered totals after every API process is replaced. Both cold
+bounds meet 120 seconds. The first run includes failed object PUTs lasting about
+11 seconds and a 25-second request timeout; the repeat has no such failures in
+the collected scale-down slow-operation trace. These observations do not isolate
+the cause of variation or establish a general speedup, sustained performance or
+an SLO. Both results remain in the evidence.
+
+The earlier 13.42-second successful commit coincided with a newly ready owner's
+immediate **5.57-second handoff checkpoint**. The worker now lets queued work
+interrupt optional staging before publication, once per owner. Required capacity
+checkpoints and publication still finish without interruption. The held command
+keeps its original admission permit; spent upload credit and retry pacing remain
+in force. Late immutable uploads are handled by existing collection. A busy queue
+cannot repeatedly cancel maintenance. There is no extra task, projection, serving
+authority or storage-format change.
+
+The real HTTP regression pauses an already-written immutable table, checks that
+the queued write completes, then holds the retry and verifies that repeated
+traffic cannot cancel it again. It also checks that required checkpoints block,
+the final cut includes the new revision, and exact retries return the saved
+result. The old worker fails in **1.04s**; an unlimited-yield variant fails the
+maintenance assertion in **1.02s**. All **15 focused HTTP checks pass in 1.35s**,
+with formatting and strict Clippy. Woodpecker passes the full Rust/client/Pi,
+audit, capacity and formal checks; the downloaded static archive independently
+passes exact retries, ordered reads, export/restore and kill/reopen.
+
+The existing `LiveTransactions` cancellation transition covers this change;
+its **19,220 distinct states**, depth 21, nine safety fault controls and staging
+read-reachability control pass. No new model or transition is added. Scheduling,
+funding and cancellation details remain implementation obligations covered by
+the adversarial tests, not a proof of the Rust implementation.
+
+One fixed `native_prepare` measurement separates worker preparation, including
+authorization and admission funding, from queue waiting and journal upload.
+The repeat's worst gap contains **9.20s in requests** and **32.51s in backoff**;
+its longest commit attempt succeeds after **6.00s**. Other successful commits
+still take about 12 seconds in the server trace. Recovery/refusal time and
+preparation/publication costs remain the next targets; blanket deadline cuts
+would turn valid writes into uncertain outcomes.
+
+[Exact artifacts, both campaigns, timing, model bounds and cleanup](evidence/handoff-yield-2026-11-13.json)
+retain the missed target. The existing worker wait and stale verification prose
+are replaced; eleven generated model-state directories and a superseded
+pre-provisioning wait directory are removed. Both campaigns' disposable
+namespaces, buckets, scoped keys and **2,482 physical object versions** are
+removed. The scoped 1.0 support contract is unchanged.
+
 ## Recovery slots stay available for requested retries (2026-11-13)
 
 **v1.0.2**, the exact `4e8b32f` artifact from Woodpecker **390**, passes the

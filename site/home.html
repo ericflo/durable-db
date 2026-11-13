@@ -131,7 +131,7 @@ curl http://127.0.0.1:7654/v1/databases/demo/read \
 <div class="stats">
 <a href="verification-results.html#initial-release-2026-11-08"><strong>36.3M</strong><span>distinct states checked in the shared-page cluster model</span></a>
 <a href="proof-publication.html"><strong>35</strong><span>obligations in an unbounded TLAPS proof of abstract page reachability</span></a>
-<a href="verification-results.html#recovery-slots-stay-available-for-requested-retries-2026-11-13"><strong>54.67s</strong><span>largest scale-down readback gap on v1.0.2; 57.20s in the fresh v1.0.1 run. Both recovered every acknowledged write and met the fixture target. Short samples; no SLO.</span></a>
+<a href="verification-results.html#handoff-staging-yields-once-to-queued-work-2026-11-13"><strong>68.44s</strong><span>largest scale-down readback gap on v1.0.3; an unchanged repeat measured 41.96s. Both recovered every acknowledged write; the first missed the 60s target. Short samples; no SLO.</span></a>
 <a href="verification-results.html#directory-capacity-at-100005-entries"><strong>100,005</strong><span>databases in the directory capacity check, every head reopened without a cache</span></a>
 </div>
 <p class="caveat">Bounded model checking is not a proof of the Rust implementation or of every deployment. The <a href="verification.html">verification record</a> lists every assumption, checked bound and remaining obligation.</p>
