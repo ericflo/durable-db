@@ -362,6 +362,18 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     && node -e 'const fs = require("node:fs"); const artifacts = fs.readFileSync("/tmp/native-tests.json", "utf8").trim().split("\n").map(JSON.parse); const test = artifacts.find(a => a.executable && a.target.name === "durable_db" && a.profile.test); if (!test) throw Error("missing native test executable"); fs.copyFileSync(test.executable, "/test-tools/native-tests");' \
     && strip --strip-debug /test-tools/native-tests && kache stats
 
+# Application-only edits must not invalidate the Rust checks/build layer.
+# This stage still tests against the executable built from this exact source.
+FROM rust-check AS client-check
+COPY examples examples
+COPY clients clients
+COPY scripts/test-client.sh scripts/test-client.sh
+COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
+COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
+RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
+    && DURABLE_DB_TEST_ADMISSION_BYTES=1073741824 /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
+    && mkdir -p /checks && touch /checks/javascript.passed
+
 # Finish the client contract before optimized compilation can contend for CPU.
 # Only its success marker enters this stage, not application source/dependencies.
 FROM rust-check AS build
@@ -375,17 +387,6 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     && mkdir -p /out \
     && cp /cache/target/x86_64-unknown-linux-musl/release/durable-db /out/durable-db \
     && /out/durable-db --version && kache stats
-# Application-only edits must not invalidate the Rust checks/build layer.
-# This stage still tests against the executable built from this exact source.
-FROM rust-check AS client-check
-COPY examples examples
-COPY clients clients
-COPY scripts/test-client.sh scripts/test-client.sh
-COPY scripts/benchmark-http.mjs scripts/benchmark-http.mjs
-COPY scripts/test-benchmark.mjs scripts/test-benchmark.mjs
-RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
-    && DURABLE_DB_TEST_ADMISSION_BYTES=1073741824 /test-tools/native-tests --exact ownership::root::tests::http::native_http_javascript_contract --ignored --nocapture \
-    && mkdir -p /checks && touch /checks/javascript.passed
 
 FROM build AS assembled
 COPY --from=autoscaling-check /checks/autoscaling.passed /out/checks/autoscaling.passed
