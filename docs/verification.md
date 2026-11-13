@@ -180,7 +180,12 @@ formatting and strict clippy pass. `PublicationCombining` retains **1,736,213 st
 15,818,936 generated, depth 25, six unsafe mutations and two coverage controls.
 The receipt coverage now requires that the busy helper holds that same proposal
 at acknowledgement. These are bounded component checks, not Rust or composition
-proofs. Exact-runtime cloud qualification is pending.
+proofs. The exact v0.24.18 static binary passes the existing B2/Kubernetes
+campaign with all 705 acknowledgements and readbacks recovered, plus versioned
+MinIO membership/recovery. Sampled logs contain 71 confirmations after helper
+admission. Direct rollout gaps are 67.49s / 32.62s; the first misses 60s, and
+both whole-rollout bounds miss. These runs do not establish a net performance
+or request-cost improvement. See the [measurements](verification-results.md).
 
 `queued_receipt` and `helping_receipt` distinguish the observer's completion point.
 Their zero attempt/preparation/comparison fields describe observation work only;

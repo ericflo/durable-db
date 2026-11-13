@@ -21,7 +21,7 @@ scrape_configs:
       - targets: [durable-db.internal:7654]
 ```
 
-Configure the deployment's actual service discovery and TLS endpoint; the example alone does not install monitoring. Metrics credentials share a distinct bounded admission allowance. Filling the tenant admission table does not prevent the fixed administrator and metrics principals from creating their entries. Global request capacity remains shared, so this is not a guarantee of metrics availability under every overload.
+Configure the deployment's actual service discovery and TLS endpoint; the example alone does not install monitoring. Metrics and administrative control requests share two reserved process slots, separate from tenant data capacity, and retain their own per-principal limits. Filling the tenant admission table does not prevent these fixed principals from creating entries. This reserve does not guarantee metrics availability during provider failures, shutdown or every overload.
 
 Metrics use fixed operation, outcome, and event names. They contain no database names, object paths, keys, values, tokens, or provider response messages. All series have bounded cardinality. Counters reset when the process restarts; aggregate `rate` or `increase` across replicas rather than subtracting counters across restarts.
 
@@ -62,8 +62,12 @@ incarnation after activation succeeds. The same owner ID links the following fix
 
 Shared-publication logs additionally record `reused_pages` on helper attempts.
 It means a completed directory upload survived a metadata-only comparison
-conflict; it does not mean the comparison was skipped. Queued-receipt events
-have no staged directory. Older samples omit this field.
+conflict; it does not mean the comparison was skipped. `queued_receipt` confirms
+the exact proposal before helper admission; `helping_receipt` confirms it after
+admission and cancels redundant local helping. Their zero attempt/preparation/
+comparison fields describe the observer only. An interrupted admitted helper may
+already have uploaded pages or issued a conditional write; do not treat those
+zeroes as its cost or refund its funding. Older samples omit `reused_pages`.
 
 Progress timestamps are cumulative monotonic elapsed milliseconds within one
 call; subtract adjacent values from that call for stage duration. Catalogue

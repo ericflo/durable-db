@@ -1,5 +1,73 @@
 # Verification results
 
+## Confirm receipts during helper work (v0.24.18, 2026-11-13)
+
+One receipt observer now spans queueing and admitted helper work. An exact
+published pointer can cancel redundant helping; helper completion cancels a
+stalled probe. The allowance remains **eight attempts per invocation**, spaced
+by one second, with one probe in flight per shared connection; admission does
+not reset it. Already issued writes retain their original target/fence checks,
+and spent upload credit is never refunded. Longer uncontended helpers may spend
+extra observation reads inside that cap. No authority, format or deadline change.
+
+Five focused checks pass in **0.03s**, including stalled comparisons, lost
+replies, unavailable/superseded pointers, cancellation and allowance continuity.
+Restoring the old observer or allowing a ninth probe fails its regression. All
+**377 routine Rust checks**, formatting and strict clippy pass. The existing
+PublicationCombining model checks **1,736,213 states**, six unsafe mutations and
+two coverage controls. Receipt coverage now requires that the busy helper holds
+the exact acknowledged proposal. These finite checks do not prove Rust or
+protocol composition. Removed the admission-only observation restriction,
+obsolete assertions/guidance, temporary checkout, patch and TLC scratch data.
+
+[Woodpecker 342](https://ci.eflorenzano.com/repos/18/pipeline/342/1) verifies the
+static binary from `d4170d0`, audits, models, client/Pi contracts and both
+10,005-entry capacity fixtures. Standalone installation, transactions,
+export/restore and kill/reopen pass. Versioned MinIO membership/recovery passes
+in **40.25s**; its container, bucket and **68 versions** are removed.
+
+B2 uses the unchanged three-host, 16-partition, four-writer profile: 1→3→6,
+two rollouts, zero compute and cold restart. All **705 acknowledgements,
+verified readbacks and recovered keys** pass the independent four-history check.
+
+| Observation | v0.24.17 | v0.24.18 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 / 2 | 52.11s / 74.31s | 67.49s / 32.62s |
+| Whole-rollout progress bound, rollout 1 / 2 | 103.73s / 115.44s | 120.33s / 96.10s |
+| Scale to three / six | 24.98s / 40.69s | 15.61s / 16.11s |
+| Cold recovery after API readiness | 43.53s | 48.14s |
+
+One direct gap and both whole-rollout bounds miss 60s. The first gap contains
+**28.97s committing** and **38.27s after acknowledgement**, with 33 unavailable
+responses and **24.01s total backoff**; no overload response appears in those
+two RPCs. The second contains **32.16s after acknowledgement**, including
+**28.53s backoff** after eight overload and 25 unavailable responses. Recorded
+acknowledged write/readback RPCs contain **136 HTTP 429s**, versus 153 in the
+preceding 749-write run; controls are excluded. Different histories do not
+establish a net latency, refusal-rate or request-cost improvement. Completed
+gaps include the preceding readback; unfinished gaps remain right-censored.
+
+Bounded logs capture **71 confirmations after helper admission**, up to 5.68s
+whole-call elapsed, and 14 while queued. The longest complete normal helper
+call is **6.06s**. Separate complete-call maxima are **6.40s activation**,
+**11.03s selection** and **14.48s checkpoint**. Missing/rotated logs and interrupted
+helper work prevent treating these as population maxima or one critical path.
+Observer trace zeroes do not mean its cancelled helper incurred no cost.
+
+The namespace, scoped B2 key, bucket and **1,673 versions** are removed; the
+qualification wrapper exits successfully. Its disposable-bucket cleanup helper
+now re-lists after interrupted batches, stopping after three consecutive failed
+batches. Before-delete failure, lost deletion replies and permanent failure are
+checked locally. This helper change does not qualify production collection.
+
+Source inspection identifies the next small experiment: shutdown closes
+admission but can keep accepting connections during up to five seconds of route
+withdrawal. Test stopping HTTP acceptance concurrently with withdrawal, then
+qualify the remaining refusal and owner-recovery delays. This is not attribution
+of the measured gaps. The existing [evidence record](evidence/native-recovery-2026-11-11.json)
+pins source, binary, workload and reports. Broader failures, AWS, sustained
+performance, memory and public multitenancy remain open.
+
 ## Refuse self-forwarding during recovery (v0.24.17, 2026-11-13)
 
 Activation can publish an owner's address before local recovery installs its

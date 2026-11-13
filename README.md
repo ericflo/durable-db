@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.17. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.18. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,15 +142,14 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.17 prevents a recovering owner from forwarding requests to itself and
-consuming another tenant request slot. The exact binary recovers all **749
-acknowledged writes** on B2 through scaling, two rollouts, total compute loss and
-cold restart. Direct rollout readback gaps are **52.11s / 74.31s**; one misses the
-60-second target, and overload responses remain. Scale-up and cold recovery meet
-their targets; whole-rollout bounds still miss. This removes a reproduced refusal
-path, without establishing an overall availability improvement or SLO.
-Main also keeps bounded receipt confirmation active during helper work; local
-checks pass, with exact-runtime cloud qualification pending.
+v0.24.18 confirms exact publication receipts during helper work, within the
+existing eight-probe allowance. It retains v0.24.17's refusal of self-forwarding
+during recovery. The exact binary recovers all **705 acknowledged writes** on B2
+through scaling, two rollouts, total compute loss and cold restart. Direct rollout
+readback gaps are **67.49s / 32.62s**; one misses the 60-second target. Scale-up and
+cold recovery meet their targets; whole-rollout bounds still miss, and 429/503
+responses remain. Logs capture 71 confirmations after helper admission. These
+short, different-history samples do not establish an overall improvement or SLO.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the
