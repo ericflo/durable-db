@@ -1,92 +1,48 @@
 # Production readiness
 
-**Release decision: not ready for production.** v0.24.26 is the latest experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
+**1.0 release candidate: qualification in progress.** The latest published release is v0.24.26. The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
-The production release must retain one installable executable, directory-backed laptop development, and Kubernetes deployments on the existing hosts that scale down to one node. A special clock/compute profile is not an acceptable substitute. Cluster data stays authoritative in B2 or S3 through one common storage algorithm, with bounded disposable caches and automatic maintenance. Performance, tenant protection and correctness are joint acceptance criteria.
+## Supported 1.0 scope
 
-This document tracks the gates for the first production release. A gate closes only with reproducible evidence tied to a commit and configuration. A design, a passing happy-path test, or a successful deployment is not sufficient. The [verification record](verification-results.md) separates completed experiments from planned qualification.
+- One static Linux x86_64 executable; directory-backed laptop development and native serving on ordinary Kubernetes hosts, scaling down to one replica. No calibrated clock, special VM profile, external consensus service or persistent API-node disk is required.
+- One dedicated B2 bucket per deployment, containing many logical databases. B2 remains authoritative; bounded memory and optional local-disk caches are disposable. The common S3 implementation remains available, with MinIO integration coverage; AWS production qualification is deferred.
+- Atomic revision-checked transactions, exact retries within the bounded receipt window and ordered snapshot reads/scans within one database. Cross-database transactions are outside the API contract. Existing key, value, request and database limits remain enforced.
+- Database-scoped, revocable capabilities, administrator-only provisioning, logical quotas, bounded admission and cumulative upload funding. These protect access and limit work; they are not fair billing or availability isolation between hostile tenants. Keep all databases in one administrative trust domain.
+- Automatic checkpoints and physical collection. Upload ceilings require operator funding; deletion does not refund cumulative allowances. Reads, control traffic and egress are not capped by the immutable-upload ceiling.
+- Manual consistent export, archive inspection and verified resumable restore into a fresh destination. Pause application writes for a reliable export window, store the archive under independent protection, and verify restoration before routing traffic. No scheduled backup, continuous PITR or restore-time SLO is promised.
 
-## Contract to qualify
+Use trusted private networking for peer traffic and TLS at application ingress. Keep signing keys and provider credentials on servers. Do not configure external lifecycle expiration on database objects. Set Kubernetes CPU/memory limits, concurrency and maximum replica count together. In-process cache budgets are not an RSS ceiling. See [deployment](deployment.md), [security](security.md), [recovery](recovery.md) and [API bounds](api.md#errors-and-bounds).
 
-The initial contract is atomic, revision-checked transactions and ordered scans within one database. Acknowledged writes must survive the loss of every API process and cache. Uncertain writes require identical retries; the recent receipt window is bounded. Cross-database transactions are outside this contract.
-
-Current per-database limits are 256 MiB, 1,000,000 keys, with smaller request and rewrite budgets. Large database counts and high active throughput are different requirements. The directory has been tested at 100,005 entries with sequential insertion, periodic collection, pagination, and an uncached reopen of every head. Concurrent HTTP provisioning and collection at that population, and a declared active workload, remain capacity gates. This synthetic-provider result is not a cloud capacity guarantee.
-
-Total databases, active databases, peak read/write arrival rates, value sizes, contention, and p99 latency targets must be recorded before choosing a production topology. Measure B2 first, then AWS S3, using the same implementation and workload. Include physical object versions, provider calls, and bandwidth when estimating cost. A laptop-to-cloud measurement is not a regional Kubernetes SLO.
-
-The first production release needs automatic, independently stored backups with a declared backup interval, retention bound and measured restore time. Continuous point-in-time recovery and a 30-day history are optional later features, not requirements of the original brief. Neither is currently implemented or promised.
+A logical directory has been tested at 100,005 entries; this is not a promise of 100,005 simultaneously active databases. The short cloud campaigns are four sequential writers. No p99 latency, throughput or availability SLO is declared. Capacity-test the intended workload before admitting it; published measurements retain their exact scope and failures.
 
 ## Remaining production gates, in order
 
-The critical path is qualifying clustered recovery and performance. The native cloud cutover is implemented; membership churn, collection and provider failures must now meet a declared operating envelope. A release number is not a readiness measure. Close usable end-to-end capabilities, use focused checks during development, and run full qualification when a capability is ready.
+The target is a release in hours, not completion of every long-term feature. A data-loss, authorization or bounded-resource failure blocks release. A missed engineering latency target remains visible and motivates later work; it is not converted into an SLO or silently removed from the evidence.
 
-Sizes describe remaining engineering scope: **medium** means a few focused implementation and validation changes; **large** means substantial integration and a failure campaign. They are estimates, not calendar delivery promises. Gate 1 now qualifies the integrated native cloud CLI, DNS membership and bounded residency on the existing hosts.
+1. **Close the worker-loss durability check.** Kill a whole disposable Kubernetes worker, including kubelet and its database processes; keep the remaining workers serving from B2, return the worker, remove all API processes and verify every acknowledged write. The existing-host campaign separately records direct scale-down gaps. Containerized workers share a host kernel; physical power and rack-loss qualification are deferred.
+2. **Review the actual supported boundary.** Keep exact-retry, authorization, quota/admission, corruption, collection, export/restore and failure tests green. Existing small TLA+ models and negative controls, plus abstract publication/journal proofs, remain required. They are not a composed proof of the entire protocol or of Rust. Review the changed release path; comprehensive independent review is deferred.
+3. **Ship the checked artifact and operating instructions.** Run kache/Woodpecker audits and release checks, verify the downloaded binary and installer, publish the supported scope and measured limits, and remove all disposable qualification resources. Experimental-version migration uses export/restore; mixed-version rolling upgrades are not a 1.0 guarantee.
 
-| Order | Gate and rough size | What must be true for 1.0 |
+## Changes to the previous six-gate plan
+
+| Previous gate | Required for this 1.0 | Deferred |
 | --- | --- | --- |
-| **1** | **Native clustered serving — medium to large** | Repeated v0.24.25 B2 isolation campaigns meet the 60-second gap target. With cached-route expiry, v0.24.26 host-local process pause, return and rollout maxima are 54.41s / 26.86s / 44.30s. The scale-down controller bound is still 90.63s; direct gap measurement comes next. Physical power loss and node-controller replacement remain distinct checks. Memory and funded administration remain open. These short runs establish no SLO. [Measurements and failed runs](verification-results.md). |
-| **2** | **Tenant isolation and lifecycle — medium to large** | Finish charging administrative work and retries, reduce unused tenant-credit loss across handoffs, bound creation/request/egress costs across replicas, and prevent an exhausted tenant from stopping funded neighbors' ordinary operation. Verify credential rotation/revocation, tenant deletion and data isolation. Existing logical quotas and durable admission/reserve funding cover only part of this. |
-| **3** | **Automatic maintenance and recovery — medium** | Bound growth of every physical object class, including registrations and catalog headers; qualify large-image cleanup and concurrent readers. Schedule bounded backups to independently protected storage, recover interrupted jobs and demonstrate restore after source loss. The retained checkpoint/export primitives already exist. |
-| **4** | **Performance and autoscaling qualification — large, plus a 72-hour run** | Declare workload and latency/throughput targets, then measure the native serving path on B2 and AWS S3 using the same algorithm. Exercise Pi and web-app workloads, contention, provider failures, scale up/down, rolling replacement and whole-host loss. Check histories, memory, object growth and cost throughout a sustained run. Earlier shared-engine tests do not qualify the replacement. |
-| **5** | **Composed correctness and security review — large** | Connect the TLA+ ownership, journal, transaction, admission, retention and collection arguments under explicit provider/platform assumptions. Keep bounded checks and negative controls small; verify the implementation's corresponding boundaries with adversarial tests. Resolve independent protocol and tenant-isolation review findings. Do not present bounded exploration as an unbounded proof or as a proof of Rust. |
-| **6** | **Operational release — medium** | Verify installation, supported-version upgrades, interruption/rollback or export/restore, alert delivery and operator recovery procedures on the existing Kubernetes hosts. Keep dependency audits, kache/Woodpecker builds, checked release artifacts, README and Pages current. Publish the supported operating envelope and remaining exclusions. |
+| 1. Clustered serving | Existing-host scaling/recovery and whole Kubernetes worker loss, with histories and cold readback | Exhaustive topology tests, physical power/rack loss, permanent-partition availability and availability SLOs |
+| 2. Tenant isolation | Access controls, logical quotas and bounded work within one trust domain | Mutually untrusted tenant hosting, complete administrative attribution, fair shared-maintenance progress and billing isolation |
+| 3. Maintenance/recovery | Automatic checkpoint/collection and verified manual export/restore | Backup scheduling/orchestration, continuous PITR and broad large-image retention campaigns |
+| 4. Performance | Publish current measurements, costs/bounds and missed targets honestly | The 72-hour soak, AWS production qualification and throughput/p99 commitments |
+| 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
+| 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-The next engineering targets for the existing four-writer failure fixture are
-**60 seconds for every writer to resume acknowledged/read-back progress after
-single-process loss or a replica change**, and **120 seconds after a cold API
-process becomes ready following total compute loss**. These are targets to test,
-not achieved SLOs. Measure from fault injection or readiness to each writer's
-progress, separately from budget inspection and diagnostic collection. Provider
-outage recovery starts when connectivity is restored; the outage duration must
-also remain visible. Broader production targets still need a declared workload,
-region, provider conditions and repeatability.
+These remain follow-up work, not discarded goals. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
-The current harness retains its outer 180-second identical-request retry limit
-and 240-second readiness/progress checks, with two further verified readbacks
-from every writer before each next fault. Passing those ceilings alone does not
-meet the engineering targets. New reports record controller-monotonic upper bounds from the fault command
-(or cold readiness) to two further readbacks per writer after readiness. They
-include readiness and polling delay, exclude subsequent budget/diagnostic work,
-and report target attainment separately from campaign success. Earlier
-phase-to-phase durations include diagnostics and are not direct measurements
-of the new targets.
+## Qualification interpretation
 
-An upper bound below the target establishes that fixture's progress within the
-target. A bound above it is inconclusive: serial pod replacement and delayed
-polling can inflate the bound while writers continue serving. Use the direct
-per-writer readback gaps below to assess observed silence during a rollout;
-retain the controller bounds as separate rollout/recovery diagnostics.
+[Verification results](verification-results.md) retain passing and failed campaigns. Direct readback windows use the workload's monotonic clock and per-writer counters. They include the largest completed gap and the right-censored unfinished gap at close. Controller bounds include readiness/polling delays and are separate diagnostics; a bound over 60 seconds does not alone establish a 60-second service gap.
 
-Schema 2 records each successful readback only after validating its revision
-and value. Rollout, peer-isolation, host-process pause/resume and scale-down windows use the workload's own monotonic clock and per-writer
-counters. The independent checker reports the largest completed readback gap
-per writer, including the last readback before the window, and the unfinished
-gap at window close. That final gap is right-censored: later silence is unknown.
-The windows end before subsequent diagnostics. These observations do not compare
-clocks across hosts or attribute all delay to the rollout. Older schema 1
-histories remain checkable but cannot supply verified readback timings.
+The engineering targets remain 60 seconds for each writer to resume after a replica change or single failure, and 120 seconds after API readiness following total compute loss. The harness keeps its outer 180-second identical-request retry limit and 240-second readiness/progress checks. These are fixture targets, not production commitments. Acknowledged data recovery is mandatory even when a timing target is missed.
 
-The host-process fixture stops every database process placed on one host while
-retaining its pod identities and DNS records, then resumes those same processes.
-Its two readback windows include the fault or resumption through verified progress
-from every writer. The host kernel, kubelet and unrelated services stay running;
-this does not qualify physical power loss or node-controller replacement.
-
-Gate 1 now follows [revocable writer permits](design-owned-partitions.md#revocable-writer-permits): fresh per-writer object validation, permanent revocation before journal recovery, no bounded-clock assumption and no bucket-wide conditional update for ordinary requests. The ownership, routing, layout and residency models establish separate bounded properties; their composition and implementation correspondence remain open. The integrated CLI has completed per-writer handoff, provider-interruption and cold-replacement checks on B2. Repeatability, host failures and declared latency/concurrency targets remain decisive checks. Restricted-profile and ClockBound findings remain [fallback evidence](design-owned-partitions.md#serving-authority-remains-the-central-decision); they do not narrow the required hosts.
-
-Gate 5 starts with every protocol change and reviews the integrated result; it is not a postponed proof-writing phase. The [verification record](verification.md) and [results](verification-results.md) retain the detailed checked bounds, negative controls, provider observations and unfinished obligations. Existing evidence includes native local recovery, native HTTP B2/MinIO tests with revocable permits and independent partitions, historical clock experiments, older-engine Kubernetes/physical-host campaigns, and standalone release tests. Those scopes remain distinct.
-
-## Scope that can wait until after 1.0
-
-These are recommended deferrals within the original brief, not claims that they are implemented:
-
-- **Continuous PITR, a 30-day history and arbitrary historical queries.** Keep scheduled retained backups, bounded retention and tested restore in 1.0.
-- **Additional binary platforms.** Additional architectures and operating systems may follow the existing Linux x86_64 binary/local-directory path. Supporting the existing Kubernetes hosts, including pause and replacement safety without special clock hardware, cannot be deferred.
-- **Exposing key/range validation in the public API.** Keep the existing per-database revision transaction contract initially; independent databases must still scale and meet the declared performance target.
-- **A complete mechanized proof of the Rust program.** The brief calls for a TLA-based correctness argument from the start. Composed protocol reasoning, explicit assumptions, negative controls and implementation validation remain gates; full source-language refinement is separate research work.
-- **Optional packaging and presentation breadth.** Extra package-manager channels, a hosted dashboard and additional deployment examples can follow. Keep the single-file installer, dependency checks, usable documentation and basic operational tooling.
-
-Correctness, meaningful performance, one-node/laptop operation, shared B2/S3 storage semantics, tenant protection, automatic maintenance, Kubernetes scaling, and clear docs remain required. None is traded away to label a release production-ready.
+Native ownership uses [revocable writer permits](design-owned-partitions.md#revocable-writer-permits): fresh object validation and predecessor revocation before recovery, without a bounded-clock assumption. Historical shared-engine and restricted-clock results do not qualify this serving path. [Verification](verification.md) records each current model's bounds, assumptions and unfinished composition obligations.
 
 ## Reproducible load baseline
 

@@ -12,6 +12,27 @@ import {setTimeout as sleep} from 'node:timers/promises';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const windowName = 'rolling-replacement-1';
 
+test('worker faults refuse production contexts, control planes and mismatched identities', () => {
+  const result = spawnSync('python3', ['-c', `
+import copy,runpy
+validate=runpy.run_path('scripts/qualify-multinode.py')['kind_worker']
+cluster='durable-db-test-0123456789';name=cluster+'-worker'
+node={'metadata':{'name':name},'status':{'addresses':[{'type':'InternalIP','address':'172.20.0.2'}]}}
+container={'Id':'a'*64,'Name':'/'+name,'Config':{'Labels':{'io.x-k8s.kind.cluster':cluster,'io.x-k8s.kind.role':'worker'}},'State':{'Running':True},'NetworkSettings':{'Networks':{'kind':{'IPAddress':'172.20.0.2'}}}}
+assert validate('kind-'+cluster,node,container)['container_id']=='a'*64
+cases=[('epsilon',node,container)]
+for path,value in [(('Config','Labels','io.x-k8s.kind.cluster'),'production'),(('Config','Labels','io.x-k8s.kind.role'),'control-plane'),(('Name',),'/another-worker'),(('Id',),'short'),(('State','Running'),False),(('NetworkSettings','Networks','kind','IPAddress'),'172.20.0.3')]:
+    changed=copy.deepcopy(container);p=changed
+    for key in path[:-1]:p=p[key]
+    p[path[-1]]=value;cases.append(('kind-'+cluster,node,changed))
+for context,node,container in cases:
+    try:validate(context,node,container)
+    except ValueError:continue
+    raise AssertionError('Unsafe worker fault accepted')
+`], {encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test('direct ingress observations use fresh sockets, validate reads and bound stalled peers', {timeout: 10000}, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'durable-db-ingress-'));
   t.after(() => rm(directory, {recursive: true}));
@@ -90,7 +111,7 @@ test('checker measures verified readbacks, rejects broken evidence, and preserve
   assert.deepEqual(window.readbacks, [2, 2, 2, 2]);
   assert.equal(window.observed_within_target, false);
   for (const name of ['asymmetric-peer-isolation', 'symmetric-peer-isolation',
-    'one-host-process-pause', 'one-host-processes-resumed', 'scale-one']) {
+    'one-host-process-pause', 'one-host-processes-resumed', 'scale-one', 'worker-loss', 'worker-return']) {
     const fault = structuredClone(report);
     fault.phases = [{name: `${name}-start`, readback_window: name}];
     fault.readback_windows[0].name = name;

@@ -1,6 +1,6 @@
 [package]
 name = "durable-db"
-version = "0.24.26"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"

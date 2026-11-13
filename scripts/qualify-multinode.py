@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Run bounded recovery and peer/provider network faults in a new test namespace.
 
-Never drains/reboots hosts or edits cluster-wide objects. Requires an existing
-cluster, immutable database image, dedicated disposable provider namespace,
-and private storage/signing/administrator files. The caller owns provider cleanup.
+Never drains/reboots production hosts. The worker-loss scenario only kills a
+validated disposable local kind worker. Requires an existing cluster, immutable
+database image, dedicated provider namespace and private credential files.
+The caller owns provider and disposable cluster cleanup.
 """
 import argparse
 import base64
@@ -18,7 +19,6 @@ import subprocess
 import time
 import urllib.request
 import uuid
-import yaml
 
 NETWORK_IMAGE = 'docker.io/nicolaka/netshoot@sha256:47b907d662d139d1e2f22bfe14f4efca1e3f1feed283572f47c970c780c03b61'
 
@@ -122,7 +122,26 @@ function probe(origin,writer){return new Promise(resolve=>{
 """
 
 
+def kind_worker(context, node, container):
+    """Bind the destructive fault to one disposable worker's immutable ID."""
+    labels=container['Config']['Labels']
+    cluster=labels.get('io.x-k8s.kind.cluster','')
+    address=container['NetworkSettings']['Networks'].get('kind',{}).get('IPAddress')
+    if (not re.fullmatch(r'durable-db-test-[0-9a-f]{10}',cluster)
+        or context!='kind-'+cluster
+        or labels.get('io.x-k8s.kind.role')!='worker'
+        or container['Name']!='/'+node['metadata']['name']
+        or not node['metadata']['name'].startswith(cluster+'-worker')
+        or not container['State']['Running']
+        or not re.fullmatch(r'[0-9a-f]{64}',container['Id'])
+        or not address
+        or address not in [a['address'] for a in node['status']['addresses'] if a['type']=='InternalIP']):
+        raise ValueError('Worker fault requires a matching live disposable kind worker')
+    return dict(name=node['metadata']['name'],container_id=container['Id'],cluster=cluster,address=address)
+
+
 def main():
+    import yaml
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--context', required=True)
     parser.add_argument('--image', required=True)
@@ -130,7 +149,7 @@ def main():
     parser.add_argument('--signing-key-file', type=Path, required=True)
     parser.add_argument('--admin-token-file', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--scenario', choices=['recovery','peer-isolation','rollout'], default='recovery',
+    parser.add_argument('--scenario', choices=['recovery','peer-isolation','rollout','worker-loss'], default='recovery',
                         help='Focused isolation or repeated rollouts reuse writers, cold verification and cleanup')
     parser.add_argument('--peer-ingress', choices=['side-pinned','shared'], default='side-pinned',
                         help='Use side-specific or the ordinary shared Service during peer isolation')
@@ -143,6 +162,8 @@ def main():
                         help='Read only this namespace from kubelet statistics through the API proxy')
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
+    if args.scenario=='worker-loss' and not re.fullmatch(r'kind-durable-db-test-[0-9a-f]{10}',args.context):
+        parser.error('Worker loss requires a disposable local kind context')
     if args.peer_ingress!='side-pinned' and args.scenario!='peer-isolation':
         parser.error('Shared peer ingress requires the peer-isolation scenario')
     if not 30 <= args.peer_hold_seconds <= 300:
@@ -187,10 +208,14 @@ def main():
         report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=args.peer_hold_seconds)
         report['configuration']['ingress_observation']=dict(fresh_connections=True,timeout_seconds=5,read_concurrency=1,writers=[0,1],outside_measured_hold=True)
     if args.scenario=='rollout':report['configuration']['rollout_repetitions']=2
+    if args.scenario=='worker-loss':
+        report['configuration']['worker_fault']='SIGKILL of a validated local kind worker container, then restart'
+        report['limitations'].append('Worker kubelet, containers and transport stop; all kind nodes share one host kernel. No physical power or rack-loss claim.')
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
     created = False
     stopped = []
+    lost_worker = None
 
     def kube(*command, body=None, timeout=60):
         return subprocess.check_output(['kubectl','--context',args.context,'-n',namespace,*command],
@@ -252,6 +277,7 @@ def main():
         retirements = report.setdefault('retirement_events', {})
         uploads = report.setdefault('journal_upload_failures', {})
         for pod in pods():
+            if lost_worker and pod['spec']['nodeName']==lost_worker['name']:continue
             name = pod['metadata']['name']
             identity = name + '/' + pod['metadata']['uid']
             try:
@@ -674,6 +700,8 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                 template=resource['spec']['template'];template['metadata']['labels']['durable-db-role']='storage-client'
                 if template['spec'].get('hostNetwork'):raise RuntimeError('Fault injection requires a private pod network namespace')
                 template['spec']['topologySpreadConstraints'][0]['whenUnsatisfiable']='DoNotSchedule'
+                if args.scenario=='worker-loss':
+                    template['spec']['topologySpreadConstraints'][0]['nodeTaintsPolicy']='Honor'
                 container=template['spec']['containers'][0];container['image']=args.image
                 container['args']=['serve','--listen=0.0.0.0:7654','--admin-key-file=/run/keys/admin.key','--memory-cache-mib=8','--concurrency=4','--maintenance-seconds=60','--upload-budget-bytes=1073741824','--upload-budget-attempts=100000']
                 container['resources']=dict(requests=dict(cpu='25m',memory='96Mi'),limits=dict(cpu='250m',memory='384Mi'))
@@ -714,6 +742,9 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                                                securityContext=dict(allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,capabilities=dict(drop=['ALL'])),
                                                volumeMounts=[dict(name='work',mountPath='/work',readOnly=True),dict(name='credentials',mountPath='/run/credentials',readOnly=True)])],
                               volumes=[dict(name='work',configMap=dict(name='workload',items=[dict(key='runner.mjs',path='scripts/runner.mjs'),dict(key='transport.mjs',path='clients/javascript/transport.mjs')])),dict(name='credentials',secret=dict(secretName='workload-credentials',defaultMode=0o440))]))
+        if args.scenario=='worker-loss':
+            runner['spec']['nodeSelector']={'kubernetes.io/hostname':args.context.removeprefix('kind-')+'-control-plane'}
+            runner['spec']['tolerations']=[dict(key='node-role.kubernetes.io/control-plane',operator='Exists',effect='NoSchedule')]
         kube('apply','-f','-',body=runner)
         kube('wait','--for=condition=Ready','pod/workload','--timeout=120s',timeout=150)
         with args.output.with_suffix('.forward.log').open('w') as log:
@@ -758,6 +789,34 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             peer_isolation(initial,isolated)
         elif args.scenario=='rollout':
             for number in range(1,3):rolling(f'rolling-replacement-{number}')
+        elif args.scenario=='worker-loss':
+            partition,preferred=preferred_writer(pods())
+            node=json.loads(kube('get','node',preferred['spec']['nodeName'],'-o','json'))
+            container=json.loads(subprocess.check_output(['docker','inspect',node['metadata']['name']]))[0]
+            identity=kind_worker(args.context,node,container)
+            window=start_readbacks('worker-loss');timing=recovery('worker-loss')
+            lost_worker=identity
+            subprocess.run(['docker','kill','--signal=KILL',identity['container_id']],check=True,stdout=subprocess.DEVNULL,timeout=30)
+            phase('worker-killed',worker=identity,preferred_partition=partition,readback_window=window['name'])
+            acknowledged=progress(timing)
+            deadline=time.monotonic()+120
+            while True:
+                node=json.loads(kube('get','node',identity['name'],'-o','json'))
+                condition=next(c for c in node['status']['conditions'] if c['type']=='Ready')
+                if condition['status']!='True':break
+                if time.monotonic()>=deadline:raise RuntimeError('Node controller did not observe worker loss')
+                snapshot();time.sleep(2)
+            state=json.loads(subprocess.check_output(['docker','inspect',identity['container_id']]))[0]['State']
+            if state['Running'] or state['Pid']!=0:raise RuntimeError('Worker restarted before recovery')
+            window['end']=readback_point();save()
+            phase('worker-loss-recovered',writes_acknowledged=acknowledged,node_condition=condition,container_stopped=True)
+            window=start_readbacks('worker-return');timing=recovery('worker-return')
+            subprocess.run(['docker','start',identity['container_id']],check=True,stdout=subprocess.DEVNULL,timeout=60)
+            kube('wait','--for=condition=Ready','node/'+identity['name'],'--timeout=180s',timeout=190)
+            located=placement(wait_replicas(6));acknowledged=progress(timing)
+            window['end']=readback_point();save();lost_worker=None
+            phase('worker-return',placement=located,writes_acknowledged=acknowledged,readback_window=window['name'])
+            budget('worker-return')
         else:
             # Pause every database process on one host, with no replacement pods.
             # Target the preferred host of writer zero's partition, not a random pod.
@@ -826,6 +885,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             timing=recovery('provider-restored',60,'before restoring provider egress')
             kube('apply','-f','-',body=policy)
             phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress(timing))
+        if args.scenario in ('recovery','worker-loss'):
             window=start_readbacks('scale-one')
             timing=recovery('scale-one')
             kube('scale','statefulset','durable-db','--replicas=1')
@@ -866,6 +926,9 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             except Exception:pass
         raise
     finally:
+        if lost_worker:
+            try:subprocess.run(['docker','start',lost_worker['container_id']],check=True,stdout=subprocess.DEVNULL,timeout=60)
+            except Exception:report['worker_restart_failed']=True
         if stopped:
             try:resume_processes()
             except Exception:report['process_resume_failed']=True
