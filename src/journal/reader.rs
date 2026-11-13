@@ -1,9 +1,31 @@
 use super::LogId;
 use super::budget::Budget;
 use super::frame::{Batch, MAX_BATCH_BYTES, Prefix};
-use crate::{cache::Cache, storage::Storage};
+use crate::{
+    cache::Cache,
+    storage::{Object, Storage},
+};
 use anyhow::{Context, ensure};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesOrdered};
 use std::sync::Arc;
+
+type Read = BoxFuture<'static, (bool, anyhow::Result<Option<Object>>)>;
+// Includes the returned frame: at most four 4 MiB bodies per discovery reader.
+const READ_WINDOW: usize = 4;
+
+struct ReadAhead<'a> {
+    pending: &'a mut FuturesOrdered<Read>,
+    preserve: bool,
+}
+impl Drop for ReadAhead<'_> {
+    fn drop(&mut self) {
+        // A cancelled cache insertion or failed decode has popped a result but
+        // has not advanced the prefix. Discard the suffix before any retry.
+        if !self.preserve {
+            self.pending.clear();
+        }
+    }
+}
 
 /// A streaming, bounded-memory scanner. Discovery is provisional; the controller
 /// must end old acknowledgement permission and durably select the prefix before
@@ -15,6 +37,7 @@ pub struct Reader {
     finished: bool,
     budget: Budget,
     cache: Option<Arc<Cache>>,
+    pending: FuturesOrdered<Read>,
 }
 
 impl Reader {
@@ -33,17 +56,14 @@ impl Reader {
             finished: false,
             budget: Budget::new(1, MAX_BATCH_BYTES),
             cache: None,
+            pending: FuturesOrdered::new(),
         }
     }
 
     pub fn replay(storage: Arc<dyn Storage>, selected: Prefix) -> Self {
         Self {
-            storage,
-            prefix: Prefix::empty(selected.log),
             selected: Some(selected),
-            finished: false,
-            budget: Budget::new(1, MAX_BATCH_BYTES),
-            cache: None,
+            ..Self::discover(storage, selected.log)
         }
     }
 
@@ -104,6 +124,10 @@ impl Reader {
         // One live replay frame per reader, including frames held by its caller.
         // Reserve before GET so another read cannot allocate beyond that bound.
         let reservation = self.budget.reserve(MAX_BATCH_BYTES)?;
+        let mut reads = ReadAhead {
+            pending: &mut self.pending,
+            preserve: false,
+        };
         let key = self.prefix.log.key(position);
         // Discovery must still observe the provider. Only selected replay may
         // reuse a prior positive read; neither absence nor disk is authority.
@@ -118,7 +142,36 @@ impl Reader {
         let bytes = match cached {
             Some(bytes) => bytes,
             None => {
-                let Some(object) = self.storage.get(&key, MAX_BATCH_BYTES).await? else {
+                let object = if self.selected.is_none() {
+                    // Probe an empty journal once. After the first frame, keep
+                    // a bounded window, consuming results only in chain order.
+                    let window = if position == 1 { 1 } else { READ_WINDOW };
+                    while reads.pending.len() < window {
+                        let Some(next) = position.checked_add(reads.pending.len() as u64) else {
+                            break;
+                        };
+                        let storage = self.storage.clone();
+                        let key = self.prefix.log.key(next);
+                        let speculative = !reads.pending.is_empty();
+                        reads.pending.push_back(
+                            async move { (speculative, storage.get(&key, MAX_BATCH_BYTES).await) }
+                                .boxed(),
+                        );
+                    }
+                    let (speculative, object) =
+                        reads.pending.next().await.expect("discovery read queued");
+                    let object = object?;
+                    if object.is_none() && speculative {
+                        // Lookahead may have observed absence before lower
+                        // frames completed. Only a fresh front read ends a scan.
+                        self.storage.get(&key, MAX_BATCH_BYTES).await?
+                    } else {
+                        object
+                    }
+                } else {
+                    self.storage.get(&key, MAX_BATCH_BYTES).await?
+                };
+                let Some(object) = object else {
                     ensure!(
                         self.selected.is_none(),
                         "selected journal prefix is missing a frame"
@@ -148,6 +201,7 @@ impl Reader {
         }
         self.prefix = batch.prefix;
         batch.reservation = Some(reservation);
+        reads.preserve = true;
         Ok(Some(batch))
     }
 }

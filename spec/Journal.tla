@@ -51,6 +51,11 @@ BeginScan(early) == /\ control.online /\ ~control.sealed /\ ~scan.running
                    /\ (control.phase = "recovering" \/ (early /\ control.phase = "draining"))
                    /\ scan' = [position |-> 0, running |-> TRUE, finished |-> FALSE]
                    /\ UNCHANGED <<writer, objects, control>>
+\* Bounded positive prefetch is a stutter until consumed in this order. Objects
+\* are immutable here; physical collection is a separate controller obligation.
+\* A speculative missing result is only a hint: the reader repeats that GET
+\* when it reaches the front, preserving ReadMissing's fresh observation.
+\* Errors/cancellation discard the speculative suffix, never advance the scan.
 ReadNext == /\ control.online /\ scan.running /\ scan.position + 1 \in objects
             /\ scan' = [scan EXCEPT !.position = @ + 1]
             /\ UNCHANGED <<writer, objects, control>>

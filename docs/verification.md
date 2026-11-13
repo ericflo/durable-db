@@ -302,15 +302,34 @@ The configured instance permits competing advances below revision three and expl
 
 ## Journal prefix safety
 
-`Journal.tla` precedes the immutable journal implementation in `src/journal/`. `Prepare` allocates fresh positions, `Upload` makes their immutable bytes durable, `Observe` establishes positive durability knowledge, and `Consume` advances only through consecutive known positions. These correspond to `Writer::prepare`, the single-use `PreparedUpload::send`, `Writer::complete`/`resolve`, and `Writer::pop_durable`. Missing or failed responses never establish absence. Recovery scans one position at a time and fixes a prefix before successor activation; late uploads cannot extend that decision. `Reader` implements discovery and replay, but conditional selection and serving permission remain caller obligations.
+`Journal.tla` precedes the immutable journal implementation in `src/journal/`. `Prepare` allocates fresh positions, `Upload` makes their immutable bytes durable, `Observe` establishes positive durability knowledge, and `Consume` advances only through consecutive known positions. These correspond to `Writer::prepare`, the single-use `PreparedUpload::send`, `Writer::complete`/`resolve`, and `Writer::pop_durable`. Missing or failed responses never establish absence. Recovery consumes positions in order and fixes a prefix before successor activation; late uploads cannot extend that decision. `Reader` implements discovery and replay, but conditional selection and serving permission remain caller obligations.
 
 The TLC-only constraint permits three prepared positions. All **4,134 distinct states** (18,455 generated, depth 26) pass, with an optimistic fingerprint collision estimate of 3.2e-12. Six mandatory controls expose false durability knowledge, consumption gaps, early recovery, stale negative reads, late acknowledgement and reopened selection. Run `scripts/check-model.sh Journal`.
 
 `JournalProof.tla` removes the exploration bound: all **88 strict TLAPS obligations** prove the inductive invariant and its consequences for arbitrary log lengths and execution lengths within one handoff. The theorem establishes consumed-prefix durability, preservation of acknowledged work in the selected prefix, and selection immutability. Removing the contiguous-consumption rule must fail the corresponding induction step. Run `scripts/check-proof.sh Journal`; it uses the same pinned tools and fresh proof caches as the [publication proof](proof-publication.md). Woodpecker requires both checks in independent cache stages.
 
-The proof assumes immutable unique identities, durable objects and fresh per-key observations, an external boundary ending old acknowledgement permission, and atomic durable selection. It does not establish that boundary, arbitrary ownership epochs, delegation, clock behavior, transactions, request deduplication, resource admission, collection, liveness or Rust refinement. The actual serving engine is unchanged. The older handoff-only model is retired; its [historical evidence](evidence/wal-handoff-candidate-2026-11-09.json) retains its source commit.
+The proof assumes immutable unique identities, durable objects and fresh per-key observations, an external boundary ending old acknowledgement permission, and atomic durable selection. It does not establish that boundary, arbitrary ownership epochs, delegation, clock behavior, transactions, request deduplication, resource admission, collection, liveness or Rust refinement. The older handoff-only model is retired; its [historical evidence](evidence/wal-handoff-candidate-2026-11-09.json) retains its source commit.
 
 Thirteen journal tests cover out-of-order completion, unknown outcomes, cancellation and retained-frame budgets, bounded parsing, corruption, exact replay and local reopen; a separate collector regression establishes namespace isolation. Real B2 and versioned MinIO checks each recover 512 records after reconnect, resolve three lost responses without repeating PUT, and exclude a late suffix after persisted selection. These use the existing conditional publication layer as a fixture, not a replacement ownership controller. Source hashes, bounds, provider results and cleanup are in [the component evidence](evidence/journal-2026-11-09.json).
+
+Discovery now overlaps at most four GETs after its initial epoch probe. Only
+ordered, checksum- and chain-validated frames advance the cursor. A speculative
+missing result is re-read when it reaches the front, preserving the model's
+fresh `ReadMissing` transition. Failed/cancelled reads and corrupt frames discard
+the suffix. The caller may hold only one frame; the entire discovery window is
+at most **16 MiB of payload per reader**, or **64 MiB** across the cluster's four
+acquisitions. Selected replay remains one frame/4 MiB. Cache, transport and
+allocator overhead are separate; this is not a whole-process RSS proof.
+
+A 107-frame virtual-time fixture with 100ms GET delays changes from **10.8s to
+2.9s**, with no claim about cloud latency. Three focused regressions take **0.01s**
+and cover ordered consumption, a four-request ceiling, retained frames,
+cancellation, read errors, a late upload after speculative absence, holes and
+corrupt suffixes. Removing cancellation cleanup or the fresh missing-frame check
+makes the regression fail. The unchanged 4,134-state model, all six controls,
+88-obligation abstract proof and its mutation control pass. Bounded prefetch and
+memory sizing are implementation obligations, not new properties of that proof.
+Exact-runtime cloud qualification remains pending.
 
 ## Candidate revocable writer permits
 

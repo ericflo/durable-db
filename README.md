@@ -150,6 +150,8 @@ writes** through scaling, two rollouts, total compute loss and cold restart.
 Direct rollout readback gaps are **64.26s / 61.82s**; both still miss the
 60-second target. Scale-up and cold recovery meet their targets. These bounded,
 different-history runs establish no overall availability improvement or SLO.
+Main also overlaps journal discovery through a bounded four-read window; cloud
+qualification of that change is underway.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

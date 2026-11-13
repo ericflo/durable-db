@@ -373,9 +373,10 @@ async fn selection_retry_restarts_only_when_collection_snapshot_changes() {
         let mut root = selecting.await.unwrap();
         // A data sweep invalidates the scan. A metadata-only sweep removes the
         // first attempt's objects, but retrying stages fresh ones from the same cut.
+        // The longer rescan also confirms its speculative end-of-log probe.
         assert_eq!(
             files.frame_reads.load(Ordering::SeqCst),
-            if data_sweep { 5 } else { 2 }
+            if data_sweep { 6 } else { 2 }
         );
         let journal = scan(&mut root).await;
         assert!(journal.is_selected());

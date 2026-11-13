@@ -32,7 +32,7 @@ async fn selected_replay_reuses_positive_reads_within_cache_and_frame_bounds() {
     while discovery.read_next().await.unwrap().is_some() {}
     assert_eq!(discovery.finished_prefix(), Some(selected));
     let gets = files.gets.load(Ordering::SeqCst);
-    assert_eq!(gets, 3); // Two positive reads and the end-of-journal probe.
+    assert!((4..=7).contains(&gets)); // Two frames, bounded lookahead and fresh end probe.
     let mut replay = Reader::replay(files.clone(), selected).with_cache(Some(cache.clone()));
     let first = replay.read_next().await.unwrap().unwrap();
     assert!(replay.read_next().await.is_err()); // Cache hits retain the frame bound.
@@ -211,6 +211,155 @@ async fn resetting_selected_replay_preserves_the_budget_of_a_retained_frame() {
     assert!(reader.read_next().await.unwrap().is_some());
 }
 
+#[tokio::test(start_paused = true)]
+async fn discovery_overlaps_reads_without_exceeding_its_window_or_returning_out_of_order() {
+    let files = Arc::new(Files::default());
+    let mut writer = writer(files.clone());
+    for _ in 0..107 {
+        drop(append(&mut writer, b"value").await);
+    }
+    for position in 1..=112 {
+        files
+            .read_delay
+            .lock()
+            .unwrap()
+            .insert(writer.log().key(position), Duration::from_millis(100));
+    }
+    let mut reader = Reader::discover(files.clone(), writer.log());
+    let started = tokio::time::Instant::now();
+    for position in 1..=107 {
+        let frame = reader.read_next().await.unwrap().unwrap();
+        assert_eq!(frame.prefix().position(), position);
+        assert!(frame.records().eq([b"value".as_slice()]));
+        let gets = files.gets.load(Ordering::SeqCst);
+        assert!(reader.read_next().await.is_err()); // One caller-held frame.
+        assert_eq!(files.gets.load(Ordering::SeqCst), gets);
+    }
+    assert!(reader.read_next().await.unwrap().is_none());
+    assert_eq!(reader.finished_prefix(), Some(writer.durable_prefix()));
+    let elapsed = started.elapsed();
+    println!("107-frame synthetic discovery: {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(4));
+    assert_eq!(files.peak_reads.load(Ordering::SeqCst), 4);
+    assert_eq!(files.active_reads.load(Ordering::SeqCst), 0);
+    assert!(files.gets.load(Ordering::SeqCst) <= 112);
+}
+
+#[tokio::test(start_paused = true)]
+async fn discovery_discards_cancelled_reads_and_rechecks_a_speculative_missing_frame() {
+    let files = Arc::new(Files::default());
+    let mut writer = writer(files.clone());
+    drop(append(&mut writer, b"one").await);
+    drop(append(&mut writer, b"two").await);
+    let third = writer.prepare(&[Bytes::from_static(b"late")]).unwrap();
+    let mut reader = Reader::discover(files.clone(), writer.log());
+    drop(reader.read_next().await.unwrap());
+    files
+        .read_delay
+        .lock()
+        .unwrap()
+        .insert(writer.log().key(2), Duration::from_secs(1));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), reader.read_next())
+            .await
+            .is_err()
+    );
+    assert_eq!(files.active_reads.load(Ordering::SeqCst), 0);
+    assert!(reader.finished_prefix().is_none());
+    files.fail_read.store(true, Ordering::SeqCst);
+    assert!(reader.read_next().await.is_err()); // Cancellation retained no stale result.
+    assert_eq!(files.active_reads.load(Ordering::SeqCst), 0);
+    {
+        let read = reader.read_next();
+        tokio::pin!(read);
+        tokio::select! {
+            _ = &mut read => panic!("second frame must remain pending"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => (),
+        }
+        // The lookahead has already observed position 3 absent. Its late arrival
+        // must be observed afresh when it reaches the front of the scan.
+        writer.complete(third.send().await).unwrap();
+        drop(writer.pop_durable().unwrap().unwrap());
+        assert_eq!(read.await.unwrap().unwrap().prefix().position(), 2);
+    }
+    assert_eq!(
+        reader.read_next().await.unwrap().unwrap().prefix(),
+        writer.durable_prefix()
+    );
+    assert!(reader.read_next().await.unwrap().is_none());
+    assert_eq!(reader.finished_prefix(), Some(writer.durable_prefix()));
+    assert_eq!(files.active_reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn discovery_stops_at_holes_and_discards_corrupt_prefetched_suffixes() {
+    for missing in [true, false] {
+        let files = Arc::new(Files::default());
+        let mut writer = writer(files.clone());
+        for _ in 0..5 {
+            drop(append(&mut writer, b"value").await);
+        }
+        let key = writer.log().key(3);
+        let original = files.objects.lock().unwrap().remove(&key).unwrap();
+        if !missing {
+            files
+                .objects
+                .lock()
+                .unwrap()
+                .insert(key.clone(), Bytes::from_static(b"corrupt"));
+        } else {
+            // An unreachable corrupt suffix cannot override the first hole.
+            files
+                .objects
+                .lock()
+                .unwrap()
+                .insert(writer.log().key(4), Bytes::from_static(b"corrupt"));
+        }
+        files
+            .read_delay
+            .lock()
+            .unwrap()
+            .insert(writer.log().key(2), Duration::from_secs(1));
+        let mut reader = Reader::discover(files.clone(), writer.log());
+        for position in 1..=2 {
+            assert_eq!(
+                reader
+                    .read_next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .prefix()
+                    .position(),
+                position
+            );
+        }
+        if missing {
+            assert!(reader.read_next().await.unwrap().is_none());
+            assert_eq!(reader.finished_prefix().unwrap().position(), 2);
+        } else {
+            assert!(reader.read_next().await.is_err());
+            assert!(reader.finished_prefix().is_none());
+            files.objects.lock().unwrap().insert(key, original);
+            for position in 3..=5 {
+                assert_eq!(
+                    reader
+                        .read_next()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .prefix()
+                        .position(),
+                    position
+                );
+            }
+            assert!(reader.read_next().await.unwrap().is_none());
+            assert_eq!(reader.finished_prefix(), Some(writer.durable_prefix()));
+        }
+        assert_eq!(files.active_reads.load(Ordering::SeqCst), 0);
+        assert!(files.peak_reads.load(Ordering::SeqCst) <= 4);
+    }
+}
+
 #[derive(Default)]
 struct Files {
     objects: Mutex<BTreeMap<String, Bytes>>,
@@ -218,6 +367,9 @@ struct Files {
     puts: AtomicUsize,
     gets: AtomicUsize,
     fail_read: AtomicBool,
+    read_delay: Mutex<BTreeMap<String, Duration>>,
+    active_reads: AtomicUsize,
+    peak_reads: AtomicUsize,
     // 1: unknown before storage; 2: unknown after storage; 3/4: pause before/after.
     fault: AtomicU8,
     paused: Notify,
@@ -228,17 +380,30 @@ struct Files {
 impl Storage for Files {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
         self.gets.fetch_add(1, Ordering::SeqCst);
+        struct Reading<'a>(&'a AtomicUsize);
+        impl Drop for Reading<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let active = self.active_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_reads.fetch_max(active, Ordering::SeqCst);
+        let _reading = Reading(&self.active_reads);
         anyhow::ensure!(
             !self.fail_read.swap(false, Ordering::SeqCst),
             "injected read failure"
         );
-        let objects = self.objects.lock().unwrap();
-        let Some(bytes) = objects.get(key) else {
+        let bytes = self.objects.lock().unwrap().get(key).cloned();
+        let delay = self.read_delay.lock().unwrap().get(key).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        let Some(bytes) = bytes else {
             return Ok(None);
         };
         anyhow::ensure!(bytes.len() <= max, "object exceeds requested bound");
         Ok(Some(Object {
-            bytes: bytes.clone(),
+            bytes,
             version: Version(UpdateVersion {
                 e_tag: None,
                 version: None,
@@ -357,7 +522,7 @@ async fn pipelined_completion_never_skips_a_hole_and_recovery_uses_no_control_ca
     assert!(reader.read_next().await.unwrap().is_none());
     assert_eq!(reader.finished_prefix(), Some(expected));
     assert_eq!(files.puts.load(Ordering::SeqCst), 2);
-    assert_eq!(files.gets.load(Ordering::SeqCst), 3);
+    assert!((4..=7).contains(&files.gets.load(Ordering::SeqCst)));
 }
 
 #[tokio::test]
