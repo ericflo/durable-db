@@ -156,12 +156,13 @@ impl Published {
         // Admission only: the protocol is safe with concurrent helpers. One
         // helper per process bounds staging memory and duplicate network work.
         let queued = std::time::Instant::now();
-        let _helper = tokio::select! {
+        let admitted_queue_ms = std::sync::atomic::AtomicU64::new(u64::MAX);
+        tokio::select! {
             biased;
-            permit = self.helpers.acquire() => permit.context("publication helper stopped")?,
+            result = self.help_submitted(&proposal, publication, started, queued, &admitted_queue_ms) => result,
             receipt = async {
-                // Keep our place in the helper queue while checking only for
-                // this exact receipt. At most eight probes per invocation and
+                // Check only this exact receipt while queued or helping.
+                // At most eight probes per invocation and
                 // one in flight per connection; no detached polling task.
                 for _ in 0..8 {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -178,17 +179,38 @@ impl Published {
                 // helper path retains all comparison/uncertainty checks.
                 std::future::pending::<Version>().await
             } => {
-                self.proposal_cleanup.committed(name);
-                // Queue time here includes the bounded observation work.
-                tracing::info!(%publication, outcome = "queued_receipt", attempt = 0_u64,
-                    queue_ms = queued.elapsed().as_millis() as u64,
-                    prepare_ms = 0_u64, compare_ms = 0_u64,
+                self.proposal_cleanup.committed(name.clone());
+                let recorded = admitted_queue_ms.load(std::sync::atomic::Ordering::Relaxed);
+                let queued_only = recorded == u64::MAX;
+                let queue_ms = if queued_only { queued.elapsed().as_millis() as u64 } else { recorded };
+                // Observer work only: an interrupted helper may have issued
+                // staging writes or a comparison before this receipt arrived.
+                tracing::info!(%publication,
+                    outcome = if queued_only { "queued_receipt" } else { "helping_receipt" },
+                    attempt = 0_u64, queue_ms, prepare_ms = 0_u64, compare_ms = 0_u64,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "shared publication progress");
-                return Ok(Some(receipt));
+                Ok(Some(receipt))
             }
-        };
+        }
+    }
+
+    async fn help_submitted(
+        &self,
+        proposal: &Proposal,
+        publication: Uuid,
+        started: std::time::Instant,
+        queued: std::time::Instant,
+        admitted_queue_ms: &std::sync::atomic::AtomicU64,
+    ) -> anyhow::Result<Option<Version>> {
+        let name = proposal.key();
+        let _helper = self
+            .helpers
+            .acquire()
+            .await
+            .context("publication helper stopped")?;
         let queue_ms = queued.elapsed().as_millis() as u64;
+        admitted_queue_ms.store(queue_ms, std::sync::atomic::Ordering::Relaxed);
         // Fixed outcomes and a random invocation identity only; never log a
         // database name, key, manifest body or provider error.
         let progress = |outcome: &'static str,
@@ -197,8 +219,8 @@ impl Published {
                         compare_ms: u64,
                         reused_pages: bool| {
             tracing::info!(%publication, outcome, attempt, queue_ms, prepare_ms, compare_ms, reused_pages,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "shared publication progress");
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "shared publication progress");
         };
         progress("admitted", 0, 0, 0, false);
         let mut discovery = None;
@@ -206,7 +228,7 @@ impl Published {
         for attempt in 0..8 {
             let preparing = std::time::Instant::now();
             let before = self.authority.read().await?;
-            if self.proposal_result(&proposal, &before).await? {
+            if self.proposal_result(proposal, &before).await? {
                 self.proposal_cleanup.committed(name.clone());
                 progress(
                     "helped",
@@ -269,7 +291,7 @@ impl Published {
                 // Refresh after discovery I/O. Retries already checked a new
                 // comparison above and need no duplicate read/target lookup.
                 let observed = self.authority.read().await?;
-                if self.proposal_result(&proposal, &observed).await? {
+                if self.proposal_result(proposal, &observed).await? {
                     self.proposal_cleanup.committed(name.clone());
                     progress(
                         "helped",

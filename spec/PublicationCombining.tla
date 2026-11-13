@@ -132,6 +132,8 @@ Abort(j) == /\ response[j] = "waiting" /\ j \notin committed
 \* A historical success remains a valid receipt after the target changes; it
 \* does not authorize serving or let a subsequent CAS skip its comparison.
 \* Observation does not need a helper slot: another helper may still be busy.
+\* This also permits confirmation while the caller's own helper is still busy;
+\* a confirmed historical receipt may cancel its redundant staging/comparison.
 Ack(j,r) == /\ response[j] = "waiting" /\ r \in 1..Len(history)
             /\ history[r].heads[target[j]] = j
             /\ response' = [response EXCEPT ![j] = "success"]
@@ -205,7 +207,7 @@ NoCommitAfterDefiniteAbort == \A j \in Jobs: response[j] = "aborted" => j \notin
 NotSupersededReceipt == ~\E j \in Jobs:
     response[j] = "success" /\ Current.heads[target[j]] # j
 NotReceiptWhileHelperBusy == ~\E j \in Jobs, h \in Helpers:
-    response[j] = "success" /\ helping[h]
+    response[j] = "success" /\ helping[h] /\ j \in chosen[h]
 \* Fault: let a submitted but unconfirmed proposal manufacture a receipt.
 PrematureReceipt(j) == /\ phase[j] = "submitted" /\ response[j] = "waiting"
     /\ response' = [response EXCEPT ![j] = "success"]
@@ -220,7 +222,8 @@ Spec == Init /\ [][Next]_vars
 \* start a new helper after an earlier acknowledgement.
 QueuedReceiptSpec == Init /\ [][Next /\
     ((\E j \in Jobs: response[j] # "success" /\ response'[j] = "success")
-     => \E h \in Helpers: helping[h])]_vars
+     => \E j \in Jobs, h \in Helpers: response[j] # "success" /\ response'[j] = "success"
+          /\ helping[h] /\ j \in chosen[h])]_vars
 UnsafeReceiptSpec == Init /\ [][Next \/ (\E j \in Jobs: PrematureReceipt(j))]_vars
 UnsafeRefreshSpec == Init /\ [][Next \/
     (\E h \in Helpers, r \in 1..Len(history): Refresh(h,r,FALSE))]_vars

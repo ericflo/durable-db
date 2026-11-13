@@ -994,7 +994,7 @@ async fn publication_retries_reuse_discovery_without_replaying_uploads() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn queued_receipt_bypasses_a_stalled_helper() {
+async fn receipt_bypasses_a_queued_or_admitted_stalled_helper() {
     for lose_reply in [false, true] {
         let (store, metadata) = setup().await;
         let other = replica(&metadata).await;
@@ -1040,7 +1040,13 @@ async fn queued_receipt_bypasses_a_stalled_helper() {
                 .unwrap()
                 .unwrap()
         );
-        assert!(!stalled.is_finished());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), stalled)
+                .await
+                .expect("an admitted helper must also return its confirmed receipt")
+                .unwrap()
+                .unwrap()
+        );
         assert_eq!(
             metadata.read().await.unwrap().revision,
             revision,
@@ -1051,8 +1057,6 @@ async fn queued_receipt_bypasses_a_stalled_helper() {
             lists,
             "receipt observation must not discover or help more proposals"
         );
-        metadata.resume.notify_one();
-        assert!(stalled.await.unwrap().unwrap());
         for name in ["a", "b", "c"] {
             assert_eq!(
                 store
@@ -1068,7 +1072,7 @@ async fn queued_receipt_bypasses_a_stalled_helper() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn queued_receipt_probes_are_bounded_and_yield_to_the_helper() {
+async fn receipt_probes_are_bounded_and_yield_to_helper_completion() {
     use std::time::Duration;
     for mode in ["absent", "superseded", "failed", "stalled"] {
         let (store, metadata) = setup().await;
@@ -1094,6 +1098,16 @@ async fn queued_receipt_probes_are_bounded_and_yield_to_the_helper() {
         });
         metadata.submitted.notified().await;
         if mode == "superseded" {
+            // Keep the admitted helper blocked: this competing write must not
+            // also publish its proposal and allow its new observer to finish.
+            let names = metadata.files.list("proposals/", None, 128).await.unwrap();
+            let before = metadata.read().await.unwrap();
+            let mut info = before.info.clone();
+            info.insert(
+                "durable-db-proposal-scan".into(),
+                names.last().unwrap().clone(),
+            );
+            assert!(metadata.replace(&before, info).await.unwrap().is_some());
             assert!(
                 other
                     .cas("heads/b.json", None, Bytes::from_static(b"winner"))
@@ -1129,7 +1143,7 @@ async fn queued_receipt_probes_are_bounded_and_yield_to_the_helper() {
             assert!(
                 tokio::time::timeout(Duration::from_secs(1), queued)
                     .await
-                    .expect("helper admission must cancel its stalled read probe")
+                    .expect("helper completion must cancel a stalled read probe")
                     .unwrap()
                     .unwrap()
             );
@@ -1143,8 +1157,8 @@ async fn queued_receipt_probes_are_bounded_and_yield_to_the_helper() {
             }
             assert_eq!(
                 metadata.reads.load(Ordering::SeqCst) - reads,
-                8,
-                "receipt probes stop at their bound, including failed observations"
+                16,
+                "queued and admitted callers each stop at eight probes, including failures"
             );
             assert!(
                 !queued.is_finished(),
@@ -1165,6 +1179,56 @@ async fn queued_receipt_probes_are_bounded_and_yield_to_the_helper() {
         }
         assert!(stalled.await.unwrap().unwrap());
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn receipt_probe_allowance_survives_helper_admission() {
+    use std::time::Duration;
+    let (store, metadata) = setup().await;
+    metadata.pause.store(true, Ordering::SeqCst);
+    let first = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .cas("heads/a.json", None, Bytes::from_static(b"a"))
+                .await
+        }
+    });
+    wait_paused(&metadata).await;
+    metadata.submitted.notified().await;
+    let next = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .cas("heads/b.json", None, Bytes::from_static(b"b"))
+                .await
+        }
+    });
+    metadata.submitted.notified().await;
+    let reads = metadata.reads.load(Ordering::SeqCst);
+    for _ in 0..4 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(metadata.reads.load(Ordering::SeqCst) - reads, 8);
+    // Finish the first helper, then hold the second after its admission.
+    metadata.pause.store(true, Ordering::SeqCst);
+    metadata.resume.notify_one();
+    assert!(first.await.unwrap().unwrap());
+    wait_paused(&metadata).await;
+    let reads = metadata.reads.load(Ordering::SeqCst);
+    for _ in 0..16 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        metadata.reads.load(Ordering::SeqCst) - reads,
+        4,
+        "admission must not reset the four probes already spent while queued"
+    );
+    assert!(!next.is_finished(), "unconfirmed work is still uncertain");
+    metadata.resume.notify_one();
+    assert!(next.await.unwrap().unwrap());
 }
 
 #[tokio::test]

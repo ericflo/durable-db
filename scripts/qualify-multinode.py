@@ -237,7 +237,7 @@ def main():
                     prepare_ms=int(prepared), compare_ms=int(compared), elapsed_ms=int(elapsed),
                     reused_pages={"true":True,"false":False}.get(reused))
                     for stamp, publication, outcome, attempt, queued, prepared, compared, reused, elapsed in re.findall(
-                        r'(?m)^([0-9TZ:.+\-]+).*?shared publication progress.*?publication=([0-9a-f-]{36})\s+outcome="?(admitted|queued_receipt|helped|confirmed|conflict|uncertain)"?\s+attempt=(\d+)\s+queue_ms=(\d+)\s+prepare_ms=(\d+)\s+compare_ms=(\d+)\s+(?:reused_pages=(true|false)\s+)?elapsed_ms=(\d+)', log)]
+                        r'(?m)^([0-9TZ:.+\-]+).*?shared publication progress.*?publication=([0-9a-f-]{36})\s+outcome="?(admitted|queued_receipt|helping_receipt|helped|confirmed|conflict|uncertain)"?\s+attempt=(\d+)\s+queue_ms=(\d+)\s+prepare_ms=(\d+)\s+compare_ms=(\d+)\s+(?:reused_pages=(true|false)\s+)?elapsed_ms=(\d+)', log)]
             except subprocess.SubprocessError:
                 pass  # A disappearing pod must not prevent the failure report.
 

@@ -149,6 +149,8 @@ cold restart. Direct rollout readback gaps are **52.11s / 74.31s**; one misses t
 60-second target, and overload responses remain. Scale-up and cold recovery meet
 their targets; whole-rollout bounds still miss. This removes a reproduced refusal
 path, without establishing an overall availability improvement or SLO.
+Main also keeps bounded receipt confirmation active during helper work; local
+checks pass, with exact-runtime cloud qualification pending.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the
