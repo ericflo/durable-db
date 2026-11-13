@@ -134,6 +134,8 @@ def main():
                         help='Focused isolation or repeated rollouts reuse writers, cold verification and cleanup')
     parser.add_argument('--peer-ingress', choices=['side-pinned','shared'], default='side-pinned',
                         help='Use side-specific or the ordinary shared Service during peer isolation')
+    parser.add_argument('--peer-hold-seconds', type=int, default=30,
+                        help='Hold each peer split for 30..300 seconds')
     parser.add_argument('--control-port', type=int, default=17840)
     parser.add_argument('--steady-seconds', type=int, default=0,
                         help='Optional bounded steady pilot, at most one hour, before disruption')
@@ -143,6 +145,8 @@ def main():
     args = parser.parse_args()
     if args.peer_ingress!='side-pinned' and args.scenario!='peer-isolation':
         parser.error('Shared peer ingress requires the peer-isolation scenario')
+    if not 30 <= args.peer_hold_seconds <= 300:
+        parser.error('Peer isolation hold must be between 30 and 300 seconds')
     if not 0 <= args.steady_seconds <= 3600:
         parser.error('The bounded pilot duration must be between zero and 3600 seconds')
     if args.observe_memory and not args.steady_seconds:
@@ -180,7 +184,7 @@ def main():
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
     if args.scenario=='peer-isolation':
         report['configuration']['peer_ingress']=args.peer_ingress
-        report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=30)
+        report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=args.peer_hold_seconds)
         report['configuration']['ingress_observation']=dict(fresh_connections=True,timeout_seconds=5,read_concurrency=1,writers=[0,1],outside_measured_hold=True)
     if args.scenario=='rollout':report['configuration']['rollout_repetitions']=2
     args.output.parent.mkdir(parents=True,exist_ok=True)
@@ -610,7 +614,10 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                 restrict(mode)
                 phase(mode+'-peer-isolation-start',network=require_network(mode),provider_statuses=provider_access())
                 before=snapshot()['verified']
-                time.sleep(30)
+                deadline=time.monotonic()+args.peer_hold_seconds
+                while (remaining:=deadline-time.monotonic())>0:
+                    time.sleep(min(15,remaining))
+                    acquisitions();save()
                 after=snapshot()['verified']
                 phase(mode+'-peer-isolation-held',network=require_network(mode),provider_statuses=provider_access(),
                       before=before,after=after,writer_progress=[b>=a+2 for a,b in zip(before,after)],ingress_observation=ingress_access(mode))
