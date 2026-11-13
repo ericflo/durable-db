@@ -289,6 +289,18 @@ The Rust reserve regression interleaves a multi-tenant claim with a refill, lose
 
 Tenant ledger initialization, refill, admission grants and maintenance claims share one publication path using `PublicationRetry`: **44,354 distinct states, 117,886 generated, depth 21**, with its required unsafe-rebase counterexample. Its head is the tenant-directory root, and every budgeted metadata sweep advances its fence. Ordinary control updates may change the nonce without changing either. Unbudgeted local collection omits the new fence field, preserving its existing format. Byte charging, identity checks and the Rust implementation remain separate obligations.
 
+Tenant ledger records and directory pages now use the owner's existing bounded
+byte cache. The authority supplies their expected digests; records still enforce
+their size, schema, database identity and budget invariants. Grants, fresh status
+barriers and collection comparisons remain authoritative, and volatile credit is
+never reconstructed from cached records. The regression checks zero provider
+metadata GETs for a warm grant and two for a cold grant (three without caching),
+fresh grants after allocator replacement, corrupt-cache fallback, disabled/tiny
+caches and authority failure. Existing lost-reply/split and collection-race
+checks run with caching enabled; an uncached observer verifies the published
+ledger after collection. Cache operations stutter in the unchanged model;
+digest checking and memory bounds remain implementation obligations.
+
 The metadata retry regression pauses initialization, refill and grant publication across an unrelated read barrier. Each operation retains its original ledger and directory objects: six objects for the three operations, without retry copies. Permanently stale comparisons stop within eight attempts without more uploads; a changed format fails closed. Existing competing-ledger, lost-response and collection races still pass. Four Rust negative controls independently force reuploads or omit the directory, metadata-fence or format check. This reduces retry amplification; administrative uploads remain namespace-funded and per-tenant attribution is still open.
 
 Budgeted native format `owned-candidate-23` charges five times the authenticated data-object size of each base table that a transaction can replace, plus bounded new manifest/split work and the existing leaf and ancestor bytes, deduplicated across affected paths with nine temporary references. Manifest seeks cover the database's metadata/receipt interval and every mutation key, charging each routed table once. This includes unchanged neighboring rows, expired receipts, replacements and tombstones. New generations and gap inserts pay for the table they displace. Appends after all base tables pay for the rightmost manifest path without copying table rows. Sorted later append ranges need no additional traversal. Missing or corrupt path evidence fails admission before journal assignment. Distinct writes can pay repeatedly; pending/committed/identical same-batch retries reuse admission. Pricing reads no values or table indexes and uses the existing bounded manifest cache. The old recorded-data-plus-index allowance is removed because reblocking can enlarge the index.

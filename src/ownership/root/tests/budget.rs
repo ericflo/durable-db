@@ -319,7 +319,9 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
         })
         .await
         .unwrap();
-    let root = connection.root().unwrap();
+    let root = connection.root().unwrap().with_cache(Arc::new(
+        crate::cache::Cache::new(1024 * 1024, None).unwrap(),
+    ));
     let a = root.database_budget("a").unwrap().unwrap();
     let b = root.database_budget("b").unwrap().unwrap();
     for ledger in [&a, &b] {
@@ -731,6 +733,102 @@ async fn collection_preserves_recovery_catalogs_across_takeovers_and_name_collis
 }
 
 #[tokio::test]
+async fn database_budget_cache_reuses_bytes_not_credit_or_authority() {
+    use crate::cache::Cache;
+    for bytes in [0, 128, 1024 * 1024] {
+        let provider = Provider::new();
+        let faults = Arc::new(http::Faults::default());
+        let connection = Connection::new(
+            Arc::new(http::Files {
+                inner: provider.files.clone(),
+                faults: faults.clone(),
+            }),
+            provider.clone(),
+            "test",
+        )
+        .with_upload_budget(UploadLimits {
+            bytes: 32 * 1024 * 1024,
+            attempts: 128,
+        })
+        .await
+        .unwrap();
+        let cache = Arc::new(Cache::new(bytes, None).unwrap());
+        let root = connection.root().unwrap().with_cache(cache.clone());
+        root.database_budget("app")
+            .unwrap()
+            .unwrap()
+            .initialize_database()
+            .await
+            .unwrap();
+        // Fresh allocators share immutable bytes, never the last owner's rights.
+        for grant in 1..=2 {
+            faults.metadata_reads.store(0, Ordering::SeqCst);
+            let calls = provider.calls.load(Ordering::SeqCst);
+            let ledger = root.database_budget("app").unwrap().unwrap();
+            ledger.charge(100).await.unwrap();
+            assert_eq!(
+                faults.metadata_reads.load(Ordering::SeqCst) == 0,
+                bytes > 128,
+                "warm funding should reuse immutable metadata within the existing cache budget"
+            );
+            assert!(
+                provider.calls.load(Ordering::SeqCst) > calls,
+                "cached bytes grant no credit"
+            );
+            assert!(cache.memory_bytes().await <= bytes);
+            // An uncached observer must see every independently allocated grant.
+            assert_eq!(
+                connection
+                    .root()
+                    .unwrap()
+                    .database_budget("app")
+                    .unwrap()
+                    .unwrap()
+                    .status()
+                    .await
+                    .unwrap()
+                    .allocated
+                    .attempts,
+                grant * 32
+            );
+        }
+        // A new process starts cold: fetch the page and ledger once, then reuse
+        // that page while staging the grant instead of downloading it again.
+        faults.metadata_reads.store(0, Ordering::SeqCst);
+        let cold = connection
+            .root()
+            .unwrap()
+            .with_cache(Arc::new(Cache::new(bytes, None).unwrap()));
+        cold.database_budget("app")
+            .unwrap()
+            .unwrap()
+            .charge(100)
+            .await
+            .unwrap();
+        assert_eq!(
+            faults.metadata_reads.load(Ordering::SeqCst),
+            if bytes > 128 { 2 } else { 3 }
+        );
+        // Wrong cached bytes are misses, not a substitute for the digest from
+        // the newly observed authority. Tiny/disabled caches remain functional.
+        for prefix in ["indexes/", "manifests/"] {
+            for key in provider.files.list(prefix, None, 128).await.unwrap() {
+                cache.insert(&key, Bytes::from_static(b"corrupt")).await;
+            }
+        }
+        faults.metadata_reads.store(0, Ordering::SeqCst);
+        let ledger = root.database_budget("app").unwrap().unwrap();
+        assert_eq!(ledger.status().await.unwrap().allocated.attempts, 96);
+        assert!(faults.metadata_reads.load(Ordering::SeqCst) > 0);
+        provider.fail_replacements.store(8, Ordering::SeqCst);
+        assert!(
+            ledger.status().await.is_err(),
+            "warm metadata cannot replace a fresh read barrier"
+        );
+    }
+}
+
+#[tokio::test]
 async fn database_budget_metadata_reuses_staging_and_bounds_stale_comparisons() {
     async fn objects(provider: &Provider) -> Vec<String> {
         let mut objects = provider.files.list("manifests/", None, 128).await.unwrap();
@@ -842,7 +940,9 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
         })
         .await
         .unwrap();
-    let root = connection.root().unwrap();
+    let root = connection.root().unwrap().with_cache(Arc::new(
+        crate::cache::Cache::new(1024 * 1024, None).unwrap(),
+    ));
     let ledger = root.database_budget("app").unwrap().unwrap();
     ledger.initialize_database().await.unwrap();
     let collector = root.collection();
@@ -857,7 +957,17 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
     provider.release.notify_one();
     task.await.unwrap().unwrap();
     assert_eq!(
-        ledger.status().await.unwrap().allocated.attempts,
+        connection
+            .root()
+            .unwrap()
+            .database_budget("app")
+            .unwrap()
+            .unwrap()
+            .status()
+            .await
+            .unwrap()
+            .allocated
+            .attempts,
         32,
         "a fenced publisher rebuilt its immutable paths before granting rights"
     );

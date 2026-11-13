@@ -195,6 +195,7 @@ impl Root {
                 crate::upload_budget::Allocator::database(
                     self.session.authority(),
                     self.files.clone(),
+                    self.cache.clone(),
                     name,
                 )
                 .map(Arc::new)

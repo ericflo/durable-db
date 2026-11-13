@@ -32,6 +32,7 @@ pub(super) struct Faults {
     release: Notify,
     puts: AtomicU64,
     range_reads: AtomicU64,
+    pub(super) metadata_reads: AtomicU64,
 }
 pub(super) struct Files {
     pub(super) inner: Arc<Remote>,
@@ -40,6 +41,9 @@ pub(super) struct Files {
 #[async_trait]
 impl Storage for Files {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<Object>> {
+        if key.starts_with("indexes/") || key.starts_with("manifests/") {
+            self.faults.metadata_reads.fetch_add(1, Ordering::SeqCst);
+        }
         if key.split('/').any(|part| part == "permits")
             && self.faults.fail_permit.load(Ordering::SeqCst)
         {

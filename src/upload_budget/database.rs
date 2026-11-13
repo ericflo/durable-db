@@ -1,5 +1,6 @@
 //! Name-bound ledgers share the existing directory and nonrefundable allocator.
 use super::*;
+use crate::cache::Cache;
 use crate::directory::{Directory, Pointer, Root};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -12,6 +13,7 @@ pub(crate) const DEFAULT_LIMITS: UploadLimits = UploadLimits {
 
 pub(super) struct Ledger {
     files: Arc<dyn Storage>,
+    cache: Option<Arc<Cache>>,
     name: String,
 }
 #[derive(Serialize, Deserialize)]
@@ -38,23 +40,41 @@ pub(crate) fn root(before: &Bucket) -> anyhow::Result<Option<Root>> {
     Ok(root)
 }
 impl Ledger {
+    fn directory(&self) -> Directory {
+        let directory = Directory::new(self.files.clone());
+        match &self.cache {
+            Some(cache) => directory.with_cache(cache.clone()),
+            None => directory,
+        }
+    }
     pub(super) async fn read(&self, before: &Bucket) -> anyhow::Result<Option<Record>> {
-        let Some(pointer) = Directory::new(self.files.clone())
+        let Some(pointer) = self
+            .directory()
             .get(root(before)?.as_ref(), &self.name)
             .await?
         else {
             return Ok(None);
         };
-        let object = self
-            .files
-            .get(&pointer.key, 4096)
-            .await?
-            .context("missing database upload ledger")?;
+        let cached = match &self.cache {
+            Some(cache) => cache.get(&pointer.key, &pointer.sha256).await,
+            None => None,
+        };
+        let miss = cached.is_none();
+        let bytes = match cached {
+            Some(bytes) => bytes,
+            None => {
+                self.files
+                    .get(&pointer.key, 4096)
+                    .await?
+                    .context("missing database upload ledger")?
+                    .bytes
+            }
+        };
         ensure!(
-            hex::encode(Sha256::digest(&object.bytes)) == pointer.sha256,
+            bytes.len() <= 4096 && hex::encode(Sha256::digest(&bytes)) == pointer.sha256,
             "database upload ledger checksum mismatch"
         );
-        let envelope: Envelope = serde_json::from_slice(&object.bytes)?;
+        let envelope: Envelope = serde_json::from_slice(&bytes)?;
         ensure!(
             envelope.database == self.name,
             "database upload ledger scope mismatch"
@@ -64,6 +84,9 @@ impl Ledger {
             envelope.record.status.maintenance.is_some(),
             "missing maintenance reserve"
         );
+        if miss && let Some(cache) = &self.cache {
+            cache.insert(&pointer.key, bytes).await;
+        }
         Ok(Some(envelope.record))
     }
     pub(super) async fn publish(
@@ -72,23 +95,17 @@ impl Ledger {
         before: &Bucket,
         record: &Record,
     ) -> anyhow::Result<bool> {
-        Self::publish_many(
-            self.files.clone(),
-            authority,
-            before,
-            &[(&self.name, record)],
-            |_| Ok(()),
-        )
-        .await
+        self.publish_many(authority, before, &[(&self.name, record)], |_| Ok(()))
+            .await
     }
     async fn publish_many(
-        files: Arc<dyn Storage>,
+        &self,
         authority: &dyn Authority,
         before: &Bucket,
         records: &[(&str, &Record)],
         check: impl Fn(&Bucket) -> anyhow::Result<()>,
     ) -> anyhow::Result<bool> {
-        let directory = Self::write_many(files, before, records).await?;
+        let directory = self.write_many(before, records).await?;
         let mut comparison = before.clone();
         for _ in 0..8 {
             let mut info = comparison.info.clone();
@@ -109,13 +126,13 @@ impl Ledger {
         bail!("ledger publication contention budget exceeded")
     }
     async fn write_many(
-        files: Arc<dyn Storage>,
+        &self,
         before: &Bucket,
         records: &[(&str, &Record)],
     ) -> anyhow::Result<String> {
         // Namespace grants can change the authority during these uploads.
         // Publication rebases only across unchanged ledgers and collection fences.
-        let directory = Directory::new(files.clone());
+        let directory = self.directory();
         let mut next = root(before)?;
         for batch in records.chunks(crate::directory::MAX_UPDATES) {
             let mut pointers = BTreeMap::new();
@@ -129,7 +146,10 @@ impl Ledger {
                     key: key.clone(),
                     sha256: hex::encode(Sha256::digest(&bytes)),
                 };
-                files.put(&key, bytes).await?;
+                self.files.put(&key, bytes.clone()).await?;
+                if let Some(cache) = &self.cache {
+                    cache.insert(&key, bytes).await;
+                }
                 pointers.insert((*name).to_owned(), pointer);
             }
             next = Some(directory.insert_many(next.as_ref(), &pointers).await?);
@@ -143,12 +163,14 @@ impl Allocator {
     pub(crate) fn database(
         authority: Arc<dyn Authority>,
         files: Arc<dyn Storage>,
+        cache: Option<Arc<Cache>>,
         name: &str,
     ) -> anyhow::Result<Self> {
         crate::engine::validate_db(name)?;
         Ok(Self {
             database: Some(Ledger {
                 files,
+                cache,
                 name: name.into(),
             }),
             ..Self::new(authority)
@@ -234,14 +256,12 @@ impl Allocator {
                 .iter()
                 .map(|(name, record)| (*name, record))
                 .collect();
-            if Ledger::publish_many(
-                first.database.as_ref().unwrap().files.clone(),
-                &*first.authority,
-                &before,
-                &records,
-                &check,
-            )
-            .await?
+            if first
+                .database
+                .as_ref()
+                .unwrap()
+                .publish_many(&*first.authority, &before, &records, &check)
+                .await?
             {
                 return Ok(());
             }

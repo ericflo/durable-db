@@ -2,6 +2,10 @@
 \* Native tenant ledger updates (initialization, refill, grants and maintenance
 \* claims) use head = tenant-directory root and gc = metadata collection fence.
 \* Renewals/read barriers/namespace grants change revision without either root.
+\* Ledger/index bytes may come from the existing bounded, digest-checked cache.
+\* This does not cache the authority comparison or recreate volatile credit.
+\* A cached abandoned path still cannot publish across a changed collector fence.
+\* Cache lookup/eviction stutter here; byte validation is checked in Rust.
 EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS Attempts, MaxRevision, UnsafeRetry
 VARIABLES revision, gc, head, files, issued, phase, file, seen, snapshot, observedGC,
