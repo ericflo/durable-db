@@ -1,5 +1,60 @@
 # Verification results
 
+## Tenant funding reuses bounded metadata cache (2026-11-13)
+
+**v1.0.4**, the exact `1640827` artifact from Woodpecker **397**, recovers all
+**375/375 acknowledged writes** in the B2/Kubernetes scale-down campaign.
+The harness, transport, retry policy and configuration match both preceding
+v1.0.3 runs on the existing hosts:
+
+| Release / run | Acknowledged writes recovered | Largest scale-down readback gap | Cold progress bound after readiness |
+| --- | ---: | ---: | ---: |
+| v1.0.3 first | 410 / 410 | 68.44s | 47.16s |
+| v1.0.3 repeat | 415 / 415 | 41.96s | 43.47s |
+| v1.0.4 | 375 / 375 | 41.98s | 40.41s |
+
+The candidate **meets the 60-second direct scale-down target**. All four
+independent histories pass identity, invocation order, value hashes and recovered
+totals after every API process is replaced. The preceding miss remains recorded.
+Separate short samples on shared hosts do not isolate a causal latency change,
+establish sustained performance or declare an SLO.
+
+Funding now reuses immutable ledger records and directory pages through the
+owner's existing bounded byte cache. In the single-leaf regression, a grant
+requires **two metadata GETs when cold instead of three, and none when warm**.
+This counts immutable metadata downloads, not authority operations. Digests,
+record size, schema and database identity are still checked. Authority barriers,
+conditional publication and collection fences remain unchanged; cached bytes
+never restore volatile credit. No extra cache allowance, worker or protocol
+transition is introduced.
+
+The old implementation fails the warm-reuse assertion in **0.01s**. All **12
+budget tests pass in 0.66s**, including fresh allocators, disabled/tiny caches,
+corruption fallback, lost acknowledgements, a directory split and collection of
+cached abandoned paths. An uncached observer checks the published grant after
+the collection race. All **15 HTTP checks pass in 1.36s**, with formatting and
+strict Clippy. The unchanged `PublicationRetry` model checks **44,354 distinct
+states**, depth 21, and detects the unsafe rebase. Cache byte validation and
+memory bounds remain Rust obligations, not a proof supplied by that model.
+Woodpecker passes the required Rust/client/Pi, audit, capacity and formal checks.
+The downloaded static archive independently passes API, export/restore and
+kill/reopen verification.
+
+The candidate's worst gap contains **29.22s in requests** and **12.50s in
+backoff**. Its commit succeeds in **7.51s**; readback then receives **17 HTTP
+503s**, spending **21.72s in requests**. Repeated read refusals around two seconds
+are the next target. The cache regression establishes fewer downloads; recovery
+refusals and shared publication queueing remain separate costs to qualify.
+The trace records preparation and publication waits without treating overlapping
+durations as additive or attributing every delay to funding.
+
+[Exact artifact, histories, timing and cleanup](evidence/ledger-cache-2026-11-13.json)
+record the qualification. The uncached ledger path and redundant helper
+arguments are replaced; the existing cache, model, fixture and harness are
+reused. Two generated model-state directories are removed. The disposable
+namespace, bucket, scoped key and **1,186 physical object versions** are
+removed. The scoped 1.0 support contract is unchanged.
+
 ## Handoff staging yields once to queued work (2026-11-13)
 
 **v1.0.3**, the exact `fae7dee` artifact from Woodpecker **394**, recovers every
