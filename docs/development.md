@@ -66,7 +66,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Native HTTP and client contract | `cargo test --locked --lib root::tests::http`; after `npm --prefix clients/javascript ci`, run `DURABLE_DB_TEST_ADMISSION_BYTES=1073741824 cargo test --locked --lib native_http_javascript_contract -- --ignored --nocapture` |
 | Native provider qualification | `cargo test --locked --test checkpoint_cloud -- --ignored --exact native_http::native_http_budgets_cleanup_and_cold_recovery --nocapture` |
 | Pi adapter or HTTP client transport | `scripts/test-client.sh` |
-| Autoscaling workload and history evidence | `node --test scripts/test-autoscaling.mjs` (Node 24 and Python 3; about two seconds, no cluster) |
+| Autoscaling workload and history evidence | `node --test scripts/test-autoscaling.mjs` (Node 24 and Python 3; about eight seconds, including stalled-connection coverage, no cluster) |
 | Public documentation | `npm --prefix site ci` and `node site/build.mjs` |
 
 Build the debug executable before running the client script. Its focused SDK mode still checks types, formatting, the application example and benchmark accounting. Its default mode runs the full client and Pi suite, including both adapters, the 32 upstream Pi cases, indexed-adapter fault/resource tests and real Harness workflows.

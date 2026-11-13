@@ -142,12 +142,12 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-Clustered availability remains the immediate gate. The latest B2 peer-isolation
-campaign recovered all acknowledged writes, with **25.17s / 50.16s** readback gaps
-under the 60-second fixture target. Answered ownership challenges are now paced
-to reduce checkpoint conflicts; funding and confirmation retries can still stall
-writes. One passing campaign establishes no production SLO. Worst-case memory,
-sustained performance and public multitenancy remain open. See the
+Clustered availability remains the immediate gate. Two B2 peer-isolation
+campaigns recovered all acknowledged writes and met the 60-second readback-gap
+fixture target. Answered ownership challenges are paced to reduce checkpoint
+conflicts; funding and confirmation retries can still stall writes. These short
+runs establish no production SLO. Host loss, worst-case memory, sustained
+performance and public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the
 [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 

@@ -1,5 +1,30 @@
 # Verification results
 
+## Isolation repeat on v0.24.25 (2026-11-13)
+
+A second dedicated-bucket B2 campaign uses the same `cc9b1c4` release binary
+and shared-Service, four-writer, 90-second peer-isolation fixture. All **1,069
+acknowledged writes** recover after complete API replacement, and all four
+independent histories pass. Maximum readback gaps are **30.69s / 35.82s** for
+asymmetric/two-way isolation, below the 60-second fixture target. Cold progress
+is bounded by **57.98s** after API readiness.
+
+The bounded diagnostic capture contains 23 completed checkpoint sequences; the
+longest is **30.91s**, with one funding and one confirmation deferral. Two
+ambiguous journal uploads retire their owners and require recovery. This is
+additional failure coverage, not a matched latency benchmark. Cleanup removes
+**722 physical versions**, the bucket, scoped key and namespace. The two v0.24.25
+campaigns recover **2,175 acknowledgements in total** across separate namespaces.
+Neither establishes sustained performance, an SLO or physical-host failure safety.
+
+The next harness revision (`f4f3bb0`, Woodpecker **379**) reuses the same workload
+clock and checker to measure gaps around stopping every database process on one
+host and resuming those exact processes. Missing windows and histories that make
+progress while exceeding the gap target are checked adversarially. All three
+harness tests pass in **8.09s**. No runtime or protocol change is introduced.
+[Exact artifacts, histories, bounds and cleanup](evidence/native-recovery-2026-11-11.json)
+retain each run separately.
+
 ## Answered-challenge pacing (v0.24.25, 2026-11-13)
 
 After an incumbent answered a storage challenge, the candidate could publish
