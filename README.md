@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!IMPORTANT]
-> **Latest release: v1.0.0.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
+> **Latest release: v1.0.1.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -144,10 +144,12 @@ The 1.0 contract applies within the [supported deployment scope](docs/production
 
 Use one dedicated bucket per deployment, private peer networking and TLS at
 application ingress. Fund upload allowances, set process/replica limits and
-keep independently protected backups. Scaling and recovery interrupt requests:
-the latest existing-host B2 run observed a **74.68-second** scale-down readback
-gap. The 60-second engineering target remains unmet in that case; 1.0 makes no
-availability or latency commitment. See the [measured results](docs/verification-results.md),
+keep independently protected backups. v1.0.1 prioritizes requested partitions
+during recovery within the same concurrency bound. In the focused B2 comparison,
+the largest scale-down readback gap was **68.27s**, versus **111.92s** on v1.0.0;
+both runs recovered every acknowledged write. These are short sequential samples,
+and the 60-second target still misses. The release makes no availability or
+latency commitment. See the [measured results](docs/verification-results.md),
 [operating scope and deferrals](docs/production-readiness.md), and [recovery procedure](docs/recovery.md).
 
 ## Verification

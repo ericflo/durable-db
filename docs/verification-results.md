@@ -2,34 +2,56 @@
 
 ## Requested partitions recover first (2026-11-13)
 
-The native controller now considers partitions with unresolved client requests
-before background recovery, preserving round-robin order within each group and
-the existing four acquisition slots. A fixed atomic hint per partition clears
-when its local backend is installed. This changes scheduling only: no additional
-provider calls, claim rights, cancellation, receipt replay or memory reservation
-is introduced. It does not preempt already-running recovery or guarantee fairness
-under hostile traffic.
+**v1.0.1**, the exact `b441e2c` static artifact from Woodpecker **387**, passes
+the focused B2/Kubernetes scale-down campaign and recovers every acknowledged
+write after total API replacement. The preceding v1.0.0 run uses the same
+harness and configuration on the existing hosts:
 
-The motivation is the existing-host 1.0 qualification run: during scale-down,
-partition 14 does not reach its claim stage until **19:03:15.840Z**, after
-partition 2 reaches that stage at **19:02:39.329Z**. These are observations on
-the same surviving process, not a cross-host clock comparison or proof that all
-delay is queueing. The complete run's largest readback gap is **74.68s**.
+| Release | Acknowledged writes recovered | Largest scale-down readback gap | Cold progress bound after readiness |
+| --- | ---: | ---: | ---: |
+| v1.0.0 | 353 / 353 | 111.92s | 50.44s |
+| v1.0.1 | 422 / 422 | 68.27s | 57.89s |
 
-The existing paused-provider regression now also requests the last of eight
-partitions through real HTTP before membership arrives. It verifies priority,
+All four independent histories pass in each campaign. Every writer's maximum
+scale-down gap is lower in the candidate, but the **60-second target still misses**.
+Cold recovery has a higher controller bound, below its 120-second target.
+Direct gaps and controller bounds are different measurements. These are separate
+short samples on shared hosts, with provider/host variation and differing
+publication retries; they neither isolate a causal speedup nor establish an SLO.
+The direct gap includes the last completed readback before the fault window;
+not all of that elapsed time can be attributed to scale-down.
+
+The remaining 68.27s gap contains **35 HTTP 503 responses**, **42.01s in HTTP
+requests** and **26.01s in retry backoff**, measured on the workload clock.
+This separates client waiting from the owner-acquisition trace; it does not
+attribute each server-side delay or justify weakening fresh permit validation.
+
+Requested partitions now enter recovery before background work, preserving
+round-robin order within each group and the existing four acquisition slots.
+One fixed atomic hint per partition clears after local installation. The change
+adds no provider operation, reservation, task or serving authority. It does not
+preempt in-flight recovery or promise fairness under hostile traffic.
+
+The existing paused-provider regression also requests the last of eight
+partitions through real HTTP before membership arrives. It checks priority,
 continued progress for the other seven and recovery after release. The old
 scheduler fails the priority assertion; the updated check passes in **0.14s**.
 All **26 controller checks pass in 6.12s**, with strict Clippy and formatting.
 The unchanged `OwnerResidency` transition system checks **19 distinct states**,
-depth 5, and detects both reservation faults. No new state or model was added.
+depth 5, and detects both reservation faults. No model state or new model is added.
+Woodpecker passes the full required Rust/client, audit, capacity and formal checks.
+The downloaded archive independently passes exact retries, ordered reads,
+export/restore and kill/reopen; the GitHub asset digests match those files.
 
-The maintained harness adds `--scenario scale-down`, reusing 1→3→6→1 scaling,
-zero-compute recovery, four writers, budgets, history checks and cleanup.
-All four adversarial harness checks pass in **8.66s**. The old single-priority
-scan is replaced; no parallel scheduler or qualification runner is added.
-Real B2 timing for the candidate is pending; this local result is not a cloud
-latency claim. The supported release remains v1.0.0 until qualification finishes.
+`--scenario scale-down` reuses the maintained harness's 1→3→6→1→0→3 sequence,
+four writers, budgets, histories and cleanup. All four adversarial harness checks
+pass in **8.66s**. The single-priority scan and expired first-release instructions
+are replaced. Removed three generated model-state directories and Python caches.
+Cloud cleanup removes both namespaces, buckets and scoped keys, plus **1,250**
+physical versions for the baseline and **1,039** for the candidate.
+
+[Exact artifacts, histories, model bounds, claim traces and cleanup](evidence/requested-recovery-2026-11-13.json)
+retain both failed scale-down targets. The scoped 1.0 support contract is unchanged.
 
 ## Scoped 1.0 release and whole-worker recovery (2026-11-13)
 
