@@ -57,7 +57,7 @@ export async function requestJson(address, database, { method, headers, body, si
       // node:http sends once. It neither follows redirects nor retries a reset.
       const request = pool.client.request(
         url,
-        { method, headers, signal, agent: pool.agent },
+        { method, headers: { 'accept-encoding': 'identity', ...headers }, signal, agent: pool.agent },
         async (response) => {
           try {
             if (response.statusCode >= 300 && response.statusCode < 400)

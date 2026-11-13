@@ -109,6 +109,7 @@ it('keeps database paths separate, moves after 503, and never replays a lost ack
           for await (const chunk of request) body += chunk;
           const database = request.url.split('/')[3];
           calls.push({ database, side, body, authorization: request.headers.authorization });
+      expect(request.headers['accept-encoding']).toBe('identity');
           response.setHeader('content-type', 'application/json');
           if (owners[database] !== side) {
             response
