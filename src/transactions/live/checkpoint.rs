@@ -35,16 +35,15 @@ impl Maintenance {
         }
     }
 }
+/// One frozen journal cut. Staging borrows the owner immutably; publication
+/// and the projection swap require its exclusive borrow again.
+pub(crate) struct Checkpoint {
+    cut: root::Cut,
+    started: Instant,
+    stage: &'static str,
+    staged: Option<Publishing>,
+}
 impl Owner {
-    // Foreground operations only wait for capacity-required maintenance. An
-    // unfunded opportunistic handoff checkpoint must not deny ordinary reads.
-    pub(super) async fn maintain_required(&mut self) -> anyhow::Result<()> {
-        if self.checkpoint_due() {
-            self.maintain().await?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn files(&self) -> Arc<dyn Storage> {
         self.maintenance.files.clone()
     }
@@ -71,51 +70,32 @@ impl Owner {
             || self.validation.transactions >= (self.limits.validation.transactions / 2).max(1)
     }
 
-    /// Called by admission and completion; a runtime can also drive this after
-    /// a failed/cancelled call. Returns false while an upload is still pending.
-    /// Checkpoint construction pauses data mutation during I/O. Independent
-    /// control operations remain separate; immutable objects are never deleted here.
+    /// Stage and publish without concurrent access. Serving uses these same
+    /// steps with a shared borrow during staging. Returns true only after a
+    /// checkpoint is published; cache-only eviction needs no storage work.
     pub async fn maintain(&mut self) -> anyhow::Result<bool> {
-        let mut stage = "prepare";
-        let started = Instant::now();
-        let result = self.maintain_checkpoint(&mut stage, started).await;
-        if result.is_err() {
-            // Fixed stages only: provider errors may contain credentials or data.
-            tracing::warn!(owner = %self.identity.incarnation, stage,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "native checkpoint deferred");
-        } else if matches!(result, Ok(true)) && stage != "prepare" {
-            // Exclude no-op polls and discarded warm caches. This is the whole
-            // checkpoint call's elapsed time, not the last stage's duration.
-            tracing::info!(owner = %self.identity.incarnation, stage,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "native checkpoint completed");
+        let Some(mut checkpoint) = self.begin_checkpoint()? else {
+            return Ok(false);
+        };
+        let result = async {
+            checkpoint.stage(self).await?;
+            checkpoint.publish(self).await
         }
-        result
+        .await;
+        checkpoint.finish(result)
     }
 
-    async fn maintain_checkpoint(
-        &mut self,
-        stage: &mut &'static str,
-        started: Instant,
-    ) -> anyhow::Result<bool> {
-        let identity = self.identity;
-        let progress = |current: &mut &'static str, next: &'static str| {
-            *current = next;
-            tracing::info!(owner = %identity.incarnation, stage = next,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "native checkpoint progress");
-        };
+    pub(crate) fn begin_checkpoint(&mut self) -> anyhow::Result<Option<Checkpoint>> {
         self.check()?;
         if (!self.checkpoint_due() && !self.maintenance.handoff)
             || self.writer.pending_batches() != 0
         {
-            return Ok(false);
+            return Ok(None);
         }
         // Even an idle, empty successor needs its own durable cut, otherwise
         // every replacement revisits all earlier owners. This uses the normal
         // checkpoint path and funding. Handoff alone does not mark capacity as
-        // exhausted, but maintain() holds the serving write lock through I/O.
+        // exhausted. Staging keeps the projection immutable while allowing reads.
         // Retries/refusals can fill the receipt cache without advancing history.
         // Drop only that disposable state: no new checkpoint or authority CAS.
         if self.maintenance.publishing.is_none()
@@ -127,14 +107,14 @@ impl Owner {
             self.active.clear();
             self.validation = validation::Usage::default();
             self.maintenance.requested = false;
-            return Ok(true);
+            return Ok(None);
         }
         if self.maintenance.publishing.is_none() {
             // Set the gate before any await: cancellation and request-driven
             // maintenance must not bypass pacing or multiply charged uploads.
             let now = Instant::now();
             if self.maintenance.retry.is_some_and(|(at, _)| now < at) {
-                return Ok(false);
+                return Ok(None);
             }
             let delay = self
                 .maintenance
@@ -143,90 +123,161 @@ impl Owner {
                     (prior * 2).min(Duration::from_secs(30))
                 });
             self.maintenance.retry = Some((now + delay, delay));
-            // Avoid spending maintenance credit for a permanently revoked owner.
-            // Publication still requires its exact conditional comparison.
-            progress(stage, "permission");
-            self.validate().await?;
-            let origin = {
-                let _request = self.control.request.lock().await;
-                // A failed/cancelled refresh clears the cached confirmation,
-                // while the live permit can remain valid. Retry the exact
-                // comparison instead of getting stuck on the missing origin.
-                if self.control.lock()?.recovery_record().is_err() {
-                    progress(stage, "confirmation");
-                    let _ = self.control.refresh_locked().await?;
-                }
-                self.control.lock()?.recovery_record()?
-            };
-            let cut = root::Cut {
+        }
+        Ok(Some(Checkpoint {
+            cut: root::Cut {
                 identity: self.identity,
                 prefix: self.writer.durable_prefix(),
-            };
-            let mut files = self.maintenance.files.clone();
-            if self.database_budget(catalog::CATALOG.name)?.is_some() {
-                progress(stage, "allowance");
-                let costs = self.projection.checkpoint_charges().await?;
-                let mut total = 0u64;
-                let mut tenants = BTreeMap::<String, u64>::new();
-                for ((name, generation), bytes) in costs {
-                    total = total
+            },
+            started: Instant::now(),
+            stage: "prepare",
+            staged: None,
+        }))
+    }
+
+    fn maintenance_budget(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<Option<Arc<crate::upload_budget::Allocator>>> {
+        // Funding may consume backing for unused admission rights. It must
+        // invalidate the same allocator, not a newly reconstructed grant.
+        if let Some(budget) = self.budgets.get(name) {
+            return Ok(Some(budget.clone()));
+        }
+        self.database_budget(name)
+    }
+}
+impl Checkpoint {
+    fn check(&self, owner: &Owner) -> anyhow::Result<()> {
+        owner.check()?;
+        ensure!(
+            owner.identity == self.cut.identity
+                && owner.writer.durable_prefix() == self.cut.prefix
+                && owner.writer.pending_batches() == 0,
+            "checkpoint cut changed"
+        );
+        Ok(())
+    }
+    fn progress(&mut self, stage: &'static str) {
+        self.stage = stage;
+        tracing::info!(owner = %self.cut.identity.incarnation, stage,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            "native checkpoint progress");
+    }
+    pub(crate) fn finish(self, result: anyhow::Result<bool>) -> anyhow::Result<bool> {
+        if result.is_err() {
+            tracing::warn!(owner = %self.cut.identity.incarnation, stage = self.stage,
+                elapsed_ms = self.started.elapsed().as_millis() as u64,
+                "native checkpoint deferred");
+        } else if matches!(result, Ok(true)) {
+            tracing::info!(owner = %self.cut.identity.incarnation, stage = self.stage,
+                elapsed_ms = self.started.elapsed().as_millis() as u64,
+                "native checkpoint completed");
+        }
+        result
+    }
+    pub(crate) async fn stage(&mut self, owner: &Owner) -> anyhow::Result<()> {
+        self.check(owner)?;
+        if owner.maintenance.publishing.is_some() {
+            return Ok(());
+        }
+        // Avoid spending maintenance credit for a permanently revoked owner.
+        // Publication still requires its exact conditional comparison.
+        self.progress("permission");
+        owner.validate().await?;
+        let origin = {
+            let _request = owner.control.request.lock().await;
+            // A failed/cancelled refresh clears the cached confirmation,
+            // while the live permit can remain valid. Retry the exact
+            // comparison instead of getting stuck on the missing origin.
+            if owner.control.lock()?.recovery_record().is_err() {
+                self.progress("confirmation");
+                let _ = owner.control.refresh_locked().await?;
+            }
+            owner.control.lock()?.recovery_record()?
+        };
+        let cut = self.cut;
+        let mut files = owner.maintenance.files.clone();
+        if owner.database_budget(catalog::CATALOG.name)?.is_some() {
+            self.progress("allowance");
+            let costs = owner.projection.checkpoint_charges().await?;
+            let mut total = 0u64;
+            let mut tenants = BTreeMap::<String, u64>::new();
+            for ((name, generation), bytes) in costs {
+                total = total
+                    .checked_add(bytes)
+                    .context("checkpoint allowance overflow")?;
+                if (Database {
+                    name: &name,
+                    generation,
+                }) != catalog::CATALOG
+                {
+                    let cost = tenants.entry(name).or_default();
+                    *cost = cost
                         .checked_add(bytes)
                         .context("checkpoint allowance overflow")?;
-                    if (Database {
-                        name: &name,
-                        generation,
-                    }) != catalog::CATALOG
-                    {
-                        let cost = tenants.entry(name).or_default();
-                        *cost = cost
-                            .checked_add(bytes)
-                            .context("checkpoint allowance overflow")?;
-                    }
                 }
-                let charges: Vec<_> = tenants
-                    .into_iter()
-                    .map(|(name, bytes)| {
-                        Ok((
-                            self.cached_budget(&name)?
-                                .context("missing tenant allocator")?,
-                            bytes,
-                        ))
-                    })
-                    .collect::<anyhow::Result<_>>()?;
-                progress(stage, "funding");
-                if let Err(error) =
-                    crate::upload_budget::Allocator::fund_maintenance(&charges, |before| {
-                        self.control.lock()?.check_funding_origin(before, origin)
-                    })
-                    .await
-                {
-                    // Collection/takeover can invalidate the captured origin.
-                    // Refresh control before the paced retry; do not upload or
-                    // reconstruct any rights from an uncertain funding reply.
-                    let _ = self.control.refresh().await;
-                    return Err(error);
-                }
-                files = crate::upload_budget::Attempt::bounded(files, total);
             }
-            progress(stage, "staging");
-            let staged = checkpoint::write_projection(&self.projection, files, origin, cut).await?;
-            let snapshot = checkpoint::Snapshot::new(
-                self.maintenance.files.clone(),
-                self.maintenance.cache.clone(),
-                staged.reference(),
-            );
-            self.maintenance.publishing = Some(Publishing {
-                staged,
-                snapshot,
-                attempted: false,
-            });
+            let charges: Vec<_> = tenants
+                .into_iter()
+                .map(|(name, bytes)| {
+                    Ok((
+                        owner
+                            .maintenance_budget(&name)?
+                            .context("missing tenant allocator")?,
+                        bytes,
+                    ))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            self.progress("funding");
+            if let Err(error) =
+                crate::upload_budget::Allocator::fund_maintenance(&charges, |before| {
+                    owner.control.lock()?.check_funding_origin(before, origin)
+                })
+                .await
+            {
+                // Collection/takeover can invalidate the captured origin.
+                // Refresh control before the paced retry; do not upload or
+                // reconstruct any rights from an uncertain funding reply.
+                let _ = owner.control.refresh().await;
+                return Err(error);
+            }
+            files = crate::upload_budget::Attempt::bounded(files, total);
         }
-        progress(stage, "publication");
-        let _request = self.control.request.lock().await;
-        let pending = self.maintenance.publishing.as_mut().unwrap();
+        self.progress("staging");
+        let staged = checkpoint::write_projection(&owner.projection, files, origin, cut).await?;
+        let snapshot = checkpoint::Snapshot::new(
+            owner.maintenance.files.clone(),
+            owner.maintenance.cache.clone(),
+            staged.reference(),
+        );
+        self.staged = Some(Publishing {
+            staged,
+            snapshot,
+            attempted: false,
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn publish(&mut self, owner: &mut Owner) -> anyhow::Result<bool> {
+        self.check(owner)?;
+        if let Some(staged) = self.staged.take() {
+            ensure!(
+                owner.maintenance.publishing.is_none(),
+                "checkpoint staging replaced"
+            );
+            owner.maintenance.publishing = Some(staged);
+        }
+        self.progress("publication");
+        let _request = owner.control.request.lock().await;
+        let pending = owner
+            .maintenance
+            .publishing
+            .as_mut()
+            .context("checkpoint not staged")?;
         for attempt in 0..2 {
             if !pending.attempted {
-                progress(stage, "publication");
+                self.progress("publication");
                 let staged = Staged {
                     origin: pending.staged.origin,
                     reference: pending.staged.reference,
@@ -234,16 +285,16 @@ impl Owner {
                 let publication = if attempt == 0 {
                     // Funding and staging can advance the register. Read their
                     // result and let publication validate it in the same CAS.
-                    let observed = self.control.lock()?.observe();
+                    let observed = owner.control.lock()?.observe();
                     let observed = observed.await?;
-                    let mut root = self.control.lock()?;
+                    let mut root = owner.control.lock()?;
                     // The request gate excludes live control calls. Only a
                     // cancelled earlier validation can still be pending here.
                     root.abandon();
                     root.publish_checkpoint_observed(observed, staged)
                 } else {
                     // The retry below already confirmed a fresh comparison.
-                    self.control.lock()?.publish_checkpoint(staged)
+                    owner.control.lock()?.publish_checkpoint(staged)
                 };
                 match publication {
                     Ok(publication) => {
@@ -251,7 +302,7 @@ impl Owner {
                         // until exact validation confirms the new or old reference.
                         pending.attempted = true;
                         let completed = publication.execute().await;
-                        let _outcome = self.control.lock()?.finish(completed)?;
+                        let _outcome = owner.control.lock()?.finish(completed)?;
                     }
                     // Resolve a changed origin through the same confirmation
                     // path, which discards collected staging before rebuilding.
@@ -259,19 +310,19 @@ impl Owner {
                     Err(error) => return Err(error.into()),
                 }
             }
-            let published = self
+            let published = owner
                 .control
                 .lock()?
                 .recovery_record()
                 .ok()
                 .is_some_and(|r| r.checkpoint == Some(pending.staged.reference));
             if !published {
-                progress(stage, "confirmation");
-                let _outcome = self.control.refresh_locked().await?;
-                let record = self.control.lock()?.recovery_record()?;
+                self.progress("confirmation");
+                let _outcome = owner.control.refresh_locked().await?;
+                let record = owner.control.lock()?.recovery_record()?;
                 if record.checkpoint != Some(pending.staged.reference) {
                     if record.collection != pending.staged.origin.collection {
-                        self.maintenance.publishing = None;
+                        owner.maintenance.publishing = None;
                         return Ok(false);
                     }
                     ensure!(
@@ -291,16 +342,16 @@ impl Owner {
             }
             break;
         }
-        self.control.check(self.identity)?;
-        let pending = self.maintenance.publishing.take().unwrap();
-        self.projection.rebase(pending.snapshot);
-        self.active.clear();
-        self.validation = validation::Usage::default();
-        self.maintenance.covered = self.writer.durable_prefix().position();
-        self.maintenance.recovered = 0;
-        self.maintenance.handoff = false;
-        self.maintenance.requested = false;
-        self.maintenance.retry = None;
+        owner.control.check(owner.identity)?;
+        let pending = owner.maintenance.publishing.take().unwrap();
+        owner.projection.rebase(pending.snapshot);
+        owner.active.clear();
+        owner.validation = validation::Usage::default();
+        owner.maintenance.covered = owner.writer.durable_prefix().position();
+        owner.maintenance.recovered = 0;
+        owner.maintenance.handoff = false;
+        owner.maintenance.requested = false;
+        owner.maintenance.retry = None;
         Ok(true)
     }
 }

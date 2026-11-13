@@ -77,6 +77,7 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         .complete(creation.upload.take().unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     let CatalogResult::Created(first) = owner.catalog_result(&creation).await.unwrap().unwrap()
     else {
         panic!("wrong result kind")
@@ -143,6 +144,7 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(
         owner
             .authorized_result(&prepared.tickets[0], &writer)
@@ -186,6 +188,7 @@ async fn native_lifecycle_creation_is_durable_idempotent_and_cannot_expose_the_i
         .complete(internal_name.upload.take().unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     let read = ReadRequest {
         keys: vec!["app".into()],
         ..Default::default()
@@ -254,6 +257,7 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         .complete(creation.upload.take().unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     let auth = Auth::new(&"32".repeat(32)).unwrap();
     let (writer, token) = credential(&owner, "app", &auth, true).await;
     let (reader, _) = credential(&owner, "app", &auth, false).await;
@@ -279,6 +283,7 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         .complete(change.upload.take().unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(owner.catalog_result(&change).await.unwrap().is_none());
     assert_eq!(
         owner
@@ -292,6 +297,7 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(owner.catalog_result(&change).await.unwrap().is_some());
     assert!(owner.catalog_result(&duplicate).await.unwrap().is_some());
     assert!(matches!(
@@ -332,6 +338,7 @@ async fn native_lifecycle_pending_revocation_fences_writes_and_durable_revocatio
         .complete(rotate.upload.take().unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(matches!(
         owner
             .read_authorized("app", &ReadRequest::default(), &reader)
@@ -400,6 +407,7 @@ async fn apply_quota_write(
         .await?;
     if let Some(upload) = prepared.upload {
         owner.complete(upload.send().await).await?;
+        owner.maintain().await?;
     }
     Ok(owner
         .authorized_result(&prepared.tickets[0], &Access::Administrator)
@@ -429,6 +437,7 @@ async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_
                 .complete(prepared.upload.take().unwrap().send().await)
                 .await
                 .unwrap();
+            owner.maintain().await.unwrap();
         }
         let first = quota_write(0, "first", &[("x", Some(b"abc"))]);
         let competing = quota_write(0, "competing", &[("y", Some(b"abc"))]);
@@ -454,6 +463,7 @@ async fn native_lifecycle_quotas_survive_retries_pending_writes_checkpoints_and_
             .complete(group.upload.unwrap().send().await)
             .await
             .unwrap();
+        owner.maintain().await.unwrap();
         for i in [0, 1, 4] {
             let result = owner
                 .authorized_result(&group.tickets[i], &admin)
@@ -587,6 +597,7 @@ async fn native_validation_waits_for_checkpoint_without_abandoning_its_invocatio
     provider.pause.store(true, Ordering::SeqCst);
     let finish = tokio::spawn(async move {
         owner.complete(uploaded).await.unwrap();
+        owner.maintain().await.unwrap();
         owner
     });
     provider.entered.notified().await;
@@ -626,6 +637,7 @@ async fn native_cancelled_validation_keeps_reads_live_and_does_not_strand_the_co
         .complete(creation.upload.take().unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     let control = owner.control();
     let stalled = control.clone();
     provider.pause.store(true, Ordering::SeqCst);

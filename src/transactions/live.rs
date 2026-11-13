@@ -370,7 +370,6 @@ impl Owner {
         database: Database<'_>,
     ) -> anyhow::Result<Snapshot> {
         self.check()?;
-        self.maintain_required().await?;
         self.warm(database).await?;
         let name: Arc<str> = database.name.into();
         let token = self.active[&(name.clone(), database.generation)]
@@ -413,7 +412,6 @@ impl Owner {
     /// between the first accepted revision and creation of its upload handle.
     pub async fn prepare(&mut self, requests: &[Request<'_>]) -> anyhow::Result<Prepared> {
         self.check()?;
-        self.maintain_required().await?;
         ensure!(
             !self.checkpoint_due(),
             "checkpoint waiting for pending uploads"
@@ -657,18 +655,18 @@ impl Owner {
         self.failed = false;
         Ok(Prepared { tickets, upload })
     }
+    /// Publish completed journal work. The caller schedules `maintain` after
+    /// replying, keeping checkpoint I/O off the acknowledgement path.
     pub async fn complete(&mut self, completion: journal::Completion) -> anyhow::Result<()> {
         self.check()?;
         self.writer.complete(completion)?;
         self.publish().await?;
-        self.maintain_required().await?;
         Ok(())
     }
     pub async fn resolve_upload(&mut self, position: u64) -> anyhow::Result<journal::Resolution> {
         self.check()?;
         let result = self.writer.resolve(position).await?;
         self.publish().await?;
-        self.maintain_required().await?;
         Ok(result)
     }
     async fn publish(&mut self) -> anyhow::Result<()> {

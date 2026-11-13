@@ -149,8 +149,9 @@ campaigns, all **2,586 acknowledged writes** recover through scaling, rollouts,
 process pauses, provider interruption and cold restart. The largest readback gap
 per rollout ranges from **64.80 to 86.83 seconds**, still missing 60 seconds;
 six of twelve broader recovery targets are missed. These samples establish no
-overall availability improvement. Next address recovery queueing and checkpoint
-I/O that blocks reads.
+overall availability improvement. Main now allows reads during checkpoint
+funding and immutable uploads; publication remains exclusive. Cloud qualification
+of that change and recovery queueing are next.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

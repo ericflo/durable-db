@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, RwLock, RwLockWriteGuard, Semaphore, mpsc, oneshot},
     task::{JoinHandle, JoinSet},
 };
 
@@ -316,6 +316,24 @@ async fn validate_response(owner: &Owner) -> Result<()> {
         .map_err(Error::Storage)
 }
 
+// The worker is the sole mutator. Downgrade during immutable staging so reads
+// keep their existing view; reacquire exclusive access before publication can
+// let collection retire old tables. No second projection or worker is needed.
+async fn maintain(owner: &Resident) -> anyhow::Result<bool> {
+    let mut state = owner.write().await;
+    let Some(mut checkpoint) = state.begin_checkpoint()? else {
+        return Ok(false);
+    };
+    let state = RwLockWriteGuard::downgrade(state);
+    let staged = checkpoint.stage(&state).await;
+    drop(state);
+    let result = match staged {
+        Ok(()) => checkpoint.publish(&mut *owner.write().await).await,
+        Err(error) => Err(error),
+    };
+    checkpoint.finish(result)
+}
+
 async fn run(
     owner: Arc<Resident>,
     mut queue: mpsc::Receiver<Command>,
@@ -410,8 +428,8 @@ async fn run(
                 }
             }
             _ = retry.tick() => {
-                let mut owner = owner.write().await;
                 if let Some(position) = unknown.first().copied() {
+                    let mut owner = owner.write().await;
                     match owner.resolve_upload(position).await {
                         Ok(Resolution::Durable) => { unknown.remove(&position); }
                         Ok(Resolution::Unknown) => {
@@ -423,54 +441,57 @@ async fn run(
                         }
                         Err(_) => (),
                     }
-                } else {
-                    let _ = owner.maintain().await;
                 }
             }
         }
-        let owner = owner.read().await;
-        if owner.check().is_err() {
-            return;
-        }
-        let mut replies = Vec::new();
-        let mut i = 0;
-        while i < pending.len() {
-            let response = &pending[i].response;
-            if response.send.is_closed() {
-                pending.swap_remove(i);
-                continue;
+        {
+            let owner = owner.read().await;
+            if owner.check().is_err() {
+                return;
             }
-            let result = match &pending[i].ticket {
-                Ticket::Catalog(change) => owner
-                    .catalog_result_unvalidated(change)
-                    .map(|r| r.map(Reply::Catalog)),
-                Ticket::Commit(ticket, access) => owner
-                    .authorized_result_unvalidated(ticket, access)
-                    .await
-                    .map(|r| r.map(Reply::Commit)),
-            };
-            let result = match result {
-                Ok(None) => {
-                    i += 1;
+            let mut replies = Vec::new();
+            let mut i = 0;
+            while i < pending.len() {
+                let response = &pending[i].response;
+                if response.send.is_closed() {
+                    pending.swap_remove(i);
                     continue;
                 }
-                Ok(Some(reply)) => Ok(reply),
-                Err(error) => Err(error),
-            };
-            replies.push((pending.swap_remove(i).response, result));
-        }
-        if !replies.is_empty() {
-            let validated = validate_response(&owner).await.is_ok();
-            for (response, result) in replies {
-                let result = if validated {
-                    result
-                } else {
-                    Err(Error::Storage(anyhow::anyhow!(
-                        "serving permission unavailable"
-                    )))
+                let result = match &pending[i].ticket {
+                    Ticket::Catalog(change) => owner
+                        .catalog_result_unvalidated(change)
+                        .map(|r| r.map(Reply::Catalog)),
+                    Ticket::Commit(ticket, access) => owner
+                        .authorized_result_unvalidated(ticket, access)
+                        .await
+                        .map(|r| r.map(Reply::Commit)),
                 };
-                let _ = response.send.send(result);
+                let result = match result {
+                    Ok(None) => {
+                        i += 1;
+                        continue;
+                    }
+                    Ok(Some(reply)) => Ok(reply),
+                    Err(error) => Err(error),
+                };
+                replies.push((pending.swap_remove(i).response, result));
+            }
+            if !replies.is_empty() {
+                let validated = validate_response(&owner).await.is_ok();
+                for (response, result) in replies {
+                    let result = if validated {
+                        result
+                    } else {
+                        Err(Error::Storage(anyhow::anyhow!(
+                            "serving permission unavailable"
+                        )))
+                    };
+                    let _ = response.send.send(result);
+                }
             }
         }
+        // Reply before maintenance starts, then quiesce new admissions until
+        // its cut is published. The retry tick also drives idle/paced work.
+        let _ = maintain(&owner).await;
     }
 }

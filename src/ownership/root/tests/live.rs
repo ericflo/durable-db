@@ -76,6 +76,7 @@ async fn funded_checkpoint_publishes_without_redundant_validation() {
     let calls = provider.calls.load(Ordering::SeqCst);
     let start = provider.history.lock().unwrap().len() - 1;
     owner.complete(completed).await.unwrap();
+    assert!(owner.maintain().await.unwrap());
     let calls = provider.calls.load(Ordering::SeqCst) - calls;
     {
         let history = provider.history.lock().unwrap();
@@ -148,6 +149,7 @@ async fn live_checkpoint_recovers_after_control_confirmation_is_lost() {
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(!owner.checkpoint_due());
     assert_eq!(
         owner
@@ -375,6 +377,7 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         .complete(first.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(
         owner.outcome(first.tickets[1]).await.unwrap(),
         Result::Rejected(Rejection::Capacity)
@@ -391,6 +394,7 @@ async fn live_admission_reserves_index_and_queue_before_acceptance() {
         .complete(second.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(
         owner.outcome(second.tickets[0]).await.unwrap(),
         Result::Committed(2)
@@ -484,6 +488,7 @@ async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_s
             .complete(prepared.upload.unwrap().send().await)
             .await
             .unwrap();
+        owner.maintain().await.unwrap();
         assert_eq!(
             owner.outcome(prepared.tickets[0]).await.unwrap(),
             Result::Committed(n as u64)
@@ -546,6 +551,7 @@ async fn live_checkpoints_schedule_continuously_and_recover_only_the_uncovered_s
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(owner.usage().versions, 0);
     let current = owner.snapshot(database("a")).await.unwrap();
     assert!(
@@ -585,6 +591,7 @@ async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
         .complete(first.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(owner.checkpoint_due());
     assert!(!owner.maintain().await.unwrap());
     assert!(
@@ -597,6 +604,7 @@ async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
         .complete(next.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(!owner.checkpoint_due());
     let retry = owner
         .prepare(&[request(&snapshot, "first", &[], &[])])
@@ -617,6 +625,7 @@ async fn live_checkpoint_drains_pending_uploads_before_accepting_more_work() {
         .complete(third.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(
         owner.outcome(third.tickets[0]).await.unwrap(),
         Result::Committed(3)
@@ -750,9 +759,10 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         .await
         .unwrap();
     let completion = prepared.upload.unwrap().send().await;
+    owner.complete(completion).await.unwrap();
     paused.pause_upload.store(true, Ordering::SeqCst);
     tokio::select! {
-        result = owner.complete(completion) => panic!("table upload was not paused: {result:?}"),
+        result = owner.maintain() => panic!("table upload was not paused: {result:?}"),
         _ = paused.entered.notified() => (),
     }
     let first_charge = budget.status().await.unwrap().maintenance.unwrap();
@@ -824,6 +834,7 @@ async fn live_checkpoint_cancellation_resolves_publication_and_reads_recheck_aut
         .complete(batch.upload.unwrap().send().await)
         .await
         .unwrap();
+    assert!(owner.maintain().await.unwrap());
     assert!(!owner.checkpoint_due());
     assert!(paused.table_puts.load(Ordering::SeqCst) > puts);
     let snapshot = owner.snapshot(database("durable-catalog")).await.unwrap();
@@ -927,6 +938,7 @@ async fn live_public_reads_match_the_existing_wire_contract_without_warming_rece
             .complete(prepared.upload.unwrap().send().await)
             .await
             .unwrap();
+        owner.maintain().await.unwrap();
         old.commit(
             "a",
             &CommitRequest {
@@ -1062,6 +1074,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     let result = owner
         .commit_result(prepared.tickets[0])
         .await
@@ -1111,6 +1124,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(owner.usage().versions, 0, "second frame checkpoints");
     let retry = owner.prepare_request(database("a"), &first).await.unwrap();
     assert!(retry.upload.is_none());
@@ -1157,6 +1171,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         .complete(separate.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert!(
         !owner
             .commit_result(separate.tickets[0])
@@ -1171,6 +1186,7 @@ async fn live_wire_commits_keep_identity_across_pending_checkpoint_takeover_and_
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     let expired = owner.prepare_request(database("a"), &first).await.unwrap();
     assert!(expired.upload.is_none());
     assert!(matches!(
@@ -1334,6 +1350,7 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
         .complete(prepared.upload.unwrap().send().await)
         .await
         .unwrap();
+    owner.maintain().await.unwrap();
     assert_eq!(
         owner
             .commit_result(prepared.tickets[0])
@@ -1371,7 +1388,7 @@ async fn live_wire_admission_does_not_checkpoint_away_its_just_evaluated_snapsho
         } else {
             assert!(result.unwrap().unwrap().replayed);
         }
-        assert!(owner.maintain().await.unwrap());
+        assert!(!owner.maintain().await.unwrap());
         assert_eq!(owner.usage().databases, 0);
         assert_eq!(provider.calls.load(Ordering::SeqCst), controls);
         assert_eq!(
@@ -1442,7 +1459,8 @@ async fn live_checkpoint_rebuilds_collected_staging_and_preserves_cold_recovery(
         .await
         .unwrap();
     collector.collect().await.unwrap();
-    assert!(owner.complete(completion).await.is_err());
+    owner.complete(completion).await.unwrap();
+    assert!(owner.maintain().await.is_err());
     assert!(files.list("tables/", None, 128).await.unwrap().is_empty());
     tokio::time::advance(Duration::from_secs(1)).await;
     provider.pause_root.store(true, Ordering::SeqCst);

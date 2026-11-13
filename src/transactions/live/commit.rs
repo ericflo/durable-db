@@ -72,7 +72,6 @@ impl Owner {
             }
         }
         self.check()?;
-        self.maintain_required().await?;
         let blocked = self.checkpoint_due();
         let mut evaluations = Vec::with_capacity(requests.len());
         for (i, (((database, request), decoded), fingerprint)) in

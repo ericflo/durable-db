@@ -855,6 +855,7 @@ mod tests {
         let completion = third.upload.unwrap().send().await;
         state.lock().unwrap().lose_next_control_reply = true;
         owner.complete(completion).await.unwrap();
+        assert!(owner.maintain().await.unwrap());
         assert_eq!(
             owner.outcome(third.tickets[0]).await.unwrap(),
             live::Outcome::Committed(3)

@@ -23,6 +23,7 @@ pub(super) struct Faults {
     pause_read_at: AtomicU64,
     corrupt_read: AtomicBool,
     fail_checkpoint: AtomicBool,
+    pause_checkpoint: AtomicBool,
     pub(super) fail_permit: AtomicBool,
     pub(super) fail_journal: AtomicBool,
     pub(super) late_upload: Mutex<Option<(String, Bytes)>>,
@@ -77,6 +78,11 @@ impl Storage for Files {
         {
             *self.faults.late_upload.lock().unwrap() = Some((key.to_owned(), bytes));
             anyhow::bail!("uncertain journal upload, delayed at the provider");
+        }
+        if key.starts_with("tables/") && self.faults.pause_checkpoint.swap(false, Ordering::SeqCst)
+        {
+            self.faults.entered.notify_one();
+            self.faults.release.notified().await;
         }
         if key.starts_with("tables/") && self.faults.fail_checkpoint.load(Ordering::SeqCst) {
             self.faults
@@ -576,6 +582,113 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         calls,
         "ordinary reads and writes never renew control"
     );
+}
+
+#[tokio::test]
+async fn native_http_reads_continue_during_checkpoint_staging_and_recheck_permission() {
+    for revoke in [false, true] {
+        let (router, provider, faults, token) = fixture(8, 2).await;
+        create(&router, &token, "app").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/databases/app", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        faults.pause_checkpoint.store(true, Ordering::SeqCst);
+        let (writer, endpoint, credential) = (client.clone(), url.clone(), token.clone());
+        let pending = tokio::spawn(async move {
+            tcp_call(
+                &writer,
+                "POST",
+                &format!("{endpoint}/commit"),
+                &credential,
+                commit(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), faults.entered.notified())
+            .await
+            .unwrap();
+        assert!(provider.record().checkpoint.is_none());
+        let read = json!({"expected_revision":1,"keys":["x"],"scans":[{"prefix":"","limit":10}]});
+        let reply = tokio::time::timeout(
+            Duration::from_secs(1),
+            tcp_call(
+                &client,
+                "POST",
+                &format!("{url}/read"),
+                &token,
+                read.clone(),
+            ),
+        )
+        .await
+        .expect("checkpoint staging must not block reads");
+        assert_eq!(reply.0, StatusCode::OK);
+        assert_eq!(reply.1["values"], json!(["eA=="]));
+        assert_eq!(
+            reply.1["scans"][0]["items"],
+            json!([{"key":"x","value":"eA=="}])
+        );
+        let info = tokio::time::timeout(
+            Duration::from_secs(1),
+            tcp_call(&client, "GET", &url, &token, Value::Null),
+        )
+        .await
+        .unwrap();
+        assert_eq!(info.0, StatusCode::OK);
+        let acknowledged = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("acknowledgement must precede checkpoint I/O")
+            .unwrap();
+        assert_eq!(acknowledged.0, StatusCode::OK);
+        if revoke {
+            provider.revoke_current().await;
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    tcp_call(
+                        &client,
+                        "POST",
+                        &format!("{url}/read"),
+                        &token,
+                        read.clone()
+                    )
+                )
+                .await
+                .unwrap()
+                .0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+        faults.release.notify_one();
+        if !revoke {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while provider.record().checkpoint.is_none() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let replay =
+                tcp_call(&client, "POST", &format!("{url}/commit"), &token, commit()).await;
+            let mut expected = acknowledged.1;
+            expected["replayed"] = json!(true);
+            assert_eq!(replay, (StatusCode::OK, expected));
+            assert_eq!(
+                tcp_call(
+                    &client,
+                    "POST",
+                    &format!("{url}/read"),
+                    &token,
+                    read.clone()
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+        }
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[tokio::test]
