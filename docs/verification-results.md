@@ -44,9 +44,10 @@ then an 18.47-second acquisition. Its stage timings are cumulative, and do not
 attribute all client delay to that partition.
 
 The existing cache, model, TCP fixtures and campaign harness are reused. Ten
-generated model-state directories are removed. The disposable namespace, bucket,
-scoped key and **1,245 physical object versions**
-are removed. Cleanup retried a truncated B2 version listing; the final empty
+generated model-state directories are removed. The disposable namespace, bucket
+and scoped key are removed. Cleanup retried a truncated B2 version listing;
+the successful retry removed **1,245 remaining physical object versions**.
+Any deletions before the interrupted listing are not counted. The final empty
 listing, bucket removal and key revocation are confirmed.
 
 ## Tenant funding reuses bounded metadata cache (2026-11-13)
