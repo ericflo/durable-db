@@ -64,6 +64,12 @@ md.renderer.rules.heading_close = (tokens, index, options, env, self) => {
   const anchor = tokens[index].tag === 'h1' ? '' : `<a class="anchor" href="#${id}" aria-label="Link to this section">#</a>`;
   return anchor + self.renderToken(tokens, index, options);
 };
+function render(source, env) {
+  return md.render(source, env).replace(/href="(?:docs\/)?([a-z0-9-]+)\.md(#[^"]*)?"/g, (_match, name, fragment = '') => {
+    if (!docs.includes(name)) throw new Error(`Unpublished documentation target: ${name}`);
+    return `href="${name}.html${fragment}"`;
+  });
+}
 const navigation = [['index.html#docs', 'Docs'], ['api.html', 'API'], ['architecture.html', 'Architecture'], ['verification.html', 'Verification'], ['production-readiness.html', 'Status']];
 function layout({ title, description, body, current = '' }) {
   const links = navigation.map(([href, label]) => `<a href="${href}"${href === `${current}.html` ? ' aria-current="page"' : ''}>${label}</a>`).join('');
@@ -75,13 +81,7 @@ for (const [index, page] of pages.entries()) {
   const title = source.split('\n')[0].replace(/^# /, '');
   const env = { headingIds: new Map(), toc: [] };
   tocs.set(page.name, env.toc);
-  const content = md
-    .render(source, env)
-    .replace(/href="([a-z0-9-]+)\.md(#[^"]*)?"/g, (_match, name, fragment = '') => {
-      if (!docs.includes(name))
-        throw new Error(`Unpublished documentation target: ${name}`);
-      return `href="${name}.html${fragment}"`;
-    });
+  const content = render(source, env);
   const sidebar = sections
     .map(([section, entries]) => `<p>${section}</p><ul>${entries.map(([name, label]) => `<li><a href="${name}.html"${name === page.name ? ' aria-current="page"' : ''}>${label}</a></li>`).join('')}</ul>`)
     .join('');
@@ -112,8 +112,14 @@ const milestones = tocs.get('verification-results').slice(0, 5).map(([id, headin
 const directory = sections
   .map(([section, entries]) => `<section><h3>${section}</h3><ul>${entries.map(([name, label, summary]) => `<li><a href="${name}.html"><strong>${label}</strong><span>${summary}</span></a></li>`).join('')}</ul></section>`)
   .join('');
+// Keep the release evidence in one place; the template retains its status cards.
+const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+const status = readme.split('\n## Status\n')[1]?.split('\n## ')[0]
+  .split('\n').filter((line) => !line.startsWith('|')).join('\n').trim();
+if (!status?.startsWith(`${version} `)) throw new Error('README status must describe the installer release');
 const home = (await readFile(new URL('home.html', import.meta.url), 'utf8'))
   .replaceAll('{{version}}', version)
+  .replace('{{status}}', render(status, { headingIds: new Map(), toc: [] }))
   .replace('{{milestones}}', milestones.join(''))
   .replace('{{directory}}', directory);
 if (home.includes('{{')) throw new Error('Unreplaced homepage placeholder');
