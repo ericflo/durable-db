@@ -362,9 +362,10 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     && node -e 'const fs = require("node:fs"); const artifacts = fs.readFileSync("/tmp/native-tests.json", "utf8").trim().split("\n").map(JSON.parse); const test = artifacts.find(a => a.executable && a.target.name === "durable_db" && a.profile.test); if (!test) throw Error("missing native test executable"); fs.copyFileSync(test.executable, "/test-tools/native-tests");' \
     && strip --strip-debug /test-tools/native-tests && kache stats
 
-# Client failures must not wait for optimized compilation and the capacity sweep.
-# Both branches consume the same checked Rust source and join in assembled.
+# Finish the client contract before optimized compilation can contend for CPU.
+# Only its success marker enters this stage, not application source/dependencies.
 FROM rust-check AS build
+COPY --from=client-check /checks/javascript.passed /out/checks/javascript.passed
 RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
     --mount=type=cache,id=durable-db-kache,target=/cache/kache,sharing=locked \
     --mount=type=cache,id=durable-db-target,target=/cache/target,sharing=locked \
@@ -388,7 +389,6 @@ RUN DURABLE_DB_TEST_BINARY=/test-tools/durable-db scripts/test-client.sh \
 
 FROM build AS assembled
 COPY --from=autoscaling-check /checks/autoscaling.passed /out/checks/autoscaling.passed
-COPY --from=client-check /checks/javascript.passed /out/checks/javascript.passed
 COPY --from=proof-tools /opt/proof-tools/toolchain.tar.gz /out/verification-tools/tlapm-c8ddc44-linux-x86_64.tar.gz
 COPY --from=proof-tools /opt/proof-tools/tlapm/doc/tlapm/LICENSE /out/verification-tools/LICENSE.tlapm
 COPY --from=model /checks /out/checks

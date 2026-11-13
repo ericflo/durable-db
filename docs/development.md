@@ -25,7 +25,7 @@ The model command checks every current-engine model and its required controls. T
 
 ## Work on one component
 
-Run the checks affected by a change while iterating. Woodpecker retains the complete required suite.
+Run the checks affected by a change while iterating. Woodpecker retains the complete required suite. Its client contract finishes before optimized compilation starts, avoiding CPU contention with the contract deadline. Only the successful marker is passed into the optimized build; application source and Node dependencies stay in the client stage.
 
 | Change | Focused checks |
 | --- | --- |

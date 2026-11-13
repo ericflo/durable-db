@@ -22430,6 +22430,18 @@
       "serving-delays-tests.log": "89ae497d1dba58075f2a14b365baf8de189557ffd2dd798f9d9fffbec724a666",
       "serving-delays-harness.log": "63af96e7db0ffc67c2f74e7f38a0b6f613d8d7942a44e125e51ed59e2174c2c2",
       "serving-delays-site.log": "0361cd6e5134632cd0d824dd82d457e372f2c6950f5513755257ed9d631fd9f4"
+    },
+    "live_parser_check": {
+      "version": "durable-db 0.24.14",
+      "samples": [
+        {
+          "time_utc": "2026-11-13T06:04:02.780441Z",
+          "operation": "http_read",
+          "outcome": "invalid",
+          "elapsed_ms": 1101
+        }
+      ],
+      "temporary_server_data_and_credentials_removed": true
     }
   },
   "forward_connection_deadline": {
@@ -22464,6 +22476,59 @@
       "forward-connect-clippy.log": "4e25878504d5348780d21123b26f7e42f349fc925c5de2f3169493d832c350a2",
       "forward-connect-tests.log": "ee3781596cec7c44ecf8c7f5b01895f72d206278567e6548dcf7b8e980e97c3d",
       "forward-connect-routing-model.log": "bf4f45a55798bb0ae6cff1db5f6bb193fe3376ebee856532b17840b6c5534f7f"
+    },
+    "native_javascript_contract": {
+      "passed": 99,
+      "skipped": 1,
+      "local_seconds": 28.74,
+      "failed_ci_pipeline": 326,
+      "failure": "Aggregate 120-second client-suite deadline during concurrent optimized compilation; no individual test failure was reported before cancellation.",
+      "ci_change": "Make the unchanged client success marker a prerequisite of optimized compilation; remove the duplicate final-assembly marker copy. Assertions and deadlines unchanged.",
+      "log_sha256": "90d0579f99f44e43afe3e2b6938147f0e8bb44a9385e295aa0ce10d200198331",
+      "ci_log_sha256": "3c06536f32ae17c446cd26b9356c844f98102dafa61ea7ad22d09fa16ebf442b"
+    },
+    "minio_membership": {
+      "date_utc": "2026-11-13",
+      "source_commit": "e04f9709ae09669e6ef38ccd77fa5d98101d8417",
+      "clean_worktree": true,
+      "native_format": "owned-candidate-23",
+      "command": "cargo test --locked --test checkpoint_cloud -- --ignored --exact native_http::membership_places_partitions_and_recovers_over_http --nocapture",
+      "scope": "Debug native HTTP; 4 MiB cache; clock-independent permits; live predecessor refused after takeover. Real B2 and versioned MinIO, not AWS, Kubernetes placement, arbitrary memory rollback, sustained load or an SLO.",
+      "results": [
+        {
+          "provider": "versioned MinIO",
+          "image": "epsilon-maintenance-minio:20261105",
+          "image_id": "sha256:9d75ed8ad714bbe8111050a031fe9cb31eb446e1ee4651bb94b805c96eaadef1",
+          "test": {
+            "automatic_acquisition_and_placement": true,
+            "ceilings_preserved": true,
+            "checkpoint_and_cold_recovery": true,
+            "independent_node_transports_and_caches": true,
+            "layout_mismatch_refused": true,
+            "live_removed_owner_refused": true,
+            "maximum_live_servers": 2,
+            "membership_sequence": [
+              1,
+              2,
+              1,
+              0,
+              1
+            ],
+            "partitions": 2,
+            "provider_metrics_count_once": true,
+            "receipts_preserved": true,
+            "scope": "Loopback controller with supplied membership snapshots and B2/versioned-MinIO storage. Not Kubernetes discovery, AWS, CLI cutover or a performance SLO.",
+            "seconds": 40.390031912,
+            "shared_metadata_collection": true,
+            "unmoved_owner_preserved": true
+          },
+          "cleanup": {
+            "bucket_removed": true,
+            "physical_versions_deleted": 80,
+            "container_removed": true
+          }
+        }
+      ]
     }
   }
 }
