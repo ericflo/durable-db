@@ -1,5 +1,79 @@
 # Verification results
 
+## Reusing directory uploads and measuring readback gaps (v0.24.9, 2026-11-12)
+
+Publication retries retain the completed directory root and at most 64 selected
+pointers when a definite conflict changes only register metadata. The exact base
+directory and original collection fence must still match. Publication preserves
+the current metadata and compares its exact revision. A changed directory
+requires selection and path copying again; uncertainty never permits replaying
+an immutable PUT. This removes unconditional retry uploads without adding a
+storage format, cache layer or detached task.
+
+The forced two-conflict regression uses **one directory upload instead of
+three**, with both confirmed and applied-but-lost final replies. The competing
+helper now deliberately skips the pending proposal, so the changed-directory
+test exercises a real rebase instead of accidentally receiving help. Omitting
+the root comparison fails that test. All **362 routine Rust checks**, formatting
+and strict clippy pass; the publication suite takes **1.39 seconds**.
+The existing publication model adds no state and still explores **1,736,213
+states**. Six fault controls and two reachability controls pass, including a
+one-helper fault that loses an unrelated write when directory equality is
+omitted. These are bounded component checks, not Rust refinement or a composed
+deployment proof.
+
+Schema 2 records each readback only after checking its revision and value.
+Rollout windows use the workload's monotonic clock and per-writer counters,
+ending before subsequent diagnostics. The checker reports completed gaps from
+the preceding readback and the unfinished interval at window close; that final
+interval is right-censored. It rejects missing readbacks/windows and inconsistent
+counts. Two local tests take **2.13 seconds**, including held responses after
+acknowledgement, corrupt values and eleven malformed-evidence cases. Schema 1
+remains checkable without inventing readback times. The separate harness CI
+stage reuses unchanged Rust/client checks; Woodpecker #306 finishes in **117
+seconds**.
+
+The unchanged v0.24.8 binary recovers **807** acknowledged writes under the new
+instrumentation. The exact v0.24.9 static binary then recovers **765** writes,
+readbacks and keys across four independently checked histories:
+
+| Observation | v0.24.8 baseline | v0.24.9 | Target |
+| --- | ---: | ---: | ---: |
+| Scale to three, progress bound | 19.40s | 46.07s | 60s |
+| Scale to six, progress bound | 16.95s | 50.08s | 60s |
+| First rollout, maximum verified-readback gap | 71.49s | 73.60s | 60s |
+| Second rollout, maximum verified-readback gap | 93.96s | 75.98s | 60s |
+| First rollout, post-readiness progress bound | 129.65s | 129.09s | 60s |
+| Second rollout, post-readiness progress bound | 134.70s | 109.97s | 60s |
+| Cold three-node recovery, after readiness | 58.44s | 65.10s | 120s |
+
+The two post-readiness rollout bounds start before replacement, include the
+whole rollout, and end after two further readbacks per writer. They are retained
+alongside the direct gap measurement. The fixture and fault schedule are
+unchanged. These small samples do **not** establish overall recovery improvement:
+the first readback gap is slightly longer, the second shorter, and scaling/cold
+bounds are higher.
+
+Candidate logs capture **28 reused-page comparison attempts across 26
+publications**: 24 confirm and four conflict. Preparation on these attempts
+takes at most **88 ms**. Sampled activation, selection and checkpoint maxima are
+8.25s, 15.81s and 12.15s. The longest selection reads 84 frames in 9.57s before
+6.15s of publication work. Logs are bounded and incomplete; these maxima are
+separate calls, not a single critical path or population distribution. Next
+investigate duplicate journal fetching during selection and replay within the
+existing cache bound, retaining checksum, prefix and ownership checks.
+
+Versioned MinIO passes membership and cold recovery in **40.30 seconds**; this is
+a loopback S3-binding check, not AWS qualification. Both B2 namespaces, buckets
+and scoped keys, the MinIO container/bucket, and all **3,401 physical versions**
+are removed. Completed TLC scratch and superseded ad hoc logs are removed;
+there is no parallel implementation. [Woodpecker #307](https://ci.eflorenzano.com/repos/18/pipeline/307/1)
+checks the static executable, client contracts, proofs/models and optimized
+10,005-database test (196.13s). The [evidence record](evidence/native-recovery-2026-11-11.json),
+entries `staged_directory_reuse` and `release_0_24_9`, records exact runtime and
+harness identities, per-writer measurements, checksums and cleanup. Recovery
+latency and the [remaining production gates](production-readiness.md) stay open.
+
 ## Confirming receipts while a helper is busy (v0.24.8, 2026-11-12)
 
 A queued publication can now observe its exact published identity without waiting
