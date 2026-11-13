@@ -427,7 +427,7 @@ async fn run(
                 }
             }
             _ = admission.tick() => {
-                // At most one admission retry per second, earliest gap first.
+                // At most one pre-send retry per second, earliest gap first.
                 // No resolving GET or repeated data PUT for an unsent frame.
                 if let Some((position, upload)) = unsent.pop_first() {
                     let reservation = owner.reservation.clone();

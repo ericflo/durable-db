@@ -12,8 +12,10 @@ Init == /\ writer = [planned |-> 0, known |-> {}, durable |-> 0,
 
 \* Fresh sequence identities contain one immutable value. Late uploads can
 \* finish after the old process disappears or a successor seals its prefix.
-\* Upload admission refusal occurs before any data request and stutters here.
-\* Retrying admission retains the same identity; it permits only the first PUT.
+\* Admission refusal and proven pre-send connection failure stutter here.
+\* Retrying retains the same identity; it permits only the first data PUT.
+\* The transport witness requires a single attempt with no redirects/replay.
+\* This model assumes that witness; TCP/error classification is a Rust obligation.
 \* After an attempted/cancelled PUT, absence still never authorizes a retry.
 Prepare == /\ writer.online
            /\ writer' = [writer EXCEPT !.planned = @ + 1]

@@ -250,12 +250,18 @@ def main():
         transports = report.setdefault('forward_transport_errors', {})
         challenges = report.setdefault('challenge_events', {})
         retirements = report.setdefault('retirement_events', {})
+        uploads = report.setdefault('journal_upload_failures', {})
         for pod in pods():
             name = pod['metadata']['name']
             identity = name + '/' + pod['metadata']['uid']
             try:
                 log = kube('logs', name, '--tail=1024').decode(errors='replace')
                 log = re.sub(r'\x1b\[[0-9;]*m', '', log)
+                failures = [dict(time_utc=stamp, owner=owner, position=int(position), kind=kind, unsent=unsent=='true')
+                    for stamp,owner,position,kind,unsent in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?journal upload failed.*?owner=([0-9a-f-]{36})\s+position=(\d+)\s+kind="?(connect|timeout|interrupted|request|decode|other)"?\s+unsent=(true|false)',log)]
+                merged = {json.dumps(event,sort_keys=True):event for event in uploads.get(identity,[])+failures}
+                uploads[identity] = sorted(merged.values(),key=lambda event:event['time_utc'])[-256:]
                 retired = [dict(time_utc=stamp, owner=owner, reason=reason)
                     for stamp,owner,reason in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native (?:worker retired|resident removed).*?owner=([0-9a-f-]{36})\s+reason="?(upload_task|unresolved_upload|incomplete_publication|permission|unready|membership)"?\b',log)]

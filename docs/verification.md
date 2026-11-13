@@ -345,6 +345,29 @@ The configured instance permits competing advances below revision three and expl
 
 ## Journal prefix safety
 
+The shared B2/S3 upload binding distinguishes a typed connection-establishment
+failure from an ambiguous request failure. Only the internal client with SDK
+retries, transport retries and redirects disabled may return `storage::NotSent`
+for `HttpErrorKind::Connect`. Arbitrary stores supplied to `Remote::new` cannot
+issue this witness. Timeouts (including conservatively classified connect
+timeouts), resets, HTTP refusals, decode failures and lost replies remain unknown.
+Admission also uses this same marker; the former budget-only definition is gone.
+The existing bounded queue retains the original journal position and buffer and
+retries its first send at most once per second. Each attempt passes upload
+admission again; no spent credit is refunded. No new retry worker, storage object
+or ownership rule is introduced. Diagnostics contain only the writer incarnation,
+position, fixed failure class and unsent flag; the cloud harness retains at most
+256 such events per pod incarnation, without provider error strings.
+
+A real TCP regression fails on the former implementation, then preserves the
+same journal position across connection refusal and makes exactly one PUT after
+the endpoint opens. An arbitrary SDK binding cannot claim the witness. Other
+TCP checks accept a complete body and lose or stall its reply, and check redirects
+and HTTP failures: none yields a resend handle. Ten focused transport, journal,
+native HTTP and late-upload recovery checks pass in **6.08 seconds**. The models
+below treat proven-unsent failure as stuttering; classification of the pinned
+transport implementation is an explicit Rust obligation, not a TLA theorem.
+
 `Journal.tla` precedes the immutable journal implementation in `src/journal/`. `Prepare` allocates fresh positions, `Upload` makes their immutable bytes durable, `Observe` establishes positive durability knowledge, and `Consume` advances only through consecutive known positions. These correspond to `Writer::prepare`, the single-use `PreparedUpload::send`, `Writer::complete`/`resolve`, and `Writer::pop_durable`. Missing or failed responses never establish absence. Recovery consumes positions in order and fixes a prefix before successor activation; late uploads cannot extend that decision. `Reader` implements discovery and replay, but conditional selection and serving permission remain caller obligations.
 
 The TLC-only constraint permits three prepared positions. All **4,134 distinct states** (18,455 generated, depth 26) pass, with an optimistic fingerprint collision estimate of 3.2e-12. Six mandatory controls expose false durability knowledge, consumption gaps, early recovery, stale negative reads, late acknowledgement and reopened selection. Run `scripts/check-model.sh Journal`.

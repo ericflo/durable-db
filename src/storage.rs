@@ -13,6 +13,29 @@ use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+/// No object request was sent. Admission may already have spent credit; never
+/// refund it. A connection failure proves this only without retries/redirects.
+#[derive(Debug, thiserror::Error)]
+#[error("object upload failed before sending its request")]
+pub(crate) struct NotSent;
+
+// Inspect typed causes only. Their messages may contain signed URLs, keys or
+// response bodies; neither diagnostics nor retry decisions parse those strings.
+pub(crate) fn upload_error_kind(error: &anyhow::Error) -> &'static str {
+    use object_store::client::{HttpError, HttpErrorKind};
+    match error.chain().find_map(|e| e.downcast_ref::<HttpError>()) {
+        Some(e) => match e.kind() {
+            HttpErrorKind::Connect => "connect",
+            HttpErrorKind::Timeout => "timeout",
+            HttpErrorKind::Interrupted => "interrupted",
+            HttpErrorKind::Request => "request",
+            HttpErrorKind::Decode => "decode",
+            _ => "other",
+        },
+        None => "other",
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Version(pub UpdateVersion);
 pub struct Object {
@@ -64,7 +87,7 @@ pub trait Storage: Send + Sync {
 
 pub struct Remote {
     inner: Arc<dyn ObjectStore>,
-    uploads: Arc<dyn ObjectStore>,
+    uploads: Option<Arc<dyn ObjectStore>>,
     prefix: String,
 }
 impl Remote {
@@ -77,14 +100,16 @@ impl Remote {
             bail!("object prefix must be a nonempty ASCII identifier");
         }
         Ok(Self {
-            uploads: inner.clone(),
+            uploads: None,
             inner,
             prefix: format!("{prefix}/"),
         })
     }
-    /// Separate single-attempt uploads from retryable reads/listings.
-    pub(crate) fn with_uploads(mut self, uploads: Arc<dyn ObjectStore>) -> Self {
-        self.uploads = uploads;
+    /// Trusted binding: SDK retries, transport retries and redirects MUST all be
+    /// disabled. Only then can its final connect error prove no request was sent.
+    /// Arbitrary stores supplied to `new` never provide that witness.
+    pub(crate) fn with_single_attempt_uploads(mut self, uploads: Arc<dyn ObjectStore>) -> Self {
+        self.uploads = Some(uploads);
         self
     }
     fn path(&self, key: &str) -> Path {
@@ -182,6 +207,8 @@ impl Storage for Remote {
         let mode = old.map_or(PutMode::Create, |v| PutMode::Update(v.0.clone()));
         match self
             .uploads
+            .as_ref()
+            .unwrap_or(&self.inner)
             .put_opts(&self.path(key), bytes.into(), mode.into())
             .await
         {
@@ -194,8 +221,21 @@ impl Storage for Remote {
         }
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
-        self.uploads.put(&self.path(key), bytes.into()).await?;
-        Ok(())
+        self.uploads
+            .as_ref()
+            .unwrap_or(&self.inner)
+            .put(&self.path(key), bytes.into())
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                let error = anyhow::Error::new(error);
+                let unsent = self.uploads.is_some() && upload_error_kind(&error) == "connect";
+                if unsent {
+                    error.context(NotSent)
+                } else {
+                    error
+                }
+            })
     }
     async fn list(
         &self,

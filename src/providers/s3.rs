@@ -72,7 +72,7 @@ impl S3 {
         let store = Arc::new(super::transport::single_attempt(builder.clone())?);
         let files = Arc::new(
             Remote::new(Arc::new(super::transport::observations(builder)?), prefix)?
-                .with_uploads(store.clone()),
+                .with_single_attempt_uploads(store.clone()),
         );
         Ok(Arc::new(Self {
             store,

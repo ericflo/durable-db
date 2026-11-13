@@ -274,7 +274,7 @@ impl Writer {
     }
 }
 
-/// At most one physical PUT. Only proven admission refusal can return this owned
+/// At most one sent PUT. Only proven pre-send failure can return this owned
 /// handle for a first send. Cancellation gives no such proof: the position stays
 /// unresolved until an exact read or a future handoff selects the old prefix.
 pub struct PreparedUpload {
@@ -302,7 +302,11 @@ impl PreparedUpload {
         let unsent = result
             .as_ref()
             .err()
-            .is_some_and(|e| e.is::<crate::upload_budget::NotSent>());
+            .is_some_and(|e| e.is::<crate::storage::NotSent>());
+        if let Err(error) = &result {
+            tracing::warn!(owner = %self.prefix.log.epoch(), position = self.prefix.position,
+                kind = crate::storage::upload_error_kind(error), unsent, "journal upload failed");
+        }
         Completion {
             prefix: self.prefix,
             durable: result.is_ok(),
@@ -319,7 +323,7 @@ pub struct Completion {
 }
 
 impl Completion {
-    /// Recover the owned upload only when admission proved no data request was
+    /// Recover the owned upload only when storage proved no data request was
     /// sent. The same identity/buffers remain reserved. Unknown provider replies
     /// and cancellation never produce this witness and never permit another PUT.
     pub fn take_unsent(&mut self) -> Option<PreparedUpload> {

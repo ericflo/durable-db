@@ -209,7 +209,7 @@ mod tests {
             "prefix",
         )
         .unwrap()
-        .with_uploads(Arc::new(single_attempt(builder).unwrap()));
+        .with_single_attempt_uploads(Arc::new(single_attempt(builder).unwrap()));
         for bytes in [Bytes::new(), Bytes::from_static(b"fixture payload")] {
             for status in [200, 301, 302, 303, 307, 308, 429, 500, 503] {
                 {
@@ -219,9 +219,69 @@ mod tests {
                 }
                 let result = remote.put("blocks/fixture", bytes.clone()).await;
                 assert_eq!(result.is_ok(), status == 200, "status {status}");
+                if let Err(error) = result {
+                    assert!(
+                        !error.is::<crate::storage::NotSent>(),
+                        "HTTP {status} is not a pre-send failure"
+                    );
+                }
                 assert_eq!(wire.lock().unwrap().calls, [(Method::PUT, bytes.clone())]);
             }
         }
+        server.abort();
+        server.await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn refused_connection_preserves_the_original_journal_upload_for_its_first_send() {
+        use crate::journal::{QueueLimits, Resolution, Writer};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let upload = Arc::new(single_attempt(builder(format!("http://{address}"))).unwrap());
+        // An arbitrary SDK client may have already tried sending before its
+        // last error. Only our explicit one-attempt binding supplies the witness.
+        let generic = Remote::new(upload.clone(), "prefix").unwrap();
+        let error = generic
+            .put("blocks/fixture", Bytes::from_static(b"unsent"))
+            .await
+            .unwrap_err();
+        assert!(!error.is::<crate::storage::NotSent>());
+        let remote = Arc::new(generic.with_single_attempt_uploads(upload));
+        let mut writer = Writer::new(remote, uuid::Uuid::new_v4(), QueueLimits::default()).unwrap();
+        let upload = writer
+            .prepare(&[Bytes::from_static(b"same frame")])
+            .unwrap();
+        let held = writer.pending_bytes();
+        let mut completion = upload.send().await;
+        assert_eq!(completion.resolution(), Resolution::Unknown);
+        let upload = completion
+            .take_unsent()
+            .expect("connect refusal cannot retire the journal");
+        writer.complete(completion).unwrap();
+        assert!(writer.pop_durable().unwrap().is_none());
+        assert_eq!(writer.pending_bytes(), held);
+        assert_eq!(upload.position(), 1);
+
+        let wire = Arc::new(Mutex::new(Wire {
+            status: 200,
+            calls: vec![],
+        }));
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let app = axum::Router::new()
+            .fallback(response)
+            .with_state(wire.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        writer.complete(upload.send().await).unwrap();
+        let batch = writer.pop_durable().unwrap().unwrap();
+        assert_eq!(batch.prefix().position(), 1);
+        assert_eq!(
+            batch.records().collect::<Vec<_>>(),
+            [b"same frame".as_slice()]
+        );
+        assert_eq!(writer.pending_bytes(), 0);
+        assert_eq!(wire.lock().unwrap().calls.len(), 1);
+        assert_eq!(wire.lock().unwrap().calls[0].0, Method::PUT);
         server.abort();
         server.await.unwrap_err();
     }
@@ -266,12 +326,34 @@ mod tests {
 
     #[tokio::test]
     async fn fully_received_upload_with_lost_response_is_not_replayed() {
+        for stalled in [false, true] {
+            lost_upload_response(stalled).await;
+        }
+    }
+    async fn lost_upload_response(stalled: bool) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let upload = single_attempt(builder(format!(
-            "http://{}",
-            listener.local_addr().unwrap()
-        )))
+        let upload = Arc::new(
+            single_attempt(
+                builder(format!("http://{}", listener.local_addr().unwrap())).with_client_options(
+                    ClientOptions::new()
+                        .with_allow_http(true)
+                        .with_timeout(Duration::from_secs(1)),
+                ),
+            )
+            .unwrap(),
+        );
+        let remote = Arc::new(
+            Remote::new(upload.clone(), "prefix")
+                .unwrap()
+                .with_single_attempt_uploads(upload),
+        );
+        let mut writer = crate::journal::Writer::new(
+            remote,
+            uuid::Uuid::new_v4(),
+            crate::journal::QueueLimits::default(),
+        )
         .unwrap();
+        let upload = writer.prepare(&[Bytes::from_static(b"delayed")]).unwrap();
         let wire = Arc::new(Mutex::new(Vec::new()));
         let received = wire.clone();
         let server = tokio::spawn(async move {
@@ -294,18 +376,23 @@ mod tests {
                 stream.read_exact(&mut body).await.unwrap();
                 received.lock().unwrap().push(body);
                 // Provider accepted the complete body, then the response vanished.
+                if stalled {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
                 stream.shutdown().await.unwrap();
             }
         });
-        use object_store::ObjectStoreExt;
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            upload.put(&"fixture".into(), Bytes::from_static(b"delayed").into()),
-        )
-        .await
-        .expect("upload should resolve without SDK retry backoff");
-        assert!(result.is_err());
-        assert_eq!(*wire.lock().unwrap(), [b"delayed".to_vec()]);
+        let mut result = tokio::time::timeout(Duration::from_secs(5), upload.send())
+            .await
+            .expect("upload should resolve without SDK retry backoff");
+        assert_eq!(result.resolution(), crate::journal::Resolution::Unknown);
+        assert!(
+            result.take_unsent().is_none(),
+            "a lost or timed-out reply is not a pre-send failure"
+        );
+        writer.complete(result).unwrap();
+        assert!(writer.pop_durable().unwrap().is_none());
+        assert_eq!(wire.lock().unwrap().len(), 1);
         server.abort();
         server.await.unwrap_err();
     }

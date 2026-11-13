@@ -3,7 +3,7 @@ use crate::{
     Error, Result,
     metrics::{Event, REGISTRY},
     publication::{Authority, Bucket},
-    storage::{Object, Storage, Version},
+    storage::{NotSent, Object, Storage, Version},
 };
 use anyhow::{Context, bail, ensure};
 use async_trait::async_trait;
@@ -21,12 +21,6 @@ const MAX_UNITS: u64 = (1 << 53) - 1;
 const GRANT_BYTES: u64 = 8 * 1024 * 1024;
 const GRANT_ATTEMPTS: u64 = 32;
 const RECEIPTS: usize = 8;
-
-/// Only the admission boundary may issue this witness: no object PUT was called.
-/// A grant request may have committed, so its credit is still never refunded.
-#[derive(Debug, thiserror::Error)]
-#[error("immutable upload admission failed before sending the object")]
-pub(crate) struct NotSent;
 
 #[derive(Debug, thiserror::Error)]
 #[error("immutable upload budget exhausted")]

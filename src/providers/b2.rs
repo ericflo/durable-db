@@ -141,7 +141,7 @@ impl Native {
         let uploads = Arc::new(super::transport::single_attempt(s3.clone())?);
         let files = Arc::new(
             Remote::new(Arc::new(super::transport::observations(s3)?), prefix)?
-                .with_uploads(uploads),
+                .with_single_attempt_uploads(uploads),
         );
         let native = Arc::new(native);
         Ok(super::Connection::new(files, native, prefix))
