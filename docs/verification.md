@@ -948,7 +948,14 @@ and strict clippy pass. The unchanged
 OwnerChallenge transition system checks **3,968 distinct states**, 24,897
 generated, depth 14, and ten fault/coverage controls. Transport closure stutters
 in that model; socket behavior and joining both drains are Rust obligations.
-Exact-runtime cloud qualification is pending.
+The exact v0.24.19 static binary recovers all **800 acknowledged writes** through
+B2/Kubernetes scaling, two rollouts, zero compute and cold restart. Direct rollout
+readback gaps are **43.09s / 50.40s**, both within the 60-second fixture target.
+Recorded application commit/readback RPCs contain no 429s; controls still hit
+limits, and unavailable responses and transport errors remain. Separate peer-only
+isolation still stalls some writers with B2 reachable from every pod. These short
+checks do not establish continuous availability or an overall performance gain;
+see the [measurements and limits](verification-results.md).
 
 The cluster aborts and joins its scheduler and maintenance task, retires every
 local resident before storage I/O, and conditionally withdraws the final resident routes. Four

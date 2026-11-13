@@ -1,5 +1,78 @@
 # Verification results
 
+## Drain HTTP during route withdrawal (v0.24.19, 2026-11-13)
+
+Shutdown now closes admission and signals graceful HTTP shutdown before waiting
+for provider I/O. Admitted requests and the existing five-second route withdrawal
+drain concurrently; process exit waits for both. The production change adds
+**18 net lines**, with no new worker, authority rule, provider algorithm or format.
+Socket closure is scheduled asynchronously; racing requests can still be refused.
+
+Two real TCP checks pass in **0.03s**, covering a held withdrawal, listener and
+idle keep-alive closure, admitted-request completion and withdrawal timeout.
+The old serialized shutdown and a mutation that returns after only one drain
+both fail. All **379 routine Rust checks**, formatting and strict clippy pass.
+The unchanged OwnerChallenge transition system checks **3,968 distinct states**,
+24,897 generated, depth 14, and ten fault/coverage controls. It models routing
+hints, not TCP or Rust refinement. Removed the serialized shutdown sequence,
+obsolete ordering guidance and eleven TLC scratch directories.
+
+[Woodpecker 345](https://ci.eflorenzano.com/repos/18/pipeline/345/1) verifies the
+static binary from `3dafec0`, audits, client/Pi contracts and both 10,005-entry
+capacity fixtures. Standalone installation, transactions, export/restore and
+kill/reopen pass; tag pipeline 346 is green. There is no new MinIO run for this
+transport lifecycle change; v0.24.18's provider evidence remains separate.
+
+B2 uses the unchanged three-host, 16-partition, four-writer rollout profile:
+1→3→6, two rollouts, zero compute and cold restart. All **800 acknowledgements,
+verified readbacks and recovered keys** pass the independent four-history check.
+
+| Observation | v0.24.18 | v0.24.19 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 / 2 | 67.49s / 32.62s | 43.09s / 50.40s |
+| Whole-rollout progress upper bound, rollout 1 / 2 | 120.33s / 96.10s | 99.63s / 104.38s |
+| Scale to three / six | 15.61s / 16.11s | 15.90s / 13.41s |
+| Cold recovery after API readiness | 48.14s | 51.94s |
+
+Both direct gaps are below 60s. Whole-rollout bounds include serial replacement
+and polling: a bound above target does **not** prove an application outage.
+Completed readback gaps include the preceding readback; unfinished gaps remain
+right-censored. Different histories do not establish a general improvement or SLO.
+Recorded acknowledged commit/readback RPCs contain **zero HTTP 429s**, versus 136
+in the preceding 705-write run, but still contain **381 HTTP 503s** and **52
+transport/decode errors**. Control requests account for another **125 HTTP 429s**.
+The largest gaps include **23.50s / 17.50s of retry backoff** after unavailable
+responses. Bounded complete-call maxima are **7.57s activation, 9.26s selection
+and 11.31s checkpoint**; these are not population maxima or one critical path.
+
+A separate three-host campaign on the same binary checks asymmetric and two-way
+peer isolation, followed by healing, zero compute and cold restart. All **535
+acknowledgements, readbacks and recovered keys** pass the independent checker.
+Fresh and retained peer connections match the intended cuts; every pod reads
+B2-backed control state successfully, with unchanged pod identities/restart counts.
+During the 30-second holds, writer readback increments are **[6, 31, 0, 6]** and
+**[12, 17, 0, 0]**. Three writers progress in the asymmetric hold, only two in the
+two-way hold. All four resume within **10.80s / 17.86s** after healing; cold
+recovery takes **44.09s** after API readiness. Campaign success checks durability
+and recovery, not progress from every writer during a split. This separate run
+still records one application HTTP 429.
+
+The stalled writers match blocked forwarding directions under stable placement:
+writer 2 enters through the isolated pod but partition 14 prefers the majority;
+writer 3 enters through the majority but partition 2 prefers the isolated pod.
+The logs sample no new claims during the two-way hold. This supports investigating
+cross-side forwarding, not assuming ownership churn. Next test ordinary shared
+Service ingress and connection reuse under the same cut; these side-pinned
+clients cannot establish its availability. No continuous split-availability claim.
+
+Both namespaces, scoped B2 keys and buckets are removed, including **1,771
+rollout versions** and **1,100 peer-isolation versions**.
+Shared registry maintenance interrupted the initial artifact download before
+any cloud test resources existed; retrying the same verified artifact succeeded.
+The [evidence record](evidence/native-recovery-2026-11-11.json) pins source, binary,
+workload, reports and cleanup. Broader failures, sustained B2/AWS performance,
+memory, complete tenant accounting and public multitenancy remain open.
+
 ## Confirm receipts during helper work (v0.24.18, 2026-11-13)
 
 One receipt observer now spans queueing and admitted helper work. An exact
@@ -37,7 +110,8 @@ verified readbacks and recovered keys** pass the independent four-history check.
 | Scale to three / six | 24.98s / 40.69s | 15.61s / 16.11s |
 | Cold recovery after API readiness | 43.53s | 48.14s |
 
-One direct gap and both whole-rollout bounds miss 60s. The first gap contains
+One direct gap exceeds 60s. Both whole-rollout upper bounds also exceed 60s, but
+those bounds do not prove an application outage. The first gap contains
 **28.97s committing** and **38.27s after acknowledgement**, with 33 unavailable
 responses and **24.01s total backoff**; no overload response appears in those
 two RPCs. The second contains **32.16s after acknowledgement**, including
@@ -60,11 +134,10 @@ now re-lists after interrupted batches, stopping after three consecutive failed
 batches. Before-delete failure, lost deletion replies and permanent failure are
 checked locally. This helper change does not qualify production collection.
 
-Source inspection identifies the next small experiment: shutdown closes
-admission but can keep accepting connections during up to five seconds of route
-withdrawal. Test stopping HTTP acceptance concurrently with withdrawal, then
-qualify the remaining refusal and owner-recovery delays. This is not attribution
-of the measured gaps. The existing [evidence record](evidence/native-recovery-2026-11-11.json)
+This release still kept accepting connections during up to five seconds of route
+withdrawal after closing admission; v0.24.19 addresses that ordering above.
+This is not attribution of the measured gaps. The existing
+[evidence record](evidence/native-recovery-2026-11-11.json)
 pins source, binary, workload and reports. Broader failures, AWS, sustained
 performance, memory and public multitenancy remain open.
 

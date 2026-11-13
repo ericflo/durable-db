@@ -1,6 +1,6 @@
 # Production readiness
 
-**Release decision: not ready for production.** v0.24.18 is the latest experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
+**Release decision: not ready for production.** v0.24.19 is the latest experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
 
 The production release must retain one installable executable, directory-backed laptop development, and Kubernetes deployments on the existing hosts that scale down to one node. A special clock/compute profile is not an acceptable substitute. Cluster data stays authoritative in B2 or S3 through one common storage algorithm, with bounded disposable caches and automatic maintenance. Performance, tenant protection and correctness are joint acceptance criteria.
 
@@ -24,7 +24,7 @@ Sizes describe remaining engineering scope: **medium** means a few focused imple
 
 | Order | Gate and rough size | What must be true for 1.0 |
 | --- | --- | --- |
-| **1** | **Native clustered serving — medium to large** | v0.24.18 keeps bounded receipt confirmation active during helper work; v0.24.17 prevents recovering owners from forwarding to themselves. All 705 acknowledged B2 writes recover through scaling, two rollouts, zero compute and cold restart. Direct rollout gaps are 67.49s / 32.62s; one misses 60s. Whole-rollout bounds remain 120.33s / 96.10s. Scale-up and cold recovery meet their targets, while 429/503 responses remain. Next qualify the shutdown acceptance window and separate remaining refusal/owner-recovery waits. Short, different-history samples are not an overall improvement or availability guarantee. Physical-host loss, broader failures, memory and funded-administration qualification remain. Continuous split availability is unqualified. [Measurements and failed runs](verification-results.md). |
+| **1** | **Native clustered serving — medium to large** | v0.24.19 drains HTTP concurrently with route withdrawal. All 800 acknowledged B2 writes recover through scaling, two rollouts, zero compute and cold restart. Direct rollout gaps are 43.09s / 50.40s, both below 60s; scale-up and cold recovery meet their targets. Whole-rollout bounds are 99.63s / 104.38s, separate diagnostics rather than measured outages. Application commit/readback RPCs contain no 429s in this run, but control limits, 503s and transport errors remain. Peer-only isolation still stalls some writers while every pod can reach B2. Next test shared Service ingress and connection reuse under peer isolation, then remaining recovery waits. Short samples are not an availability guarantee. Physical-host loss, broader failures, memory and funded-administration qualification remain. [Measurements and failed runs](verification-results.md). |
 | **2** | **Tenant isolation and lifecycle — medium to large** | Finish charging administrative work and retries, reduce unused tenant-credit loss across handoffs, bound creation/request/egress costs across replicas, and prevent an exhausted tenant from stopping funded neighbors' ordinary operation. Verify credential rotation/revocation, tenant deletion and data isolation. Existing logical quotas and durable admission/reserve funding cover only part of this. |
 | **3** | **Automatic maintenance and recovery — medium** | Bound growth of every physical object class, including registrations and catalog headers; qualify large-image cleanup and concurrent readers. Schedule bounded backups to independently protected storage, recover interrupted jobs and demonstrate restore after source loss. The retained checkpoint/export primitives already exist. |
 | **4** | **Performance and autoscaling qualification — large, plus a 72-hour run** | Declare workload and latency/throughput targets, then measure the native serving path on B2 and AWS S3 using the same algorithm. Exercise Pi and web-app workloads, contention, provider failures, scale up/down, rolling replacement and whole-host loss. Check histories, memory, object growth and cost throughout a sustained run. Earlier shared-engine tests do not qualify the replacement. |
@@ -50,6 +50,12 @@ include readiness and polling delay, exclude subsequent budget/diagnostic work,
 and report target attainment separately from campaign success. Earlier
 phase-to-phase durations include diagnostics and are not direct measurements
 of the new targets.
+
+An upper bound below the target establishes that fixture's progress within the
+target. A bound above it is inconclusive: serial pod replacement and delayed
+polling can inflate the bound while writers continue serving. Use the direct
+per-writer readback gaps below to assess observed silence during a rollout;
+retain the controller bounds as separate rollout/recovery diagnostics.
 
 Schema 2 records each successful readback only after validating its revision
 and value. Rollout windows use the workload's own monotonic clock and per-writer
