@@ -1186,6 +1186,129 @@ struct PausedPermit {
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
+
+#[tokio::test]
+async fn recovering_owner_does_not_forward_to_itself_or_consume_another_tenant_slot() {
+    for capacity in [4, 8] {
+        let provider = Provider::new();
+        let files = Arc::new(PausedPermit {
+            inner: provider.files.clone(),
+            pause: AtomicBool::new(true),
+            blocked: Default::default(),
+            entered: Default::default(),
+            release: Default::default(),
+        });
+        let directory = Connection::new(files.clone(), provider, "test")
+            .into_partitions(budget(), Arc::new(Cache::new(0, None).unwrap()))
+            .await
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (_membership, members) = watch::channel(vec![Member::from(address)]);
+        let cluster = Cluster::open(
+            directory.clone(),
+            ClusterConfig {
+                layout: Layout::new(1).unwrap(),
+                address,
+                limits: Limits::default(),
+                upload_limits: budget(),
+                capacity: 4,
+                maintenance: Duration::from_secs(60),
+            },
+            Arc::new(Cache::new(0, None).unwrap()),
+            Arc::new(auth()),
+            members,
+        )
+        .await
+        .unwrap();
+        let application = Arc::new(crate::api::App::new(cluster.clone(), auth(), capacity));
+        let server = Server::serve(listener, crate::api::router(application.clone()));
+        let route = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                files.entered.notified().await;
+                let observed = directory
+                    .lazy_partition(0)
+                    .unwrap()
+                    .root()
+                    .unwrap()
+                    .observe()
+                    .await
+                    .unwrap();
+                if let Some(route) = observed.route() {
+                    break route;
+                }
+                // Permit creation is checked before activation too. Stop only
+                // after the open route is published, before local installation.
+                files.pause.store(true, Ordering::SeqCst);
+                files.release.notify_one();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(route.address, address, "the recovering owner is advertised");
+        assert!(
+            cluster
+                .resolve("app")
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_none()
+        );
+        let token = auth().issue("app".into(), true, 60).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                server
+                    .call(
+                        "POST",
+                        "/v1/databases/app/read",
+                        &token,
+                        json!({"keys":["x"]})
+                    )
+                    .await
+                    .0,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "recovery is unavailable, not tenant overload"
+            );
+        }
+        assert_eq!(application.rejected.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            application.requests.load(Ordering::SeqCst),
+            2,
+            "no second HTTP hop even with spare capacity"
+        );
+        files.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while cluster
+                .resolve("app")
+                .await
+                .unwrap()
+                .unwrap()
+                .owner_incarnation()
+                .is_none()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            server
+                .call(
+                    "POST",
+                    "/v1/databases/app/read",
+                    &token,
+                    json!({"keys":["x"]})
+                )
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(application.rejected.load(Ordering::SeqCst), 0);
+        assert_eq!(application.requests.load(Ordering::SeqCst), 3);
+    }
+}
+
 #[async_trait]
 impl crate::storage::Storage for PausedPermit {
     async fn get(&self, key: &str, max: usize) -> anyhow::Result<Option<crate::storage::Object>> {

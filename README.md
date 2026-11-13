@@ -149,6 +149,8 @@ loss and cold restart. Both direct rollout readback gaps meet the 60-second
 target: **57.56s / 49.21s**. Scale-up and cold recovery also meet their targets;
 whole-rollout progress bounds remain **98.74s / 108.93s**. These short,
 different-history runs do not establish an availability guarantee or SLO.
+Main also refuses self-forwarding while a local owner recovers; the focused HTTP
+regression passes, with exact-runtime cloud qualification pending.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

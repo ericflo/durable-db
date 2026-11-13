@@ -39,6 +39,10 @@ ValidationFailure == /\ s.activated /\ s.phase = "sent" /\ s.pinned = "old"
                                !.retired = @ \/ Fault = "Unavailable"]
 IdleRetires == s.absent => s.retired
 \* Routing observations are hints, including stale ones after takeover.
+\* A cluster forwarder refuses its own advertised address before Send while
+\* no local backend is installed. This transport refusal grants no authority;
+\* omitted work is stuttering here. Socket identity and admission-slot usage
+\* remain implementation obligations checked by the paused-recovery TCP test.
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
 Takeover == /\ s.route = "old"

@@ -835,6 +835,18 @@ At `00637a4`, the native HTTP partition fixture passes on B2 in 52.98 seconds an
 
 ## Owner discovery and forwarding
 
+Cluster forwarders refuse their own advertised socket before opening a connection
+or caching the route. Activation may expose that route before local recovery
+finishes; forwarding back would consume another tenant slot and turn recovery
+into HTTP 429. A paused-acquisition TCP regression reproduces that refusal on the
+old path, then passes in **0.05s** with one or two tenant slots: two explicit
+requests produce two admissions, zero rejections and HTTP 503; unpausing recovery
+resumes local service. This changes no authority, deadline or admission limit.
+The unchanged 728-state OwnerRouting model and nine controls pass; socket identity
+and request-slot counts are Rust test obligations, not properties of that model.
+All **376 routine Rust checks**, formatting and strict clippy pass. Exact-runtime
+cloud qualification is pending.
+
 `Root::advertise` binds an optional socket address to a fresh ownership incarnation in its existing control record. An open observation is a route hint, never serving permission. `api::Forward` caches one route for an explicitly selected partition and sends one authenticated HTTP attempt. The receiving backend checks the incarnation before dispatch; ordinary policy checks and fresh writer-permit validation remain mandatory. Tenant claims keep their expiry, policy generation and revocation identity. Administrator forwarding uses a signed 60-second token, never the signing-key bearer. The forwarder refuses redirects, disables transport retries/proxy inheritance, bounds concurrency and bytes, and clears only the failed cache instance. Readiness indicates the forwarding process's admission state, not owner availability. Deployment still needs a trusted private peer network or transport mesh and a shared signing-key ring.
 
 `OwnerRouting` checks **728 distinct states, 3,197 generated, depth 11**. It covers address reuse, stale discovery, pinned destination identity, one forwarding attempt, synchronous route invalidation on cancellation and retirement after an idle permit observation confirms absence. Nine negative controls detect omitted identity checks, replay after a lost reply, reselecting after admission, retained busy/cancelled routes, readiness substituted for permission, failure to retire an idle revoked owner, retirement from a preference change alone, and retirement on an unavailable response-validation read. A failed fresh check suppresses the state-derived reply with HTTP 503 while retaining a locally healthy worker. Confirmed absent permission or an already failed local view still retires it. Two real TCP regressions fail against the previous implementation, then pass for rejected commands and sealed durable commits; identical retries preserve the incarnation and never resubmit a durable journal. The initial state now includes a confirmed claimant before activation; preference may discard neither its recovery nor the later serving backend. The availability subcase assumes a healthy process remains in membership; failure and explicit removal may still stop service. Run `scripts/check-model.sh OwnerRouting`. Errors stutter in the probe model; eventual observation and scheduling remain liveness assumptions. The existing `RevocableOwner` argument supplies response/permit ordering. These separate bounds do not establish composed placement correctness or Rust refinement.

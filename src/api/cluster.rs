@@ -105,10 +105,11 @@ impl Cluster {
         let mut partitions = Vec::new();
         for id in 0..config.layout.partitions() {
             let connection = directory.lazy_partition(id)?;
-            let forward = Arc::new(Forward::new(&connection, auth.clone(), config.capacity)?);
+            let mut forward = Forward::new(&connection, auth.clone(), config.capacity)?;
+            forward.local_address = Some(config.address);
             partitions.push(Partition {
                 connection,
-                forward,
+                forward: Arc::new(forward),
                 local: RwLock::new(None),
                 challenge: Mutex::new(None),
             });

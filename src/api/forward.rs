@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use reqwest::{Client, Method, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -36,6 +37,7 @@ pub struct Forward {
     auth: Arc<Auth>,
     peer: Mutex<Option<Arc<Peer>>>,
     permits: Semaphore,
+    pub(super) local_address: Option<SocketAddr>,
 }
 struct Peer {
     route: Route,
@@ -69,6 +71,7 @@ impl Forward {
             auth: auth.into(),
             peer: Mutex::new(None),
             permits: Semaphore::new(capacity),
+            local_address: None,
         })
     }
     async fn peer(&self) -> Result<Arc<Peer>> {
@@ -85,6 +88,13 @@ impl Forward {
             .map_err(anyhow::Error::from)?
             .route()
             .ok_or_else(|| Error::Storage(anyhow::anyhow!("owner has no open route")))?;
+        // An open route can precede recovery and local backend installation.
+        // Do not send a second request to this process or cache that route.
+        if self.local_address == Some(route.address) {
+            return Err(Error::Storage(anyhow::anyhow!(
+                "local owner is unavailable"
+            )));
+        }
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(25))
