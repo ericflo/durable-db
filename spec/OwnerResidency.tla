@@ -15,6 +15,9 @@ Init == s = [live |-> {}, reserved |-> {}, retired |-> {}]
 \* Requests may prioritize a queued partition. Acquire already chooses any
 \* eligible owner; changing that order preserves this transition relation.
 \* Priority is bounded advisory state, never another reservation or authority.
+\* While requests await recovery, background acquisitions may use just one
+\* slot, leaving room for requested retries. Restricting eligible Acquire
+\* steps preserves these safety invariants; scheduling progress is tested in Rust.
 \* Placement is scheduling, never serving authority.
 Acquire(o) == /\ o \notin s.live
               /\ (Cardinality(s.reserved) < Capacity \/ Fault = "Acquire")

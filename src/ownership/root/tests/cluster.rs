@@ -1580,6 +1580,91 @@ async fn empty_unfunded_cluster_exposes_admin_refill_before_acquisition() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn background_recovery_leaves_slots_for_requested_retries() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let layout = Layout::new(8).unwrap();
+    let directory = directory(&provider).await;
+    let node = Node::with_layout(directory.clone(), listener, vec![], layout).await;
+    let names: Vec<_> = (0..8)
+        .map(|id| {
+            (0..1000)
+                .map(|n| format!("app-{n}"))
+                .find(|name| layout.partition(name).unwrap() == id)
+                .unwrap()
+        })
+        .collect();
+    let token = auth().administrator_token(600).unwrap();
+    assert_eq!(
+        node.server
+            .call(
+                "GET",
+                &format!("/v1/databases/{}", names[7]),
+                &token,
+                Value::Null
+            )
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let reads = provider.reads.load(Ordering::SeqCst);
+    provider.pause_all_reads.store(true, Ordering::SeqCst);
+    for requested in 1..=3 {
+        // Demand arriving while other recoveries are stalled must still obtain
+        // a slot. Membership wakes the existing scheduler without waiting a tick.
+        node.cluster.resolve(&names[8 - requested]).await.unwrap();
+        node.members(&[node.address]);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(
+            provider.reads.load(Ordering::SeqCst) - reads,
+            requested as u64 + 1,
+            "one background recovery must leave room for requested work"
+        );
+    }
+    provider.pause_all_reads.store(false, Ordering::SeqCst);
+    provider.release.notify_waiters();
+    // Unrequested partitions must also finish once the requested work completes.
+    // Observe storage instead of resolve(), which would turn them into requests.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for id in 0..8 {
+            let connection = directory.partition(id, budget()).await.unwrap();
+            while connection
+                .root()
+                .unwrap()
+                .observe()
+                .await
+                .unwrap()
+                .route()
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        while node
+            .cluster
+            .resolve(&names[7])
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_incarnation()
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    node.server
+        .ok(
+            "PUT",
+            &format!("/v1/databases/{}", names[7]),
+            &token,
+            json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
+        )
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn paused_acquisition_does_not_block_queued_partitions() {
     for requested_first in [false, true] {
         let provider = Provider::new();

@@ -215,6 +215,8 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
     for (const [timing, duration] of [[record.commit_rpc, record.end - record.start],
       [record.read_rpc, record.readback_end - record.end]]) {
       assert.ok(timing.request_seconds > 0);
+      assert.ok(timing.longest_request.seconds > 0 && timing.longest_request.seconds <= timing.request_seconds);
+      assert.ok(timing.longest_request.status in timing.statuses);
       assert.ok(timing.request_seconds + timing.backoff_seconds <= duration);
       const counts = {};
       for (const [id, statuses] of Object.entries(timing.connections)) {

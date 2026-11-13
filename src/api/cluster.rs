@@ -210,10 +210,23 @@ impl Cluster {
                     }
                 }
                 // Requested partitions go first, retaining round-robin order
-                // within each group and the same four acquisition slots.
+                // within each group and the same four acquisition slots. Leave
+                // room for requested retries while they wait on a challenge or
+                // failed attempt; background recovery may use one slot meanwhile.
+                let demand = cluster.partitions.iter().enumerate().any(|(id, p)| {
+                    p.requested.load(Ordering::Relaxed)
+                        && preferred(id as u32, &peers) == Some(cluster.config.address)
+                });
+                let mut background = pending
+                    .iter()
+                    .enumerate()
+                    .filter(|(id, active)| {
+                        **active && !cluster.partitions[*id].requested.load(Ordering::Relaxed)
+                    })
+                    .count();
                 'fill: for requested in [true, false] {
                     for _ in 0..count {
-                        if acquisitions.len() == 4 {
+                        if acquisitions.len() == 4 || (!requested && demand && background >= 1) {
                             break 'fill;
                         }
                         let id = cursor;
@@ -230,6 +243,7 @@ impl Cluster {
                             continue;
                         }
                         pending[id] = true;
+                        background += usize::from(!requested);
                         let cluster = cluster.clone();
                         let members = members.clone();
                         acquisitions

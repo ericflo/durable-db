@@ -34,7 +34,7 @@ const maxIntents=100000;
 const tenantLimits={bytes:1024*1024*1024,attempts:100000};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const hash=value=>createHash('sha256').update(value).digest('hex');
-const rpcTiming=()=>({request_seconds:0,backoff_seconds:0,statuses:{},connections:{}});
+const rpcTiming=()=>({request_seconds:0,backoff_seconds:0,longest_request:{seconds:0,status:null},statuses:{},connections:{}});
 async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',endpoint=origin,timing) {
   const encoded=body===undefined?undefined:JSON.stringify(body), start=performance.now();
   let attempts=0;
@@ -61,7 +61,9 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',en
     }
     status.http_attempt_statuses[code]=(status.http_attempt_statuses[code]??0)+1;
     if(timing) {
-      timing.request_seconds+=(performance.now()-attempted)/1000;
+      const seconds=(performance.now()-attempted)/1000;
+      timing.request_seconds+=seconds;
+      if(seconds>timing.longest_request.seconds)timing.longest_request={seconds,status:code};
       timing.statuses[code]=(timing.statuses[code]??0)+1;
       // Keep at most eight socket identities per RPC, plus an overflow bucket.
       const id=attempt.connection;
