@@ -141,6 +141,7 @@ struct Pending {
 /// another predecessor. Retained observations/requests need caller-side bounds.
 pub struct Root {
     files: Arc<dyn Storage>,
+    cache: Option<Arc<crate::cache::Cache>>,
     session: control::Session,
     encoding: Encoding,
     prefix: String,
@@ -213,6 +214,7 @@ impl Root {
         }
         Ok(Self {
             files,
+            cache: None,
             session,
             encoding,
             prefix: prefix.into(),
@@ -227,6 +229,11 @@ impl Root {
             journal_opened: false,
             budgeted,
         })
+    }
+
+    pub(crate) fn with_cache(mut self, cache: Arc<crate::cache::Cache>) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Advertise a peer address atomically with this fresh claim. Configure it
@@ -590,6 +597,7 @@ impl Root {
             self.files.clone(),
             record,
             self.registrations()?,
+            self.cache.clone(),
         ))
     }
 
@@ -598,7 +606,7 @@ impl Root {
     /// lock across I/O. Completion still requires a final permission check.
     pub fn replay(&mut self) -> Result<Replay, Error> {
         let record = self.recovery_record()?;
-        Ok(Replay::new(self.files.clone(), record))
+        Ok(Replay::new(self.files.clone(), record, self.cache.clone()))
     }
 
     /// Capture the confirmed checkpoint identity for immutable readback. The

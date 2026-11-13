@@ -90,7 +90,9 @@ pub async fn open(
         Arc::new(Register(directory.clone())),
         "local-exclusive",
     );
-    let mut root = connection.exclusive_root(directory)?;
+    let mut root = connection
+        .exclusive_root(directory)?
+        .with_cache(cache.clone());
     let observed = root.observe().await?;
     let claim = root.claim(observed)?;
     ensure!(

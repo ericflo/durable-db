@@ -10,7 +10,7 @@ Run `scripts/check-candidate.sh RootAcquisition`. The two- and three-candidate p
 
 ## CatalogReplay
 
-Ordered replay from a complete immutable selected catalog, assuming catalog and frame durability. Three journals with zero to two selected frames check all 27 initial cut combinations and 2,303 distinct states. Required controls detect skipping a prefix, extending it with late uploads and reversing epoch order; a fourth witnesses nonempty completion. Run `scripts/check-candidate.sh CatalogReplay`.
+Ordered replay from a complete immutable selected catalog, assuming catalog and frame durability. Three journals with zero to two selected frames check all 27 initial cut combinations and 11,459 distinct states (88,318 generated, depth 12), including a one-frame disposable cache populated only by positive provider reads. Eviction and cached replay preserve the selected cuts. Required controls detect skipping a prefix, extending it with late uploads and reversing epoch order; a fourth witnesses nonempty completion. Run `scripts/check-candidate.sh CatalogReplay`.
 
 This is a byte-stream property, not a proof of the catalog's durability, storage-tree implementation, transaction recovery, bounded execution time or serving permission. A completed replay may outlive its root interval and still needs a final permission check before exposing a reconstructed view.
 

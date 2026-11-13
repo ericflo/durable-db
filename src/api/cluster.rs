@@ -299,7 +299,10 @@ impl Cluster {
             // outcomes on the same identity, without replaying its claim PUTs.
             let mut validations = 4;
             for _ in 0..4 {
-                let mut root = connection.root()?.advertise(self.config.address)?;
+                let mut root = connection
+                    .root()?
+                    .with_cache(self.cache.clone())
+                    .advertise(self.config.address)?;
                 stage = "observe";
                 progress(stage);
                 let observed = root.observe().await?;

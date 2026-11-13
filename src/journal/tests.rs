@@ -16,6 +16,183 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn selected_replay_reuses_positive_reads_within_cache_and_frame_bounds() {
+    use crate::cache::Cache;
+    let files = Arc::new(Files::default());
+    let cache = Arc::new(Cache::new(4096, None).unwrap());
+    let mut writer = Writer::new(files.clone(), Uuid::new_v4(), QueueLimits::default()).unwrap();
+    for value in [b"first".as_slice(), b"second"] {
+        let upload = writer.prepare(&[Bytes::copy_from_slice(value)]).unwrap();
+        writer.complete(upload.send().await).unwrap();
+        drop(writer.pop_durable().unwrap().unwrap());
+    }
+    let selected = writer.durable_prefix();
+    let mut discovery =
+        Reader::discover(files.clone(), writer.log()).with_cache(Some(cache.clone()));
+    while discovery.read_next().await.unwrap().is_some() {}
+    assert_eq!(discovery.finished_prefix(), Some(selected));
+    let gets = files.gets.load(Ordering::SeqCst);
+    assert_eq!(gets, 3); // Two positive reads and the end-of-journal probe.
+    let mut replay = Reader::replay(files.clone(), selected).with_cache(Some(cache.clone()));
+    let first = replay.read_next().await.unwrap().unwrap();
+    assert!(replay.read_next().await.is_err()); // Cache hits retain the frame bound.
+    drop(first);
+    assert!(replay.read_next().await.unwrap().is_some());
+    assert!(replay.read_next().await.unwrap().is_none());
+    assert_eq!(replay.finished_prefix(), Some(selected));
+    assert_eq!(files.gets.load(Ordering::SeqCst), gets);
+
+    let mut wrong = selected;
+    wrong.digest[0] ^= 1;
+    let mut replay = Reader::replay(files.clone(), wrong).with_cache(Some(cache.clone()));
+    assert!(replay.read_next().await.unwrap().is_some());
+    assert!(replay.read_next().await.is_err()); // Cache cannot override the cut.
+    assert!(replay.finished_prefix().is_none());
+    files.fail_read.store(true, Ordering::SeqCst);
+    assert!(
+        Reader::discover(files.clone(), writer.log())
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .is_err()
+    );
+
+    // Unrelated cached data evicts both frames under the same byte ceiling.
+    cache.insert("other", Bytes::from(vec![0; 3800])).await;
+    assert!(cache.memory_bytes().await <= 4096);
+    let before = files.gets.load(Ordering::SeqCst);
+    let mut replay = Reader::replay(files.clone(), selected).with_cache(Some(cache.clone()));
+    while replay.read_next().await.unwrap().is_some() {}
+    assert_eq!(files.gets.load(Ordering::SeqCst) - before, 2);
+    assert!(cache.memory_bytes().await <= 4096);
+    // A new process/cache has no remembered provider observations.
+    let before = files.gets.load(Ordering::SeqCst);
+    let mut replay = Reader::replay(files.clone(), selected)
+        .with_cache(Some(Arc::new(Cache::new(4096, None).unwrap())));
+    while replay.read_next().await.unwrap().is_some() {}
+    assert_eq!(files.gets.load(Ordering::SeqCst) - before, 2);
+}
+
+#[tokio::test]
+async fn journal_cache_does_not_trust_inserts_disk_absence_errors_or_large_frames() {
+    use crate::cache::Cache;
+    let files = Arc::new(Files::default());
+    let log = LogId::fresh(Uuid::new_v4()).unwrap();
+    let key = log.key(1);
+    let (bytes, digest) = frame::encode(log, 1, [0; 32], &[Bytes::from_static(b"value")]).unwrap();
+    let selected = Prefix {
+        log,
+        position: 1,
+        digest,
+    };
+    let disk = tempfile::tempdir().unwrap();
+    let cache = Arc::new(Cache::new(4096, Some((disk.path().into(), 4096))).unwrap());
+    cache.insert(&key, bytes.clone()).await;
+    // Ordinary insertion is not evidence that these bytes reached storage.
+    assert!(
+        Reader::replay(files.clone(), selected)
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .is_err()
+    );
+    drop(cache);
+    let cache = Arc::new(Cache::new(4096, Some((disk.path().into(), 4096))).unwrap());
+    assert!(
+        cache
+            .get(&key, &hex::encode(Sha256::digest(&bytes)))
+            .await
+            .is_some()
+    );
+    assert!(
+        Reader::replay(files.clone(), selected)
+            .with_cache(Some(cache))
+            .read_next()
+            .await
+            .is_err()
+    ); // Disk promotion cannot grant provenance.
+
+    let cache = Arc::new(Cache::new(1024 * 1024, None).unwrap());
+    assert!(
+        Reader::discover(files.clone(), log)
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    files.fail_read.store(true, Ordering::SeqCst);
+    assert!(
+        Reader::discover(files.clone(), log)
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .is_err()
+    );
+    files
+        .objects
+        .lock()
+        .unwrap()
+        .insert(key.clone(), Bytes::from_static(b"corrupt"));
+    assert!(
+        Reader::discover(files.clone(), log)
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .is_err()
+    );
+    let (wrong_chain, _) = frame::encode(log, 1, [1; 32], &[Bytes::new()]).unwrap();
+    files
+        .objects
+        .lock()
+        .unwrap()
+        .insert(key.clone(), wrong_chain);
+    assert!(
+        Reader::discover(files.clone(), log)
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .is_err()
+    );
+    assert_eq!(cache.memory_bytes().await, 0);
+    files.objects.lock().unwrap().insert(key.clone(), bytes);
+    assert!(
+        Reader::replay(files.clone(), selected)
+            .with_cache(Some(cache.clone()))
+            .read_next()
+            .await
+            .unwrap()
+            .is_some()
+    ); // Earlier absence was not cached.
+    assert!(cache.memory_bytes().await > 0);
+
+    let (large, digest) =
+        frame::encode(log, 1, [0; 32], &[Bytes::from(vec![0; 512 * 1024])]).unwrap();
+    let selected = Prefix {
+        log,
+        position: 1,
+        digest,
+    };
+    files.objects.lock().unwrap().insert(key, large);
+    for limit in [0, 1024 * 1024] {
+        let cache = Arc::new(Cache::new(limit, None).unwrap());
+        let before = files.gets.load(Ordering::SeqCst);
+        for _ in 0..2 {
+            assert!(
+                Reader::replay(files.clone(), selected)
+                    .with_cache(Some(cache.clone()))
+                    .read_next()
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(files.gets.load(Ordering::SeqCst) - before, 2);
+        assert_eq!(cache.memory_bytes().await, 0);
+    }
+}
+
+#[tokio::test]
 async fn resetting_selected_replay_preserves_the_budget_of_a_retained_frame() {
     let files = Arc::new(Files::default());
     let mut writer = Writer::new(files.clone(), Uuid::new_v4(), QueueLimits::default()).unwrap();

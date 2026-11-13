@@ -1,7 +1,7 @@
 use super::LogId;
 use super::budget::Budget;
 use super::frame::{Batch, MAX_BATCH_BYTES, Prefix};
-use crate::storage::Storage;
+use crate::{cache::Cache, storage::Storage};
 use anyhow::{Context, ensure};
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ pub struct Reader {
     selected: Option<Prefix>,
     finished: bool,
     budget: Budget,
+    cache: Option<Arc<Cache>>,
 }
 
 impl Reader {
@@ -31,6 +32,7 @@ impl Reader {
             selected: None,
             finished: false,
             budget: Budget::new(1, MAX_BATCH_BYTES),
+            cache: None,
         }
     }
 
@@ -41,7 +43,13 @@ impl Reader {
             selected: Some(selected),
             finished: false,
             budget: Budget::new(1, MAX_BATCH_BYTES),
+            cache: None,
         }
+    }
+
+    pub(crate) fn with_cache(mut self, cache: Option<Arc<Cache>>) -> Self {
+        self.cache = cache;
+        self
     }
 
     /// Resume only from a checkpoint authenticated by the controller. Prefix
@@ -96,19 +104,32 @@ impl Reader {
         // One live replay frame per reader, including frames held by its caller.
         // Reserve before GET so another read cannot allocate beyond that bound.
         let reservation = self.budget.reserve(MAX_BATCH_BYTES)?;
-        let object = self
-            .storage
-            .get(&self.prefix.log.key(position), MAX_BATCH_BYTES)
-            .await?;
-        let Some(object) = object else {
-            ensure!(
-                self.selected.is_none(),
-                "selected journal prefix is missing a frame"
-            );
-            self.finished = true;
-            return Ok(None);
+        let key = self.prefix.log.key(position);
+        // Discovery must still observe the provider. Only selected replay may
+        // reuse a prior positive read; neither absence nor disk is authority.
+        let cached = if self.selected.is_some()
+            && let Some(cache) = &self.cache
+        {
+            cache.journal_frame(&key).await
+        } else {
+            None
         };
-        let mut batch = Batch::decode(object.bytes, self.prefix.log, position)?;
+        let fetched = cached.is_none();
+        let bytes = match cached {
+            Some(bytes) => bytes,
+            None => {
+                let Some(object) = self.storage.get(&key, MAX_BATCH_BYTES).await? else {
+                    ensure!(
+                        self.selected.is_none(),
+                        "selected journal prefix is missing a frame"
+                    );
+                    self.finished = true;
+                    return Ok(None);
+                };
+                object.bytes
+            }
+        };
+        let mut batch = Batch::decode(bytes.clone(), self.prefix.log, position)?;
         ensure!(
             batch.previous == self.prefix.digest,
             "journal hash chain mismatch"
@@ -121,6 +142,9 @@ impl Reader {
             if position == selected.position {
                 ensure!(batch.prefix == selected, "selected journal digest mismatch");
             }
+        }
+        if fetched && let Some(cache) = &self.cache {
+            cache.remember_journal_frame(&key, bytes).await;
         }
         self.prefix = batch.prefix;
         batch.reservation = Some(reservation);

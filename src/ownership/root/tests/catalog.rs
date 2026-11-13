@@ -52,11 +52,14 @@ async fn selecting_ancestral_journals_reads_the_registration_chain_once() {
             writer.complete(upload.send().await).unwrap();
             assert!(writer.pop_durable().unwrap().is_some());
         }
-        let mut root = successor(&provider).await;
+        let cache = Arc::new(crate::cache::Cache::new(64 * 1024, None).unwrap());
+        let mut root = successor(&provider).await.with_cache(cache.clone());
         let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
         root.files = files.clone();
         let before = provider.calls.load(Ordering::SeqCst);
         root.select_journals().await.unwrap();
+        let reads = files.frame_reads.load(Ordering::SeqCst);
+        assert_eq!(reads, 2 * u64::from(count)); // Each frame plus each end probe.
         let batches = u64::from(count).div_ceil(8);
         assert_eq!(provider.calls.load(Ordering::SeqCst) - before, batches);
         // One immutable prefix per journal; one index page and header per batch.
@@ -84,6 +87,18 @@ async fn selecting_ancestral_journals_reads_the_registration_chain_once() {
             assert_eq!(journal.finished_prefix().unwrap().position(), 1);
         }
         assert!(recovery.next().await.unwrap().is_none());
+        let mut replay = root.replay().unwrap();
+        for epoch in 1..=count {
+            let batch = replay.read_next().await.unwrap().unwrap();
+            assert_eq!(batch.identity().epoch, u64::from(epoch));
+            assert_eq!(batch.records().collect::<Vec<_>>(), vec![&[epoch][..]]);
+        }
+        assert!(replay.read_next().await.unwrap().is_none());
+        assert_eq!(files.frame_reads.load(Ordering::SeqCst), reads);
+        // Cached replay is still not a serving capability after revocation.
+        provider.revoke_current().await;
+        assert!(root.permission().await.unwrap().is_none());
+        assert!(cache.memory_bytes().await <= 64 * 1024);
     }
 }
 

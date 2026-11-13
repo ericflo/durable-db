@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf};
 use tokio::sync::Mutex;
 
-// Cache manifests, pages and native table blocks, never complete large data
-// objects. Readers enforce their own smaller limits after cache lookup.
+// Cache manifests, pages, native table blocks and small journal frames, never
+// complete large data objects. Readers enforce their own limits after lookup.
 const MAX_OBJECT_BYTES: usize = 512 * 1024;
 
 struct Entry<T> {
@@ -82,6 +82,9 @@ struct Disk {
 struct MemoryValue {
     bytes: Bytes,
     digest: String,
+    // Only a validated positive journal GET can establish this provenance.
+    // Disk promotion and ordinary insertion cannot authorize key-only replay.
+    journal: bool,
 }
 pub struct Cache {
     memory: Mutex<Lru<MemoryValue>>,
@@ -179,6 +182,7 @@ impl Cache {
                 MemoryValue {
                     bytes: bytes.clone(),
                     digest: digest.into(),
+                    journal: false,
                 },
                 bytes.len(),
             );
@@ -195,6 +199,7 @@ impl Cache {
             MemoryValue {
                 digest: hex::encode(Sha256::digest(&bytes)),
                 bytes: bytes.clone(),
+                journal: false,
             },
             bytes.len(),
         );
@@ -218,5 +223,41 @@ impl Cache {
     }
     pub async fn memory_bytes(&self) -> usize {
         self.memory.lock().await.bytes
+    }
+
+    pub(crate) async fn journal_frame(&self, key: &str) -> Option<Bytes> {
+        let result = self
+            .memory
+            .lock()
+            .await
+            .get(key)
+            .filter(|value| value.journal)
+            .map(|value| value.bytes.clone());
+        crate::metrics::REGISTRY.event(
+            if result.is_some() {
+                crate::metrics::Event::CacheHit
+            } else {
+                crate::metrics::Event::CacheMiss
+            },
+            1,
+        );
+        result
+    }
+
+    /// Remember only bytes fetched and validated by a journal reader. These
+    /// share the existing memory LRU and never inherit trust from disk.
+    pub(crate) async fn remember_journal_frame(&self, key: &str, bytes: Bytes) {
+        if bytes.len() > MAX_OBJECT_BYTES {
+            return;
+        }
+        self.memory.lock().await.insert(
+            key.to_string(),
+            MemoryValue {
+                digest: hex::encode(Sha256::digest(&bytes)),
+                bytes: bytes.clone(),
+                journal: true,
+            },
+            bytes.len(),
+        );
     }
 }

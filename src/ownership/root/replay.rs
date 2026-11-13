@@ -24,6 +24,7 @@ pub(crate) struct Cut {
 /// check current ownership before exposing it. Discard an invalid private view.
 pub struct Replay {
     files: Arc<dyn Storage>,
+    cache: Option<Arc<crate::cache::Cache>>,
     record: Record,
     index: Option<directory::Root>,
     loaded: bool,
@@ -37,9 +38,14 @@ pub struct Replay {
     cut: Option<Cut>,
 }
 impl Replay {
-    pub(super) fn new(files: Arc<dyn Storage>, record: Record) -> Self {
+    pub(super) fn new(
+        files: Arc<dyn Storage>,
+        record: Record,
+        cache: Option<Arc<crate::cache::Cache>>,
+    ) -> Self {
         Self {
             files,
+            cache,
             record,
             index: None,
             loaded: false,
@@ -100,7 +106,10 @@ impl Replay {
         let selected = catalog::selected(&self.files, self.index.as_ref(), cut.identity)
             .await?
             .context("checkpoint journal is not selected")?;
-        self.reader = Some(Reader::resume(self.files.clone(), cut.prefix, selected)?);
+        self.reader = Some(
+            Reader::resume(self.files.clone(), cut.prefix, selected)?
+                .with_cache(self.cache.clone()),
+        );
         self.current = Some(cut.identity);
         self.next_epoch = cut.identity.epoch;
         self.after = Some(format!(
@@ -177,7 +186,8 @@ impl Replay {
             if let Some(reader) = &mut self.reader {
                 reader.reset(prefix)?;
             } else {
-                self.reader = Some(Reader::replay(self.files.clone(), prefix));
+                self.reader =
+                    Some(Reader::replay(self.files.clone(), prefix).with_cache(self.cache.clone()));
             }
             self.current = Some(identity);
             self.after = Some(after.to_owned());

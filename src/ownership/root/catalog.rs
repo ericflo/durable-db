@@ -88,6 +88,7 @@ pub(super) async fn selected(
 /// Retained scans and recovery cursors need caller-side admission bounds.
 pub struct Recovery {
     files: Arc<dyn Storage>,
+    cache: Option<Arc<crate::cache::Cache>>,
     record: Record,
     chain: Registrations,
     index: Option<directory::Root>,
@@ -97,9 +98,15 @@ pub struct Recovery {
     finished: bool,
 }
 impl Recovery {
-    pub(super) fn new(files: Arc<dyn Storage>, record: Record, chain: Registrations) -> Self {
+    pub(super) fn new(
+        files: Arc<dyn Storage>,
+        record: Record,
+        chain: Registrations,
+        cache: Option<Arc<crate::cache::Cache>>,
+    ) -> Self {
         Self {
             files,
+            cache,
             record,
             chain,
             index: None,
@@ -184,7 +191,8 @@ impl Recovery {
                     index: self.index.clone(),
                     registration,
                     selected: false,
-                    reader: Reader::discover_from(self.files.clone(), cutoff.prefix),
+                    reader: Reader::discover_from(self.files.clone(), cutoff.prefix)
+                        .with_cache(self.cache.clone()),
                 }));
             }
             let prefix =
@@ -199,7 +207,7 @@ impl Recovery {
                 index: self.index.clone(),
                 registration,
                 selected: prefix.is_some(),
-                reader,
+                reader: reader.with_cache(self.cache.clone()),
             }));
         }
     }
