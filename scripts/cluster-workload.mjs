@@ -5,6 +5,21 @@ import {createServer} from 'node:http';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {performance} from 'node:perf_hooks';
 import {join} from 'node:path';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {subscribe} from 'node:diagnostics_channel';
+
+// Observe fetch's actual pooled sockets without changing its transport. Only
+// numeric identities enter the report; never headers, paths or socket addresses.
+const activeAttempt=new AsyncLocalStorage(), requests=new WeakMap(), sockets=new WeakMap();
+let nextSocket=0;
+subscribe('undici:request:create',({request})=>{
+  const attempt=activeAttempt.getStore();if(attempt)requests.set(request,attempt);
+});
+subscribe('undici:client:sendHeaders',({request,socket})=>{
+  const attempt=requests.get(request);if(!attempt)return;
+  if(!sockets.has(socket))sockets.set(socket,++nextSocket);
+  attempt.connection=sockets.get(socket);
+});
 const origin=process.env.DATABASE_URL;
 const writerOrigins=process.env.WRITER_ORIGINS?.split(',')??[origin];
 const credentials=process.env.CREDENTIALS_DIRECTORY??'/run/credentials';
@@ -19,15 +34,16 @@ const maxIntents=100000;
 const tenantLimits={bytes:1024*1024*1024,attempts:100000};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const hash=value=>createHash('sha256').update(value).digest('hex');
-const rpcTiming=()=>({request_seconds:0,backoff_seconds:0,statuses:{}});
+const rpcTiming=()=>({request_seconds:0,backoff_seconds:0,statuses:{},connections:{}});
 async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',endpoint=origin,timing) {
   const encoded=body===undefined?undefined:JSON.stringify(body), start=performance.now();
   let attempts=0;
   for(;;) {
     const attempted=performance.now();
+    const attempt={connection:'unobserved'};
     let code='transport_or_decode_error', result, refusal;
     try {
-      const response=await fetch(endpoint+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
+      const response=await activeAttempt.run(attempt,()=>fetch(endpoint+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)}));
       code=String(response.status);
       if(response.ok) result=await response.json();
       else if(response.status===413) {
@@ -47,6 +63,10 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',en
     if(timing) {
       timing.request_seconds+=(performance.now()-attempted)/1000;
       timing.statuses[code]=(timing.statuses[code]??0)+1;
+      // Keep at most eight socket identities per RPC, plus an overflow bucket.
+      const id=attempt.connection;
+      const bucket=id in timing.connections || Object.keys(timing.connections).length<8 ? id : 'overflow';
+      const counts=timing.connections[bucket]??={};counts[code]=(counts[code]??0)+1;
     }
     if(result!==undefined) return result;
     if(!['transport_or_decode_error','409','429','500','502','503','504'].includes(code)) throw new Error(`Unexpected HTTP status ${code}${refusal?' ('+refusal+')':''}`);

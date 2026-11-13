@@ -91,6 +91,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--scenario', choices=['recovery','peer-isolation','rollout'], default='recovery',
                         help='Focused isolation or repeated rollouts reuse writers, cold verification and cleanup')
+    parser.add_argument('--peer-ingress', choices=['side-pinned','shared'], default='side-pinned',
+                        help='Use side-specific or the ordinary shared Service during peer isolation')
     parser.add_argument('--control-port', type=int, default=17840)
     parser.add_argument('--steady-seconds', type=int, default=0,
                         help='Optional bounded steady pilot, at most one hour, before disruption')
@@ -98,6 +100,8 @@ def main():
                         help='Read only this namespace from kubelet statistics through the API proxy')
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
+    if args.peer_ingress!='side-pinned' and args.scenario!='peer-isolation':
+        parser.error('Shared peer ingress requires the peer-isolation scenario')
     if not 0 <= args.steady_seconds <= 3600:
         parser.error('The bounded pilot duration must be between zero and 3600 seconds')
     if args.observe_memory and not args.steady_seconds:
@@ -117,7 +121,7 @@ def main():
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
                                      scenario=args.scenario,
                                      client_origin='http://durable-db:7654', database_prefix='app',
-                                     writer_origins=['http://durable-db-isolated:7654','http://durable-db-majority:7654'] if args.scenario=='peer-isolation' else ['http://durable-db:7654'],
+                                     writer_origins=['http://durable-db-isolated:7654','http://durable-db-majority:7654'] if args.scenario=='peer-isolation' and args.peer_ingress=='side-pinned' else ['http://durable-db:7654'],
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      controller="StatefulSet", placement_identity="pod name", rollout_unavailable=1, rollout_deadline_seconds=240,
                                      per_writer_readbacks_before_phase=2,
@@ -132,6 +136,7 @@ def main():
                       'Only the selected scenario is exercised; no host shutdown, node drain, rack failure or control-plane failure.',
                       'Short sequential append fixture; no production SLO, arbitrary contention linearizability, sustained-load or AWS claim.'])
     if args.scenario=='peer-isolation':
+        report['configuration']['peer_ingress']=args.peer_ingress
         report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=30)
     if args.scenario=='rollout':report['configuration']['rollout_repetitions']=2
     args.output.parent.mkdir(parents=True,exist_ok=True)
@@ -429,6 +434,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
             kube('label','pod',name,'fault-side='+side)
             groups.setdefault(side,set()).add(pod['status']['podIP'])
         for side,addresses in groups.items():
+            if args.peer_ingress=='shared':continue
             name='durable-db-'+side
             kube('apply','-f','-',body=dict(apiVersion='v1',kind='Service',metadata=dict(name=name),
                 spec=dict(selector={'app':'durable-db','fault-side':side},ports=[dict(port=7654,targetPort=7654)])))
@@ -529,7 +535,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                 phase(mode+'-peer-isolation-healed',writes_acknowledged=progress(timing))
             # Stable writer URLs must also reach replacement pods after the
             # final total-compute fault, when the one-off side labels disappear.
-            for side in ('isolated','majority'):
+            for side in (() if args.peer_ingress=='shared' else ('isolated','majority')):
                 kube('patch','service','durable-db-'+side,'--type=json','-p',json.dumps([dict(op='remove',path='/spec/selector/fault-side')]))
         finally:
             for observer in observers:

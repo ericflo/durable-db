@@ -102,18 +102,25 @@ remain separate from the declared recovery targets.
 
 For the focused network experiment, add `--scenario peer-isolation` to the same
 qualification command. It starts three processes on three hosts, sends writers
-through stable services on both sides of a one-versus-two split, and exercises
-one-way then two-way peer isolation. HTTPS/DNS and workload ingress remain open.
+through stable services on both sides of a one-versus-two split by default, and
+exercises one-way then two-way peer isolation. Add `--peer-ingress shared` to
+send all writers through the ordinary `durable-db` Service instead, without
+creating side-specific Services. HTTPS/DNS and workload ingress remain open.
 A pinned test helper uses `NET_ADMIN` as root inside each disposable pod’s private
 network namespace, dropping only traffic to peer addresses on TCP port 7654.
 Host networking is refused. Long-lived observers check fresh and retained peer
 connections; every process
 must also complete a fresh provider-backed administrative read. Each split is
 held for thirty seconds after its network checks pass. Per-writer progress during
-the split is recorded separately from recovery after healing. Both scenarios
+the split is recorded separately from recovery after healing. Both ingress modes
 share cold replacement, full history verification and namespace cleanup. The
 harness records bounded claim-attempt samples during each hold independently of
-writer progress. [Current results and missed targets](verification-results.md)
+writer progress. The workload observes fetch's actual pooled sockets through
+[Undici diagnostics](https://undici.nodejs.org/api/DiagnosticsChannel), recording
+response counts for at most eight numeric connection identities per RPC, plus
+an overflow bucket. `unobserved` means no socket assignment was seen. It does not
+record headers, addresses or credentials, and does not change connection reuse
+or retry behavior. [Current results and missed targets](verification-results.md)
 retain exact binaries, configurations and timings. These short runs qualify their
 bounded fault/recovery histories, not permanent-partition availability or a
 production SLO. Rolling and scale-down still need broader qualification.

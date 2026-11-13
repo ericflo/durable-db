@@ -66,9 +66,10 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
   const directory = await mkdtemp(join(tmpdir(), 'durable-db-workload-'));
   t.after(() => rm(directory, {recursive: true}));
   await Promise.all(['admin', 'control'].map(name => writeFile(join(directory, `${name}.token`), name)));
-  const rows = new Map(), held = [], retried = new Set();
+  const rows = new Map(), held = [], retried = new Set(), sockets = new Set();
   let corrupt = false;
   const server = createServer(async (request, response) => {
+    sockets.add(request.socket);
     let raw = '';
     for await (const chunk of request) raw += chunk;
     const body = raw ? JSON.parse(raw) : {};
@@ -133,8 +134,17 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
       [record.read_rpc, record.readback_end - record.end]]) {
       assert.ok(timing.request_seconds > 0);
       assert.ok(timing.request_seconds + timing.backoff_seconds <= duration);
+      const counts = {};
+      for (const [id, statuses] of Object.entries(timing.connections)) {
+        assert.match(id, /^[1-9][0-9]*$/);
+        assert.ok(Number(id) <= sockets.size, 'Connection identity must describe a socket, not a request');
+        for (const [status, count] of Object.entries(statuses)) counts[status] = (counts[status] ?? 0) + count;
+      }
+      assert.deepEqual(counts, timing.statuses);
     }
   }
+  const uses = state.history.flatMap(r => [r.commit_rpc, r.read_rpc]).flatMap(r => Object.keys(r.connections));
+  assert.ok(new Set(uses).size < uses.length, 'Fixture must observe actual connection reuse');
   assert.deepEqual(state.failures, []);
   const result = await checked(directory, reportFor(state.history, {name: windowName, start, end, target_seconds: 60}), state.history);
   assert.equal(result.histories, 4);
