@@ -251,13 +251,20 @@ def main():
             try:
                 log = kube('logs', name, '--tail=1024').decode(errors='replace')
                 log = re.sub(r'\x1b\[[0-9;]*m', '', log)
-                challenges[identity] = dict(
+                observed_challenges = dict(
                     eligibility=[dict(time_utc=stamp, owner=owner, eligible=eligible=='true')
                         for stamp,owner,eligible in re.findall(
                             r'(?m)^([0-9TZ:.+\-]+).*?native owner challenge eligibility.*?owner=([0-9a-f-]{36})\s+eligible=(true|false)',log)],
                     replies=[dict(time_utc=stamp, owner=owner, stage=stage, outcome=outcome, elapsed_ms=int(elapsed))
                         for stamp,owner,stage,outcome,elapsed in re.findall(
                             r'(?m)^([0-9TZ:.+\-]+).*?native owner challenge reply.*?owner=([0-9a-f-]{36})\s+stage="?(observe|answer)"?\s+outcome="?(confirmed|conflict|error)"?\s+elapsed_ms=(\d+)',log)])
+                # Keep earlier eligibility transitions when later log tails no
+                # longer contain them. Both retained histories remain bounded.
+                previous = challenges.setdefault(identity, {})
+                for kind, limit in [('eligibility',256), ('replies',1024)]:
+                    merged = {json.dumps(event,sort_keys=True):event
+                        for event in previous.get(kind,[])+observed_challenges[kind]}
+                    previous[kind] = sorted(merged.values(),key=lambda event:event['time_utc'])[-limit:]
                 slow[identity] = [dict(time_utc=stamp, operation=operation,
                     outcome=outcome, elapsed_ms=int(elapsed))
                     for stamp, operation, outcome, elapsed in re.findall(
