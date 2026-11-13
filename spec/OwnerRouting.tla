@@ -57,6 +57,12 @@ Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
 \* A fresh lookup may still name that peer; membership is neither a response
 \* authority nor proof that a sent mutation aborted. In-flight attempts stay
 \* pinned. Rust checks the membership trigger and the healthy-cache fast path.
+\* A witnessed connect failure may defer another send to that exact route for
+\* a short local interval. Each explicit retry still looks up the owner; a
+\* changed incarnation/address bypasses the pause. The interval grants no
+\* permission, does not infer an abort and cannot replay a mutation. Deferring
+\* before Send stutters here; pacing, expiry and cache-instance isolation are
+\* implementation obligations checked by the TCP regressions.
 Forget == /\ s.phase = "idle" /\ s.cached # "none"
           /\ s' = [s EXCEPT !.cached = "none"]
 Takeover == /\ s.route = "old"

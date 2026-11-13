@@ -913,6 +913,24 @@ At `00637a4`, the native HTTP partition fixture passes on B2 in 52.98 seconds an
 
 ## Owner discovery and forwarding
 
+A witnessed connection failure now pauses sends to that exact route instance for
+three seconds. Every explicit retry still reads discovery: a different owner
+incarnation or address bypasses the pause immediately, while the same owner can
+be retried after it expires. The timestamp is bounded scheduling state, never
+serving authority. It neither classifies an ambiguous mutation as aborted nor
+replays it. HTTP refusals and cancellation alone do not start this pause, and
+already admitted requests remain bounded by the existing capacity and deadlines.
+
+The real TCP regressions saturate a listen queue, verify three further explicit
+retries discover without opening another stalled handshake, and then serve from
+a replacement with the existing 2.1-second response allowance. A second fixture
+recovers the original address, checks no hidden sends, advances only the scheduling
+clock, and confirms an explicit retry resumes. It fails against the old path.
+Existing late-failure/cancellation checks protect refreshed route instances.
+`OwnerRouting` represents deferral before Send as stuttering; its unchanged
+728-state check and nine negative controls cover authority and single attempts,
+not elapsed-time bounds or Rust refinement.
+
 Peer sockets on Linux now set a two-second TCP user timeout in addition to the
 existing two-second connect timeout. This bounds unacknowledged traffic on reused
 connections without reducing the 25-second response deadline for acknowledged

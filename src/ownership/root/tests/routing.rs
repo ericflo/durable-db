@@ -771,6 +771,28 @@ async fn stalled_connect_releases_capacity_and_discovers_the_replacement() {
         Err(crate::Error::Busy)
     ));
 
+    let error = tokio::time::timeout(Duration::from_secs(3), pending)
+        .await
+        .expect("connect failure must not consume the whole request deadline")
+        .unwrap_err();
+    let crate::Error::Storage(error) = error else {
+        panic!("expected a connection error");
+    };
+    let transport = error.downcast_ref::<reqwest::Error>().unwrap();
+    assert!(transport.is_connect() && transport.is_timeout());
+    let reads = provider.reads.load(Ordering::SeqCst);
+    for _ in 0..3 {
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(250), forward.info("app", &access))
+                .await
+                .expect("the same failed route must not start another stalled handshake"),
+            Err(crate::Error::Storage(_))
+        ));
+    }
+    assert!(
+        provider.reads.load(Ordering::SeqCst) >= reads + 3,
+        "deferred sends still discover replacements"
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let _new = advertised(&provider, listener.local_addr().unwrap()).await;
     let _replacement = Server::serve(
@@ -781,19 +803,63 @@ async fn stalled_connect_releases_capacity_and_discovers_the_replacement() {
             crate::Error::NotFound.into_response()
         }),
     );
-    let error = tokio::time::timeout(Duration::from_secs(3), pending)
-        .await
-        .expect("connect failure must not consume the whole request deadline")
-        .unwrap_err();
-    let crate::Error::Storage(error) = error else {
-        panic!("expected a connection error");
-    };
-    let transport = error.downcast_ref::<reqwest::Error>().unwrap();
-    assert!(transport.is_connect() && transport.is_timeout());
     assert!(matches!(
         tokio::time::timeout(Duration::from_secs(3), forward.info("app", &access))
             .await
             .expect("retry must use the new owner and released capacity"),
         Err(crate::Error::NotFound)
     ));
+}
+
+#[tokio::test]
+async fn failed_connection_pause_expires_without_owner_change_or_hidden_retry() {
+    let provider = Provider::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _owner = advertised(&provider, address).await;
+    drop(listener);
+    let forward = Forward::new(&provider.connection("test"), auth(), 1).unwrap();
+    let access = crate::auth::Access::Administrator;
+    let error = forward.info("app", &access).await.unwrap_err();
+    assert!(
+        matches!(error, crate::Error::Storage(e) if e.downcast_ref::<reqwest::Error>().is_some_and(|e| e.is_connect()))
+    );
+
+    let calls = Arc::new(AtomicU64::new(0));
+    let count = calls.clone();
+    let _recovered = Server::serve(
+        TcpListener::bind(address).await.unwrap(),
+        Router::new().fallback(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { crate::Error::NotFound.into_response() }
+        }),
+    );
+    let reads = provider.reads.load(Ordering::SeqCst);
+    for _ in 0..3 {
+        assert!(
+            matches!(
+                forward.info("app", &access).await,
+                Err(crate::Error::Storage(_))
+            ),
+            "a failed route must retain its pause across fresh observations"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no hidden replay or probe");
+    assert!(provider.reads.load(Ordering::SeqCst) >= reads + 3);
+    // Advance only the local scheduling clock, then resume before real TCP I/O.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::time::resume();
+    assert!(
+        matches!(
+            forward.info("app", &access).await,
+            Err(crate::Error::NotFound)
+        ),
+        "a false failure suspicion must not suppress the same owner forever"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "only the explicit retry sends"
+    );
 }

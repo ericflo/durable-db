@@ -19,12 +19,15 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Semaphore, watch};
+use tokio::{
+    sync::{Mutex, Semaphore, watch},
+    time::Instant,
+};
 
 pub(super) const OWNER_HEADER: &str = "x-durable-db-owner";
 const MAX_RESPONSE: usize = 1024 * 1024;
@@ -44,6 +47,7 @@ struct Peer {
     route: Route,
     client: Client,
     usable: AtomicBool,
+    connect_retry: StdMutex<Option<Instant>>,
 }
 // Cancellation must invalidate the same route instance as a failed response.
 // A late failure cannot invalidate a refreshed peer or revive an old one.
@@ -105,6 +109,20 @@ impl Forward {
                 "local owner is unavailable"
             )));
         }
+        // A failed connection is only a scheduling hint. Still discover on
+        // every explicit retry so a replacement bypasses this short pause.
+        if let Some(peer) = &*cached
+            && peer.route == route
+            && peer
+                .connect_retry
+                .lock()
+                .expect("connect retry lock poisoned")
+                .is_some_and(|retry| Instant::now() < retry)
+        {
+            return Err(Error::Storage(anyhow::anyhow!(
+                "owner connection retry deferred"
+            )));
+        }
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(25))
@@ -124,6 +142,7 @@ impl Forward {
             route,
             client,
             usable: AtomicBool::new(true),
+            connect_retry: StdMutex::new(None),
         });
         *cached = Some(peer.clone());
         Ok(peer)
@@ -158,6 +177,13 @@ impl Forward {
                 .send()
                 .await
                 .inspect_err(|error| {
+                    if error.is_connect() {
+                        *peer
+                            .connect_retry
+                            .lock()
+                            .expect("connect retry lock poisoned") =
+                            Some(Instant::now() + Duration::from_secs(3));
+                    }
                     tracing::info!(
                         owner = %peer.route.identity.incarnation,
                         connect = error.is_connect(),
