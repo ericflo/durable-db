@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.12. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.13. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,16 +142,13 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.12 gives a returning stable member priority during graceful handoff,
-while still permitting another member to take over after scale-down. The focused
-HTTP tests prevent an unnecessary temporary ownership claim. Across two B2
-campaigns, all **2,586 acknowledged writes** recover through scaling, rollouts,
-process pauses, provider interruption and cold restart. The largest readback gap
-per rollout ranges from **64.80 to 86.83 seconds**, still missing 60 seconds;
-six of twelve broader recovery targets are missed. These samples establish no
-overall availability improvement. Main now allows reads during checkpoint
-funding and immutable uploads; publication remains exclusive. Cloud qualification
-of that change and recovery queueing are next.
+v0.24.13 allows reads during checkpoint funding and immutable uploads, and
+acknowledges commits before starting maintenance. Publication remains exclusive.
+The exact release binary recovers all **676 acknowledged writes** through B2
+scaling, two rollouts, total compute loss and cold restart. Scale-up and cold
+recovery meet their test targets, but rollout readback gaps of **74.41 / 83.96
+seconds** still miss 60 seconds. Doubling recovery concurrency worsened one
+rollout and was removed. No overall availability improvement is established.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

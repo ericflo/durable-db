@@ -1,5 +1,73 @@
 # Verification results
 
+## Reads continue during checkpoint staging (v0.24.13, 2026-11-13)
+
+The native worker now acknowledges validated commits before starting maintenance.
+Checkpoint funding and immutable uploads hold a shared view, so point reads,
+ordered scans and database information can proceed. New mutations wait for the
+checkpoint; publication and projection replacement remain exclusive so collection
+cannot retire tables while a reader still uses them. Cancellation preserves the
+existing retry gate and uncertain-publication state. There is one checkpoint
+implementation, with the same cached tenant allocators and no extra worker.
+
+The real TCP regression pauses a table upload and requires point/scan/info reads
+and the preceding acknowledgement within one second. A second case revokes the
+permit while paused and requires refusal. Receipt replay survives publication.
+The old exclusive path fails that deadline; the new regression takes **0.24s**.
+All **370 routine Rust checks**, formatting, strict clippy and Woodpecker **320**
+pass. LiveTransactions checks **19,220 states**, nine fault controls and a
+concurrent-read reachability case; Checkpoint and PublicationSafety controls
+also pass. These are bounded component checks, not a Rust or deployment proof.
+
+The exact static binary from `39cdf51` passes standalone installation,
+transactions, export/restore and kill/reopen. Versioned MinIO passes tenant
+funding, retention, automatic cleanup and cold recovery in **182.85s**, including
+three one-minute collection waits. Its bucket, container and **31 versions**
+are removed. B2 runs on the existing three hosts with 16 partitions, four
+sequential writers, 8 MiB caches and 128 MiB resident allowances through
+1→3→6, two rollouts, zero compute and cold recovery at three. All **676
+acknowledgements, readbacks and recovered keys** pass the independent four-history
+check. Its namespace, bucket, scoped key and **1,248 versions** are removed.
+
+| Observation | v0.24.12 | v0.24.13 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 | 86.83s | 74.41s |
+| Largest direct readback gap, rollout 2 | 64.80s | 83.96s |
+| Whole-rollout progress bound, rollout 1 | 157.40s | 109.51s |
+| Whole-rollout progress bound, rollout 2 | 121.45s | 125.65s |
+| Scale to three | 43.94s | 19.15s |
+| Scale to six | 65.26s | 45.57s |
+| Cold recovery after API readiness | 71.35s | 69.22s |
+
+Scale-up meets 60s and cold recovery meets 120s. Both direct rollout gaps still
+miss 60s. These mixed, different-history samples establish **no overall
+availability improvement**. The largest first gap includes **53.64s after
+acknowledgement**; the largest second gap includes **83.55s inside commit**.
+The longest completed selection and checkpoint samples take **21.40s / 14.24s**,
+respectively; they are separate calls, not one critical path. Allowing reads
+during staging fixes the controlled blocking case but leaves publication,
+routing and acquisition delays to isolate. Open gaps are right-censored; the
+workload monotonic clock does not attribute all delay to the rollout.
+
+The earlier one-minute acquisition queue was occupied by other recoveries,
+not an idle timer. An eight-slot experiment at `cb2b54e` keeps the same aggregate
+resident budget and recovers all **786 acknowledgements**, but direct rollout
+gaps worsen to **115.38 / 81.58s** (whole bounds **162.96 / 129.65s**). Scale-up
+improves to **15.59 / 19.74s** and cold recovery takes **66.27s**. The tradeoff does
+not justify doubling concurrency: the experiment and its expanded fixture are
+**removed**, restoring four slots. Its namespace, bucket, key and **1,346 versions**
+are removed. Those writes belong to a different binary and are not added to the
+release's recovery count. [Artifacts, measurements and scope](evidence/native-recovery-2026-11-11.json).
+
+Cleanup also removes the implicit foreground maintenance helper and all six
+call sites, obsolete API migration instructions and stale clock/lock wording.
+Twenty-nine TLC scratch directories are deleted, retaining raw checker logs.
+A temporary compiler experiment reduces a local release edit from **73.28s to
+56.05s** with sixteen codegen units, but grows the binary from **14.53 to 18.39 MB**.
+Runtime performance is unmeasured, so the shipping profile is unchanged; its
+checkout and build directory are removed. Continuous split availability,
+physical-host loss, sustained performance and public multitenancy remain open.
+
 ## Graceful handoff targets the returning member (v0.24.12, 2026-11-13)
 
 Graceful shutdown now leaves the departing stable member's fingerprint in the

@@ -17,12 +17,12 @@ Cloud readiness keeps routing and administration reachable during partition reco
 | Method and path | Meaning |
 | --- | --- |
 | `PUT /v1/databases/{db}` | Admin: idempotent protected creation with a permanent request identity |
-| `POST /v1/databases/{db}` | Admin: legacy format-1 creation with `max_bytes` and `max_keys` quotas |
+| `POST /v1/databases/{db}` | Returns `501`; use protected PUT creation |
 | `GET /v1/databases/{db}` | Revision, live key/byte usage, access policy, and limits |
 | `POST /v1/databases/{db}/read` | Atomic read of keys and/or ordered scans |
 | `POST /v1/databases/{db}/commit` | Revision-checked atomic writes and optional value checks |
 | `POST /v1/databases/{db}/gc` | Returns `501`; native maintenance runs automatically |
-| `POST /v1/databases/{db}/access` | Admin: enable durable authorization, revoke a token ID, or rotate its generation |
+| `POST /v1/databases/{db}/access` | Admin: revoke a token ID or rotate its credential generation |
 | `POST /v1/tokens` | Admin: mint a database-scoped token |
 | `GET /v1/storage/upload-budget` | Admin: authoritative cumulative upload ceilings and allocation, or `null` when unbudgeted |
 | `POST /v1/storage/upload-budget` | Admin: revision-checked, idempotent increase of upload ceilings |
@@ -49,11 +49,9 @@ Use `PUT /v1/databases/{db}` with an administrator credential:
 }
 ```
 
-The operation atomically creates a protected database with revocable tokens enabled from the start (format 2 in the existing engine; a durable catalog row in native serving). The response is `{info, replayed}`; initial `info.policy` has a fresh incarnation, generation zero, policy revision one, and no revocations. Legacy application tokens cannot access it. Mint scoped tokens through `POST /v1/tokens` after creation.
+The operation atomically creates a protected database with revocable tokens enabled from the start. The response is `{info, replayed}`; initial `info.policy` has a fresh incarnation, generation zero, policy revision one, and no revocations. Legacy application tokens cannot access it. Mint scoped tokens through `POST /v1/tokens` after creation.
 
-Persist the exact creation request in your provisioning system before sending it. A retry with the same ID and limits returns the original initial info even after later data writes, policy changes, and collection. Its receipt lasts for the database lifetime, independently of the bounded transaction/policy receipt windows. A different creation ID returns 409; reusing the original ID with different limits returns 400. An existing legacy database cannot be claimed by this operation. PUT never replaces an existing database. On a transport failure or 503, retry the identical creation request; observing only that the name exists is insufficient evidence that your creation succeeded.
-
-`POST /v1/databases/{db}` retains the original legacy behavior for compatibility. It accepts only `{max_bytes,max_keys}`, has no creation receipt, and starts without durable revocation. New provisioning should use PUT. All servers must support format 2 before serving protected databases.
+Persist the exact creation request in your provisioning system before sending it. A retry with the same ID and limits returns the original initial info even after later data writes, policy changes, and collection. Its receipt lasts for the database lifetime, independently of the bounded transaction/policy receipt windows. A different creation ID returns 409; reusing the original ID with different limits returns 400. PUT never replaces an existing database. On a transport failure or 503, retry the identical creation request; observing only that the name exists is insufficient evidence that your creation succeeded.
 
 ## Read a snapshot
 
@@ -98,25 +96,25 @@ Only `409 conflict` authorizes a fresh transaction attempt before any uncertain 
 
 ## Durable token revocation
 
-PUT creation starts protected. For an existing legacy database, upgrade all servers, then enable its database policy with an administrator request:
+PUT creation starts protected. Use an administrator credential and the current policy revision to change access through `POST /v1/databases/{db}/access`. For example, invalidate all currently issued database tokens:
 
 ```json
 {
   "request_id": "a-unique-policy-operation-id",
-  "expected_policy_revision": 0,
-  "change": {"action": "enable"}
+  "expected_policy_revision": 1,
+  "change": {"action": "rotate"}
 }
 ```
 
-Send this to `POST /v1/databases/{db}/access`. The response is `{policy: {incarnation, generation, revision, revoked_tokens}, replayed}`. Activation moves this database to manifest format 2 and invalidates all legacy database tokens at the policy publication. Old binaries refuse the database after activation, including administrator reads and collection. This migration has no downgrade operation. Complete the binary rollout first and retain a suitable recovery plan. Other databases may remain in legacy format during migration.
+The response is `{policy: {incarnation, generation, revision, revoked_tokens}, replayed}`. Rotation changes the database credential generation; it does not change the shared signing key. Older storage formats require [export and restore](recovery.md#local-format-upgrades), not in-place policy activation.
 
-`POST /v1/tokens` accepts `{database, write, ttl_seconds}`. For an enabled policy it returns `{token, token_id}` bound to the current incarnation and generation. For a legacy database it returns the legacy `{token}` envelope. Issuance racing a generation change may return a token that is already invalid; request another token after observing the current policy. For offline issuance, supply both `--incarnation` and `--generation` from fresh administrator info to `durable-db token`. Omitting both produces a legacy token, which protected databases refuse.
+`POST /v1/tokens` accepts `{database, write, ttl_seconds}` and returns `{token, token_id}` bound to the current incarnation and generation. Issuance racing a generation change may return a token that is already invalid; request another token after observing the current policy. For offline issuance, supply both `--incarnation` and `--generation` from fresh administrator info to `durable-db token`. Omitting both produces a legacy token, which protected databases refuse.
 
-To revoke one token, submit a new policy request ID and the current **policy** revision, with `"change": {"action": "revoke", "token_id": "<issued UUID>"}`. To invalidate all tokens and clear the revocation set, use `"change": {"action": "rotate"}`. This advances the database credential generation; it does not rotate the shared signing key. At most 128 token IDs can be revoked per generation. Rotation is required before adding another ID when that set is full. Revocations never expire based on a server's clock. Repeating `enable` cannot reset a policy.
+To revoke one token, submit a new policy request ID and the current **policy** revision, with `"change": {"action": "revoke", "token_id": "<issued UUID>"}`. To invalidate all tokens and clear the revocation set, use `"change": {"action": "rotate"}`. At most 128 token IDs can be revoked per generation. Rotation is required before adding another ID when that set is full. Revocations never expire based on a server's clock.
 
 Policy changes leave the **data** revision unchanged and advance the separate policy revision. They retain the last 32 policy receipts, independent of data-write receipts. After an unknown outcome, retry the identical request ID, expected policy revision, and body. A retained receipt returns its original policy result, which may precede the current policy; use administrator info for the latest state. Beyond the receipt window, the old expected revision prevents reapplication and returns 409. Reusing a retained request ID with different content returns 400. A conflict requires inspecting fresh policy state before deciding on a new administrative operation.
 
-Info, reads, writes, and write-receipt replay authorize against the same validated manifest they use. A read already in flight may finish from its earlier authorized snapshot; an operation invoked after an acknowledged revocation cannot use that old policy. A write prepared before a policy change loses the exact manifest comparison if the policy publishes first. Administrator operations remain privileged. [Security boundaries](security.md) and [verification limits](verification.md#durable-authorization-lifecycle) still apply.
+Info, reads, writes and write-receipt replay check the policy in their committed view. Policy changes share journal order with data writes. A pending revocation blocks new affected writes; a committed revocation also fences receipt replies. A read already in flight may finish from its earlier authorized snapshot; an operation invoked after an acknowledged revocation cannot use that old policy. Administrator operations remain privileged. [Security boundaries](security.md) and [verification limits](verification.md#durable-authorization-lifecycle) still apply.
 
 ## Cumulative upload admission
 
