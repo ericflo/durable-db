@@ -1,25 +1,99 @@
 # Verification results
 
-## Returning-member handoff experiment — unreleased
+## Graceful handoff targets the returning member (v0.24.12, 2026-11-13)
 
-The broad recovery-challenge experiment at `39bbf80` is rejected. Its B2 rollout
-preserves all **939 acknowledgements**, but direct readback gaps worsen from
-**71.10 / 72.29s** to **86.53 / 94.42s**. No explicit post-claim failure appears
-in the bounded acquisition trace; avoiding those failures alone does not improve
-availability. A separate peer-isolation run recovers **601 acknowledgements**,
-but only two of four writers progress during the symmetric hold. These results
-do not qualify continuous split availability. Both namespaces, buckets and keys
-are removed, along with **2,590 B2/MinIO versions**. No release was made.
+Graceful shutdown now leaves the departing stable member's fingerprint in the
+existing owner-bound hint. That member's replacement skips the challenge wait;
+another member joins the same hint and waits 15 seconds before fallback. This
+prevents an unnecessary temporary claim when the member returns promptly, while
+still permitting scale-down. A late return can still interrupt recovery. The
+normal reachable-owner rebalancing policy, storage format, metadata allowance
+and exact permit fencing are unchanged. No new timer or worker is added.
 
-The replacement removes broad challenges and recovery-stage answer credits. It
-reuses the shutdown hint to identify the departing stable member: a returning
-replacement skips the wait, while a temporary fallback member waits 15 seconds.
-Three real HTTP checks and two injected faults cover prompt replacement,
-fallback and prevention of the extra claim. The bounded policy model checks
-3,968 states with seven fault controls and three reachability checks. Local
-verification passes; cloud latency qualification is pending. The ordinary
-reachable-owner rebalancing policy and exact permit fencing remain unchanged.
-[Evidence, rejected artifact and checked scope](evidence/native-recovery-2026-11-11.json).
+Three real HTTP regressions cover prompt replacement, delayed fallback and a
+returning member that prevents the temporary claim. Each requires one new epoch,
+fencing of a retained old backend and identical receipt replay. They pass in
+**0.12 seconds**. Removing or ignoring the target breaks the corresponding
+regression. The policy model checks **3,968 states**, seven fault controls and
+three reachability cases; its responder stops before withdrawal, matching the
+implementation. RootAcquisition and OwnerRouting controls also pass. These are
+bounded component checks, not a proof of Rust or deployment liveness.
+
+All **369 routine Rust checks**, formatting, strict clippy and Woodpecker **317**
+pass. The static artifact passes the standalone install/transaction/export/restore
+and kill/reopen checks. Versioned MinIO passes membership and cold recovery in
+**40.39 seconds**, removing its bucket, container and **80 physical versions**.
+The B2 rollout uses that exact binary on the existing three hosts: 16 partitions,
+four sequential writers, 8 MiB caches and 128 MiB resident allowances, through
+1→3→6, two rollouts, zero compute and cold recovery at three.
+
+All **761 acknowledged writes** recover and the independent four-history check
+passes. Its namespace, bucket, scoped key and **1,154 physical versions** are
+removed. No explicit post-claim failure appears among 86 completed acquisition
+traces; this bounded trace is not an exhaustive concurrency proof.
+
+| Observation | v0.24.11 | v0.24.12 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 | 71.10s | 86.83s |
+| Largest direct readback gap, rollout 2 | 72.29s | 64.80s |
+| Whole-rollout progress bound, rollout 1 | 157.08s | 157.40s |
+| Whole-rollout progress bound, rollout 2 | 147.59s | 121.45s |
+| Scale to three | 46.09s | 43.94s |
+| Scale to six | 19.43s | 65.26s |
+| Cold recovery after API readiness | 67.77s | 71.35s |
+
+Both direct rollout gaps and scale-to-six miss 60 seconds. Cold recovery meets
+120 seconds. These mixed samples establish **no overall availability improvement**.
+The largest first-rollout gap contains **79.57 seconds after acknowledgement**;
+the serving worker also holds its write lock through checkpoint I/O, blocking
+reads. The longest completed checkpoint sample is **22.24 seconds**, but that
+does not explain the entire gap. In the separate failure campaign, a replacement
+process defers partition 12, does not start its next acquisition for about a
+minute, then takes another **34.01 seconds** to finish. These observations make
+fair acquisition scheduling and reads during checkpoint I/O the next targets;
+forwarding delays still need to be separated from them.
+Continuous split availability, physical-host loss, sustained performance and
+public multitenant readiness remain open.
+
+A separate broader B2 campaign on the same artifact recovers **1,825 more
+acknowledgements** through two minutes of steady load, host-local process pauses,
+replacement while old peers remain in DNS, forced pod loss, another rollout,
+provider interruption, scale-down to one, zero compute and cold restart. Its
+four-history check passes. The namespace, bucket, scoped key and **1,890 physical
+versions** are removed. Across both candidate B2 runs, **2,586 acknowledgements**
+recover; candidate B2/MinIO cleanup removes **3,124 versions**.
+
+| Broader campaign observation | Progress bound | Target |
+| --- | ---: | ---: |
+| Scale to three | 52.11s | 60s |
+| Scale to six | 19.77s | 60s |
+| Processes paused on one host | 73.53s | 60s |
+| Those processes resumed | 16.40s | 60s |
+| Replace all paused processes still in DNS | 127.31s | 60s |
+| Paused processes resumed | 19.25s | 60s |
+| Return to six replicas | 95.47s | 60s |
+| Forced pod loss | 22.57s | 60s |
+| Rolling replacement | 155.78s | 60s |
+| Provider connectivity restored | 66.74s | 60s |
+| Scale down to one | 88.74s | 60s |
+| Cold recovery after API readiness | 73.02s | 120s |
+
+**Six of twelve targets are missed.** The additional rollout's largest direct
+readback gap is **78.91 seconds**, also missing 60 seconds. The completed traces
+contain 125 confirmed acquisitions without an explicit post-claim failure and
+one incomplete claimed trace; absence of a failure event is not proof that
+recovery was never interrupted. This fixture pauses database processes; it does
+not shut down a host or establish a sustained operating envelope.
+
+The earlier experiment at `39bbf80` challenged reachable incumbents and granted
+recovery-stage answer credits. It is **rejected and removed**, including its
+extra HTTP scaffolding: its gaps worsened to **86.53 / 94.42 seconds**. Its 939
+rollout and 601 peer-isolation acknowledgements recovered, but only two of four
+writers progressed during the symmetric hold. Its two namespaces, buckets,
+keys and 2,590 B2/MinIO versions are removed. It was never released. The
+unconditional-withdrawal regression is replaced by the three shared-fixture
+cases above; 28 additional local TLC scratch directories are removed, with raw
+checker logs retained. [Artifacts, measurements and scope](evidence/native-recovery-2026-11-11.json).
 
 ## Validating selection retries in publication (v0.24.11, 2026-11-13)
 
