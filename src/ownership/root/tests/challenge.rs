@@ -121,6 +121,7 @@ async fn uncertain_challenges_defer_and_stale_owner_markers_are_not_answers() {
 #[tokio::test]
 async fn route_withdrawal_is_identity_bound_and_never_grants_permission() {
     let provider = Provider::new();
+    let member = Uuid::new_v4();
     let mut owner = provider
         .root()
         .advertise("127.0.0.1:7654".parse().unwrap())
@@ -130,10 +131,19 @@ async fn route_withdrawal_is_identity_bound_and_never_grants_permission() {
     let identity = owner.identity().unwrap().unwrap();
     let mut hint = provider.root();
     let stale = hint.observe().await.unwrap();
+    assert!(
+        hint.withdraw_route(
+            hint.observe().await.unwrap(),
+            identity.incarnation,
+            Uuid::nil()
+        )
+        .await
+        .is_err()
+    );
     provider.fail_replacements.store(1, Ordering::SeqCst);
     assert!(
         !hint
-            .withdraw_route(hint.observe().await.unwrap(), identity.incarnation)
+            .withdraw_route(hint.observe().await.unwrap(), identity.incarnation, member)
             .await
             .unwrap()
     );
@@ -144,11 +154,15 @@ async fn route_withdrawal_is_identity_bound_and_never_grants_permission() {
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(
         !hint
-            .withdraw_route(hint.observe().await.unwrap(), identity.incarnation)
+            .withdraw_route(hint.observe().await.unwrap(), identity.incarnation, member)
             .await
             .unwrap()
     );
     assert!(hint.observe().await.unwrap().incumbent().is_none());
+    assert_eq!(
+        hint.observe().await.unwrap().withdrawn_member(),
+        Some((identity, member))
+    );
     assert_eq!(owner.permission().await.unwrap(), Some(identity));
     assert!(
         hint.permission().await.unwrap().is_none(),
@@ -163,12 +177,12 @@ async fn route_withdrawal_is_identity_bound_and_never_grants_permission() {
     let successor = provider.record();
     assert!(
         !hint
-            .withdraw_route(stale, identity.incarnation)
+            .withdraw_route(stale, identity.incarnation, member)
             .await
             .unwrap()
     );
     assert!(
-        hint.withdraw_route(hint.observe().await.unwrap(), identity.incarnation)
+        hint.withdraw_route(hint.observe().await.unwrap(), identity.incarnation, member)
             .await
             .is_err()
     );

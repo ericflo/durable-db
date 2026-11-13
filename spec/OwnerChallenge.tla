@@ -1,17 +1,13 @@
 ------------------------ MODULE OwnerChallenge ------------------------
 EXTENDS Integers, FiniteSets
 CONSTANT Fault
-ASSUME Fault \in {"None", "Compare", "Coalesce", "Wait", "Answer", "Forget", "WithdrawCompare"}
+ASSUME Fault \in {"None", "Compare", "Coalesce", "Wait", "Answer", "Forget", "WithdrawCompare", "WithdrawTarget"}
 VARIABLE s
 vars == <<s>>
 Candidates == {1, 2}
 \* One incumbent, two challengers, one takeover, at most four metadata writes.
 \* The register's exact CAS and unique revision assumptions are checked by the
 \* existing provider/ownership models. No hint grants response permission here.
-\* Reachable incumbents use this same challenge before rebalancing. A recovering
-\* owner may answer once per completed recovery stage even while yielding;
-\* a stalled stage cannot renew that credit. This one-round model abstracts an
-\* available answer as alive; bounded multi-round progress is checked in Rust.
 Init == s = [owner |-> 0, nonce |-> 0, revision |-> 0, alive |-> TRUE,
   joined |-> [c \in Candidates |-> 0], waited |-> {},
   captured |-> [c \in Candidates |-> -1], answer |-> -1,
@@ -28,7 +24,7 @@ Join(c) == /\ s.owner = 0 /\ s.nonce # 0 /\ s.joined[c] = 0
 Wait(c) == /\ s.joined[c] # 0
   /\ s' = [s EXCEPT !.waited = @ \cup {c}]
 Prepare(c) == /\ s.owner = 0
-  /\ (s.withdrawn \/ (s.nonce # 0 /\ s.nonce = s.joined[c]
+  /\ ((s.withdrawn /\ (c = 1 \/ Fault = "WithdrawTarget")) \/ (s.nonce # 0 /\ s.nonce = s.joined[c]
                          /\ (c \in s.waited \/ Fault = "Wait")))
   /\ s' = [s EXCEPT !.captured[c] = s.revision]
 \* Captured requests may apply after their caller disappears or loses a reply.
@@ -36,7 +32,7 @@ Apply(c) == /\ s.captured[c] >= 0 /\ s.owner = 0 /\ s.revision < 4
   /\ (s.revision = s.captured[c] \/ Fault = "Compare")
   /\ s' = [s EXCEPT !.owner = c, !.nonce = 0, !.revision = @ + 1,
     !.replaced = TRUE,
-    !.valid = s.withdrawn \/ (~s.answered /\ c \in s.waited), !.withdrawn = FALSE]
+    !.valid = (s.withdrawn /\ c = 1) \/ (~s.answered /\ c \in s.waited), !.withdrawn = FALSE]
 \* Retrying an uncertain claim retains the completed owner/nonce wait. It
 \* grants no authority and cannot survive an answer's changed comparison.
 Forget(c) == /\ s.captured[c] >= 0
@@ -46,9 +42,11 @@ Forget(c) == /\ s.captured[c] >= 0
 \* Best-effort shutdown removes only the old route, using its captured revision.
 \* It grants no authority: permit revocation/recovery remain outside this hint model.
 \* One shutdown hint captured at revision zero, allowed to arrive arbitrarily late.
+\* The responder stops first. With no route, nonce 3 names returning member 1;
+\* member 2 must join/wait before falling back. This hint never grants authority.
 Withdraw == /\ s.revision < 4
   /\ (s.revision = 0 \/ Fault = "WithdrawCompare")
-  /\ s' = [s EXCEPT !.withdrawn = TRUE, !.nonce = 0, !.revision = @ + 1]
+  /\ s' = [s EXCEPT !.withdrawn = TRUE, !.nonce = 3, !.alive = FALSE, !.revision = @ + 1]
 WithdrawalBound == s.withdrawn => s.owner = 0
 NotWithdrawnReplacement == ~(s.replaced /\ s.waited = {})
 RetryKeepsWait == s.kept

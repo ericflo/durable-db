@@ -15,6 +15,14 @@ impl Observation {
     pub(crate) fn challenge(&self) -> Option<Uuid> {
         self.record.and_then(|record| record.challenge)
     }
+    /// A withdrawn route uses the owner-bound hint to name the departing member.
+    /// Other members wait before falling back; a replacement of that member may
+    /// proceed directly. Neither case establishes ownership or serving permission.
+    pub(crate) fn withdrawn_member(&self) -> Option<(Identity, Uuid)> {
+        let record = self.record?;
+        (record.address.is_none() && record.phase == Phase::Open)
+            .then_some((record.identity, record.challenge?))
+    }
 }
 impl Root {
     /// Join one owner-bound challenge. An uncertain publication never permits
@@ -40,8 +48,12 @@ impl Root {
         &mut self,
         observed: Observation,
         incarnation: Uuid,
+        member: Uuid,
     ) -> Result<bool, Error> {
         self.available()?;
+        if member.is_nil() {
+            return Err(Error::Incompatible);
+        }
         if self.epoch.is_some() {
             return Err(Error::Bound);
         }
@@ -50,7 +62,7 @@ impl Root {
             return Err(Error::NotOwner);
         }
         record.address = None;
-        record.challenge = None;
+        record.challenge = Some(member);
         self.publish_hint(observed, record).await
     }
 
@@ -72,14 +84,11 @@ impl Root {
     }
 
     /// Bounded background work for this incarnation, from confirmed claim until
-    /// its placement slot is retired. The callback decides whether to answer an
-    /// actual pending challenge; neither its decision nor the reply grants authority.
-    pub(crate) fn answer_challenges<F>(
-        &self,
-        mut wanted: F,
-    ) -> impl Future<Output = ()> + Send + use<F>
+    /// its placement slot is retired. A yielding incumbent stops answering but
+    /// can still serve until revoked. The callback is only a scheduling hint.
+    pub(crate) fn answer_challenges<F>(&self, wanted: F) -> impl Future<Output = ()> + Send + use<F>
     where
-        F: FnMut() -> bool + Send,
+        F: Fn() -> bool + Send,
     {
         let identity = self.epoch.map(|epoch| Identity {
             epoch,
@@ -95,6 +104,9 @@ impl Root {
             };
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
+                if !wanted() {
+                    continue;
+                }
                 let answer = async {
                     let observed = authority.read().await?;
                     let Some(mut record) =
@@ -102,7 +114,7 @@ impl Root {
                     else {
                         return Ok::<_, anyhow::Error>(());
                     };
-                    if record.identity == identity && record.challenge.is_some() && wanted() {
+                    if record.identity == identity && record.challenge.is_some() {
                         record.challenge = None;
                         let info =
                             metadata::encode(&observed.info, &prefix, encoding, record, budgeted)?;

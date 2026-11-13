@@ -818,7 +818,7 @@ At `80841e5`, the expanded four-server/two-partition fixture passes on B2 in **5
 
 ## Storage-path owner challenges
 
-Before replacing another advertised owner, including a reachable one, the controller
+Before replacing an advertised owner excluded by local peer health, the controller
 publishes or joins an incarnation-bound random challenge in the existing partition
 metadata. It waits 15 seconds for that same owner and nonce to remain unanswered;
 only then does it attempt the ordinary exact conditional claim. A response, changed
@@ -828,25 +828,17 @@ the same owner and nonce remain. One bounded owner/nonce/deadline descriptor per
 partition records it. Pending waits release their acquisition and resident slots;
 the ordinary three-second scheduler revisits them. Four active acquisitions remain
 the limit. No sleeping future or one-second polling loop holds up later partitions.
-Healthy peers rebalance after the same challenge wait; reuse of this process's address takes the
+Known healthy peers can still rebalance; reuse of this process's address takes the
 normal fenced recovery path directly. Confirmed acquisition continues while this
 process remains in membership, even after preference changes; an unconfirmed
 candidate still yields immediately. Actual takeover can fence either stage.
-The existing 15-second challenge now also delays reachable-owner moves. This
-lets a returning preferred pod observe useful recovery before fencing it;
-graceful route withdrawal still skips the wait.
+No extra settling interval delays reachable-owner moves.
 
 Each confirmed claimant polls once every three seconds, with one request in flight,
 through activation, recovery and serving. It conditionally clears only its own
 challenge. Removing the local placement stops this responder even when an in-flight request
-retains the old backend. A serving incumbent that prefers another process stops
+retains the old backend. A retained incumbent that prefers another process stops
 answering, allowing that successor to take over even with asymmetric peer reachability.
-A recovering incumbent can also answer once after confirmed claim, once after
-activation and once after journal selection. These credits coalesce into one
-boolean and are consumed only for an actual challenge. Finishing recovery clears
-the credit. A stalled stage cannot renew it indefinitely; observation errors or
-an uncertain answer may consume it without delaying takeover. These are advisory
-opportunities to finish work, never authority or a guarantee against interruption.
 Ordinary owner publication, collection, budget operations and read barriers
 preserve the hint; the responder is the sole answer path. An already submitted
 answer may still complete after preference changes. No extra storage object or
@@ -862,41 +854,41 @@ reach a partition's owner may still refuse requests during a permanent peer spli
 
 `OwnerChallenge.tla` checks one incumbent, two challengers, one challenge round and
 four metadata writes, with one shutdown withdrawal captured at the initial
-revision: **14,750 distinct states, 104,725 generated, depth 14**. Six fault
+revision: **3,968 distinct states, 24,897 generated, depth 14**. Seven fault
 controls break comparison, coalescing, waiting, owner-only acknowledgement,
-retention of a completed wait across retries and the withdrawal comparison.
+retention of a completed wait across retries, the withdrawal comparison and
+the distinction between a returning member and a fallback member.
 Three reachability controls exercise a live answer, replacement after a stop,
-and replacement without a challenge wait after withdrawal. A stale withdrawal
+and same-member replacement without a challenge wait after withdrawal. The
+responder stops before withdrawal, matching the shutdown order. A stale withdrawal
 cannot clear a successor’s route. Captured requests can
 apply after owner death or lost replies. This finite policy check assumes the
 existing exact register/permit protocol; it is neither Rust refinement nor a proof
 of arbitrary-round liveness. RootAcquisition and OwnerRouting remain separate
 checks of acquisition and response authority.
 
-The returning-member HTTP regressions pause a confirmed owner's activation,
-then start a real preferred peer with both processes still reachable. The first
-requires the original claimant to finish, accept a write, and hand off its value
-and identical receipt; the retained predecessor must refuse after takeover.
-The second keeps activation stalled and requires takeover without a membership
-change. Restoring the reachable-owner bypass fails the first; allowing repeated
-answers without new progress fails the second. Both pass in 0.42 seconds with
-paused scheduling time. They replace the older simulated-peer recovery test;
-membership retirement, unrelated-partition progress and cold restart retain
-their existing independent coverage. The one-round model remains unchanged in
-state space; these checks do not establish cloud handoff latency.
-
 The CLI now closes admission, aborts and joins the cluster scheduler and
 maintenance task, retires every local resident before storage I/O, and
 conditionally withdraws the final resident routes. Four
 hints can run concurrently within the CLI's five-second deadline. Each hint
 checks the old incarnation and captures the exact metadata comparison; it neither
-activates that incarnation nor revokes its permit. If no withdrawal becomes
-durable, replacements retain the ordinary challenge path. Lost replies and
-cancelled hints cannot authorize service. No format,
-object class or extra background worker is added. The real HTTP regression keeps
-the old backend alive and requires replacement within five simulated seconds,
-then checks actual permit fencing and identical receipt replay. Suppressing the
-hint fails in 0.10 seconds; both initial withdrawal regressions pass in 0.11 seconds.
+activates that incarnation nor revokes its permit. The existing owner-bound
+`ddb-challenge` nonce holds a UUIDv8 fingerprint of the departing stable member
+when its route is absent. This is an advisory identifier, not a credential. That
+member's replacement skips the wait; other members join the hint and wait 15
+seconds before fallback. No new metadata bytes are reserved. If no withdrawal
+becomes durable, replacements retain the ordinary challenge path. Legacy hints
+without a target remain readable. Lost replies and cancelled hints cannot
+authorize service. No format, object class or extra background worker is added.
+
+Three real HTTP regressions keep the old backend alive: same-member replacement
+within five simulated seconds, delayed fallback when that member stays absent,
+and a returning member that prevents the temporary fallback claim. Each checks
+exactly one new owner epoch, actual permit fencing and identical receipt replay.
+They pass in 0.12 seconds. Removing the target lets the temporary member claim;
+ignoring the target makes the returning member miss its deadline. Both negative
+controls fail as required. This replaces the unconditional-withdrawal test and
+the rejected experiment's broad challenge/progress-credit tests.
 A 16-partition shutdown regression blocks all metadata reads, expires the drain
 deadline, and requires every local resident to be retired. It detects the
 previous I/O-dependent retirement order in 0.11 seconds.

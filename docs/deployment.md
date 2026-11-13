@@ -53,7 +53,7 @@ Create namespace `durable-db`, a `durable-db-signing` Secret containing `admin.k
 
 The headless service publishes not-ready addresses so discovery does not depend on acquisition completing first. Discovery admits candidates only after an HTTP 200 from `/health/live`, and excludes an established peer after two missed observations even if DNS still lists it. Probes run independently of DNS refresh, with sixteen requests at most and a one-second request deadline. Three-second rounds do not overlap; large peer lists can take longer. Permit fencing, not this failure suspicion, authorizes takeover. Allow peer HTTP traffic on the advertised port. All pods must use the same peer port, IP family and fixed layout. Defaults are 16 partitions and a 128 MiB aggregate resident payload allowance (`--partitions`, `--resident-memory-mib`). The partition count does not cap database count and does not change when pods scale. Too-small per-partition shares fail startup. Frame/window/checkpoint thresholds remain per partition; the cloud receipt window is 128 commits. Journal bytes retain a 256 MiB aggregate component ceiling. Cache, transient checkpoint/HTTP/provider buffers and allocator overhead are separate from resident payload accounting; qualify peak RSS against pod limits.
 
-Before taking over from another advertised incumbent, the candidate publishes or joins a
+Before taking over from an excluded incumbent, the candidate publishes or joins a
 storage-path challenge and waits 15 seconds for an answer. The incumbent answers
 through the bucket even when peer HTTP is blocked. Pending waits release acquisition
 slots; the three-second scheduler revisits them while other partitions recover.
@@ -64,17 +64,21 @@ servers before relying on this behavior; older binaries do not answer challenges
 
 A preference change keeps the current healthy backend serving until actual
 revocation; leaving membership still removes it. While yielding to another
-preferred process, a serving incumbent stops answering challenges so asymmetric peer
+preferred process, the incumbent stops answering challenges so asymmetric peer
 reachability cannot prevent that successor from taking over. The existing
 resident budget covers this overlap. Once a claim is confirmed, recovery also
 continues while the process remains a member, even if preference changes before
 activation finishes. A later takeover still fences it. Candidates without a
-confirmed claim continue to yield immediately. During recovery, the incumbent can
-answer once after each of claim, activation and journal selection. A stalled
-stage cannot continually renew that allowance. The same challenge wait now
-protects recovery from a returning reachable pod; healthy rebalancing also waits
-for an unanswered challenge. Graceful route withdrawal still skips that wait.
-No separate settling timer or serving authority is introduced.
+confirmed claim continue to yield immediately. No extra settling timer is used.
+
+Graceful shutdown leaves the departing stable member's fingerprint in the existing
+owner-bound hint. A replacement of that member skips the challenge wait; another
+member waits the same 15 seconds before falling back. This avoids a temporary
+claim when the original member returns promptly. Scale-down still permits takeover,
+and a late return can still interrupt recovery. Failed shutdown hints retain the
+ordinary recovery path. The hint grants no authority: every successor must claim,
+revoke the old permit and recover. Older binaries preserve this field but do not
+honor the member preference; mixed-version convergence remains unqualified.
 
 `scripts/qualify-multinode.py` is the maintained native deployment/fault campaign.
 Use `--scenario rollout` for two consecutive replacements after 1→3→6 scaling,

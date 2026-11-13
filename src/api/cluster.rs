@@ -5,7 +5,7 @@ use crate::{
     Result,
     auth::Auth,
     cache::Cache,
-    ownership::root::{Outcome, Route},
+    ownership::root::{Identity, Outcome},
     providers::{
         Connection,
         partitions::{Layout, Partitions},
@@ -65,7 +65,7 @@ struct Partition {
 }
 #[derive(Clone, Copy)]
 struct Challenge {
-    incumbent: Route,
+    incumbent: Identity,
     nonce: uuid::Uuid,
     ready_at: tokio::time::Instant,
 }
@@ -73,6 +73,7 @@ struct Challenge {
 // requests retain the old backend. Its permit remains the response authority.
 struct Local {
     backend: Arc<Native>,
+    member: uuid::Uuid,
     _challenges: JoinSet<()>,
 }
 /// A bounded native controller. The caller supplies membership snapshots; an
@@ -306,9 +307,21 @@ impl Cluster {
                 stage = "observe";
                 progress(stage);
                 let observed = root.observe().await?;
-                if let Some(incumbent) = observed.incumbent()
-                    && incumbent.address != self.config.address
-                {
+                let member = member_hint(&members.borrow(), self.config.address)?;
+                let incumbent = observed
+                    .incumbent()
+                    .filter(|incumbent| {
+                        incumbent.address != self.config.address
+                            && !contains(&members.borrow(), incumbent.address)
+                    })
+                    .map(|incumbent| incumbent.identity)
+                    .or_else(|| {
+                        observed
+                            .withdrawn_member()
+                            .filter(|(_, target)| *target != member)
+                            .map(|(identity, _)| identity)
+                    });
+                if let Some(incumbent) = incumbent {
                     stage = "challenge";
                     progress(stage);
                     let challenge = *partition
@@ -352,18 +365,12 @@ impl Cluster {
                 let mut challenges = JoinSet::new();
                 let answering_members = members.clone();
                 let address = self.config.address;
-                // Give useful recovery time to finish before rebalancing.
-                // One answer per stage buys time; stalled work cannot renew it.
-                let recovery_progress = Arc::new(AtomicBool::new(true));
-                let answering_progress = recovery_progress.clone();
                 challenges.spawn(root.answer_challenges(move || {
                     preferred(id, &answering_members.borrow()) == Some(address)
-                        || answering_progress.swap(false, Ordering::AcqRel)
                 }));
                 stage = "activate";
                 progress(stage);
                 root.activate_confirmed(&mut validations).await?;
-                recovery_progress.store(true, Ordering::Release);
                 if let Ok(Some(identity)) = root.identity() {
                     tracing::info!(partition = id, owner = %identity.incarnation,
                         "native acquisition owner");
@@ -371,13 +378,11 @@ impl Cluster {
                 stage = "select_journals";
                 progress(stage);
                 root.select_journals().await?;
-                recovery_progress.store(true, Ordering::Release);
                 stage = "recover";
                 progress(stage);
                 let owner = Opening::new(root, self.limits, self.cache.clone())?
                     .recover()
                     .await?;
-                recovery_progress.store(false, Ordering::Release);
                 stage = "serve";
                 progress(stage);
                 let native = Native::start_reserved(
@@ -389,6 +394,7 @@ impl Cluster {
                 .map_err(anyhow::Error::from)?;
                 return Ok(Local {
                     backend: Arc::new(native),
+                    member,
                     _challenges: challenges,
                 });
             }
@@ -467,16 +473,17 @@ impl Backend for Cluster {
                         .backend
                         .owner_incarnation()
                         .expect("native owner identity"),
+                    local.member,
                 ));
             }
         }
         futures::stream::iter(owned)
-            .map(|(id, incarnation)| async move {
+            .map(|(id, incarnation, member)| async move {
                 let partition = &self.partitions[id];
                 let withdraw = async {
                     let mut root = partition.connection.root()?;
                     let observed = root.observe().await?;
-                    root.withdraw_route(observed, incarnation).await
+                    root.withdraw_route(observed, incarnation, member).await
                 };
                 if !matches!(withdraw.await, Ok(true)) {
                     tracing::warn!(partition = id, "native routing withdrawal deferred");
@@ -517,6 +524,21 @@ impl Backend for Cluster {
 }
 fn contains(peers: &[Member], address: SocketAddr) -> bool {
     peers.iter().any(|peer| peer.address == address)
+}
+fn member_hint(peers: &[Member], address: SocketAddr) -> anyhow::Result<uuid::Uuid> {
+    let member = peers
+        .iter()
+        .find(|peer| peer.address == address)
+        .context("local member is absent")?;
+    let mut hash = Sha256::new();
+    hash.update(b"durable-db.member.v1\0");
+    hash.update(member.id.as_bytes());
+    let mut bytes = [0; 16];
+    bytes.copy_from_slice(&hash.finalize()[..16]);
+    // A bounded UUIDv8 fingerprint, not an authentication credential.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(uuid::Uuid::from_bytes(bytes))
 }
 fn membership(peers: &[Member]) -> anyhow::Result<Vec<Member>> {
     ensure!(peers.len() <= MAX_MEMBERS, "membership exceeds 256 peers");
@@ -570,10 +592,20 @@ mod tests {
                     .clone()
             })
             .collect();
+        let hints: std::collections::BTreeMap<_, _> = peers
+            .iter()
+            .map(|peer| (peer.id.clone(), member_hint(&peers, peer.address).unwrap()))
+            .collect();
         peers.reverse();
         for index in 0..peers.len() {
             peers[index].address.set_port(9000 + index as u16);
             let validated = membership(&peers).unwrap();
+            for peer in &validated {
+                assert_eq!(
+                    member_hint(&validated, peer.address).unwrap(),
+                    hints[&peer.id]
+                );
+            }
             for (p, expected) in winners.iter().enumerate() {
                 let winner = preferred(p as u32, &validated).unwrap();
                 assert_eq!(

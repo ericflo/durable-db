@@ -1,5 +1,26 @@
 # Verification results
 
+## Returning-member handoff experiment — unreleased
+
+The broad recovery-challenge experiment at `39bbf80` is rejected. Its B2 rollout
+preserves all **939 acknowledgements**, but direct readback gaps worsen from
+**71.10 / 72.29s** to **86.53 / 94.42s**. No explicit post-claim failure appears
+in the bounded acquisition trace; avoiding those failures alone does not improve
+availability. A separate peer-isolation run recovers **601 acknowledgements**,
+but only two of four writers progress during the symmetric hold. These results
+do not qualify continuous split availability. Both namespaces, buckets and keys
+are removed, along with **2,590 B2/MinIO versions**. No release was made.
+
+The replacement removes broad challenges and recovery-stage answer credits. It
+reuses the shutdown hint to identify the departing stable member: a returning
+replacement skips the wait, while a temporary fallback member waits 15 seconds.
+Three real HTTP checks and two injected faults cover prompt replacement,
+fallback and prevention of the extra claim. The bounded policy model checks
+3,968 states with seven fault controls and three reachability checks. Local
+verification passes; cloud latency qualification is pending. The ordinary
+reachable-owner rebalancing policy and exact permit fencing remain unchanged.
+[Evidence, rejected artifact and checked scope](evidence/native-recovery-2026-11-11.json).
+
 ## Validating selection retries in publication (v0.24.11, 2026-11-13)
 
 When a failed or uncertain selection leaves the recovery snapshot unchanged,
