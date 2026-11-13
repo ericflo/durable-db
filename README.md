@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.25. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.26. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,12 +142,12 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-Clustered availability remains the immediate gate. Two B2 peer-isolation
-campaigns recovered all acknowledged writes and met the 60-second readback-gap
-fixture target. Answered ownership challenges are paced to reduce checkpoint
-conflicts; funding and confirmation retries can still stall writes. These short
-runs establish no production SLO. Host loss, worst-case memory, sustained
-performance and public multitenancy remain open. See the
+Clustered availability remains the immediate gate. Repeated B2 peer-isolation
+runs and the latest host-local process pause, return and rollout checks meet
+their 60-second readback-gap target. Cached forwarding routes now expire when
+the existing health view excludes the peer. Scale-down gaps, whole-worker
+failure, worst-case memory, sustained performance and public multitenancy remain
+open; these short runs establish no production SLO. See the
 [measured results and limits](docs/verification-results.md) and the
 [ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
 

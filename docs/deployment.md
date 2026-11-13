@@ -147,7 +147,9 @@ source and identifies its bounds; older runs used fetch's shared origin pool.
 Explicit retry bodies and deadlines remain unchanged. [Current results and missed targets](verification-results.md)
 retain exact binaries, configurations and timings. These short runs qualify their
 bounded fault/recovery histories, not permanent-partition availability or a
-production SLO. Rolling and scale-down still need broader qualification.
+production SLO. Rolling and scale-down still need broader qualification. Recovery campaigns now
+record a direct scale-down readback window; older reports retain only the
+controller progress bound for that phase.
 The initial NetworkPolicy attempt
 failed injection validation because established connections remained usable;
 [that behavior is implementation-defined](https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-s-impact-on-existing-connections).

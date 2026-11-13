@@ -1,6 +1,6 @@
 # Production readiness
 
-**Release decision: not ready for production.** v0.24.25 is the latest experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
+**Release decision: not ready for production.** v0.24.26 is the latest experimental release. The passing models, cloud tests, and 100,005-entry directory qualification establish a useful foundation. They do not establish safe public multitenancy, an operating envelope, disaster recovery, or a proof of the implementation.
 
 The production release must retain one installable executable, directory-backed laptop development, and Kubernetes deployments on the existing hosts that scale down to one node. A special clock/compute profile is not an acceptable substitute. Cluster data stays authoritative in B2 or S3 through one common storage algorithm, with bounded disposable caches and automatic maintenance. Performance, tenant protection and correctness are joint acceptance criteria.
 
@@ -24,7 +24,7 @@ Sizes describe remaining engineering scope: **medium** means a few focused imple
 
 | Order | Gate and rough size | What must be true for 1.0 |
 | --- | --- | --- |
-| **1** | **Native clustered serving — medium to large** | Two v0.24.25 B2 isolation campaigns recover all 2,175 acknowledgements across separate buckets. Their maximum gaps (25.17s / 50.16s and 30.69s / 35.82s) meet the 60-second fixture target; checkpoint funding/confirmation retries remain. Next qualify host loss and return, including direct per-writer gaps around host-local process pauses. Physical power loss and node-controller replacement remain distinct checks. Memory and funded administration remain open. These short runs establish no SLO. [Measurements and failed runs](verification-results.md). |
+| **1** | **Native clustered serving — medium to large** | Repeated v0.24.25 B2 isolation campaigns meet the 60-second gap target. With cached-route expiry, v0.24.26 host-local process pause, return and rollout maxima are 54.41s / 26.86s / 44.30s. The scale-down controller bound is still 90.63s; direct gap measurement comes next. Physical power loss and node-controller replacement remain distinct checks. Memory and funded administration remain open. These short runs establish no SLO. [Measurements and failed runs](verification-results.md). |
 | **2** | **Tenant isolation and lifecycle — medium to large** | Finish charging administrative work and retries, reduce unused tenant-credit loss across handoffs, bound creation/request/egress costs across replicas, and prevent an exhausted tenant from stopping funded neighbors' ordinary operation. Verify credential rotation/revocation, tenant deletion and data isolation. Existing logical quotas and durable admission/reserve funding cover only part of this. |
 | **3** | **Automatic maintenance and recovery — medium** | Bound growth of every physical object class, including registrations and catalog headers; qualify large-image cleanup and concurrent readers. Schedule bounded backups to independently protected storage, recover interrupted jobs and demonstrate restore after source loss. The retained checkpoint/export primitives already exist. |
 | **4** | **Performance and autoscaling qualification — large, plus a 72-hour run** | Declare workload and latency/throughput targets, then measure the native serving path on B2 and AWS S3 using the same algorithm. Exercise Pi and web-app workloads, contention, provider failures, scale up/down, rolling replacement and whole-host loss. Check histories, memory, object growth and cost throughout a sustained run. Earlier shared-engine tests do not qualify the replacement. |
@@ -58,7 +58,7 @@ per-writer readback gaps below to assess observed silence during a rollout;
 retain the controller bounds as separate rollout/recovery diagnostics.
 
 Schema 2 records each successful readback only after validating its revision
-and value. Rollout, peer-isolation and host-process pause/resume windows use the workload's own monotonic clock and per-writer
+and value. Rollout, peer-isolation, host-process pause/resume and scale-down windows use the workload's own monotonic clock and per-writer
 counters. The independent checker reports the largest completed readback gap
 per writer, including the last readback before the window, and the unfinished
 gap at window close. That final gap is right-censored: later silence is unknown.

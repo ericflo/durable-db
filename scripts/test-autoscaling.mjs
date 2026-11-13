@@ -90,7 +90,7 @@ test('checker measures verified readbacks, rejects broken evidence, and preserve
   assert.deepEqual(window.readbacks, [2, 2, 2, 2]);
   assert.equal(window.observed_within_target, false);
   for (const name of ['asymmetric-peer-isolation', 'symmetric-peer-isolation',
-    'one-host-process-pause', 'one-host-processes-resumed']) {
+    'one-host-process-pause', 'one-host-processes-resumed', 'scale-one']) {
     const fault = structuredClone(report);
     fault.phases = [{name: `${name}-start`, readback_window: name}];
     fault.readback_windows[0].name = name;

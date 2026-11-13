@@ -1,5 +1,61 @@
 # Verification results
 
+## Cached routes after host-process loss (v0.24.26, 2026-11-13)
+
+The exact `59a961f` static candidate (Woodpecker **381**) recovers all **1,933
+acknowledged writes** after the full B2 recovery campaign. All four independent
+histories pass. It expires forwarding caches when a peer leaves the existing
+health view; the three directly measured readback windows meet the 60-second
+fixture target:
+
+| Maximum completed readback gap | v0.24.25 baseline | v0.24.26 |
+| --- | ---: | ---: |
+| Host-local process pause | 82.32s | **54.41s** |
+| Same processes resumed | 11.71s | **26.86s** |
+| Rolling replacement | 55.53s | **44.30s** |
+
+These are separate campaigns, not a matched performance benchmark. Partition 2's
+replacement is ready **42.38s** after the pause, close to the baseline's 42.82s;
+the longest client delay is shorter. In-flight requests can still time out, and
+a fresh storage hint can legitimately name an excluded peer. No automatic replay
+or health-based serving authority was introduced.
+
+The sole replacement while six old processes remain stopped and in DNS resumes
+all writers within **79.73s** after readiness; the final zero-API restart is
+bounded by **61.16s**. Provider-restoration progress takes at most **18.28s**.
+The scale-down controller bound is **90.63s** and does not establish its direct
+gap target. The following harness revision adds that missing window using the
+existing checker; three adversarial harness tests pass in **8.23s**. This campaign
+used the preceding harness and does not retroactively acquire that measurement.
+
+The preceding v0.24.25 campaign also recovers all **1,873 acknowledgements** and
+passes its four independent histories, despite missing the host-pause gap target.
+Its cleanup removes **1,762 physical versions**, the bucket, scoped key and namespace.
+
+The baseline checkpoint finishes seven seconds after owner readiness.
+Different ingress caches nevertheless
+send requests to the stopped predecessor, each consuming about 25 seconds.
+The longest writer gap includes three transport failures and **80.49s** in read
+requests. A live kernel can acknowledge TCP while its database process is stopped.
+
+The TCP regression checks healthy-cache reuse and fresh hints naming an excluded
+peer, then stalls that peer and publishes a replacement. It fails before the fix
+and passes afterward. Nine focused
+routing checks finish in **4.20s**; all **384 enabled Rust checks**, formatting
+and strict Clippy pass. `OwnerRouting` adds one hint-discard transition with no
+new state variables: **728 distinct states, 3,285 generated, depth 11**, and nine
+required fault controls. Deleted ten generated TLC scratch directories; retained
+logs and reused the existing health monitor without another worker or timer.
+
+The v0.24.26 cleanup removes **2,250 physical versions**, the bucket, scoped key
+and namespace. Its downloaded release also passes standalone exact retries,
+ordered reads, export/restore and kill/reopen.
+
+This fixture stops only database processes on one host. Its kernel and kubelet
+remain live; physical power loss and node-controller replacement are still open.
+[Exact baseline artifacts, histories and diagnosis](evidence/native-recovery-2026-11-11.json)
+retain the failed target alongside the isolation results.
+
 ## Isolation repeat on v0.24.25 (2026-11-13)
 
 A second dedicated-bucket B2 campaign uses the same `cc9b1c4` release binary

@@ -826,9 +826,12 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             timing=recovery('provider-restored',60,'before restoring provider egress')
             kube('apply','-f','-',body=policy)
             phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress(timing))
+            window=start_readbacks('scale-one')
             timing=recovery('scale-one')
             kube('scale','statefulset','durable-db','--replicas=1')
-            phase('scale-one',placement=placement(wait_replicas(1)),writes_acknowledged=progress(timing))
+            located=placement(wait_replicas(1));acknowledged=progress(timing)
+            window['end']=readback_point();save()
+            phase('scale-one',placement=located,writes_acknowledged=acknowledged,readback_window=window['name'])
             budget('scale-one')
         # Writers remain active: pending mutations resolve after the cold restart.
         kube('scale','statefulset','durable-db','--replicas=0');wait_replicas(0)
