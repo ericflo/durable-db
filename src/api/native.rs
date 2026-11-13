@@ -415,12 +415,15 @@ async fn run(
                 }
             }
             completed = uploads.join_next(), if !uploads.is_empty() => {
-                let Some(Ok((position, mut completion, _reservation))) = completed else { return };
+                let Some(Ok((position, mut completion, _reservation))) = completed else {
+                    tracing::warn!(owner = %identity.incarnation, reason = "upload_task", "native worker retired");
+                    return;
+                };
                 if let Some(upload) = completion.take_unsent() {
                     unsent.insert(position, upload);
                 } else if completion.resolution() == Resolution::Unknown { unknown.insert(position); }
                 if owner.write().await.complete(completion).await.is_err() {
-                    tracing::warn!("native completion deferred; checking authority before retry");
+                    tracing::warn!(owner = %identity.incarnation, position, "native completion deferred; checking authority before retry");
                 }
             }
             _ = admission.tick() => {
@@ -440,7 +443,7 @@ async fn run(
                             // Absence cannot prove an abort, but waiting cannot
                             // repair a failed PUT either. Reacquisition revokes
                             // this owner and selects its durable journal prefix.
-                            tracing::warn!("unresolved journal upload; native owner retired");
+                            tracing::warn!(owner = %identity.incarnation, reason = "unresolved_upload", position, "native worker retired");
                             return;
                         }
                         Err(_) => (),
@@ -450,7 +453,13 @@ async fn run(
         }
         {
             let owner = owner.read().await;
-            if owner.check().is_err() {
+            if let Err(error) = owner.check() {
+                let reason = if error.to_string() == "owner retired after incomplete publication" {
+                    "incomplete_publication"
+                } else {
+                    "permission"
+                };
+                tracing::warn!(owner = %identity.incarnation, reason, "native worker retired");
                 return;
             }
             let mut replies = Vec::new();

@@ -245,12 +245,19 @@ def main():
         slow = report.setdefault('slow_operations', {})
         transports = report.setdefault('forward_transport_errors', {})
         challenges = report.setdefault('challenge_events', {})
+        retirements = report.setdefault('retirement_events', {})
         for pod in pods():
             name = pod['metadata']['name']
             identity = name + '/' + pod['metadata']['uid']
             try:
                 log = kube('logs', name, '--tail=1024').decode(errors='replace')
                 log = re.sub(r'\x1b\[[0-9;]*m', '', log)
+                retired = [dict(time_utc=stamp, owner=owner, reason=reason)
+                    for stamp,owner,reason in re.findall(
+                        r'(?m)^([0-9TZ:.+\-]+).*?native (?:worker retired|resident removed).*?owner=([0-9a-f-]{36})\s+reason="?(upload_task|unresolved_upload|incomplete_publication|permission|unready|membership)"?\b',log)]
+                merged = {json.dumps(event,sort_keys=True):event
+                    for event in retirements.get(identity,[])+retired}
+                retirements[identity] = sorted(merged.values(),key=lambda event:event['time_utc'])[-256:]
                 observed_challenges = dict(
                     eligibility=[dict(time_utc=stamp, owner=owner, eligible=eligible=='true')
                         for stamp,owner,eligible in re.findall(
@@ -281,9 +288,12 @@ def main():
                     stage=stage, elapsed_ms=int(elapsed))
                     for stamp, outcome, owner, stage, elapsed in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native checkpoint (progress|deferred|completed).*?owner=([0-9a-f-]{36})\s+stage="?(prepare|permission|allowance|funding|staging|publication|confirmation)"?\b.*?elapsed_ms=(\d+)', log)]
-                owners[identity] = [dict(time_utc=stamp, partition=int(partition), owner=owner)
+                observed_owners = [dict(time_utc=stamp, partition=int(partition), owner=owner)
                     for stamp, partition, owner in re.findall(
                         r'(?m)^([0-9TZ:.+\-]+).*?native acquisition owner.*?partition=(\d+)\s+owner=([0-9a-f-]{36})\b', log)]
+                merged = {json.dumps(event,sort_keys=True):event
+                    for event in owners.get(identity,[])+observed_owners}
+                owners[identity] = sorted(merged.values(),key=lambda event:event['time_utc'])[-256:]
                 activations[identity] = [dict(time_utc=stamp, owner=owner, stage=stage,
                     predecessors=int(predecessors), elapsed_ms=int(elapsed))
                     for stamp, owner, stage, predecessors, elapsed in re.findall(

@@ -185,16 +185,24 @@ impl Cluster {
                 cluster
                     .ready
                     .store(contains(&peers, cluster.config.address), Ordering::Release);
-                for partition in &cluster.partitions {
+                for (id, partition) in cluster.partitions.iter().enumerate() {
                     let mut local = partition.local.write().await;
                     // A preference change schedules the successor; it does not
                     // revoke this incumbent. Keep serving until actual takeover
                     // or removal, retaining the resident reservation throughout.
                     // Native health checks are local and never wait for I/O.
-                    if !contains(&peers, cluster.config.address)
-                        || matches!(&*local, Some(local) if !local.backend.ready().await)
+                    if (!contains(&peers, cluster.config.address)
+                        || matches!(&*local, Some(local) if !local.backend.ready().await))
+                        && let Some(local) = local.take()
                     {
-                        local.take();
+                        let reason = if contains(&peers, cluster.config.address) {
+                            "unready"
+                        } else {
+                            "membership"
+                        };
+                        tracing::info!(partition = id,
+                            owner = %local.backend.owner_incarnation().expect("native owner identity"),
+                            reason, "native resident removed");
                     }
                 }
                 for _ in 0..count {

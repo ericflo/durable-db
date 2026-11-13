@@ -1,5 +1,45 @@
 # Verification results
 
+## Owner challenge polling after slow I/O (candidate, 2026-11-13)
+
+A challenge responder used to sleep three seconds **after** provider I/O. Slow
+observations and failed answers therefore extended its polling period while a
+challenger's 15-second grace period kept running. It now uses a three-second
+cadence and skips missed ticks, with at most one responder round in flight. This
+removes the extra idle time; it does not change the grace period, grant authority
+on timeout, replay a captured comparison or add a storage object or worker.
+
+A paused-clock regression injects three three-second reads and two failed answer
+attempts. The old loop exceeds the grace period; the new loop answers within it,
+invalidates a captured stale claim and leaves the incumbent's permit usable.
+Eight challenge and real HTTP cluster checks pass in **0.36s**. Clippy, formatting
+and three harness checks pass. The unchanged OwnerChallenge transition system
+checks **3,968 states**, depth 14, with ten required negative controls. It models
+neither provider latency nor Rust scheduling and does not establish an SLO.
+
+The earlier all-paths-503 sample coincides with a handoff in the saved trace.
+Partition 2's successor enters revocation, selects 38 journal frames in 4.52s,
+and reports ready near the serial probe round. Those cross-host wall-clock
+samples cannot establish a simultaneous all-path outage or explain why the
+challenge remained unanswered. New fixed-field diagnostics record eligibility and
+answer outcomes; the harness retains at most 256 eligibility changes and 1,024
+reply samples per pod incarnation across rounds. Provider errors and object
+metadata are never copied into those diagnostics.
+
+The fresh B2 campaign uses runtime `ad44ced` (Woodpecker **366**) and harness
+`fceb642` (**367**). All **764** acknowledged writes survive complete replacement;
+independent history checks pass, and cleanup removes **1,450** versions, the
+bucket, scoped key and namespace. However, only writers **1 and 2** make the
+required progress during the two-way hold. Writers **0 and 3** share partition
+2, which is reacquired by the **same pod** while all pods remain Ready; no
+competing peer claim is sampled. Serial probes again return 503 or 429 through
+every tested path. The cadence change therefore **does not resolve the
+availability failure**. Its initial owner never logs an answer attempt, and the
+trace did not retain the worker's retirement cause. The next diagnostic records
+fixed retirement reasons and keeps at most 256 retirement and owner-identity
+events per pod incarnation. No provider error text is exported. See the
+[candidate evidence](evidence/native-recovery-2026-11-11.json).
+
 ## Per-database client connections (v0.24.22, 2026-11-13)
 
 The Node.js SDK replaces global fetch pooling with bounded HTTP/1 pools scoped
