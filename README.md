@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.14. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.15. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,17 +142,14 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.14 limits stalled peer connections to a two-second handshake allowance,
-while retaining the 25-second overall request deadline. Separate timings distinguish
-forwarding, read-lock and provider waits. The exact release binary recovers all
-**791 acknowledged writes** on B2 through scaling, two rollouts, total compute
-loss and cold restart. Direct rollout readback gaps are **74.80s / 49.11s**;
-one still misses the 60-second target. Both scale-up steps and cold recovery
-meet their targets. Sampled connection timeouts end at 2.000–2.002s, but repeated
-unavailable/overload responses still delay clients. These short runs establish
-no overall availability guarantee.
-Main also funds claim uploads before observing their target, removing a
-reproduced self-conflict; release qualification for that change is underway.
+v0.24.15 removes a reproduced ownership self-conflict: allocating upload credit
+used to invalidate the candidate's own claim comparison. All **84 sampled
+successful acquisitions** on B2 now use one claim attempt; the preceding run
+repeated claims in 79 of 80. The exact binary recovers all **798 acknowledged
+writes** through scaling, two rollouts, total compute loss and cold restart.
+Direct rollout readback gaps are **64.26s / 61.82s**; both still miss the
+60-second target. Scale-up and cold recovery meet their targets. These bounded,
+different-history runs establish no overall availability improvement or SLO.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

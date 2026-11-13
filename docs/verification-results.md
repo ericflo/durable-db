@@ -1,5 +1,75 @@
 # Verification results
 
+## Fund ownership claims before comparing their target (v0.24.15, 2026-11-13)
+
+A fresh owner's upload-credit allocation changed the control record after its
+claim had observed it, forcing a self-conflict and an abandoned registration and
+permit. Cluster acquisition now confirms those two uploads' credit before
+capturing the claim comparison. Deferred fallback candidates allocate nothing.
+The existing allocator still charges each PUT; lost grant replies create no
+local rights. No target or collection fence is rebased, and no storage format
+changes. Concurrent changes can still conflict.
+
+The real TCP regression fails on the old path with two registrations and passes
+with one in **0.03s**. A virtual-time fallback regression also catches an unused
+**8 MiB / 32-attempt** grant; all 24 cluster checks pass in **6.10s**. All **372
+routine Rust checks**, formatting and strict clippy pass. UploadCredits retains
+**11,006 distinct states**, 41,209 generated, depth 17 and five fault controls.
+Its existing Reserve transition permits this order; this bounded credit model
+is not a composed acquisition or Rust proof.
+
+[Woodpecker 332](https://ci.eflorenzano.com/repos/18/pipeline/332/1) passes audits,
+client/Pi contracts, models and both budget formats' 10,005-entry capacity checks.
+Release tag pipeline **333** also passes.
+The native JavaScript contract passes in **69.20s**. That synthetic capacity
+fixture now advances virtual time through its sequential read-gathering waits:
+**87.57s → 31.01s locally**, excluding compilation, with every entry and assertion
+retained. The musl CI check takes **140.48s**, versus 249.05s in pipeline 328.
+Separate hardware/load samples do not establish whole-build speed or database
+performance. Real-network deadlines and the separate 100,005-entry fixture are
+unchanged. Removed the redundant connection budget flag, duplicated debit
+branches, contradictory guidance, six TLC scratch directories and the temporary
+capacity worktree.
+
+The exact static binary from `52139ac` passes standalone installation,
+transactions, export/restore and kill/reopen. Versioned MinIO passes HTTP
+membership 1→2→1→0→1, funding, metadata collection, receipt recovery and retired
+owner refusal in **40.35s**; its container, bucket and **68 versions** are removed.
+B2 runs on the existing three Kubernetes hosts with 16 partitions, four
+sequential writers, 8 MiB caches and 128 MiB resident allowances through
+1→3→6, two rollouts, zero compute and cold recovery at three. All **798
+acknowledgements, verified readbacks and recovered keys** pass the independent
+four-history check. Its namespace, bucket and scoped key are removed. The first
+physical-deletion pass lost a connection; a fresh listing found one remaining
+version, which the cleanup retry removed before deleting the key and bucket.
+The interrupted pass did not record a total version count.
+
+| Observation | v0.24.14 | v0.24.15 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 / 2 | 74.80s / 49.11s | 64.26s / 61.82s |
+| Whole-rollout progress bound, rollout 1 / 2 | 105.93s / 107.68s | 119.64s / 113.75s |
+| Scale to three / six | 48.18s / 18.36s | 15.71s / 47.96s |
+| Cold recovery after API readiness | 60.73s | 65.23s |
+| Sampled successful acquisitions with repeated claims | 79 of 80 | 0 of 84 |
+
+Both scale-up steps and cold recovery meet their targets. Both direct rollout
+gaps and whole-rollout bounds still miss 60s. The bounded acquisition samples
+confirm removal of redundant work; these different histories do not establish
+an overall latency improvement or production SLO. Deleted or rotated logs can
+omit calls. No sampled confirmed claim ends in an explicit acquisition failure.
+
+The longest sampled selection takes **26.16s**, including **22.22s discovering
+107 journal frames**. The largest first-rollout gap contains a **63.75s commit**,
+including **44.51s of backoff** after 32 overload and 17 unavailable responses.
+A different writer waits **49.13s after acknowledgement**, with 27.62s in read
+requests and 21.51s of backoff. These separate, overlapping boundaries cannot
+be added into one critical path. Next reduce journal discovery and distinguish
+the remaining admission/route refusals. Completed gaps include the last readback
+before each window; open gaps are right-censored. The
+[evidence record](evidence/native-recovery-2026-11-11.json) pins source, artifact,
+workload and report hashes. Broader failures, AWS, sustained performance, memory
+and tenant-isolation qualification remain open.
+
 ## Separate connection, forwarding and owner waits (v0.24.14, 2026-11-13)
 
 The forwarder now allows two seconds to establish a peer connection within its
