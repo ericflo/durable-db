@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!IMPORTANT]
-> **Latest release: v1.0.5.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
+> **Latest release: v1.0.6.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -144,12 +144,12 @@ The 1.0 contract applies within the [supported deployment scope](docs/production
 
 Use one dedicated bucket per deployment, private peer networking and TLS at
 application ingress. Fund upload allowances, set process/replica limits and
-keep independently protected backups. v1.0.5 pauses repeated connections to a
-failed owner while each explicit retry still discovers replacements. Its B2 run
-recovered **383/383** acknowledged writes, with a largest scale-down
-readback gap of **41.55s**, which meets the 60-second fixture target.
-The preceding v1.0.4 run measured **41.98s**. These short samples do not
-establish a general speedup or an availability/latency commitment.
+keep independently protected backups. v1.0.6 reuses authenticated catalog pages
+during recovery within the existing cache budget. Its B2 run recovered **385/385**
+acknowledged writes, with a largest scale-down readback gap of **41.31s**,
+which meets the 60-second fixture target. The preceding v1.0.5 run measured
+**41.55s**. These short samples do not establish a general speedup or an
+availability/latency commitment.
 See the [measured results](docs/verification-results.md),
 [operating scope and deferrals](docs/production-readiness.md), and [recovery procedure](docs/recovery.md).
 

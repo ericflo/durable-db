@@ -1,5 +1,54 @@
 # Verification results
 
+## Recovery reuses authenticated catalog pages (2026-11-13)
+
+**v1.0.6**, the exact `88c1e7e` artifact from Woodpecker **404**,
+recovers all **385/385 acknowledged writes** in the unchanged B2/Kubernetes
+scale-down campaign on the existing hosts.
+
+| Release | Acknowledged writes recovered | Largest scale-down readback gap | Cold progress bound after readiness |
+| --- | ---: | ---: | ---: |
+| v1.0.5 | 383 / 383 | 41.55s | 44.08s |
+| v1.0.6 | 385 / 385 | 41.31s | 51.24s |
+
+The candidate **meets the 60-second direct scale-down target**. All four
+independent histories pass after every API process is replaced. These separate,
+short samples on shared hosts do not establish a causal speedup, sustained
+performance or an SLO. Earlier timing misses remain recorded.
+
+Selection and replay now reuse digest-bound directory pages and selected-prefix
+records through the owner's existing bounded byte cache. Catalog headers still
+come from storage. Size, schema, digest, journal identity, selected cuts and fresh
+serving permission remain checked. The 15-second challenge policy is unchanged:
+this change reduces recovery I/O without weakening live-owner protection.
+
+The eight-journal fixture previously downloaded **33 index pages/prefix records**
+across selection, recovery traversal and ordered replay. The cached path downloads
+**zero** for both eight and seventeen journals within the same **64 KiB** allowance.
+This excludes headers, frames, registration records and authority operations.
+A cold single-prefix lookup needs two downloads; its warm repeat needs none.
+
+The old implementation fails the regression in **0.01s**. All **16 catalog tests
+pass in 0.69s**, **four replay tests in 0.54s**, and **15 HTTP tests in 1.34s**.
+Checks include zero/tiny caches, corrupt cache fallback, a checksum-valid record
+naming the wrong journal, lost selection replies, late frames and revoked ownership.
+Formatting and strict Clippy pass. The unchanged CatalogReplay model checks
+**11,459 distinct states**, three unsafe controls and one completion control.
+It assumes a complete immutable catalog; digest validation, memory bounds and
+Rust refinement remain separate obligations. Woodpecker passes the required
+Rust/client/Pi, audit, capacity and formal checks. The downloaded static binary
+independently passes API, export/restore and kill/reopen verification.
+
+The worst direct gap contains **10.55s in requests** and **30.51s
+in caller backoff**. The [exact evidence](evidence/catalog-cache-2026-11-13.json)
+retains per-writer timings, acquisition stages, hashes, cleanup and the unchanged
+fixture reference. The scoped 1.0 support contract remains unchanged.
+
+The uncached catalog page/prefix lookups are replaced using the existing cache
+and directory. No new allowance, worker, format or model is introduced. The model
+runner removes its scratch tree. The test namespace, bucket and scoped key are
+removed; cleanup confirms **1,184 physical versions** removed.
+
 ## Failed owner connections pause before another send (2026-11-13)
 
 **v1.0.5**, the exact `3c37099` artifact from Woodpecker **400**,

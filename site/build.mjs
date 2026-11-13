@@ -141,6 +141,7 @@ for (const file of [
   'handoff-yield-2026-11-13.json',
   'ledger-cache-2026-11-13.json',
   'forward-pause-2026-11-13.json',
+  'catalog-cache-2026-11-13.json',
   'release-1.0.0-2026-11-13.json',
   'release-0.2.0-2026-11-10.json',
   'release-0.3.0-2026-11-10.json',

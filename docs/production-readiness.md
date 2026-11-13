@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.5, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.6, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -23,7 +23,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 2. **Supported boundary.** Woodpecker **384** passed dependency audits, Rust formatting/Clippy/tests, client and native Pi contracts, capacity checks, existing small TLA+ models/negative controls and abstract publication/journal proofs. Those are component checks, not a composed proof of the entire protocol or of Rust. The Pi adapters remain experimental pending broader cloud Harness/upgrade qualification; the supported application interface is HTTP/TypeScript KV.
 3. **Checked executable and operations.** The downloaded static archive independently passed protected creation, exact retries, ordered reads, export/restore and kill/reopen with an empty toolchain path. The installer pins the release and verifies its checksum. The operating instructions specify funding, private networking, resource bounds and manual backups. Both campaigns' buckets, keys and namespaces, plus the disposable worker cluster, were removed. Experimental-version migration uses export/restore; mixed-version rolling upgrades are not a 1.0 guarantee.
 
-[Exact release and campaign evidence](evidence/release-1.0.0-2026-11-13.json) records artifact hashes, source, histories, failed timing targets and cleanup. [Verification results](verification-results.md) explain their limits. The initial v1.0.0 runtime matched v0.24.26. v1.0.5 pauses repeated connections to a failed owner while explicit retries keep discovering replacements. Its [B2 campaign](verification-results.md#failed-owner-connections-pause-before-another-send-2026-11-13) recovers all 383 acknowledged writes, with a 41.55s largest scale-down gap and a 44.08s cold progress bound after readiness. The direct gap meets the 60-second target. The preceding v1.0.4 sample measured 41.98s; v1.0.3 measured 68.44s and 41.96s. These short runs retain failures and variability; they neither establish a general speedup or SLO nor complete deferred features.
+[Exact release and campaign evidence](evidence/release-1.0.0-2026-11-13.json) records artifact hashes, source, histories, failed timing targets and cleanup. [Verification results](verification-results.md) explain their limits. The initial v1.0.0 runtime matched v0.24.26. v1.0.6 reuses authenticated catalog pages during recovery within the existing cache budget. Its [B2 campaign](verification-results.md#recovery-reuses-authenticated-catalog-pages-2026-11-13) recovers all 385 acknowledged writes, with a 41.31s largest scale-down gap and a 51.24s cold progress bound after readiness. The direct gap meets the 60-second target. The preceding v1.0.5 sample measured 41.55s. Earlier results retain misses and variability; these short runs neither establish a general speedup or SLO nor complete deferred features.
 
 ## Changes to the previous six-gate plan
 
@@ -36,7 +36,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+These remain follow-up work, not discarded goals. The next performance qualification increases native B2 concurrency and measures process-resource behavior against the published limits. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 

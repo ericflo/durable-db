@@ -691,8 +691,6 @@ recorded in [verification results](verification-results.md).
 
 The model assumes ordered winning epochs, durable immutable bytes and exact register comparisons. Drain completion abstracts the ending of every earlier acknowledgement interval. The separate acquisition, registration, timing and journal results are not a complete composition or Rust-refinement theorem. Later sections describe transaction/receipt recovery, checkpoints and native HTTP integration. Collection, physical upload admission, election and placement are outside this component model. History traversal still grows with ownership changes.
 
-The same change raises only the disposable JavaScript test server's request budget. An isolated receipt-eviction test fell from **37.35 s to 2.44 s** locally; the full JavaScript suite passed 98 tests with one opt-in process-control case skipped, plus four web-app storage tests. No assertions or failure scenarios were removed. These single-run development timings measure avoided admission waits, not database throughput.
-
 ## Ordered catalog replay
 
 Selection and ordered replay now share authenticated directory pages and selected
