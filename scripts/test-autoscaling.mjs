@@ -18,12 +18,22 @@ test('direct ingress observations use fresh sockets, validate reads and bound st
   const token = join(directory, 'admin.token'), secret = 'never-include-this-credential';
   await writeFile(token, secret);
   const sockets = new Set(), calls = [];
+  let activeReads = 0, peakReads = 0;
   const origins = [];
   for (const mode of ['healthy', 'refusing', 'redirect', 'stalled']) {
     const server = createServer(async (request, response) => {
       sockets.add(request.socket); calls.push(mode);
       assert.equal(request.headers.authorization, 'Bearer '+secret);
-      if (mode === 'stalled') return;
+      if (request.method === 'POST') {
+        peakReads = Math.max(peakReads, ++activeReads);
+        response.on('close', () => { activeReads--; });
+        await sleep(20);
+      }
+      if (mode === 'stalled') {
+        if (request.url === '/health/ready') return response.end();
+        if (request.url.includes('writer-0')) return;
+        return response.writeHead(503).end();
+      }
       if (mode === 'refusing') return response.writeHead(503).end(secret);
       if (mode === 'redirect') return response.writeHead(307, {location: origins[0]+request.url}).end(secret);
       if (request.url === '/health/ready') return response.end();
@@ -45,10 +55,11 @@ test('direct ingress observations use fresh sockets, validate reads and bound st
   assert.equal(exit, 0, errors); assert.equal(errors, ''); assert(!output.includes(secret));
   const rows = JSON.parse(output);
   assert.deepEqual(rows.map(row => [row.ready.status, ...row.reads.map(r => r.status)]),
-    [[200,200,200],[503,503,503],[307,307,307],[0,0,0]]);
+    [[200,200,200],[503,503,503],[307,307,307],[200,0,503]]);
   assert.deepEqual(rows[0].reads.map(r => r.valid), [true,false]);
   assert.equal(calls.length, 12); assert.equal(sockets.size, 12, 'no connection reuse or replay');
-  for (const result of [rows[3].ready,...rows[3].reads]) assert(result.elapsed_ms>=4900 && result.elapsed_ms<7000);
+  assert.equal(peakReads, 1, 'diagnostic reads must not create their own admission overload');
+  assert(rows[3].reads[0].elapsed_ms>=4900 && rows[3].reads[0].elapsed_ms<7000);
 });
 
 async function checked(directory, report, history, succeeds = true) {

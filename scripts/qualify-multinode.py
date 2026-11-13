@@ -110,10 +110,15 @@ function probe(origin,writer){return new Promise(resolve=>{
   const timer=setTimeout(()=>{request.destroy();finish({status:0})},5000);
   request.on('error',()=>finish({status:0}));request.end(body);
 })}
-Promise.all(config.origins.map(async origin=>{
-  const [ready,...reads]=await Promise.all([probe(origin),...[0,1].map(writer=>probe(origin,writer))]);
-  return {ready,reads};
-})).then(rows=>console.log(JSON.stringify(rows))).catch(()=>process.exit(2));
+(async()=>{const rows=[];
+  // One administrator read at a time, including its forwarding hop: parallel
+  // probes can exhaust per-principal admission and measure their own overload.
+  for(const origin of config.origins){const ready=await probe(origin),reads=[];
+    for(const writer of [0,1])reads.push(await probe(origin,writer));
+    rows.push({ready,reads});
+  }
+  console.log(JSON.stringify(rows));
+})().catch(()=>process.exit(2));
 """
 
 
@@ -174,7 +179,7 @@ def main():
     if args.scenario=='peer-isolation':
         report['configuration']['peer_ingress']=args.peer_ingress
         report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=30)
-        report['configuration']['ingress_observation']=dict(fresh_connections=True,timeout_seconds=5,writers=[0,1],outside_measured_hold=True)
+        report['configuration']['ingress_observation']=dict(fresh_connections=True,timeout_seconds=5,read_concurrency=1,writers=[0,1],outside_measured_hold=True)
     if args.scenario=='rollout':report['configuration']['rollout_repetitions']=2
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
@@ -541,7 +546,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                         for s in slices for e in s.get('endpoints',[])]
             before=endpoints()
             config=dict(origins=[*urls,'http://durable-db:7654'],prefix=report['configuration']['database_prefix'])
-            rows=json.loads(kube('exec','workload','--','node','-e',INGRESS_PROBE,json.dumps(config),timeout=15))
+            rows=json.loads(kube('exec','workload','--','node','-e',INGRESS_PROBE,json.dumps(config),timeout=70))
             observation=dict(mode=mode,time_utc=utc(),targets=[p['metadata']['name'] for p in live]+['Service'],
                              endpoints_before=before,endpoints_after=endpoints(),rows=rows)
             report.setdefault('ingress_observations',[]).append(observation);save()
