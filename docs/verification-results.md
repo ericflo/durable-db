@@ -1,5 +1,62 @@
 # Verification results
 
+## Scoped 1.0 release and whole-worker recovery (2026-11-13)
+
+**v1.0.0** supports B2-backed Kubernetes and local deployments within one
+application or organization trust domain. The [release scope](production-readiness.md)
+explicitly defers hostile shared tenancy, scheduled backups/PITR, AWS production
+qualification, sustained-performance promises and broader proof/review work.
+This replaces the previous six-gate release plan. Runtime behavior is unchanged
+from v0.24.26; the candidate changes version and qualification harness only.
+
+The exact `8cae5ef` static candidate (Woodpecker **384**) recovers all **504
+acknowledged writes** after a whole disposable Kubernetes worker is killed,
+returned, the cluster scales to one, and every API process is replaced. All four
+independent histories pass their identity, invocation-order, value-hash and
+recovered-count checks. Every writer made verified progress before fault injection.
+
+| Direct window | Largest completed readback gap | 60s fixture target |
+| --- | ---: | --- |
+| Whole worker stopped | 52.93s | Met |
+| Same worker returned | 3.81s | Met |
+| Six replicas to one | 65.23s | Missed |
+
+The worker stayed stopped until every writer resumed; its container had PID zero,
+and Kubernetes reported `NodeStatusUnknown` because kubelet heartbeats stopped.
+Cold progress is bounded by **51.14s after API readiness**, a controller measurement,
+not a direct readback gap. The fixture uses kind v0.33.0, Kubernetes v1.36.4,
+three worker containers limited to two CPUs/4 GiB each, and a surviving control-plane
+workload. The nodes share one host kernel: this is not physical power/rack-loss
+qualification or an HPA load test. The four writers use 16 fixed partitions,
+8 MiB caches and 128 MiB resident budgets, with 384 MiB API-container limits.
+
+The separate existing-host campaign uses the v0.24.26 artifact (`59a961f`,
+Woodpecker **381**) and the strengthened `782d68d` harness. It recovers all
+**1,848 acknowledgements** and passes four histories. Its direct completed gaps
+are **60.31s** for host-local process pause, **21.94s** on resume, **43.45s** for
+rolling replacement and **74.68s** on scale-down. The pause and scale-down targets
+are missed. These are separate environments and campaigns, not a matched benchmark.
+The recorded open gaps are right-censored; no latency or availability SLO follows.
+
+Woodpecker 384 passes all **384 enabled Rust checks**, strict Clippy/formatting,
+dependency audits, client/native Pi contracts, the optimized capacity regression,
+and required models/proofs with their controls. Four focused harness tests pass
+in **8.64s**, including rejection of non-test contexts and mismatched worker
+identities. The downloaded static archive independently passes protected creation,
+exact retries, ordered reads, export/restore and kill/reopen with an empty toolchain
+path. The two GitHub release asset digests match those checked files.
+
+Cleanup removes **950** physical versions from the worker campaign and **2,470**
+from the existing-host campaign, both buckets, scoped keys and namespaces, plus
+the disposable kind cluster and its private kubeconfig. Removed the superseded
+six-gate release plan and stale status text instead of adding another roadmap.
+Client/example README files no longer enter Docker's client-test inputs, avoiding
+future verification invalidation for guide-only edits. No serving implementation,
+dependency or protocol model was added.
+
+[Source, exact artifacts, histories, bounds and cleanup](evidence/release-1.0.0-2026-11-13.json)
+retain both timing failures and the narrower 1.0 interpretation.
+
 ## Cached routes after host-process loss (v0.24.26, 2026-11-13)
 
 The exact `59a961f` static candidate (Woodpecker **381**) recovers all **1,933

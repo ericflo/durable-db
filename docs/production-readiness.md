@@ -1,12 +1,12 @@
 # Production readiness
 
-**1.0 release candidate: qualification in progress.** The latest published release is v0.24.26. The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**v1.0.0 is the scoped production release.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
 - One static Linux x86_64 executable; directory-backed laptop development and native serving on ordinary Kubernetes hosts, scaling down to one replica. No calibrated clock, special VM profile, external consensus service or persistent API-node disk is required.
 - One dedicated B2 bucket per deployment, containing many logical databases. B2 remains authoritative; bounded memory and optional local-disk caches are disposable. The common S3 implementation remains available, with MinIO integration coverage; AWS production qualification is deferred.
-- Atomic revision-checked transactions, exact retries within the bounded receipt window and ordered snapshot reads/scans within one database. Cross-database transactions are outside the API contract. Existing key, value, request and database limits remain enforced.
+- The HTTP API and TypeScript KV SDK: atomic revision-checked transactions, exact retries within the bounded receipt window and ordered snapshot reads/scans within one database. Cross-database transactions are outside the API contract. Existing key, value, request and database limits remain enforced.
 - Database-scoped, revocable capabilities, administrator-only provisioning, logical quotas, bounded admission and cumulative upload funding. These protect access and limit work; they are not fair billing or availability isolation between hostile tenants. Keep all databases in one administrative trust domain.
 - Automatic checkpoints and physical collection. Upload ceilings require operator funding; deletion does not refund cumulative allowances. Reads, control traffic and egress are not capped by the immutable-upload ceiling.
 - Manual consistent export, archive inspection and verified resumable restore into a fresh destination. Pause application writes for a reliable export window, store the archive under independent protection, and verify restoration before routing traffic. No scheduled backup, continuous PITR or restore-time SLO is promised.
@@ -15,13 +15,15 @@ Use trusted private networking for peer traffic and TLS at application ingress. 
 
 A logical directory has been tested at 100,005 entries; this is not a promise of 100,005 simultaneously active databases. The short cloud campaigns are four sequential writers. No p99 latency, throughput or availability SLO is declared. Capacity-test the intended workload before admitting it; published measurements retain their exact scope and failures.
 
-## Remaining production gates, in order
+## 1.0 release checks
 
-The target is a release in hours, not completion of every long-term feature. A data-loss, authorization or bounded-resource failure blocks release. A missed engineering latency target remains visible and motivates later work; it is not converted into an SLO or silently removed from the evidence.
+The checks for this supported scope passed. A data-loss, authorization or bounded-resource failure still blocks a release. A missed engineering latency target remains visible and motivates follow-up work; it is not converted into an SLO or silently removed from the evidence.
 
-1. **Close the worker-loss durability check.** Kill a whole disposable Kubernetes worker, including kubelet and its database processes; keep the remaining workers serving from B2, return the worker, remove all API processes and verify every acknowledged write. The existing-host campaign separately records direct scale-down gaps. Containerized workers share a host kernel; physical power and rack-loss qualification are deferred.
-2. **Review the actual supported boundary.** Keep exact-retry, authorization, quota/admission, corruption, collection, export/restore and failure tests green. Existing small TLA+ models and negative controls, plus abstract publication/journal proofs, remain required. They are not a composed proof of the entire protocol or of Rust. Review the changed release path; comprehensive independent review is deferred.
-3. **Ship the checked artifact and operating instructions.** Run kache/Woodpecker audits and release checks, verify the downloaded binary and installer, publish the supported scope and measured limits, and remove all disposable qualification resources. Experimental-version migration uses export/restore; mixed-version rolling upgrades are not a 1.0 guarantee.
+1. **Worker-loss durability.** The exact 1.0 candidate recovered all **504 acknowledged writes** after SIGKILL of a whole disposable Kubernetes worker, its return, scale-down and replacement of every API process. All four independent histories pass. The largest worker-loss readback gap is **52.93s**; scale-down is **65.23s**, above the 60-second target. Containerized workers share a host kernel; physical power and rack-loss qualification are deferred. The separate existing-host run recovered **1,848 acknowledgements** and measured a **74.68s** scale-down gap.
+2. **Supported boundary.** Woodpecker **384** passed dependency audits, Rust formatting/Clippy/tests, client and native Pi contracts, capacity checks, existing small TLA+ models/negative controls and abstract publication/journal proofs. Those are component checks, not a composed proof of the entire protocol or of Rust. The Pi adapters remain experimental pending broader cloud Harness/upgrade qualification; the supported application interface is HTTP/TypeScript KV.
+3. **Checked executable and operations.** The downloaded static archive independently passed protected creation, exact retries, ordered reads, export/restore and kill/reopen with an empty toolchain path. The installer pins the release and verifies its checksum. The operating instructions specify funding, private networking, resource bounds and manual backups. Both campaigns' buckets, keys and namespaces, plus the disposable worker cluster, were removed. Experimental-version migration uses export/restore; mixed-version rolling upgrades are not a 1.0 guarantee.
+
+[Exact release and campaign evidence](evidence/release-1.0.0-2026-11-13.json) records artifact hashes, source, histories, failed timing targets and cleanup. [Verification results](verification-results.md) explain their limits. Runtime behavior is unchanged from v0.24.26; 1.0 closes this qualification boundary rather than claiming the deferred features are implemented.
 
 ## Changes to the previous six-gate plan
 

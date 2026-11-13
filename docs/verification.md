@@ -1,6 +1,6 @@
 # Verification
 
-Current local and cloud serving use the native engine. The [native cloud CLI](#native-cloud-cli), [DNS membership](#dns-membership) and [resident-owner accounting](#resident-owner-accounting) sections describe the latest integration. Earlier publication-engine and timed-ownership experiments below retain their original scope; they do not qualify the replacement. The [production gates](production-readiness.md) state what is still required.
+Current local and cloud serving use the native engine. The [native cloud CLI](#native-cloud-cli), [DNS membership](#dns-membership) and [resident-owner accounting](#resident-owner-accounting) sections describe the latest integration. Earlier publication-engine and timed-ownership experiments below retain their original scope; they do not qualify the replacement. The [release scope](production-readiness.md) separates the supported 1.0 boundary from deferred qualification.
 
 ## Client connection reuse
 
@@ -437,7 +437,7 @@ Use `s3` with the same fixture for the S3 binding. It caps uploads at 34 objects
 
 ## Candidate serving permission and log acknowledgement
 
-The timed `OwnedWal` experiment is retired in favor of the revocable-permit candidate. Its standalone model/configurations and cached CI stage were removed; [historical evidence](evidence/owned-wal-candidate-2026-11-09.json) retains the 570,280-state result, seven controls, source commit and timing assumptions. Timed root/partition models still describe the current experimental controller and are retained until its replacement is integrated. The restricted-profile and VM failure evidence below remains available as a fallback, not a production deployment restriction.
+The timed `OwnedWal` experiment is retired in favor of the revocable-permit candidate. Its standalone model/configurations and cached CI stage were removed; [historical evidence](evidence/owned-wal-candidate-2026-11-09.json) retains the 570,280-state result, seven controls, source commit and timing assumptions. Timed root/partition models describe the historical controller; current cloud serving uses clock-independent revocable permits. The restricted-profile and VM failure evidence below remains available as a fallback, not a production deployment restriction.
 
 ## Candidate permission delegation
 

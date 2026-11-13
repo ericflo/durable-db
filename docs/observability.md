@@ -126,7 +126,7 @@ cd deploy/prometheus
 promtool test rules alerts.test.yml
 ```
 
-No alerts are automatically installed into an existing monitoring service. Synthetic rule tests do not test a real notification receiver, on-call routing, or an operator's recovery procedure. Those drills, persistent cleanup-backlog measurement, and a measured latency/error budget remain production gates.
+No alerts are automatically installed into an existing monitoring service. Synthetic rule tests do not test a real notification receiver, on-call routing, or an operator's recovery procedure. Operators must configure and test their own notification receiver and recovery procedure. Persistent cleanup-backlog qualification and a measured latency/error budget are follow-up work beyond the [1.0 scope](production-readiness.md).
 
 ## Unavailable
 

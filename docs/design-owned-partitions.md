@@ -1,6 +1,6 @@
 # Owned partitions and durable log batches
 
-**Status: native local and cloud CLI serving are integrated; production qualification remains open.** Local mode uses exclusive filesystem ownership. Cloud mode uses clock-independent permits, fixed database mapping, DNS membership, owner forwarding and bounded resident state. Qualification on the existing Kubernetes hosts remains required; a restricted compute profile is not an acceptable first-production requirement.
+**Status: native local and cloud serving are integrated.** The [1.0 scope](production-readiness.md) covers one trust domain on B2 or a local directory; the larger design goals below remain the long-term direction. Local mode uses exclusive filesystem ownership. Cloud mode uses clock-independent permits, fixed database mapping, DNS membership, owner forwarding and bounded resident state. Existing-host qualification uses ordinary Kubernetes hosts; no restricted compute profile is required.
 
 ## Why the serving engine changed
 
@@ -47,7 +47,7 @@ A partition contains many databases and has one current writer incarnation. Its 
 
 Control changes use the existing publication/rebase protocol. Ordinary native reads and acknowledgements validate the partition's permit directly. Moving one partition does not revoke another. Shared collection protects directory pages and control records; partition collection cannot list or delete another partition's data. Format 6 prevents legacy cloud servers from interpreting control records as database manifests.
 
-The shared upload ceiling covers both control publication and partition data. Per-partition and per-tenant ceilings remain additional limits. Shared control publication needs upload credit, including partition collection fences; administrators can replenish the shared ceiling directly. Attribution of shared overhead and guaranteed maintenance progress remain production gates.
+The shared upload ceiling covers both control publication and partition data. Per-partition and per-tenant ceilings remain additional limits. Shared control publication needs upload credit, including partition collection fences; administrators can replenish the shared ceiling directly. Complete attribution of shared overhead and fair maintenance progress are deferred beyond the single-trust-domain [1.0 scope](production-readiness.md).
 
 `Root::advertise` publishes an address with a fresh ownership incarnation. `api::Forward` discovers that route, caches it and forwards one bounded request. The destination checks the incarnation, tenant policy and ordinary serving permission; a stale address cannot select another owner. A failed request returns to the caller, whose explicit retry refreshes the route. [Routing checks and limitations](verification.md#owner-discovery-and-forwarding) include live B2/MinIO takeover.
 
@@ -237,11 +237,11 @@ These are raw object operations from the development host to B2 `us-west-002`, n
 
 This demonstrates useful provider concurrency and supports investigating batched independent publication. It does not establish the throughput of a replacement database. For a lightly loaded database, an individual durable write still waits for object storage; Rust and batching cannot remove that floor. Current native warm reads still require a fresh permit GET, although they avoid the bucket-wide conditional update. Its latency and response grouping must meet the declared workload targets.
 
-## Next qualification gate
+## Qualification scope
 
-The controller, DNS membership, resident budgets and cloud CLI are integrated. Qualify warm reads, independent databases, a resumed stale owner, return to one node and recovery after total compute loss on the existing hosts. Verify administrator refill while owner admission is exhausted. Measure actual B2 and AWS S3 behavior, RSS and performance before declaring production readiness.
+The controller, DNS membership, resident budgets and cloud CLI are integrated. Bounded B2 campaigns exercise independent databases, stale-owner return, scaling down to one and recovery after total API loss; [results](verification-results.md) retain missed latency targets. Existing tests cover administrator refill under exhausted owner admission. AWS, sustained performance and broader physical-failure qualification are deferred beyond the [1.0 scope](production-readiness.md).
 
-The bounded registration/acquisition and response models remain component arguments. Repeated takeover, abandoned control calls and concurrent collection still need composed reasoning and adversarial implementation checks. Tenant isolation, bounded physical growth, retention and backups remain the [other production gates](production-readiness.md#remaining-production-gates-in-order).
+The bounded registration/acquisition and response models remain component arguments. Repeated takeover, abandoned control calls and concurrent collection still need composed reasoning and adversarial implementation checks. The [1.0 scope](production-readiness.md) records the supported access/resource bounds and manual recovery path, plus deferred tenant fairness, long-duration growth and backup orchestration.
 
 ## Reproduce the raw provider experiment
 

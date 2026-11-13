@@ -38,4 +38,4 @@ Lists return `{ items, cursor }` in UTF-8 byte order. Pass the opaque cursor bac
 
 Setup creates a protected database and writes a one-hour scoped credential privately. The application keeps that credential on its server. This localhost demonstration has no user login; a deployed application supplies authentication and per-user authorization. A database token grants access to its entire database.
 
-The tests exercise actual HTTP storage, including concurrent task completion and duplicate requests. SDK tests separately inject lost responses, definite conflicts and receipt eviction. They establish behavior within their checked cases; the [replacement design](design-owned-partitions.md) still gates cloud latency and production suitability.
+The tests exercise actual HTTP storage, including concurrent task completion and duplicate requests. SDK tests separately inject lost responses, definite conflicts and receipt eviction. They establish behavior within their checked cases; the [release scope](production-readiness.md) records the supported boundary and measured availability limits.

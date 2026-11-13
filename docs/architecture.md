@@ -1,6 +1,6 @@
 # Architecture
 
-Durable DB serves local directories and cloud buckets through the native journal, sorted-table index and checkpoint engine. In cloud mode, the bucket is authoritative and API processes are disposable. One process can own every partition; adding processes moves ownership while database mapping stays fixed. The service is experimental: the [production gates](production-readiness.md) still require broader correctness, performance and operational qualification.
+Durable DB serves local directories and cloud buckets through the native journal, sorted-table index and checkpoint engine. In cloud mode, the bucket is authoritative and API processes are disposable. One process can own every partition; adding processes moves ownership while database mapping stays fixed. The [1.0 scope](production-readiness.md) covers one administrative trust domain on B2 or a local directory; broader performance, multitenant and operational qualification remains follow-up work.
 
 ## Placement and authority
 

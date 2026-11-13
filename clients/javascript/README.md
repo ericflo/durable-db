@@ -1,6 +1,6 @@
 # JavaScript and TypeScript
 
-Typed JSON storage for server-side applications. The package is private while durable-db is experimental; the [runnable task board](../../examples/web-app/README.md) links it locally. Node.js 24 is the tested runtime.
+Typed JSON storage for server-side applications. The package is linked from source while the repository is private; the [runnable task board](../../examples/web-app/README.md) links it locally. Node.js 24 is the tested runtime.
 
 ```ts
 import { Database } from '@durable-db/client';

@@ -13,3 +13,6 @@ spec/states
 spec/*_TTrace_*
 
 clients/javascript/dist
+# These guides are not inputs to client tests or the public site build.
+clients/**/README.md
+examples/**/README.md

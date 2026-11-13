@@ -1,6 +1,6 @@
 # Durable authorization lifecycle: working design
 
-Status: the modeled per-database lifecycle is implemented as an explicit format-2 activation: individual token revocation, credential generations, snapshot authorization, and bounded policy receipts. Metrics-only credentials are separate. Protected creation now has a permanent retry receipt. Overlapping signing-key rotation and the additional lifecycle work below remain production gates. See the public API and verification record for the qualified scope.
+Status: the modeled per-database lifecycle is implemented as an explicit format-2 activation: individual token revocation, credential generations, snapshot authorization, and bounded policy receipts. Metrics-only credentials are separate. Protected creation now has a permanent retry receipt. Overlapping signing-key rotation is implemented; the additional lifecycle work below is deferred beyond the single-trust-domain [1.0 scope](production-readiness.md). See the public API and verification record for the qualified scope.
 
 ## Idempotent protected creation design
 

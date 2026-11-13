@@ -4,8 +4,8 @@
 
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
-> [!WARNING]
-> **Experimental. Latest release: v0.24.26. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> [!IMPORTANT]
+> **Latest release: v1.0.0.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -107,13 +107,13 @@ These commands run one cloud process on loopback. For multiple processes, use th
 S3-compatible providers must supply atomic `If-Match`/`If-None-Match` writes, durable immutable uploads and ordered listings. A startup probe refuses providers that accept stale conditional writes, but it cannot establish the whole provider contract. B2 and S3 share one publication implementation. Upgrade every server before enabling protected databases or a new signing keyring.
 
 > [!IMPORTANT]
-> The native cloud path removes bucket-wide conditional publication from ordinary data operations. Reads still require a fresh permit GET. Its production performance and failure envelope remain unqualified; historical shared-engine benchmarks do not describe this replacement.
+> The native cloud path removes bucket-wide conditional publication from ordinary data operations. Reads still require a fresh permit GET. Its measured operating limits are documented below; historical shared-engine benchmarks do not describe this replacement.
 
 [Deployment](docs/deployment.md) covers Kubernetes manifests in `deploy/kubernetes/` (stable pod identities and disposable caches), request budgets and key rotation. [B2](docs/b2.md) and [upload admission](docs/design-upload-admission.md) cover provider details and durable spending limits.
 
 ## Contract and limits
 
-This is the contract the first production release must qualify:
+The 1.0 contract applies within the [supported deployment scope](docs/production-readiness.md):
 
 - **Serializable transactions within a database.** Every commit names the revision it read; if anything committed since, it gets `409` and the client recomputes.
 - **Durable acknowledgements.** An acknowledged write must survive the loss of every API server and every cache.
@@ -138,18 +138,17 @@ This is the contract the first production release must qualify:
 
 | State | Today |
 | --- | --- |
-| **Ready to try** | Local mode on the native engine: one process, one directory, automatic checkpoints, cleanup and crash recovery. The HTTP API with scoped, revocable tokens and per-database quotas. The TypeScript SDK. Consistent export and resumable restore. |
-| **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
-| **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
+| **Supported in 1.0** | Local-directory and B2 serving for one trust domain. Atomic transactions, ordered scans, scoped/revocable credentials, logical quotas, bounded admission, automatic checkpoints/collection, the TypeScript KV SDK, and manual export/verified restore. |
+| **Available, unqualified** | The common S3 binding on AWS. Pi 1.5.0 adapters have native HTTP conformance and Harness tests; broader cloud Harness/upgrade qualification remains open. |
+| **Deferred** | Mutually untrusted tenant hosting and complete cost/fairness isolation. Scheduled backups/PITR. Availability, throughput and p99 SLOs. A 72-hour soak, independent review, broader upgrades and additional binary platforms. |
 
-Clustered availability remains the immediate gate. Repeated B2 peer-isolation
-runs and the latest host-local process pause, return and rollout checks meet
-their 60-second readback-gap target. Cached forwarding routes now expire when
-the existing health view excludes the peer. Scale-down gaps, whole-worker
-failure, worst-case memory, sustained performance and public multitenancy remain
-open; these short runs establish no production SLO. See the
-[measured results and limits](docs/verification-results.md) and the
-[ordered production gates](docs/production-readiness.md#remaining-production-gates-in-order).
+Use one dedicated bucket per deployment, private peer networking and TLS at
+application ingress. Fund upload allowances, set process/replica limits and
+keep independently protected backups. Scaling and recovery interrupt requests:
+the latest existing-host B2 run observed a **74.68-second** scale-down readback
+gap. The 60-second engineering target remains unmet in that case; 1.0 makes no
+availability or latency commitment. See the [measured results](docs/verification-results.md),
+[operating scope and deferrals](docs/production-readiness.md), and [recovery procedure](docs/recovery.md).
 
 ## Verification
 

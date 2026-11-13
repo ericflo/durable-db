@@ -21,7 +21,7 @@ const sections = [
     ['development', 'Development', 'Building from source, focused checks and CI.'],
   ]],
   ['Verify', [
-    ['production-readiness', 'Production readiness', 'Release gates and the evidence needed to close them.'],
+    ['production-readiness', 'Production readiness', 'Supported 1.0 scope, evidence and deferred work.'],
     ['verification', 'Verification', 'Models, assumptions, checked bounds and open obligations.'],
     ['verification-results', 'Verification results', 'Dated experiments and release qualification.'],
     ['proof-publication', 'Publication proof', 'An unbounded TLAPS proof of abstract page reachability.'],
@@ -73,7 +73,7 @@ function render(source, env) {
 const navigation = [['index.html#docs', 'Docs'], ['api.html', 'API'], ['architecture.html', 'Architecture'], ['verification.html', 'Verification'], ['production-readiness.html', 'Status']];
 function layout({ title, description, body, current = '' }) {
   const links = navigation.map(([href, label]) => `<a href="${href}"${href === `${current}.html` ? ' aria-current="page"' : ''}>${label}</a>`).join('');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><meta name="description" content="${escape(description)}"><meta property="og:title" content="${title}"><meta property="og:description" content="${escape(description)}"><meta name="color-scheme" content="light dark"><link rel="icon" href="icon.svg" type="image/svg+xml"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap"><link rel="stylesheet" href="style.css"><script>document.documentElement.classList.add('js')</script><script src="site.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header class="site-header"><div class="wrap"><a class="wordmark" href="index.html"><img src="icon.svg" alt="" width="28" height="28">durable-db</a><a class="release" href="production-readiness.html">${version} · experimental</a><nav aria-label="Main">${links}</nav><a class="button button-small" href="index.html#quickstart">Get started</a></div></header>${body}<footer class="site-footer"><div class="wrap"><div><a class="wordmark" href="index.html"><img src="icon.svg" alt="" width="24" height="24">durable-db</a><p>An experimental transactional key-value database in one Rust binary. Apache-2.0.</p></div><nav aria-label="Footer"><a href="index.html#quickstart">Quick start</a><a href="api.html">HTTP API</a><a href="clients.html">TypeScript SDK</a><a href="verification-results.html">Evidence</a><a href="production-readiness.html">Release gates</a><a href="install.sh">install.sh</a></nav></div></footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><meta name="description" content="${escape(description)}"><meta property="og:title" content="${title}"><meta property="og:description" content="${escape(description)}"><meta name="color-scheme" content="light dark"><link rel="icon" href="icon.svg" type="image/svg+xml"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap"><link rel="stylesheet" href="style.css"><script>document.documentElement.classList.add('js')</script><script src="site.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header class="site-header"><div class="wrap"><a class="wordmark" href="index.html"><img src="icon.svg" alt="" width="28" height="28">durable-db</a><a class="release" href="production-readiness.html">${version} · one trust domain</a><nav aria-label="Main">${links}</nav><a class="button button-small" href="index.html#quickstart">Get started</a></div></header>${body}<footer class="site-footer"><div class="wrap"><div><a class="wordmark" href="index.html"><img src="icon.svg" alt="" width="24" height="24">durable-db</a><p>A transactional key-value database in one Rust binary. Apache-2.0.</p></div><nav aria-label="Footer"><a href="index.html#quickstart">Quick start</a><a href="api.html">HTTP API</a><a href="clients.html">TypeScript SDK</a><a href="verification-results.html">Evidence</a><a href="production-readiness.html">Release scope</a><a href="install.sh">install.sh</a></nav></div></footer></body></html>`;
 }
 const tocs = new Map();
 for (const [index, page] of pages.entries()) {
@@ -127,7 +127,7 @@ await writeFile(
   new URL('index.html', out),
   layout({
     title: 'durable-db · Transactional key-value storage that lives in your bucket',
-    description: 'An experimental transactional, ordered key-value database in one Rust binary. S3 or B2 holds the data; API servers are replaceable.',
+    description: 'A transactional, ordered key-value database in one Rust binary. B2-backed Kubernetes and local deployments within one trust domain.',
     current: 'index',
     body: home,
   }),
@@ -136,6 +136,7 @@ for (const file of ['style.css', 'site.js', 'icon.svg'])
   await copyFile(new URL(file, import.meta.url), new URL(file, out));
 await mkdir(new URL('evidence/', out), { recursive: true });
 for (const file of [
+  'release-1.0.0-2026-11-13.json',
   'release-0.2.0-2026-11-10.json',
   'release-0.3.0-2026-11-10.json',
   'inline-checkpoints-2026-11-10.json',
