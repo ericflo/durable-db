@@ -66,7 +66,7 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
   const directory = await mkdtemp(join(tmpdir(), 'durable-db-workload-'));
   t.after(() => rm(directory, {recursive: true}));
   await Promise.all(['admin', 'control'].map(name => writeFile(join(directory, `${name}.token`), name)));
-  const rows = new Map(), held = [];
+  const rows = new Map(), held = [], retried = new Set();
   let corrupt = false;
   const server = createServer(async (request, response) => {
     let raw = '';
@@ -79,6 +79,9 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
     else if (operation === 'commit') {
       data.push(...body.writes); rows.set(database, data); reply({revision: data.length});
     } else if (operation === 'read') {
+      if (body.keys && !retried.has(database)) {
+        retried.add(database); response.writeHead(503).end('{}'); return;
+      }
       const result = body.scans ? {revision: data.length, scans: [{items: data, next: null}]} :
         {revision: data.length, values: body.keys.map(key => data.find(row => row.key === key).value)};
       if (corrupt && body.keys && database.endsWith('-0')) result.values = ['corrupt'];
@@ -113,6 +116,7 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
   assert.ok(pending.history.filter(r => r.revision === 2).every(r => r.readback_end === null));
   const point = async () => { const s = await call('/status'); return {seconds: s.monotonic_seconds, verified: s.verified}; };
   const start = await point();
+  await sleep(30);
   held.forEach(release => release());
   await until(async () => (await call('/status')).verified.every(count => count >= 3));
   await call('/pause', 'POST');
@@ -120,6 +124,17 @@ test('workload timestamps only validated responses after delayed readbacks', {ti
   await call('/verify', 'POST');
   const state = await call('/status?history=1');
   assert.ok(state.history.filter(r => r.revision === 2).every(r => r.readback_end >= start.seconds));
+  for (const record of state.history) {
+    assert.deepEqual(record.commit_rpc.statuses, {'200': 1});
+    assert.deepEqual(record.read_rpc.statuses, record.revision === 1 ? {'503': 1, '200': 1} : {'200': 1});
+    if (record.revision === 1) assert.ok(record.read_rpc.backoff_seconds >= 0.09);
+    if (record.revision === 2) assert.ok(record.read_rpc.request_seconds >= 0.03);
+    for (const [timing, duration] of [[record.commit_rpc, record.end - record.start],
+      [record.read_rpc, record.readback_end - record.end]]) {
+      assert.ok(timing.request_seconds > 0);
+      assert.ok(timing.request_seconds + timing.backoff_seconds <= duration);
+    }
+  }
   assert.deepEqual(state.failures, []);
   const result = await checked(directory, reportFor(state.history, {name: windowName, start, end, target_seconds: 60}), state.history);
   assert.equal(result.histories, 4);

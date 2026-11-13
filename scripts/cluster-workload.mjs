@@ -19,10 +19,12 @@ const maxIntents=100000;
 const tenantLimits={bytes:1024*1024*1024,attempts:100000};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const hash=value=>createHash('sha256').update(value).digest('hex');
-async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',endpoint=origin) {
+const rpcTiming=()=>({request_seconds:0,backoff_seconds:0,statuses:{}});
+async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',endpoint=origin,timing) {
   const encoded=body===undefined?undefined:JSON.stringify(body), start=performance.now();
   let attempts=0;
   for(;;) {
+    const attempted=performance.now();
     let code='transport_or_decode_error', result, refusal;
     try {
       const response=await fetch(endpoint+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)});
@@ -42,13 +44,19 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',en
       } else await response.body?.cancel();
     } catch { code='transport_or_decode_error'; }
     status.http_attempt_statuses[code]=(status.http_attempt_statuses[code]??0)+1;
+    if(timing) {
+      timing.request_seconds+=(performance.now()-attempted)/1000;
+      timing.statuses[code]=(timing.statuses[code]??0)+1;
+    }
     if(result!==undefined) return result;
     if(!['transport_or_decode_error','409','429','500','502','503','504'].includes(code)) throw new Error(`Unexpected HTTP status ${code}${refusal?' ('+refusal+')':''}`);
     if(performance.now()-start>180000) {
       const operation=path.endsWith('/commit')?'commit':path.endsWith('/read')?'read':'control';
       throw new Error(`Identical-request recovery deadline exceeded (${operation}, last HTTP status ${code}${refusal?', '+refusal:''})`);
     }
+    const waiting=performance.now();
     await sleep(Math.min(++attempts*100,1000));
+    if(timing) timing.backoff_seconds+=(performance.now()-waiting)/1000;
   }
 }
 async function writer(index) {
@@ -60,12 +68,13 @@ async function writer(index) {
       const revision=status.expected[index], request_id=randomUUID();
       const value=Buffer.from(`${index}/${revision}`), key=String(revision).padStart(8,'0');
       const start=performance.now()/1000;
-      const result=await rpc(`/v1/databases/${names[index]}/commit`,{request_id,expected_revision:revision,writes:[{key,value:value.toString('base64')}]},tokens[index],'POST',endpoint);
+      const commit_rpc=rpcTiming(),read_rpc=rpcTiming();
+      const result=await rpc(`/v1/databases/${names[index]}/commit`,{request_id,expected_revision:revision,writes:[{key,value:value.toString('base64')}]},tokens[index],'POST',endpoint,commit_rpc);
       if(result.revision!==revision+1) throw new Error('Acknowledged revision mismatch');
       status.expected[index]=revision+1;status.writes_acknowledged++;
-      const record={database_index:index,request_id,revision:revision+1,start,end:performance.now()/1000,readback_end:null,value_sha256:hash(value)};
+      const record={database_index:index,request_id,revision:revision+1,start,end:performance.now()/1000,readback_end:null,value_sha256:hash(value),commit_rpc,read_rpc};
       status.history.push(record);
-      const read=await rpc(`/v1/databases/${names[index]}/read`,{expected_revision:revision+1,keys:[key]},tokens[index],'POST',endpoint);
+      const read=await rpc(`/v1/databases/${names[index]}/read`,{expected_revision:revision+1,keys:[key]},tokens[index],'POST',endpoint,read_rpc);
       if(read.revision!==revision+1||JSON.stringify(read.values)!==JSON.stringify([value.toString('base64')])) throw new Error('Read after acknowledgement mismatch');
       record.readback_end=performance.now()/1000;
       status.reads_verified++;status.verified[index]=revision+1;

@@ -1246,6 +1246,16 @@ readbacks and recovered keys agree; the separate sequential-history checker
 validates unique request identities, invocation order, contiguous revisions and
 value hashes. Per-writer totals are 371, 452, 501 and 467.
 
+The maintained workload also records request-attempt time, actual retry-backoff
+time and HTTP status counts separately for each commit and its readback. These
+bounded summaries use the workload's monotonic clock; they include no tokens,
+keys, values or arbitrary server errors, and do not isolate server-side causes.
+The existing TCP fixture injects a 503 followed by success and holds a later
+read response, checking both timing categories and unchanged verified-readback
+semantics. The two harness checks pass in 2.28 seconds. Earlier histories without
+these optional diagnostic fields remain valid; the fields do not change the
+history checker's acceptance or availability calculations.
+
 Rolling recovery takes approximately 165 seconds, scale-down 177 seconds and
 cold replacement 127 seconds between recorded phase boundaries, including
 orchestration and required readbacks. These are not request latency SLOs or a
