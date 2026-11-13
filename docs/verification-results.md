@@ -1,5 +1,60 @@
 # Verification results
 
+## Reusing journal reads during selected replay (v0.24.10, 2026-11-13)
+
+Validated small journal frames now share the existing memory LRU with index
+blocks. Discovery still fetches storage; selected replay can reuse those positive
+reads. The 512 KiB entry cap, shared weighted byte budget, 4,096-entry ceiling and
+one-frame reader allowance are unchanged. Larger frames, eviction and a fresh
+cache fall back to storage. Disk entries, ordinary insertion and missing/failed
+GETs cannot establish journal provenance. Every replay still checks the hash
+chain and selected cut; serving still requires fresh permission.
+
+The 8- and 17-journal regression performs 16 and 34 discovery GETs, then **zero
+additional frame GETs** for selected traversal and replay. Removing the provenance
+guard fails the insertion/disk regression. All **364 routine Rust checks**,
+formatting and strict clippy pass; 17 focused journal checks take **2.54 seconds**
+after compilation. The existing replay model now includes positive observations
+and one disposable cache slot: **11,459 states**, 88,318 generated, depth 12,
+under one second, with all four fault/reachability controls. This is a bounded
+abstract check, not a proof of Rust or of collection/permission composition.
+Woodpecker 310 passes the audited build, client/Pi contracts and 10,005-database
+capacity check. Versioned MinIO passes membership and cold recovery in **40.30
+seconds**, and its bucket, container and 80 versions are removed.
+
+The exact static binary from `f78585d5989b9ba3986ebdb4a882722c3649aa3b` runs the
+same B2 fixture as v0.24.9: four writers, 16 partitions, 8 MiB memory cache,
+1→3→6 nodes, two rollouts and total compute loss before cold recovery. All **784
+acknowledgements, readbacks and recovered keys** pass the independent four-history
+checker. The namespace, bucket, scoped key and **1,617 B2 versions** are removed.
+
+| Observation | v0.24.9 | v0.24.10 |
+| --- | ---: | ---: |
+| Largest sampled selection: frames / subsequent recovery | 86 / 11.257s | 103 / 1.028s |
+| Longest sampled subsequent recovery, including checkpoint/index work | 11.257s | 1.776s |
+| Nonempty selections sampled / median subsequent recovery | 14 / 4.015s | 13 / 0.701s |
+| Scale to three / six: progress upper bounds | 46.07 / 50.08s | 23.02 / 15.96s |
+| First / second rollout: largest completed readback gap | 73.60 / 75.98s | **87.91 / 97.91s** |
+| First / second rollout: readiness/progress upper bounds | 129.09 / 109.97s | 150.06 / 127.99s |
+| Cold recovery after readiness: progress upper bound | 65.10s | 44.37s |
+
+The replay samples improve, but **overall rollout improvement is not established**:
+both direct-gap samples are worse and miss 60 seconds. These are separate cloud
+runs with different histories and bounded trace capture, not paired per-frame
+benchmarks or production SLOs. Completed gaps include the last readback before
+each window; unfinished gaps at window close are right-censored (up to 32.11s in
+the first rollout and 0.89s in the second). They do not attribute all delay to the
+fault or compare clocks across hosts.
+
+The longest selection is **21.23 seconds despite discovering zero frames**:
+0.76s discovery, 12.84s first publication, 2.71s validation, 4.84s repeated
+publication and about 0.08s advancing the catalog. This is the next target;
+replay caching cannot remove that control work. Maximum sampled activation and
+checkpoint calls are 7.90s and 13.25s. These are different calls, not one combined
+critical path. Broader failure, tenant-cost, retention and operating-envelope
+gates remain open. [Exact artifacts, checked bounds, traces and cleanup](evidence/native-recovery-2026-11-11.json).
+
+
 ## Reusing directory uploads and measuring readback gaps (v0.24.9, 2026-11-12)
 
 Publication retries retain the completed directory root and at most 64 selected
