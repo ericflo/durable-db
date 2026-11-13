@@ -80,6 +80,42 @@ const lifetime=setTimeout(()=>process.exit(2),600000);
 }finally{clearTimeout(lifetime);for(const agent of agents)agent.destroy()}})().catch(()=>process.exit(2));
 """
 
+# Fresh direct connections distinguish an unavailable owner from pooled ingress.
+# Record only fixed status/timing/validation fields, never bodies or credentials.
+INGRESS_PROBE = r"""
+const http=require('node:http'),fs=require('node:fs');
+const config=JSON.parse(process.argv[1]);
+const token=fs.readFileSync(process.argv[2]??'/run/credentials/admin.token','utf8').trim();
+function probe(origin,writer){return new Promise(resolve=>{
+  const started=performance.now(),read=writer!==undefined;
+  let done=false,bytes=0,parts=[];
+  const finish=result=>{if(done)return;done=true;clearTimeout(timer);
+    resolve({...result,elapsed_ms:Math.round(performance.now()-started)})};
+  const body=read?JSON.stringify({keys:['00000000']}):undefined;
+  const path=read?'/v1/databases/'+encodeURIComponent(config.prefix+'-writer-'+writer)+'/read':'/health/ready';
+  const request=http.request(origin+path,{method:read?'POST':'GET',agent:false,
+    headers:{authorization:'Bearer '+token,'content-type':'application/json',...(read?{'content-length':Buffer.byteLength(body)}:{})}},response=>{
+    response.on('data',chunk=>{bytes+=chunk.length;if(bytes>65536){request.destroy();finish({status:0});}
+      else if(read&&response.statusCode===200)parts.push(chunk)});
+    response.on('error',()=>finish({status:0}));
+    response.on('end',()=>{
+      const result={status:response.statusCode};
+      if(read&&result.status===200){try{const value=JSON.parse(Buffer.concat(parts));
+        result.valid=Number.isSafeInteger(value.revision)&&value.revision>0&&
+          JSON.stringify(value.values)===JSON.stringify([Buffer.from(writer+'/0').toString('base64')]);
+      }catch{result.valid=false}}
+      finish(result);
+    });
+  });
+  const timer=setTimeout(()=>{request.destroy();finish({status:0})},5000);
+  request.on('error',()=>finish({status:0}));request.end(body);
+})}
+Promise.all(config.origins.map(async origin=>{
+  const [ready,...reads]=await Promise.all([probe(origin),...[0,1].map(writer=>probe(origin,writer))]);
+  return {ready,reads};
+})).then(rows=>console.log(JSON.stringify(rows))).catch(()=>process.exit(2));
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -138,6 +174,7 @@ def main():
     if args.scenario=='peer-isolation':
         report['configuration']['peer_ingress']=args.peer_ingress
         report['configuration']['peer_fault']=dict(image=NETWORK_IMAGE,method='pod-local nftables OUTPUT drops to peer TCP port 7654',capability='NET_ADMIN',uid=0,host_network=False,hold_seconds=30)
+        report['configuration']['ingress_observation']=dict(fresh_connections=True,timeout_seconds=5,writers=[0,1],outside_measured_hold=True)
     if args.scenario=='rollout':report['configuration']['rollout_repetitions']=2
     args.output.parent.mkdir(parents=True,exist_ok=True)
     forward = None
@@ -497,6 +534,21 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             if statuses!=[200]*len(live):raise RuntimeError('A partition side could not read the provider-backed administrative budget')
             return statuses
 
+        def ingress_access(mode):
+            def endpoints():
+                slices=json.loads(kube('get','endpointslices','-l','kubernetes.io/service-name=durable-db','-o','json'))['items']
+                return [dict(pod=e.get('targetRef',{}).get('name'),addresses=e['addresses'],conditions=e.get('conditions',{}))
+                        for s in slices for e in s.get('endpoints',[])]
+            before=endpoints()
+            config=dict(origins=[*urls,'http://durable-db:7654'],prefix=report['configuration']['database_prefix'])
+            rows=json.loads(kube('exec','workload','--','node','-e',INGRESS_PROBE,json.dumps(config),timeout=15))
+            observation=dict(mode=mode,time_utc=utc(),targets=[p['metadata']['name'] for p in live]+['Service'],
+                             endpoints_before=before,endpoints_after=endpoints(),rows=rows)
+            report.setdefault('ingress_observations',[]).append(observation);save()
+            if any(r.get('valid') is False for row in rows for r in row['reads']):
+                raise RuntimeError('Direct ingress read returned an invalid acknowledged value')
+            return len(report['ingress_observations'])-1
+
         def firewall(pod, *command):
             return kube('exec',pod,'-c','network-fault','--','nft',*command)
 
@@ -522,14 +574,14 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                 observers.append(subprocess.Popen(['kubectl','--context',args.context,'-n',namespace,'exec','-i',pod['metadata']['name'],'-c','fault','--','node','-e',PEER_PROBE,config],
                     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1))
             for mode in ('asymmetric','symmetric'):
-                phase(mode+'-baseline',network=require_network('connected'),provider_statuses=provider_access())
+                phase(mode+'-baseline',network=require_network('connected'),provider_statuses=provider_access(),ingress_observation=ingress_access('connected'))
                 restrict(mode)
                 phase(mode+'-peer-isolation-start',network=require_network(mode),provider_statuses=provider_access())
                 before=snapshot()['verified']
                 time.sleep(30)
                 after=snapshot()['verified']
                 phase(mode+'-peer-isolation-held',network=require_network(mode),provider_statuses=provider_access(),
-                      before=before,after=after,writer_progress=[b>=a+2 for a,b in zip(before,after)])
+                      before=before,after=after,writer_progress=[b>=a+2 for a,b in zip(before,after)],ingress_observation=ingress_access(mode))
                 timing=recovery(mode+'-peer-isolation-healed')
                 heal();require_network('connected')
                 phase(mode+'-peer-isolation-healed',writes_acknowledged=progress(timing))

@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
-import {fork, spawnSync} from 'node:child_process';
+import {fork, spawn, spawnSync} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdtemp, writeFile, rm} from 'node:fs/promises';
+import {mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
@@ -11,6 +11,46 @@ import {setTimeout as sleep} from 'node:timers/promises';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const windowName = 'rolling-replacement-1';
+
+test('direct ingress observations use fresh sockets, validate reads and bound stalled peers', {timeout: 10000}, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'durable-db-ingress-'));
+  t.after(() => rm(directory, {recursive: true}));
+  const token = join(directory, 'admin.token'), secret = 'never-include-this-credential';
+  await writeFile(token, secret);
+  const sockets = new Set(), calls = [];
+  const origins = [];
+  for (const mode of ['healthy', 'refusing', 'redirect', 'stalled']) {
+    const server = createServer(async (request, response) => {
+      sockets.add(request.socket); calls.push(mode);
+      assert.equal(request.headers.authorization, 'Bearer '+secret);
+      if (mode === 'stalled') return;
+      if (mode === 'refusing') return response.writeHead(503).end(secret);
+      if (mode === 'redirect') return response.writeHead(307, {location: origins[0]+request.url}).end(secret);
+      if (request.url === '/health/ready') return response.end();
+      let raw = ''; for await (const chunk of request) raw += chunk;
+      assert.equal(request.method, 'POST'); assert.deepEqual(JSON.parse(raw), {keys: ['00000000']});
+      // Writer 1 intentionally lies: HTTP 200 alone must not imply a valid read.
+      response.end(JSON.stringify({revision: 2, values: [Buffer.from('0/0').toString('base64')]}));
+    }).listen(0, '127.0.0.1');
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    await once(server, 'listening'); origins.push(`http://127.0.0.1:${server.address().port}`);
+  }
+  const harness = await readFile(new URL('./qualify-multinode.py', import.meta.url), 'utf8');
+  const source = harness.match(/INGRESS_PROBE = r"""\n([\s\S]*?)\n"""/)[1];
+  const child = spawn(process.execPath, ['-e', source, JSON.stringify({origins, prefix: 'test'}), token]);
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  let output = '', errors = '';
+  child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { errors += data; });
+  const [exit] = await once(child, 'exit');
+  assert.equal(exit, 0, errors); assert.equal(errors, ''); assert(!output.includes(secret));
+  const rows = JSON.parse(output);
+  assert.deepEqual(rows.map(row => [row.ready.status, ...row.reads.map(r => r.status)]),
+    [[200,200,200],[503,503,503],[307,307,307],[0,0,0]]);
+  assert.deepEqual(rows[0].reads.map(r => r.valid), [true,false]);
+  assert.equal(calls.length, 12); assert.equal(sockets.size, 12, 'no connection reuse or replay');
+  for (const result of [rows[3].ready,...rows[3].reads]) assert(result.elapsed_ms>=4900 && result.elapsed_ms<7000);
+});
+
 async function checked(directory, report, history, succeeds = true) {
   const raw = history.map(record => JSON.stringify(record) + '\n').join('');
   await writeFile(join(directory, 'report.history.jsonl'), raw);
