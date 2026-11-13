@@ -1,5 +1,59 @@
 # Verification results
 
+## Answered-challenge pacing (v0.24.25, 2026-11-13)
+
+After an incumbent answered a storage challenge, the candidate could publish
+another on its next three-second scheduler visit. Those writes invalidate live
+checkpoint comparisons. The candidate now keeps the original 15-second deadline
+after an answer before challenging that incumbent again. Each fresh nonce still
+gets its own full wait. This adds no state, storage format, dependency or worker;
+time still grants no authority.
+
+If an owner answers and then dies, recovery can wait the rest of that interval
+before starting a fresh challenge. Same-member replacement after confirmed
+withdrawal still bypasses challenges. A paused-clock HTTP cluster regression
+captures a real checkpoint publication across two scheduler ticks, then checks a
+fresh wait and eventual fencing after the responder stops. The old implementation
+fails the checkpoint assertion. **32 focused tests pass in 6.11s**, along with
+Clippy and formatting. The unchanged single-round OwnerChallenge transition
+system checks **3,968 states**, depth 14, with ten required controls; pacing
+stutters in that abstraction. It does not establish a latency bound.
+
+The exact static candidate from `cc9b1c4` (Woodpecker **376**) recovers all
+**1,106 acknowledged writes** on B2 after 90-second asymmetric/two-way peer
+splits and total API replacement. All four independent histories validate.
+Largest completed readback gaps are **25.17s / 50.16s**, both below this fixture's
+60-second target. Post-heal progress upper bounds are **11.93s / 13.79s**;
+cold progress is bounded by **36.71s** after API readiness.
+
+The bounded diagnostic capture contains **23 completed checkpoint sequences**,
+each with its initial permission stage and no unfinished sequence at close.
+The longest spans **36.30s**, including one funding and two confirmation
+deferrals, on partition 2. The previous run sampled **82.16s** on partition 12.
+These are separate campaigns, not a paired performance benchmark or proof that
+pacing explains the entire difference. The largest client gap is also on
+partition 2: **43.32s** in commit requests and **6.50s** in backoff, with two
+429s, eight 503s and one transport/decode failure before success. Funding and
+confirmation retries remain an optimization target.
+
+One ambiguous journal failure (`request`, `unsent=false`) still retires its
+owner; a successor reports ready **13.43s** later. Seven other failures carry
+the existing admission witness. No connection-refusal witness is sampled.
+Fresh challenges and safe ambiguous-write recovery remain mandatory.
+
+The downloaded binary passes standalone exact retries, ordered reads,
+export/restore and kill/reopen. Cleanup removes **1,053 physical versions**,
+the bucket, scoped key and namespace. No new AWS, rollout or physical-host
+failure qualification is claimed. Repeat the isolation/host-loss checks before
+turning these fixture targets into an operating commitment.
+[Source, artifact, timing and cleanup evidence](evidence/native-recovery-2026-11-11.json)
+retains the earlier failed targets.
+
+Removed the replacement fixture's unbounded random-port search: reserve two
+listeners and order them instead. An initial focused batch was stopped after
+that fixture did not finish; its isolated rerun passed. The revised batch and
+full CI pass. Deleted eleven model scratch directories while retaining logs.
+
 ## Proven-unsent journal uploads (v0.24.24, 2026-11-13)
 
 A connection refusal used to enter the same recovery path as a lost upload

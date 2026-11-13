@@ -66,7 +66,10 @@ Before taking over from an excluded incumbent, the candidate publishes or joins 
 storage-path challenge and waits 15 seconds for an answer. The incumbent answers
 through the bucket even when peer HTTP is blocked. Pending waits release acquisition
 slots; the three-second scheduler revisits them while other partitions recover.
-A response defers takeover; a timeout only schedules the existing fenced recovery. Slow storage or pauses
+A response defers takeover. The candidate waits out that challenge's deadline
+before issuing another, leaving checkpoint comparisons a quiet interval. If the
+owner answers and then dies, takeover waits the remainder of that interval plus
+a fresh challenge wait. A timeout only schedules the existing fenced recovery. Slow storage or pauses
 can still cause false suspicions. This adds failure-detection latency and does
 not make every partition reachable through every isolated pod. Upgrade all
 servers before relying on this behavior; older binaries do not answer challenges.
