@@ -867,8 +867,14 @@ All **380 routine Rust checks**, formatting and strict clippy pass.
 The unchanged OwnerRouting model checks **728 states** and nine controls; this
 transport change stutters, while socket lifecycle and HTTP version handling are
 Rust obligations. Full-provider outages may still churn connections, and a new
-connection need not select a reachable owner. Exact-runtime cloud qualification
-is pending; the [results](verification-results.md) retain earlier evidence.
+connection need not select a reachable owner. The exact v0.24.20 binary recovers
+531 acknowledged B2 writes through shared-Service isolation and cold restart,
+then 772 through scaling and two rollouts. Direct rollout readback gaps are
+50.88s / 56.88s, both under the fixture target. Only two writers meet the progress
+check during the two-way hold, with roughly 25-second forwarding cancellations
+still observed. Identified connections do not repeat 503s; bounded overflow
+prevents complete observation. The [results](verification-results.md) record
+the matched baseline, explicit limits and cleanup, not a production SLO.
 
 Cluster forwarders refuse their own advertised socket before opening a connection
 or caching the route. Activation may expose that route before local recovery

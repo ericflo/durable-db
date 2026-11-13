@@ -1,5 +1,85 @@
 # Verification results
 
+## Release unavailable client connections (v0.24.20, 2026-11-13)
+
+An API 503 now finishes its HTTP/1 response with `Connection: close`, allowing
+the client's explicit retry to reconnect through the shared Service. The error
+still requires the identical request for an uncertain write. There is no
+automatic replay, new worker, authority change or format change: **11 net
+production lines**. Other statuses retain reuse; HTTP/2 gets no hop-by-hop header.
+
+A real TCP test selects an unavailable backend for the first connection and an
+available one for the next. The old response traps the retry on the first backend;
+the fix reaches the second and reuses its healthy connection, passing in **0.02s**.
+An HTTP/2 header mutation fails its negative control. All **380 routine Rust
+checks**, formatting and strict clippy pass. The unchanged OwnerRouting model
+checks **728 states**, 3,197 generated, depth 11, and nine negative controls.
+Transport closure stutters; TCP behavior and version handling remain Rust
+obligations, not a proof of the implementation.
+
+The existing isolation fixture now accepts `--peer-ingress shared`; its default
+side-pinned mode remains available. A bounded observer records actual fetch
+socket identities without changing transport or retries. Two workload/checker
+tests pass in about **2.3s**; replacing socket IDs with request IDs fails. Each RPC
+retains at most eight identity buckets plus overflow, with no credentials,
+headers or addresses. Removed persistent 503 connections, the obsolete receipt
+integration note, superseded format/cutover guidance and ten TLC scratch directories.
+
+[Woodpecker 349](https://ci.eflorenzano.com/repos/18/pipeline/349/1) verifies the
+static binary from `8ef8e05`, audits, client/Pi contracts and both 10,005-entry
+capacity fixtures. Standalone installation, transactions, export/restore and
+kill/reopen pass. Builds use kache; GitHub Actions remains disabled.
+
+The shared-Service B2 comparison uses the same three-host, 16-partition,
+four-writer configuration for v0.24.19 and v0.24.20. Both check fresh and retained
+peer connections, B2 access from every pod, unchanged process identities during
+isolation, healed recovery and cold restart. Independent histories recover every
+acknowledged value. No new MinIO run is claimed for this HTTP lifecycle change.
+
+| Observation | v0.24.19 | v0.24.20 |
+| --- | ---: | ---: |
+| Acknowledgements / readbacks / recovered keys | 612 | 531 |
+| Readback increments during asymmetric hold, writers 0–3 | 21 / 16 / 18 / 21 | 16 / 14 / 12 / 18 |
+| Readback increments during two-way hold, writers 0–3 | 1 / 5 / 11 / 0 | 1 / 7 / 8 / 1 |
+| Recovery after asymmetric / two-way healing | 10.44s / 17.36s | 18.31s / 11.22s |
+| Cold recovery after API readiness | 68.99s | 41.17s |
+| Identified connections with repeated application 503s | 10 | 0 |
+| Maximum application 503s per identified connection | 29 | 1 |
+
+Only two writers meet the two-readback barrier during each 30-second two-way
+hold. New connections do not guarantee a reachable endpoint or continuous
+availability. The new run identifies **64 of 101 application 503s**; **37** fall
+into the overflow bucket and cannot establish reuse. It observes 86 distinct
+connections versus 28 in the baseline, with different histories. This supports
+the tested transport change, not a general latency, cost or error-rate improvement.
+
+The two slow writers' first readbacks after the two-way cut spend **25.19s /
+25.18s after acknowledgement**, each including one transport/decode error.
+Bounded server logs also capture forwarded requests cancelled at about 25 seconds.
+These logs lack request-ID correlation; not every delay has the same cause.
+The next experiment targets stalled peer traffic on existing connections while
+preserving the longer operation deadline. All healed/cold targets pass, but
+continuous split availability remains unqualified.
+
+The same new binary then recovers all **772 acknowledgements, readbacks and keys**
+through 1→3→6, two rollouts, zero compute and cold restart. Direct rollout gaps
+are **50.88s / 56.88s**, both below 60s (v0.24.19 observed 43.09s / 50.40s).
+Scale-up takes **20.08s / 23.31s**, and cold recovery **55.24s** after readiness.
+Whole-rollout progress upper bounds are **111.33s / 117.10s**; those include serial
+replacement and polling and do not prove application outages of those lengths.
+Completed gaps include the preceding readback; unfinished gaps are right-censored.
+Recorded application RPCs still include **five 429s, 379 503s and 56 transport/decode
+errors**. Different histories do not establish an overall performance improvement.
+
+Both shared-ingress namespaces, scoped keys and buckets are removed, including
+**803 baseline versions** and **1,017 new-runtime versions**. The rollout namespace,
+key, bucket and **1,658 versions** are also removed. A transient
+Kubernetes TLS timeout interrupted the first launcher while reading CI status,
+before it provisioned test resources; the bounded retry succeeded. The initial
+fixture push also required webhook redelivery before Woodpecker 348 passed.
+The [evidence record](evidence/native-recovery-2026-11-11.json) pins source,
+artifacts, configurations, histories, observer limits and cleanup.
+
 ## Drain HTTP during route withdrawal (v0.24.19, 2026-11-13)
 
 Shutdown now closes admission and signals graceful HTTP shutdown before waiting
@@ -61,9 +141,9 @@ The stalled writers match blocked forwarding directions under stable placement:
 writer 2 enters through the isolated pod but partition 14 prefers the majority;
 writer 3 enters through the majority but partition 2 prefers the isolated pod.
 The logs sample no new claims during the two-way hold. This supports investigating
-cross-side forwarding, not assuming ownership churn. Next test ordinary shared
-Service ingress and connection reuse under the same cut; these side-pinned
-clients cannot establish its availability. No continuous split-availability claim.
+cross-side forwarding, not assuming ownership churn. These side-pinned clients
+cannot establish ordinary shared-Service availability; v0.24.20 adds that
+experiment above. No continuous split-availability claim.
 
 Both namespaces, scoped B2 keys and buckets are removed, including **1,771
 rollout versions** and **1,100 peer-isolation versions**.
