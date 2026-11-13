@@ -1013,6 +1013,16 @@ eligibility transitions and 1,024 reply samples per pod incarnation across round
 The unchanged model below abstracts polling and I/O failures as stuttering;
 the test is not a timing guarantee on deployment hosts.
 
+Serving diagnostics distinguish unresolved journal uploads, interrupted upload
+tasks, incomplete local publication and unavailable local permission. Placement
+removal separately records unready workers or membership removal. Only fixed
+reasons and owner identities are logged, never provider error chains. The cloud
+harness retains at most 256 retirement and owner-identity events per pod
+incarnation. Peer holds are bounded to 30..300 seconds, with evidence sampled
+every 15 seconds; this observes failure and does not alter authority. The
+[v0.24.23 experiment](verification-results.md#owner-challenge-polling-and-journal-retirement-v02423-2026-11-13)
+reproduces all-paths 503 during recovery after an unresolved journal upload.
+
 A timeout is a failure suspicion, never serving authority or a clock-error bound.
 Pauses, delayed storage or inaccurate clocks may still cause a safe false takeover.
 Revocation, journal recovery and fresh response permits remain mandatory. Stable

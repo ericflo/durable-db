@@ -1,6 +1,6 @@
 # Verification results
 
-## Owner challenge polling after slow I/O (candidate, 2026-11-13)
+## Owner challenge polling and journal retirement (v0.24.23, 2026-11-13)
 
 A challenge responder used to sleep three seconds **after** provider I/O. Slow
 observations and failed answers therefore extended its polling period while a
@@ -37,8 +37,30 @@ every tested path. The cadence change therefore **does not resolve the
 availability failure**. Its initial owner never logs an answer attempt, and the
 trace did not retain the worker's retirement cause. The next diagnostic records
 fixed retirement reasons and keeps at most 256 retirement and owner-identity
-events per pod incarnation. No provider error text is exported. See the
-[candidate evidence](evidence/native-recovery-2026-11-11.json).
+events per pod incarnation. No provider error text is exported.
+
+Runtime `9121e49` passes Woodpecker **368** and standalone artifact checks. Its
+30-second B2 isolation run recovers **734 writes**, with all four writers
+progressing in both holds and no retirement sampled. A second run uses the same
+binary with 90-second holds and harness `402f575` (Woodpecker **369**), retaining
+diagnostics every 15 seconds. It recovers all **1,015 writes**, but reproduces the
+all-paths refusal: partition 2's worker reports `unresolved_upload` at
+15:38:04.279Z, its placement is removed at 15:38:04.675Z, and the same pod confirms
+a successor at 15:38:11.958Z. The serial probe round starts at 15:38:13.622Z and
+gets **503 for writer 0 through three pods and the Service**, with all readiness
+probes returning 200. A nearby object PUT failure took **10.906s**. These samples
+identify the worker's absent-after-uncertain-upload path; they do not identify
+the provider/transport error or establish simultaneous observations across hosts.
+
+The extended run records two such retirements. All four writers progress over
+each 90-second hold, which does **not** establish continuous availability. Both
+new runs pass independent history checks and clean up their namespaces, buckets,
+keys and physical versions. The first candidate's failed progress sample remains
+in the evidence. No new AWS or rollout result is claimed. Next classify upload
+failures without exporting provider error text, distinguish proven-unsent work
+from ambiguous PUTs, and qualify recovery from the latter. A missing object alone
+does not prove abort or permit replay. See the
+[runtime hashes, bounds and cleanup evidence](evidence/native-recovery-2026-11-11.json).
 
 ## Per-database client connections (v0.24.22, 2026-11-13)
 
