@@ -19,9 +19,10 @@ checks repeated reuse and credential rotation, changes owners, and loses a
 commit acknowledgement. Explicit retries preserve the exact body and apply once.
 Other fixtures fill the pool/active-request bounds, cancel requests, evict idle
 pools, bound stalled/oversized bodies, and verify HTTPS trust and hostname checks.
-Mutations that share one origin pool or automatically replay a reset fail the
-regression. The SDK/Pi contracts and web application tests also pass against the
-released local server. Cloud measurements remain separate from these checks;
+Refused HTTP 429/503 sockets are detached before reuse, without cancelling
+other active requests. Mutations that share one origin pool, automatically replay
+a reset, or reset the whole pool on refusal fail the regressions. The SDK/Pi
+contracts and web application tests also pass against the released local server. Cloud measurements remain separate from these checks;
 pooling cannot establish continuous availability behind every proxy or split.
 
 ## Native checkpoint retention

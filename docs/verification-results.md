@@ -1,5 +1,93 @@
 # Verification results
 
+## Per-database client connections (v0.24.22, 2026-11-13)
+
+The Node.js SDK replaces global fetch pooling with bounded HTTP/1 pools scoped
+by origin and database. A connection that serves one database is no longer
+offered to another database that may need the opposite side of a Service split.
+Across one loaded SDK module there are at most 64 pools, 16 outstanding requests
+per pool, 128 outstanding requests overall and one idle socket per pool. Only
+idle pools are evicted. Local capacity refusal raises status 429 before sending.
+The transport retains the 35-second deadline, requests identity encoding, bounds
+bodies to 1 MiB, verifies HTTPS trust/hostnames, and performs one attempt with no
+redirect or reset replay. This adds **97 net client lines**, no dependency or
+background worker, and no Rust engine, ownership or format change.
+
+Eleven focused tests pass in **1.12s**. A real TCP Service fixture checks separate
+working paths, credential rotation, owner movement after 503, and a lost commit
+reply followed by an identical explicit retry with one application. Other tests
+cover active/idle pool bounds, aggregate admission, cancellation, stalled and
+oversized responses, TLS and redirects. Sharing one origin pool or automatically
+replaying a reset makes the regression fail. A refusal test keeps another request
+in flight: HTTP 429/503 discards only the refused socket, and resetting the
+whole pool makes the test fail. The full local SDK/Pi suite passes
+**105 tests** with one opt-in skip in **7.95s**; four web-app checks and three
+harness checks also pass. Format and TypeScript checks pass. The unchanged
+OwnerRouting model checks **728 states**, depth 11, and nine negative controls;
+it does not model Node pooling, TLS, or establish transport liveness.
+
+The first cloud run keeps the exact v0.24.21 server and changes the workload to
+use this shared SDK transport. **851 writes are acknowledged, read back and
+recovered** through asymmetric/two-way isolation and total compute replacement.
+All four independent histories pass. Readback increments during the measured
+holds are **9 / 29 / 30 / 10** and **15 / 10 / 27 / 13**. All writers pass both
+two-readback checks. Recovery bounds after healing are **15.53s / 44.14s**;
+cold recovery is **34.24s** after API readiness.
+
+None of the **86 identified data sockets** crosses databases. The observer now
+uses Node's socket-assignment event rather than Undici's header-send event, so
+IDs may include sockets that never connect; overflow remains bounded and cannot
+establish reuse. The run records 114 HTTP 503s, two 429s and 40 transport/decode
+errors. Changed pooling and nonidentical short histories do not establish a
+causal latency improvement or production SLO.
+
+The fresh probes also expose a remaining owner-availability failure. Near the
+two-way split's end, writer 0 reads return **503 through all three pods and the
+Service**, while every readiness probe and EndpointSlice still says Ready. A new
+claim for its partition is sampled during the hold. The logs do not establish
+why the incumbent stopped serving. This differs from the preceding campaign's
+85-ms isolated-pod read: a connection pool cannot restore an unavailable owner.
+Earlier failures remain in the evidence; passing hold counters does not prove
+continuous availability.
+
+[Woodpecker 363](https://ci.eflorenzano.com/repos/18/pipeline/363/1) passes the
+audited kache build, Rust/client contracts and capacity fixtures. The downloaded
+v0.24.22 static executable passes installation without a toolchain, exact retries,
+ordered reads, export/restore and kill/reopen. The isolation run used the initial
+transport at `9a1a070`; the final transport additionally requests identity encoding
+and discards individual HTTP 429/503 connections.
+Server behavior is unchanged. There is no new AWS qualification.
+
+An intervening rollout candidate failed after scaling to three replicas: budget
+inspection returned HTTP 500, progress slowed, and all three diagnostic metrics
+requests received 429. It has no complete history or cold-recovery result. This
+exposed the missing refusal-socket policy, independently reproduced locally; it
+does not establish that pooling caused the entire cloud failure. Cleanup also
+encountered a provider connection reset. A retry removed the bucket, key and
+**446 remaining versions**; the earlier deletion count is unknown.
+
+The corrected client at `9184d86` then passes scale-up, two rolling replacements
+and total API replacement on B2: **773 acknowledged writes, verified readbacks
+and recovered keys**, with all four independent histories passing. Maximum
+completed readback gaps during the rollouts are **47.54s / 45.74s**, below the
+60-second fixture target; the closing open gaps are under 1.55s and remain
+right-censored. Scale-up progress bounds are **19.83s / 38.96s**, and cold
+recovery resumes every writer within **51.69s** after API readiness. The
+controller's rollout bounds still include serialized pod replacement and differ
+from these direct readback gaps. No identified data socket among **174** crosses
+databases or is reused after a 429/503 refusal. Bounded overflow observations
+cannot establish reuse. Passing this short rerun does not explain every refusal
+in the preceding failed campaign or close the owner-availability gate.
+
+All three campaign namespaces, scoped keys and buckets are removed. The passing
+runs delete **2,672 physical versions**; the failed run's cleanup retry removes
+another **446**, with its earlier deletion count unknown. Removed the old SDK
+fetch path and workload socket observer, refreshed obsolete client/example version pins, and deleted ten model scratch directories
+while preserving result logs. Removed another 21.1 MB of superseded candidate
+binaries/archives while retaining verification records. The
+[evidence record](evidence/native-recovery-2026-11-11.json) pins sources, binaries,
+request histories, bounds, failed controls and cleanup.
+
 ## Service readiness versus database reachability (2026-11-13)
 
 The exact **v0.24.21** binary passes another shared-Service B2 isolation and cold
