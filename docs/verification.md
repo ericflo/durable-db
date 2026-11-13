@@ -1270,6 +1270,16 @@ The serving-delay diagnostics reuse the fixed metric registry for route discover
 forwarded requests, native read-lock waits and native read execution. Slow
 operations retain cancellation outcomes; provider operations use their existing
 boundaries. Forward transport failures expose only connect/timeout flags and an
-opaque owner ID. No authority rule, deadline, retry or storage format changes.
+opaque owner ID. The instrumentation adds no authority, retry or storage-format changes.
 The existing routing/cancellation tests and native TCP regressions exercise these
 boundaries; exact-runtime cloud attribution remains pending for this candidate.
+
+The forwarder's connection deadline is now two seconds within the unchanged
+25-second overall request deadline. A Linux TCP fixture fills a loopback listen
+queue, proves the handshake stalls, and makes a new owner available while the
+old request remains in flight. The old implementation misses the three-second
+failure bound. The new one reports a classified connection timeout, releases
+capacity, rediscovers the owner on explicit retry and accepts its response after
+2.1 seconds of server work. All eight routing checks take 4.20 seconds. The
+unchanged OwnerRouting model checks 728 states and nine fault controls; it models
+cancellation and route invalidation, not physical timing or network latency.

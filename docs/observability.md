@@ -80,7 +80,10 @@ These records separate discovery, forwarding, lock contention and provider work,
 but nested durations overlap and must not be summed. `forward transport failed`
 adds only the opaque owner incarnation, connect/timeout classification and
 elapsed time for failed peer sends; it never logs the URL, request or raw error.
-A cancelled send has no transport-error classification. Pod logs are bounded
+Peer forwarding permits two seconds to establish a connection within its existing
+25-second overall request deadline. Failure invalidates that cached route; a
+caller retries explicitly. These deadlines schedule availability, never serving
+authority. A cancelled send has no transport-error classification. Pod logs are bounded
 samples, not complete request traces or cross-host clock measurements.
 
 For example, inspect the publication-register conflict fraction:

@@ -22403,7 +22403,7 @@
     "decision": "Shipping profile unchanged: faster local incremental build trades 26.6 percent binary growth for 23.5 percent shorter build; runtime performance unmeasured. Temporary checkout and target deleted."
   },
   "serving_delay_boundaries": {
-    "status": "Locally verified diagnostics candidate; cloud attribution pending",
+    "status": "Locally verified; cloud qualification combined with the bounded-connect candidate",
     "routine_rust_checks_passed": 370,
     "ignored_opt_in_checks": 20,
     "focused_routing_checks": 7,
@@ -22430,6 +22430,40 @@
       "serving-delays-tests.log": "89ae497d1dba58075f2a14b365baf8de189557ffd2dd798f9d9fffbec724a666",
       "serving-delays-harness.log": "63af96e7db0ffc67c2f74e7f38a0b6f613d8d7942a44e125e51ed59e2174c2c2",
       "serving-delays-site.log": "0361cd6e5134632cd0d824dd82d457e372f2c6950f5513755257ed9d631fd9f4"
+    }
+  },
+  "forward_connection_deadline": {
+    "status": "Local TCP regression and routing model verified; exact-runtime B2 qualification pending",
+    "connection_deadline_seconds": 2,
+    "overall_request_deadline_seconds": 25,
+    "old_path_misses_test_deadline_seconds": 3,
+    "old_negative_control_seconds": 3.13,
+    "focused_routing_checks": 8,
+    "focused_routing_seconds": 4.2,
+    "routine_rust_checks_passed": 371,
+    "ignored_opt_in_checks": 20,
+    "formatting_and_strict_clippy_passed": true,
+    "regression": "Linux loopback accept queue saturation isolates a stalled handshake. A replacement becomes ready while the old request holds the sole forwarding slot. Connection timeout releases capacity and invalidates that route; explicit retry reaches the new owner and permits a 2.1-second response. No implicit replay.",
+    "model": {
+      "name": "OwnerRouting",
+      "unchanged": true,
+      "distinct_states": 728,
+      "generated_states": 3197,
+      "depth": 11,
+      "fault_controls": 9,
+      "scope": "Cancellation, route invalidation and response authority; not a physical network timing proof."
+    },
+    "tlc_scratch_directories_removed": 10,
+    "source_sha256": {
+      "src/api/forward.rs": "3debed2817d9c086e463a717300023721bfa20b51b2d805d2966655fc0fa4b14",
+      "src/ownership/root/tests/routing.rs": "b91e815d6fd3ab17ac9138b893f615020409da6c94b78e17c90c5a2a8a2710da"
+    },
+    "raw_log_sha256": {
+      "forward-connect-before.log": "274849900b71932796a28815c1358c831d7693c0904a47a82faaed034b6ad492",
+      "forward-connect-after.log": "9eb051729b590478902603684462fc4b83fb031c6ea56ebaf188696a88830baa",
+      "forward-connect-clippy.log": "4e25878504d5348780d21123b26f7e42f349fc925c5de2f3169493d832c350a2",
+      "forward-connect-tests.log": "ee3781596cec7c44ecf8c7f5b01895f72d206278567e6548dcf7b8e980e97c3d",
+      "forward-connect-routing-model.log": "bf4f45a55798bb0ae6cff1db5f6bb193fe3376ebee856532b17840b6c5534f7f"
     }
   }
 }

@@ -520,3 +520,73 @@ async fn admission_rejection_cannot_pin_a_stale_owner_route() {
         "no internal replay or repeated stale route"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn stalled_connect_releases_capacity_and_discovers_the_replacement() {
+    use tokio::net::{TcpSocket, TcpStream};
+
+    // Saturating a local listen queue stalls a TCP handshake without firewall
+    // changes, an external address, or a delayed provider/HTTP handler.
+    let socket = TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(1).unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(
+            tokio::time::timeout(Duration::from_secs(1), TcpStream::connect(address))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), TcpStream::connect(address))
+            .await
+            .is_err(),
+        "the fixture must stall the handshake"
+    );
+    let provider = Provider::new();
+    let _old = advertised(&provider, address).await;
+    let forward = Forward::new(&provider.connection("test"), auth(), 1).unwrap();
+    let access = crate::auth::Access::Administrator;
+    let reads = provider.reads.load(Ordering::SeqCst);
+    let pending = forward.info("app", &access);
+    tokio::pin!(pending);
+    tokio::select! {
+        _ = &mut pending => panic!("the old endpoint must stall"),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => (),
+    }
+    assert!(provider.reads.load(Ordering::SeqCst) > reads);
+    assert!(matches!(
+        forward.info("app", &access).await,
+        Err(crate::Error::Busy)
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _new = advertised(&provider, listener.local_addr().unwrap()).await;
+    let _replacement = Server::serve(
+        listener,
+        Router::new().fallback(|| async {
+            // A connected request retains its full response deadline.
+            tokio::time::sleep(Duration::from_millis(2100)).await;
+            crate::Error::NotFound.into_response()
+        }),
+    );
+    let error = tokio::time::timeout(Duration::from_secs(3), pending)
+        .await
+        .expect("connect failure must not consume the whole request deadline")
+        .unwrap_err();
+    let crate::Error::Storage(error) = error else {
+        panic!("expected a connection error");
+    };
+    let transport = error.downcast_ref::<reqwest::Error>().unwrap();
+    assert!(transport.is_connect() && transport.is_timeout());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), forward.info("app", &access))
+            .await
+            .expect("retry must use the new owner and released capacity"),
+        Err(crate::Error::NotFound)
+    ));
+}

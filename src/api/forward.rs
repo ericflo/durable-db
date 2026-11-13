@@ -86,6 +86,7 @@ impl Forward {
             .route()
             .ok_or_else(|| Error::Storage(anyhow::anyhow!("owner has no open route")))?;
         let client = Client::builder()
+            .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(25))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
