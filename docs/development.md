@@ -170,7 +170,13 @@ Rust, JavaScript, autoscaling evidence checks, individual models and individual 
 
 The build step forwards TERM/INT to its `buildctl` child and waits for remote cancellation before exiting. This lets the client cancel remote work explicitly before the shell exits. A disposable BuildKit job canceled in 5.8 seconds; success and failure exit codes were also preserved. The [qualification record](evidence/checkpoint-index-reads-2026-11-10.json) retains the preceding canceled-build delay and probe setup failures.
 
-Client contracts branch from the completed debug Rust checks and run alongside the optimized build and capacity regression. Both branches must pass before artifact assembly; a client failure can stop the build without waiting for release compilation. This removes the former dependency on the optimized executable, which these tests do not use.
+Client contracts use the completed debug executable and finish before optimized
+compilation starts, avoiding CPU contention with the release build and capacity
+regression. The synthetic 10,005-entry check advances Tokio's timer waits while
+retaining both budget formats, all entries and assertions. It checks capacity
+and correctness, not physical latency. Real network/failure tests retain their
+own deadlines. A local release-mode sample takes 31.01s instead of 87.57s;
+compilation is excluded and CI timing remains platform-dependent.
 
 The pipeline archives its exact commit with canonical file permissions. Uncommitted files and checkout metadata are excluded, and the temporary context is removed on exit. File metadata matters to Docker cache reuse as well as content. [Docker cache invalidation](https://docs.docker.com/build/cache/invalidation/), [Git archive](https://git-scm.com/docs/git-archive).
 

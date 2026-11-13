@@ -514,7 +514,9 @@ async fn lost_bucket_ack_recovers_receipt_after_both_collectors_and_empty_cache(
         1
     );
 }
-#[tokio::test]
+// Synthetic capacity/correctness check: advance read-group timers without
+// paying their wall-clock gathering windows for every sequential point read.
+#[tokio::test(start_paused = true)]
 #[ignore = "capacity qualification; CI runs explicitly in release mode"]
 async fn ten_thousand_databases_split_page_recover_and_collect() {
     for limits in [

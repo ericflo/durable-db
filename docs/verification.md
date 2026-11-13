@@ -1294,7 +1294,9 @@ unknown grant reply creates no local rights. No comparison, predecessor or
 collection fence is rebased. A TCP cluster regression reproduces the old
 self-conflict (two registrations instead of one) and passes in 0.03s with one
 registration and permit. The existing lost-grant test also covers prefunding.
-All 372 routine Rust checks pass. The unchanged UploadCredits transition system
+Candidates waiting on owner challenges allocate no claim credit: the fallback
+regression catches and removes an unnecessary 8 MiB/32-attempt grant. All 24
+cluster checks pass in 6.10s. The unchanged UploadCredits transition system
 checks 11,006 states, 41,209 generated, depth 17, and five fault controls; its
 Reserve transition already permits allocation before use. This is a bounded
 credit check, not composed acquisition or Rust refinement. Exact-runtime cloud

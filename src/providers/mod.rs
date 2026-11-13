@@ -122,13 +122,15 @@ impl Connection {
         crate::upload_budget::initialize_native(&self.authority(), &self.prefix, limits).await
     }
 
-    pub(crate) async fn fund_claim(&self) -> anyhow::Result<()> {
-        if let Some(allocator) = &self.allocator {
-            allocator
-                .prefund(crate::ownership::root::CLAIM_UPLOADS)
-                .await?;
+    pub(crate) async fn fund_claim(&self) -> anyhow::Result<bool> {
+        match &self.allocator {
+            Some(allocator) => {
+                allocator
+                    .prefund(crate::ownership::root::CLAIM_UPLOADS)
+                    .await
+            }
+            None => Ok(false),
         }
-        Ok(())
     }
 
     /// Raw observations may be stale. A successful replacement is durable, but

@@ -1860,12 +1860,8 @@ async fn withdrawn_replacement(mode: Handoff) {
         .await;
     receipt["replayed"] = json!(true);
     let old = first.cluster.resolve(name).await.unwrap().unwrap();
-    let observer = directory
-        .partition(0, budget())
-        .await
-        .unwrap()
-        .root()
-        .unwrap();
+    let connection = directory.partition(0, budget()).await.unwrap();
+    let observer = connection.root().unwrap();
     let epoch = observer
         .observe()
         .await
@@ -1879,6 +1875,13 @@ async fn withdrawn_replacement(mode: Handoff) {
     // The old process and backend remain alive. Withdrawal only removes routing;
     // the successor must still revoke its permit and recover the durable receipt.
     assert!(old.info(name, &Access::Administrator).await.is_ok());
+    let allocated = connection
+        .objects()
+        .upload_budget()
+        .await
+        .unwrap()
+        .unwrap()
+        .allocated;
     let listener = loop {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         if preferred(0, &[first.address, listener.local_addr().unwrap()]) == first.address {
@@ -1916,6 +1919,17 @@ async fn withdrawn_replacement(mode: Handoff) {
             "fallback must leave time for the stable member to return"
         );
         assert!(old.info(name, &Access::Administrator).await.is_ok());
+        assert_eq!(
+            connection
+                .objects()
+                .upload_budget()
+                .await
+                .unwrap()
+                .unwrap()
+                .allocated,
+            allocated,
+            "a deferred fallback must not allocate unused claim credit"
+        );
     }
     let returned = if mode == Handoff::Returning {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

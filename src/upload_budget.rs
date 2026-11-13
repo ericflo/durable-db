@@ -267,7 +267,8 @@ impl Allocator {
     }
     /// Fund upcoming uploads before capturing a metadata comparison. This does
     /// not spend or reserve local rights for a caller; every PUT still charges.
-    pub(crate) async fn prefund(&self, minimum: UploadLimits) -> anyhow::Result<()> {
+    /// True means funding changed the authority; discard earlier observations.
+    pub(crate) async fn prefund(&self, minimum: UploadLimits) -> anyhow::Result<bool> {
         self.allocate(&mut *self.remaining.lock().await, minimum)
             .await
     }
@@ -275,9 +276,9 @@ impl Allocator {
         &self,
         remaining: &mut UploadLimits,
         minimum: UploadLimits,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         if remaining.bytes >= minimum.bytes && remaining.attempts >= minimum.attempts {
-            return Ok(());
+            return Ok(false);
         }
         // Replenish only the deficient dimensions. Existing rights remain
         // confirmed and usable even if the additional grant response is lost.
@@ -333,7 +334,7 @@ impl Allocator {
                     REGISTRY.event(Event::UploadGrantBytes, grant.bytes as usize);
                     REGISTRY.event(Event::UploadGrantAttempts, grant.attempts as usize);
                 }
-                return Ok(());
+                return Ok(true);
             }
             tokio::time::sleep(std::time::Duration::from_millis(5 * (attempt + 1))).await;
         }
