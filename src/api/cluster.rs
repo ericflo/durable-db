@@ -60,6 +60,8 @@ struct Partition {
     connection: Connection,
     forward: Arc<Forward>,
     local: RwLock<Option<Local>>,
+    // One bounded hint per partition; requests never grant serving authority.
+    requested: AtomicBool,
     // Advisory wait state survives acquisition retries without retaining a slot.
     challenge: Mutex<Option<Challenge>>,
 }
@@ -112,6 +114,7 @@ impl Cluster {
                 connection,
                 forward: Arc::new(forward),
                 local: RwLock::new(None),
+                requested: AtomicBool::new(false),
                 challenge: Mutex::new(None),
             });
         }
@@ -206,27 +209,32 @@ impl Cluster {
                             reason, "native resident removed");
                     }
                 }
-                for _ in 0..count {
-                    if acquisitions.len() == 4 {
-                        break;
+                // Requested partitions go first, retaining round-robin order
+                // within each group and the same four acquisition slots.
+                'fill: for requested in [true, false] {
+                    for _ in 0..count {
+                        if acquisitions.len() == 4 {
+                            break 'fill;
+                        }
+                        let id = cursor;
+                        cursor = (id + 1) % count;
+                        let partition = &cluster.partitions[id];
+                        if partition.requested.load(Ordering::Relaxed) != requested
+                            || pending[id]
+                            || failed[id]
+                            || preferred(id as u32, &peers) != Some(cluster.config.address)
+                        {
+                            continue;
+                        }
+                        if partition.local.read().await.is_some() {
+                            continue;
+                        }
+                        pending[id] = true;
+                        let cluster = cluster.clone();
+                        let members = members.clone();
+                        acquisitions
+                            .push(async move { (id, cluster.acquire_current(id, members).await) });
                     }
-                    let id = cursor;
-                    cursor = (id + 1) % count;
-                    if pending[id]
-                        || failed[id]
-                        || preferred(id as u32, &peers) != Some(cluster.config.address)
-                    {
-                        continue;
-                    }
-                    let partition = &cluster.partitions[id];
-                    if partition.local.read().await.is_some() {
-                        continue;
-                    }
-                    pending[id] = true;
-                    let cluster = cluster.clone();
-                    let members = members.clone();
-                    acquisitions
-                        .push(async move { (id, cluster.acquire_current(id, members).await) });
                 }
             }
             drop(acquisitions);
@@ -273,6 +281,7 @@ impl Cluster {
         // any point. Unclaimed candidates still yield to their new destination.
         if wanted(&members.borrow()) {
             *partition.local.write().await = Some(local);
+            partition.requested.store(false, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -526,7 +535,10 @@ impl Backend for Cluster {
             .map(|local| local.backend.clone())
         {
             Some(local) => local,
-            None => partition.forward.clone(),
+            None => {
+                partition.requested.store(true, Ordering::Relaxed);
+                partition.forward.clone()
+            }
         };
         Ok(Some(backend))
     }

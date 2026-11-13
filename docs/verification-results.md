@@ -1,5 +1,36 @@
 # Verification results
 
+## Requested partitions recover first (2026-11-13)
+
+The native controller now considers partitions with unresolved client requests
+before background recovery, preserving round-robin order within each group and
+the existing four acquisition slots. A fixed atomic hint per partition clears
+when its local backend is installed. This changes scheduling only: no additional
+provider calls, claim rights, cancellation, receipt replay or memory reservation
+is introduced. It does not preempt already-running recovery or guarantee fairness
+under hostile traffic.
+
+The motivation is the existing-host 1.0 qualification run: during scale-down,
+partition 14 does not reach its claim stage until **19:03:15.840Z**, after
+partition 2 reaches that stage at **19:02:39.329Z**. These are observations on
+the same surviving process, not a cross-host clock comparison or proof that all
+delay is queueing. The complete run's largest readback gap is **74.68s**.
+
+The existing paused-provider regression now also requests the last of eight
+partitions through real HTTP before membership arrives. It verifies priority,
+continued progress for the other seven and recovery after release. The old
+scheduler fails the priority assertion; the updated check passes in **0.14s**.
+All **26 controller checks pass in 6.12s**, with strict Clippy and formatting.
+The unchanged `OwnerResidency` transition system checks **19 distinct states**,
+depth 5, and detects both reservation faults. No new state or model was added.
+
+The maintained harness adds `--scenario scale-down`, reusing 1→3→6→1 scaling,
+zero-compute recovery, four writers, budgets, history checks and cleanup.
+All four adversarial harness checks pass in **8.66s**. The old single-priority
+scan is replaced; no parallel scheduler or qualification runner is added.
+Real B2 timing for the candidate is pending; this local result is not a cloud
+latency claim. The supported release remains v1.0.0 until qualification finishes.
+
 ## Scoped 1.0 release and whole-worker recovery (2026-11-13)
 
 **v1.0.0** supports B2-backed Kubernetes and local deployments within one

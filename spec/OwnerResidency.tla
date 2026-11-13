@@ -12,6 +12,9 @@ Init == s = [live |-> {}, reserved |-> {}, retired |-> {}]
 \* Completed/canceled work frees its own slot; unrelated membership changes
 \* need not retire an owner. A preference change can leave the incumbent live
 \* until revoked; its reservation remains occupied throughout that overlap.
+\* Requests may prioritize a queued partition. Acquire already chooses any
+\* eligible owner; changing that order preserves this transition relation.
+\* Priority is bounded advisory state, never another reservation or authority.
 \* Placement is scheduling, never serving authority.
 Acquire(o) == /\ o \notin s.live
               /\ (Cardinality(s.reserved) < Capacity \/ Fault = "Acquire")

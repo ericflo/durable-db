@@ -149,8 +149,8 @@ def main():
     parser.add_argument('--signing-key-file', type=Path, required=True)
     parser.add_argument('--admin-token-file', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--scenario', choices=['recovery','peer-isolation','rollout','worker-loss'], default='recovery',
-                        help='Focused isolation or repeated rollouts reuse writers, cold verification and cleanup')
+    parser.add_argument('--scenario', choices=['recovery','peer-isolation','rollout','worker-loss','scale-down'], default='recovery',
+                        help='Focused faults, rollouts or scale-down reuse writers, cold verification and cleanup')
     parser.add_argument('--peer-ingress', choices=['side-pinned','shared'], default='side-pinned',
                         help='Use side-specific or the ordinary shared Service during peer isolation')
     parser.add_argument('--peer-hold-seconds', type=int, default=30,
@@ -817,7 +817,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             window['end']=readback_point();save();lost_worker=None
             phase('worker-return',placement=located,writes_acknowledged=acknowledged,readback_window=window['name'])
             budget('worker-return')
-        else:
+        elif args.scenario=='recovery':
             # Pause every database process on one host, with no replacement pods.
             # Target the preferred host of writer zero's partition, not a random pod.
             # This is process unavailability on a host; the host kernel stays alive.
@@ -885,7 +885,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
             timing=recovery('provider-restored',60,'before restoring provider egress')
             kube('apply','-f','-',body=policy)
             phase('provider-partition-healed',probe=provider_probe(True),writes_acknowledged=progress(timing))
-        if args.scenario in ('recovery','worker-loss'):
+        if args.scenario in ('recovery','worker-loss','scale-down'):
             window=start_readbacks('scale-one')
             timing=recovery('scale-one')
             kube('scale','statefulset','durable-db','--replicas=1')

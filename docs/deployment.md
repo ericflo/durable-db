@@ -95,6 +95,7 @@ honor the member preference; mixed-version convergence remains unqualified.
 `scripts/qualify-multinode.py` is the maintained native deployment/fault campaign.
 Use `--scenario rollout` for two consecutive replacements after 1→3→6 scaling,
 followed by zero-compute cold recovery; `recovery` retains the broader fault campaign.
+`--scenario scale-down` focuses on 1→3→6→1 scaling, then zero-compute cold recovery.
 All scenarios use the same writers, budget checks and independent history verification.
 `--scenario worker-loss` additionally requires a local context named
 `kind-durable-db-test-<10 hex digits>` with three workers. It validates the selected
