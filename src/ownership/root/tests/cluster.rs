@@ -434,8 +434,8 @@ async fn one_replacement_waits_for_all_partition_challenges_without_serial_waves
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let replacement = Node::with_layout(directory, listener, vec![address], layout).await;
-    // Four active acquisitions remain the bound. Sixteen idle waits must not
-    // serialize into four fifteen-second waves before recovery can start.
+    // Eight active acquisitions remain the bound. Sixteen idle waits must not
+    // serialize into two fifteen-second waves before recovery can start.
     tokio::time::timeout(Duration::from_secs(25), all_owned(&replacement, &names))
         .await
         .expect("waiting for a challenge must release its acquisition slot");
@@ -1343,9 +1343,9 @@ async fn paused_acquisition_does_not_block_queued_partitions() {
         .await
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let layout = Layout::new(8).unwrap();
+    let layout = Layout::new(16).unwrap();
     let node = Node::with_layout(directory, listener, vec![], layout).await;
-    let names: Vec<_> = (0..8)
+    let names: Vec<_> = (0..16)
         .map(|id| {
             (0..1000)
                 .map(|n| format!("app-{n}"))
@@ -1369,7 +1369,7 @@ async fn paused_acquisition_does_not_block_queued_partitions() {
                         .is_some(),
                 );
             }
-            if serving == 7 {
+            if serving == 15 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;

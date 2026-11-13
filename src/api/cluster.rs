@@ -197,7 +197,7 @@ impl Cluster {
                     }
                 }
                 for _ in 0..count {
-                    if acquisitions.len() == 4 {
+                    if acquisitions.len() == 8 {
                         break;
                     }
                     let id = cursor;

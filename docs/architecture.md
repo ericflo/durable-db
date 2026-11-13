@@ -13,9 +13,11 @@ despite blocked peer HTTP. A completed unanswered wait schedules an ordinary
 conditional claim; it grants no serving authority. Replies use the existing
 partition metadata and introduce no new object class. See the
 [challenge protocol and limits](verification.md#storage-path-owner-challenges).
-On orderly shutdown, the process conditionally removes its routing addresses so
-replacements can skip that wait. This bounded best-effort hint changes no permit
-or history; an interrupted shutdown retains the ordinary challenge path.
+On orderly shutdown, the process conditionally removes its routing addresses
+and leaves the departing stable member’s fingerprint. That member’s replacement
+skips the wait; another member waits before fallback. This bounded best-effort
+hint changes no permit or history; an interrupted shutdown retains the ordinary
+challenge path.
 
 A permit is a write-once positive object. A successor permanently revokes predecessor permits before choosing their durable journal prefixes. Remote responses are sealed before a fresh, uncached permit GET. There is no lease, bounded-clock assumption or bucket-wide conditional write on the ordinary read path. A fresh object GET still has provider latency; this is not an in-memory latency claim. [Protocol details and assumptions](design-owned-partitions.md#revocable-writer-permits).
 
