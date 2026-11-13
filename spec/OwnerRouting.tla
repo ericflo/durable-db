@@ -43,6 +43,10 @@ IdleRetires == s.absent => s.retired
 \* no local backend is installed. This transport refusal grants no authority;
 \* omitted work is stuttering here. Socket identity and admission-slot usage
 \* remain implementation obligations checked by the paused-recovery TCP test.
+\* After an HTTP/1 unavailable response, retiring the client socket lets an
+\* explicit retry reach another ingress through a connection-based Service.
+\* This transport step stutters: it neither replays the operation nor revokes
+\* an owner. Socket reuse and HTTP-version handling are Rust test obligations.
 Lookup == /\ s.cached = "none" /\ s.phase \notin {"busy", "cancelled"}
           /\ s' = [s EXCEPT !.cached = s.route]
 Takeover == /\ s.route = "old"

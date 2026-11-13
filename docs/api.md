@@ -92,7 +92,7 @@ Checks observe the pre-commit snapshot. Writes are applied in order, so repeated
 
 A client must retain its exact serialized operation intent across transport retries. Do not mint a new request ID or read a new revision after an unknown write outcome and blindly reapply a non-idempotent operation. The last 128 receipts are retained. Beyond that window, an unchanged retry fails its original revision; the application may need to inspect state to resolve the outcome.
 
-Only `409 conflict` authorizes a fresh transaction attempt before any uncertain write outcome. The native engine also distinguishes `409 receipt_expired`: the receipt no longer establishes the original outcome, so reconcile using the original request instead of generating a new ID. The JSON SDK raises `UncertainCommitError` for this case; Pi adapters stop instead of rebuilding the write. This distinction is implemented in the native library while HTTP router integration remains pending.
+Only `409 conflict` authorizes a fresh transaction attempt before any uncertain write outcome. The native server also distinguishes `409 receipt_expired`: the receipt no longer establishes the original outcome, so reconcile using the original request instead of generating a new ID. The JSON SDK raises `UncertainCommitError` for this case; Pi adapters stop instead of rebuilding the write.
 
 ## Durable token revocation
 
@@ -131,6 +131,13 @@ At least one ceiling must increase and neither may decrease. The result contains
 ## Errors and bounds
 
 Errors use `{error,message}`: 400 invalid request, 401 invalid/mismatched credentials, 404 missing database, 409 conflict, 413 resource limit, 429 admission limit, 503 provider failure or deadline. Axum's malformed-JSON/body-extraction errors may use plain text. Provider error details, object names, secrets, and values are not returned to callers.
+
+An API 503 response over HTTP/1 includes `Connection: close`: the complete error
+reply precedes closure, allowing the next explicit retry to select a new Service
+connection. Keep the identical request ID, revision and body for an uncertain
+write. This does not replay requests or guarantee a different or healthy pod.
+Other API responses retain normal connection reuse; HTTP/2 responses never carry
+this hop-by-hop header. A provider-wide outage can still cause connection churn.
 
 | Resource | Initial bound |
 | --- | --- |

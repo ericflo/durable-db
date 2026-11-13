@@ -855,6 +855,21 @@ At `00637a4`, the native HTTP partition fixture passes on B2 in 52.98 seconds an
 
 ## Owner discovery and forwarding
 
+HTTP/1 API 503 responses now close their connection after the complete error
+reply, allowing explicit client retries to select another ingress. A real TCP
+test selects an unavailable endpoint for the first connection and an available
+one for the next. The old response keeps the retry on the unavailable endpoint;
+the corrected path reaches the available endpoint and reuses that healthy
+connection, passing in **0.02s**. Adding the header to HTTP/2 fails its negative
+control. The generic error body still requires identical retries for uncertain
+writes; the server never replays the request. Other status codes retain reuse.
+All **380 routine Rust checks**, formatting and strict clippy pass.
+The unchanged OwnerRouting model checks **728 states** and nine controls; this
+transport change stutters, while socket lifecycle and HTTP version handling are
+Rust obligations. Full-provider outages may still churn connections, and a new
+connection need not select a reachable owner. Exact-runtime cloud qualification
+is pending; the [results](verification-results.md) retain earlier evidence.
+
 Cluster forwarders refuse their own advertised socket before opening a connection
 or caching the route. Activation may expose that route before local recovery
 finishes; forwarding back would consume another tenant slot and turn recovery

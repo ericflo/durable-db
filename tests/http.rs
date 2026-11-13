@@ -13,6 +13,116 @@ use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn unavailable_http1_response_releases_pooled_connection_for_retry() {
+    use durable_db::{Error, Result, api::Backend, auth::Access, engine::Info};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::{net::TcpListener, task::JoinSet};
+
+    struct Endpoint(bool);
+    #[async_trait::async_trait]
+    impl Backend for Endpoint {
+        async fn memory_bytes(&self) -> usize {
+            0
+        }
+        async fn info(&self, _: &str, _: &Access) -> Result<Info> {
+            Err(if self.0 {
+                Error::Storage(anyhow::anyhow!("unreachable owner"))
+            } else {
+                Error::NotFound
+            })
+        }
+    }
+    let auth = Arc::new(Auth::new(&"ab".repeat(32)).unwrap());
+    let token = auth.issue("app".into(), false, 3600).unwrap();
+    let unavailable = router(Arc::new(App::new(
+        Arc::new(Endpoint(true)),
+        auth.clone(),
+        8,
+    )));
+    let available = router(Arc::new(App::new(Arc::new(Endpoint(false)), auth, 8)));
+    // Hop-by-hop Connection headers must never be added to an HTTP/2 response.
+    let response = unavailable
+        .clone()
+        .oneshot(
+            Request::builder()
+                .version(axum::http::Version::HTTP_2)
+                .uri("/v1/databases/app")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key("connection"));
+
+    let mut tasks = JoinSet::new();
+    let mut endpoints = Vec::new();
+    for app in [unavailable, available] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        endpoints.push(listener.local_addr().unwrap());
+        tasks.spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    // Like a Service, select an endpoint once per TCP connection. The first
+    // connection reaches an unsuitable pod; the next reaches an available one.
+    tasks.spawn(async move {
+        let mut connections = JoinSet::new();
+        loop {
+            let (mut client, _) = listener.accept().await.unwrap();
+            let endpoint = endpoints[count.fetch_add(1, Ordering::Relaxed).min(1)];
+            connections.spawn(async move {
+                let mut backend = tokio::net::TcpStream::connect(endpoint).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut backend).await;
+            });
+        }
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .http1_only()
+        .retry(reqwest::retry::never())
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let mut closed = Vec::new();
+    for expected in [
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::NOT_FOUND,
+        StatusCode::NOT_FOUND,
+    ] {
+        let response = client
+            .get(format!("http://{address}/v1/databases/app"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        closed.push(response.headers().get("connection").is_some());
+        let body: serde_json::Value = response.json().await.unwrap();
+        if expected == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(body["error"], "storage_unavailable");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("retry the identical request")
+            );
+        }
+    }
+    assert_eq!(closed, [true, false, false]);
+    assert_eq!(
+        accepted.load(Ordering::Relaxed),
+        2,
+        "The healthy connection remains reusable"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn configured_request_budgets_weight_commits_and_share_by_identity() {
     let auth = Auth::new(&"aa".repeat(32)).unwrap();

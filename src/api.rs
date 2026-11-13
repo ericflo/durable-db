@@ -22,7 +22,7 @@ use crate::{
 use axum::{
     Extension, Json, RequestExt, Router,
     extract::{DefaultBodyLimit, Path, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, Version, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -167,7 +167,18 @@ async fn admission(State(app): State<Arc<App>>, request: Request, next: Next) ->
         _ => Operation::HttpOther,
     };
     let timer = telemetry::REGISTRY.start(operation);
-    let response = admit(app, request, next).await;
+    let version = request.version();
+    let mut response = admit(app, request, next).await;
+    // A reused connection can pin retries to an ingress that cannot reach the
+    // owner. Finish this reply, then let the client's next attempt reconnect.
+    // Connection is hop-by-hop and forbidden on HTTP/2 and later versions.
+    if matches!(version, Version::HTTP_10 | Version::HTTP_11)
+        && response.status() == StatusCode::SERVICE_UNAVAILABLE
+    {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
     timer.finish(telemetry::http_outcome(response.status().as_u16()));
     response
 }
