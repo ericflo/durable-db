@@ -329,7 +329,11 @@ corrupt suffixes. Removing cancellation cleanup or the fresh missing-frame check
 makes the regression fail. The unchanged 4,134-state model, all six controls,
 88-obligation abstract proof and its mutation control pass. Bounded prefetch and
 memory sizing are implementation obligations, not new properties of that proof.
-Exact-runtime cloud qualification remains pending.
+The exact v0.24.16 static runtime passes four B2 histories through scale-up, two
+rollouts and cold recovery: 651 acknowledgements/readbacks/keys. Direct rollout
+gaps are 57.56s / 49.21s; whole-rollout bounds still miss 60s. Versioned MinIO
+membership/recovery also passes. These samples do not qualify a production SLO;
+see [the measured results](verification-results.md).
 
 ## Candidate revocable writer permits
 

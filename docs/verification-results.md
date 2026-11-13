@@ -1,5 +1,71 @@
 # Verification results
 
+## Overlap ordered journal discovery (v0.24.16, 2026-11-13)
+
+Recovery now overlaps four journal GETs after the first epoch probe. It consumes
+only the next checksum- and hash-chain-validated frame; speculative absence must
+be freshly checked at the front. Error, corruption, cancellation and EOF discard
+the pending suffix. Selected replay stays serial and may reuse its existing
+bounded cache. No format, ownership, admission-limit or deadline change is involved.
+The tradeoff is up to **16 MiB of discovery payload per reader**, **64 MiB** across
+four acquisitions, separate from cache, resident and transport overhead, and up
+to three lookahead GETs beyond the first hole plus a fresh absence confirmation.
+This is a payload bound, not a whole-process RSS qualification.
+
+The 107-frame virtual-time regression changes **10.8s → 2.9s** at 100ms per GET;
+it is not a cloud benchmark. Three focused checks take **0.01s**, covering ordering,
+retained-frame limits, cancellation, read failures, late uploads, holes and
+corruption. Removing cancellation cleanup or the fresh absence check fails its
+regression. All **375 routine Rust checks**, formatting and strict clippy pass.
+The unchanged Journal model checks **4,134 distinct states** and six fault controls;
+its abstract proof checks **88 obligations** and its mutation control. Those
+results do not prove Rust, memory bounds or protocol composition.
+
+[Woodpecker 335](https://ci.eflorenzano.com/repos/18/pipeline/335/1) passes audits,
+models, client/Pi contracts and both budget formats' 10,005-entry capacity checks.
+The exact static binary from `c826b29` passes standalone installation,
+transactions, export/restore and kill/reopen. Versioned MinIO passes HTTP
+membership 1→2→1→0→1, funding, collection, receipt recovery and retired-owner
+refusal in **40.38s**; its bucket, container and **68 versions** are removed.
+
+B2 uses the existing three Kubernetes hosts, 16 partitions, four sequential
+writers, 8 MiB caches and 128 MiB resident allowances through 1→3→6, two rollouts,
+zero compute and cold recovery at three. All **651 acknowledgements, verified
+readbacks and recovered keys** pass the independent four-history check. Its
+namespace, bucket, scoped key and **1,307 physical versions** are removed.
+
+| Observation | v0.24.15 | v0.24.16 |
+| --- | ---: | ---: |
+| Largest direct readback gap, rollout 1 / 2 | 64.26s / 61.82s | 57.56s / 49.21s |
+| Whole-rollout progress bound, rollout 1 / 2 | 119.64s / 113.75s | 98.74s / 108.93s |
+| Scale to three / six | 15.71s / 47.96s | 16.20s / 21.72s |
+| Cold recovery after API readiness | 65.23s | 58.61s |
+
+Both direct rollout gaps, both scale-up steps and cold recovery meet their targets;
+whole-rollout bounds still miss 60s. Completed gaps include the preceding readback;
+open gaps are right-censored. These short, different-history samples establish
+neither repeatability nor a production SLO. The longest of **62 sampled discovery
+intervals** reads **87 frames in 3.65s**, versus the prior 107-frame/22.22s sample.
+The longest full selection is **12.72s**, including **12.16s after an empty scan
+before publication advances**. Bounded logs can omit calls; these maxima are
+separate intervals, not one combined critical path.
+
+The first rollout's largest gap contains **43.94s after acknowledgement**: 27.43s
+in read requests and 16.50s of backoff after 21 unavailable responses. The second
+contains a **48.88s commit**, including 26.50s of backoff after 12 overload and
+19 unavailable responses. A separate **0.06s real TCP probe** reproduces an
+uninstalled owner's forwarder calling its own advertised address: one tenant
+slot returns 429, while two slots reach the destination refusal and return 503.
+This identifies a possible refusal path, not the cause of every cloud 429.
+Next prevent that self-forwarding and reduce remaining publication/recovery waits.
+
+Removed duplicated reader initialization, stale serial-discovery guidance, the
+temporary routing probe and seven TLC scratch directories. No parallel storage
+implementation, dependency or background prefetch worker was added. Source,
+artifact, workload, reports and checked bounds are pinned in the existing
+[evidence record](evidence/native-recovery-2026-11-11.json). Broader failures, AWS,
+sustained performance, memory and tenant-isolation qualification remain open.
+
 ## Fund ownership claims before comparing their target (v0.24.15, 2026-11-13)
 
 A fresh owner's upload-credit allocation changed the control record after its
