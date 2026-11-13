@@ -695,6 +695,25 @@ The same change raises only the disposable JavaScript test server's request budg
 
 ## Ordered catalog replay
 
+Selection and ordered replay now share authenticated directory pages and selected
+prefix records through the owner's existing bounded cache. The catalog header
+still comes from storage and validates its identity and checksum. Cached pages
+retain the directory's digest/schema/count checks; prefixes retain their exact
+size, pointer digest and journal-identity checks. Successful immutable uploads
+populate the same cache. A failed upload still prevents conditional publication,
+and cached bytes never confirm an uncertain selection or grant serving permission.
+
+The eight-journal regression previously downloaded 33 index pages/prefix records
+across selection, recovery traversal and ordered replay; the cached path downloads
+none for either eight or seventeen journals within the same 64 KiB allowance.
+This excludes catalog headers, registration records, frames and authority work.
+A separate fixture checks cold/warm lookups, zero/128-byte cache limits, corrupt
+cache fallback and a checksum-valid prefix naming the wrong journal. The existing
+lost-selection-reply test now uses the cache and still excludes late frames.
+The existing model treats catalog-byte reuse as stuttering under its immutable
+catalog assumption; byte validation, resource bounds and Rust refinement remain
+separate obligations. No ownership wait, provider authority check or format changes.
+
 `CatalogReplay.tla` checks the stream produced from a complete immutable catalog. Reads must remain inside each selected prefix, journals must be consumed in increasing epoch order, and completion requires the exact expected sequence. Late uploads beyond a selected cut remain possible. Three journals with zero to two selected frames, including all 27 initial cut combinations, with a one-frame disposable cache check **11,459** distinct states (88,318 generated, depth 12). Positive validated reads may populate the cache, eviction may clear it, and replay retains the selected-cut checks. The cache never represents absence or a failed read. Unsafe skip, extension and reverse-order controls fail the required invariant; a coverage control reaches nonempty completed history. Run `scripts/check-candidate.sh CatalogReplay`.
 
 The Rust cursor checks the catalog count against the current root epoch before returning frames, then validates canonical consecutive epoch keys, selected identities and journal hash chains while streaming. It pages at most 64 keys and reuses one frame budget across journals. The cursor owns its frame and exposes a borrowed view, and the underlying reader also refuses a reset while a frame reservation remains live. Thus a journal boundary cannot bypass the reader's memory limit. This does not bound allocations a caller makes by copying records or constructing multiple cursors.

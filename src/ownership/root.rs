@@ -777,7 +777,8 @@ impl Root {
             }
         }
         let id = Uuid::new_v4();
-        let catalog = catalog::Publication::new(self.files.clone(), id, recovered)?;
+        let catalog =
+            catalog::Publication::new(self.files.clone(), self.cache.clone(), id, recovered)?;
         record.catalog = Some(id);
         let mut prepared = self.begin(observed.raw, record)?;
         prepared.catalog = Some(catalog);

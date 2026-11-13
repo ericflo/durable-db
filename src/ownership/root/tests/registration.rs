@@ -13,6 +13,7 @@ pub(super) struct Faults {
     pub(super) puts: AtomicU64,
     pub(super) registration_reads: AtomicU64,
     pub(super) frame_reads: AtomicU64,
+    pub(super) catalog_page_reads: AtomicU64,
     delayed: Mutex<Option<(String, Bytes)>>,
 }
 impl Faults {
@@ -24,6 +25,7 @@ impl Faults {
             puts: AtomicU64::new(0),
             registration_reads: AtomicU64::new(0),
             frame_reads: AtomicU64::new(0),
+            catalog_page_reads: AtomicU64::new(0),
             delayed: Mutex::new(None),
         })
     }
@@ -35,6 +37,7 @@ impl Faults {
             puts: AtomicU64::new(0),
             registration_reads: AtomicU64::new(0),
             frame_reads: AtomicU64::new(0),
+            catalog_page_reads: AtomicU64::new(0),
             delayed: Mutex::new(None),
         })
     }
@@ -53,6 +56,9 @@ impl Storage for Faults {
         }
         if key.starts_with("journal/") {
             self.frame_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        if key.starts_with("indexes/") || key.starts_with("manifests/") {
+            self.catalog_page_reads.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.get(key, limit).await
     }

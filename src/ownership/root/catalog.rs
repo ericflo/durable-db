@@ -1,6 +1,7 @@
 //! Persisted prefix decisions using the existing bounded-page immutable B+tree.
 use super::{Cut, Identity, Record, Registration, Registrations};
 use crate::{
+    cache::Cache,
     directory::{self, Directory, Pointer},
     journal::{Batch, Prefix, Reader},
     storage::Storage,
@@ -28,6 +29,13 @@ fn header_key(id: Uuid) -> String {
 }
 fn entry_key(identity: Identity) -> String {
     format!("{:016x}-{}", identity.epoch, identity.incarnation.simple())
+}
+pub(super) fn directory(files: &Arc<dyn Storage>, cache: &Option<Arc<Cache>>) -> Directory {
+    let directory = Directory::new(files.clone());
+    match cache {
+        Some(cache) => directory.with_cache(cache.clone()),
+        None => directory,
+    }
 }
 pub(super) async fn load(
     files: &Arc<dyn Storage>,
@@ -57,28 +65,44 @@ pub(super) async fn load(
 }
 pub(super) async fn selected(
     files: &Arc<dyn Storage>,
+    cache: &Option<Arc<Cache>>,
     index: Option<&directory::Root>,
     identity: Identity,
 ) -> anyhow::Result<Option<Prefix>> {
-    let Some(pointer) = Directory::new(files.clone())
+    let Some(pointer) = directory(files, cache)
         .get(index, &entry_key(identity))
         .await?
     else {
         return Ok(None);
     };
-    let object = files
-        .get(&pointer.key, Prefix::ENCODED_BYTES)
-        .await?
-        .context("selected prefix missing")?;
+    let cached = match cache {
+        Some(cache) => cache.get(&pointer.key, &pointer.sha256).await,
+        None => None,
+    };
+    let miss = cached.is_none();
+    let bytes = match cached {
+        Some(bytes) => bytes,
+        None => {
+            files
+                .get(&pointer.key, Prefix::ENCODED_BYTES)
+                .await?
+                .context("selected prefix missing")?
+                .bytes
+        }
+    };
     ensure!(
-        hex::encode(Sha256::digest(&object.bytes)) == pointer.sha256,
+        bytes.len() == Prefix::ENCODED_BYTES
+            && hex::encode(Sha256::digest(&bytes)) == pointer.sha256,
         "selected prefix checksum mismatch"
     );
-    let prefix = Prefix::decode(&object.bytes)?;
+    let prefix = Prefix::decode(&bytes)?;
     ensure!(
         prefix.log() == crate::journal::LogId::root(identity.incarnation),
         "selected prefix names a different journal"
     );
+    if miss && let Some(cache) = cache {
+        cache.insert(&pointer.key, bytes).await;
+    }
     Ok(Some(prefix))
 }
 
@@ -148,8 +172,13 @@ impl Recovery {
                     header.cut.identity.epoch < self.record.identity.epoch,
                     "checkpoint is not from prior history"
                 );
-                if let Some(selected) =
-                    selected(&self.files, self.index.as_ref(), header.cut.identity).await?
+                if let Some(selected) = selected(
+                    &self.files,
+                    &self.cache,
+                    self.index.as_ref(),
+                    header.cut.identity,
+                )
+                .await?
                 {
                     Reader::resume(self.files.clone(), header.cut.prefix, selected)?;
                 }
@@ -181,7 +210,13 @@ impl Recovery {
                     registration.identity() == cutoff.identity,
                     "checkpoint ancestry differs from selected history"
                 );
-                let selected = selected(&self.files, self.index.as_ref(), cutoff.identity).await?;
+                let selected = selected(
+                    &self.files,
+                    &self.cache,
+                    self.index.as_ref(),
+                    cutoff.identity,
+                )
+                .await?;
                 self.finished = true;
                 if selected.is_some() {
                     return Ok(None);
@@ -195,8 +230,13 @@ impl Recovery {
                         .with_cache(self.cache.clone()),
                 }));
             }
-            let prefix =
-                selected(&self.files, self.index.as_ref(), registration.identity()).await?;
+            let prefix = selected(
+                &self.files,
+                &self.cache,
+                self.index.as_ref(),
+                registration.identity(),
+            )
+            .await?;
             let reader = match prefix {
                 Some(prefix) => Reader::replay(self.files.clone(), prefix),
                 None => Reader::discover(self.files.clone(), registration.journal()),
@@ -238,6 +278,7 @@ impl JournalRecovery {
 
 pub(super) struct Publication {
     files: Arc<dyn Storage>,
+    cache: Option<Arc<Cache>>,
     owner: Uuid,
     id: Uuid,
     index: Option<directory::Root>,
@@ -246,6 +287,7 @@ pub(super) struct Publication {
 impl Publication {
     pub(super) fn new(
         files: Arc<dyn Storage>,
+        cache: Option<Arc<Cache>>,
         id: Uuid,
         recovered: &[JournalRecovery],
     ) -> anyhow::Result<Self> {
@@ -271,6 +313,7 @@ impl Publication {
         }
         Ok(Self {
             files,
+            cache,
             owner,
             id,
             index,
@@ -290,10 +333,13 @@ impl Publication {
                 key: format!("manifests/{key}.{}", Uuid::new_v4()),
                 sha256: hex::encode(Sha256::digest(&bytes)),
             };
-            self.files.put(&pointer.key, bytes).await?;
+            self.files.put(&pointer.key, bytes.clone()).await?;
+            if let Some(cache) = &self.cache {
+                cache.insert(&pointer.key, bytes).await;
+            }
             entries.insert(key, pointer);
         }
-        let index = Directory::new(self.files.clone())
+        let index = directory(&self.files, &self.cache)
             .insert_many(self.index.as_ref(), &entries)
             .await?;
         let mut body = serde_json::to_vec(&Header {

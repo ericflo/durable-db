@@ -95,6 +95,11 @@ async fn selecting_ancestral_journals_reads_the_registration_chain_once() {
         }
         assert!(replay.read_next().await.unwrap().is_none());
         assert_eq!(files.frame_reads.load(Ordering::SeqCst), reads);
+        assert_eq!(
+            files.catalog_page_reads.load(Ordering::SeqCst),
+            0,
+            "selection and replay should reuse their authenticated catalog pages"
+        );
         // Cached replay is still not a serving capability after revocation.
         provider.revoke_current().await;
         assert!(root.permission().await.unwrap().is_none());
@@ -103,11 +108,96 @@ async fn selecting_ancestral_journals_reads_the_registration_chain_once() {
 }
 
 #[tokio::test]
+async fn catalog_cache_keeps_bounds_and_validates_selected_journal_identity() {
+    use crate::ownership::root::catalog::{load, selected};
+    use crate::{cache::Cache, directory::Directory};
+    use std::collections::BTreeMap;
+
+    for limit in [0, 128, 64 * 1024] {
+        let provider = Provider::new();
+        let (old, _late) = source(&provider).await;
+        let identity = old.identity().unwrap().unwrap();
+        let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
+        let mut root = successor(&provider).await;
+        root.files = files.clone();
+        root.select_journals().await.unwrap();
+        let catalog = root.recovery_record().unwrap().catalog;
+        let index = load(&root.files, catalog).await.unwrap();
+        let cache = Arc::new(Cache::new(limit, None).unwrap());
+        let shared = Some(cache.clone());
+        files.catalog_page_reads.store(0, Ordering::SeqCst);
+        let prefix = selected(&root.files, &shared, index.as_ref(), identity)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            files.catalog_page_reads.swap(0, Ordering::SeqCst),
+            2,
+            "cold page and prefix"
+        );
+        assert_eq!(
+            selected(&root.files, &shared, index.as_ref(), identity)
+                .await
+                .unwrap(),
+            Some(prefix)
+        );
+        assert_eq!(
+            files.catalog_page_reads.swap(0, Ordering::SeqCst),
+            if limit < 1024 { 2 } else { 0 }
+        );
+
+        let key = format!("{:016x}-{}", identity.epoch, identity.incarnation.simple());
+        let mut pointer = Directory::new(root.files.clone())
+            .get(index.as_ref(), &key)
+            .await
+            .unwrap()
+            .unwrap();
+        cache
+            .insert(&pointer.key, Bytes::from_static(b"corrupt cache"))
+            .await;
+        files.catalog_page_reads.store(0, Ordering::SeqCst);
+        assert_eq!(
+            selected(&root.files, &shared, index.as_ref(), identity)
+                .await
+                .unwrap(),
+            Some(prefix)
+        );
+        assert_eq!(
+            files.catalog_page_reads.load(Ordering::SeqCst),
+            if limit < 1024 { 2 } else { 1 },
+            "corrupt cache must refetch"
+        );
+
+        // Even a correctly hashed, cached prefix cannot name a different journal.
+        let foreign = Identity {
+            epoch: identity.epoch + 1,
+            incarnation: Uuid::new_v4(),
+        };
+        let key = format!("{:016x}-{}", foreign.epoch, foreign.incarnation.simple());
+        pointer.key = format!("manifests/{key}.{}", Uuid::new_v4());
+        root.files.put(&pointer.key, prefix.encode()).await.unwrap();
+        cache.insert(&pointer.key, prefix.encode()).await;
+        let wrong = Directory::new(root.files.clone())
+            .with_cache(cache.clone())
+            .insert_many(index.as_ref(), &BTreeMap::from([(key, pointer)]))
+            .await
+            .unwrap();
+        let error = selected(&root.files, &shared, Some(&wrong), foreign)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("different journal"));
+        assert!(cache.memory_bytes().await <= limit);
+    }
+}
+
+#[tokio::test]
 async fn lost_selection_reply_and_complete_reopen_never_extend_a_selected_prefix() {
     let provider = Provider::new();
 
     let (old, late) = source(&provider).await;
-    let mut root = successor(&provider).await;
+    let mut root = successor(&provider)
+        .await
+        .with_cache(Arc::new(crate::cache::Cache::new(64 * 1024, None).unwrap()));
     let journal = scan(&mut root).await;
     assert!(!journal.is_selected());
     assert_eq!(journal.finished_prefix().unwrap().position(), 1);

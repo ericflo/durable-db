@@ -18,6 +18,10 @@ Init == /\ selected \in [Owners -> 0..Frames]
 \* A one-frame disposable cache models positive, validated provider reads only.
 \* Discovery still reads the provider; disk bytes and missing/failed GETs cannot
 \* populate this cache. Byte integrity/bounds are checked separately in Rust.
+\* Reusing authenticated catalog pages and selected-prefix records stutters
+\* under the complete, immutable selected catalog assumed above. The header
+\* still comes from storage; pointer digests, journal identity and the shared
+\* cache budget remain Rust obligations, never serving authority.
 Remember(e,n) == /\ n \in objects[e]
                  /\ cached' = {<<e,n>>}
                  /\ UNCHANGED <<selected, objects, epoch, position, replayed, complete>>

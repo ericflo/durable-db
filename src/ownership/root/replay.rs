@@ -1,7 +1,7 @@
 //! Ordered replay of a complete, immutable coordinator-journal catalog.
 use super::{Identity, Record, catalog};
 use crate::{
-    directory::{self, Directory},
+    directory,
     journal::{Batch, Prefix, Reader},
     storage::Storage,
 };
@@ -103,9 +103,10 @@ impl Replay {
             "checkpoint journal identity mismatch"
         );
         self.load().await?;
-        let selected = catalog::selected(&self.files, self.index.as_ref(), cut.identity)
-            .await?
-            .context("checkpoint journal is not selected")?;
+        let selected =
+            catalog::selected(&self.files, &self.cache, self.index.as_ref(), cut.identity)
+                .await?
+                .context("checkpoint journal is not selected")?;
         self.reader = Some(
             Reader::resume(self.files.clone(), cut.prefix, selected)?
                 .with_cache(self.cache.clone()),
@@ -161,7 +162,7 @@ impl Replay {
                     .context("replay epoch exhausted")?;
             }
             if self.entries.is_empty() {
-                self.entries = Directory::new(self.files.clone())
+                self.entries = catalog::directory(&self.files, &self.cache)
                     .list(self.index.as_ref(), self.after.as_deref(), PAGE_ENTRIES)
                     .await?
                     .into();
@@ -180,7 +181,7 @@ impl Replay {
                 identity.epoch == self.next_epoch && identity.epoch < self.record.identity.epoch,
                 "recovery catalog has an unexpected epoch"
             );
-            let prefix = catalog::selected(&self.files, self.index.as_ref(), identity)
+            let prefix = catalog::selected(&self.files, &self.cache, self.index.as_ref(), identity)
                 .await?
                 .context("recovery catalog entry disappeared")?;
             if let Some(reader) = &mut self.reader {
