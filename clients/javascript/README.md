@@ -68,6 +68,24 @@ await wire.commit(request);
 
 Retain the same request across uncertain retries. This layer makes one HTTP attempt per call and exposes base64 values. `createProtected`, `issueToken` and `changeAccess` need administrator credentials. Redirects are refused; connect to the final HTTPS origin. See the [HTTP contract](../../docs/api.md) and [Pi integration guide](../../docs/clients.md).
 
+The Node.js client pools HTTP/1 connections by origin and database. A connection
+that works for one database is not shared with another database that may need a
+different Service endpoint during peer isolation. Across client instances in one
+loaded SDK module, it keeps at most 64 pools, 16 outstanding requests per pool,
+128 outstanding requests total, and one idle socket per pool. Idle pools are
+evicted on demand; active requests are never evicted. Capacity refusal raises
+`DbError` with status 429 before sending. These are client bounds, independent of
+the server's admission limits, and are not an RSS bound across Node workers.
+
+Requests retain the 35-second deadline, including response body reads. Request
+and response bodies are bounded to 1 MiB. HTTPS verifies certificates and host
+identity using Node's trust configuration. The client uses Node's built-in HTTP
+transport, not a global fetch dispatcher. A server's HTTP/1 503 closes the failed
+connection; an explicit retry may obtain a different Service endpoint. No owner
+address is trusted or cached by the client, and transport errors never trigger
+an automatic replay. Pooling is a routing optimization, not an availability
+guarantee under permanent isolation or an arbitrary external proxy.
+
 ## Development
 
 `src/` contains the JSON API, transaction scope, encoding and retry handling. `client.mjs` and `client.d.mts` define the wire API. `pi-indexed.mjs` and `indexed/` implement Pi storage; `pi-reference.mjs` is its reference adapter.

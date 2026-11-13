@@ -1,11 +1,6 @@
 /** UTF-8 keys, opaque binary values, and explicit snapshot/revision boundaries. */
-export class DbError extends Error {
-  constructor(status, body) {
-    super(body.message ?? `HTTP ${status}`);
-    this.status = status;
-    this.code = body.error;
-  }
-}
+import { requestJson } from './transport.mjs';
+export { DbError } from './transport.mjs';
 export function encode(bytes) {
   if (typeof bytes === 'string') bytes = new TextEncoder().encode(bytes);
   let binary = '';
@@ -30,18 +25,12 @@ export class DurableDb {
     );
   }
   async #request(url, body, method = 'POST') {
-    const response = await fetch(url, {
-      // A redirect can change POST to GET or replay a mutation at another path.
-      // It cannot establish whether this exact operation committed.
-      redirect: 'error',
+    return requestJson(url, this.database, {
       method,
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       ...(method === 'GET' ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(35_000),
     });
-    const result = await response.json();
-    if (!response.ok) throw new DbError(response.status, result);
-    return result;
   }
   create(limits = { max_bytes: 64 * 1024 * 1024, max_keys: 100000 }) {
     return this.request('', limits);

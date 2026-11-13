@@ -29,6 +29,15 @@ The SDK stores no hidden application receipts. Across separate application reque
 
 `DurableDb` is the lower-level binary wire client used by the Pi adapters and provisioning tools. It exposes `read`, `commit`, `encode`, explicit revisions and request IDs. Each call makes one HTTP attempt. Retry uncertain commits unchanged. Redirects are refused; connect directly to the final HTTPS origin.
 
+The Node.js SDK now reuses HTTP/1 connections separately for each origin and
+database, with at most 64 cached pools, 16 outstanding requests per pool, 128
+overall and one idle socket per pool. Active pools are not evicted; local
+capacity refusal returns `DbError` status 429 before sending. HTTPS trust and
+hostname checks remain enabled, and the 35-second request deadline includes
+body reads. Bodies are bounded to 1 MiB. This replaces global fetch pooling;
+it preserves the one-attempt wire contract and identical retry rules. See the
+[SDK guide](../clients/javascript/README.md) for scope and deployment limits.
+
 For provisioning with a current source build, persist a creation intent and call `await db.createProtected({request_id, limits})` using administrator credentials. Retry that same object after an unknown outcome. It returns `{info, replayed}` with the original creation info. `db.create(limits)` remains the legacy format-1 operation for compatibility. `db.changeAccess({request_id, expected_policy_revision, change})` exposes the administrative [policy API](api.md#durable-token-revocation) with explicit retry identity. Use `await db.issueToken({write: true, ttl_seconds: 3600})` for a database-scoped application credential. Protected databases return its `token_id` alongside the bearer token for later revocation. Tenant applications receive this scoped token instead of the provisioning credential.
 
 ## Pi 1.5.0 indexed adapter

@@ -7,18 +7,18 @@ import {performance} from 'node:perf_hooks';
 import {join} from 'node:path';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {subscribe} from 'node:diagnostics_channel';
+import {requestJson,DbError} from '../clients/javascript/transport.mjs';
 
-// Observe fetch's actual pooled sockets without changing its transport. Only
+// Observe the SDK transport's actual pooled sockets without altering requests. Only
 // numeric identities enter the report; never headers, paths or socket addresses.
-const activeAttempt=new AsyncLocalStorage(), requests=new WeakMap(), sockets=new WeakMap();
+const activeAttempt=new AsyncLocalStorage(), sockets=new WeakMap();
 let nextSocket=0;
-subscribe('undici:request:create',({request})=>{
-  const attempt=activeAttempt.getStore();if(attempt)requests.set(request,attempt);
-});
-subscribe('undici:client:sendHeaders',({request,socket})=>{
-  const attempt=requests.get(request);if(!attempt)return;
-  if(!sockets.has(socket))sockets.set(socket,++nextSocket);
-  attempt.connection=sockets.get(socket);
+subscribe('http.client.request.created',({request})=>{
+  const attempt=activeAttempt.getStore();if(!attempt)return;
+  request.once('socket',socket=>{
+    if(!sockets.has(socket))sockets.set(socket,++nextSocket);
+    attempt.connection=sockets.get(socket);
+  });
 });
 const origin=process.env.DATABASE_URL;
 const writerOrigins=process.env.WRITER_ORIGINS?.split(',')??[origin];
@@ -43,22 +43,22 @@ async function rpc(path,body,token=admin,method=body===undefined?'GET':'POST',en
     const attempt={connection:'unobserved'};
     let code='transport_or_decode_error', result, refusal;
     try {
-      const response=await activeAttempt.run(attempt,()=>fetch(endpoint+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,redirect:'error',signal:AbortSignal.timeout(25000)}));
-      code=String(response.status);
-      if(response.ok) result=await response.json();
-      else if(response.status===413) {
-        const error=await response.json();
+      const database=path.match(/^\/v1\/databases\/([^/]+)/)?.[1]??'administration';
+      result=await activeAttempt.run(attempt,()=>requestJson(endpoint+path,database,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:encoded,signal:AbortSignal.timeout(25000)}));
+      code='200';
+    } catch(error) {
+      if(error instanceof DbError)code=String(error.status);
+      if(code==='413') {
         // Only fixed public refusal categories enter the report.
         refusal=new Map([
           ['database write admission budget exhausted','tenant_funding'],
           ['database quota exceeded','logical_quota'],
           ['read work budget exceeded; narrow the scan','scan_work'],
         ]).get(error.message)??'resource_limit';
-      } else if(response.status===409) {
-        const error=await response.json();
-        refusal=['conflict','receipt_expired'].includes(error.error)?error.error:'unclassified_conflict';
-      } else await response.body?.cancel();
-    } catch { code='transport_or_decode_error'; }
+      } else if(code==='409') {
+        refusal=['conflict','receipt_expired'].includes(error.code)?error.code:'unclassified_conflict';
+      }
+    }
     status.http_attempt_statuses[code]=(status.http_attempt_statuses[code]??0)+1;
     if(timing) {
       timing.request_seconds+=(performance.now()-attempted)/1000;

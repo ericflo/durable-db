@@ -159,6 +159,7 @@ def main():
                   namespace=namespace, image=args.image, source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
                   harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   workload_sha256=hashlib.sha256(Path('scripts/cluster-workload.mjs').read_bytes()).hexdigest(),
+                  client_transport_sha256=hashlib.sha256(Path('clients/javascript/transport.mjs').read_bytes()).hexdigest(),
                   configuration=dict(cpu_request='25m', cpu_limit='250m', memory_request='96Mi', memory_limit='384Mi',
                                      scenario=args.scenario,
                                      client_origin='http://durable-db:7654', database_prefix='app',
@@ -166,6 +167,7 @@ def main():
                                      memory_cache_mib=8, resident_memory_mib=128, partitions=16, discovery='headless DNS', disk_cache=False, maintenance_seconds=60,
                                      controller="StatefulSet", placement_identity="pod name", rollout_unavailable=1, rollout_deadline_seconds=240,
                                      per_writer_readbacks_before_phase=2,
+                                     client_transport='SDK per-database HTTP/1 pools: 64 scopes, 16 requests per scope, 128 aggregate, one idle socket per scope',
                                      process_pause=dict(shared_pid_namespace=True, liveness_probe=False,
                                                         sidecar_image=NODE_IMAGE,sidecar_cpu_limit='100m',sidecar_memory_limit='128Mi' if args.scenario=='peer-isolation' else '64Mi'),
                                      upload_budget=dict(bytes=1073741824, attempts=100000),
@@ -617,7 +619,7 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                    dict(apiVersion='v1',kind='Secret',metadata=dict(name='durable-db-storage'),stringData=storage),
                    dict(apiVersion='v1',kind='Secret',metadata=dict(name='durable-db-signing'),stringData={'admin.key':args.signing_key_file.read_text()}),
                    dict(apiVersion='v1',kind='Secret',metadata=dict(name='workload-credentials'),stringData={'admin.token':args.admin_token_file.read_text(),'control.token':control}),
-                   dict(apiVersion='v1',kind='ConfigMap',metadata=dict(name='workload'),data={'runner.mjs':Path('scripts/cluster-workload.mjs').read_text()}),policy]
+                   dict(apiVersion='v1',kind='ConfigMap',metadata=dict(name='workload'),data={'runner.mjs':Path('scripts/cluster-workload.mjs').read_text(),'transport.mjs':Path('clients/javascript/transport.mjs').read_text()}),policy]
         base=subprocess.check_output(['kubectl','kustomize','deploy/kubernetes'],text=True)
         for resource in yaml.safe_load_all(base):
             if resource['kind'] not in ('StatefulSet','Service','PodDisruptionBudget'):continue
@@ -659,13 +661,13 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
         runner=dict(apiVersion='v1',kind='Pod',metadata=dict(name='workload',labels={'app':'durable-db-runner'}),
                     spec=dict(restartPolicy='Never',automountServiceAccountToken=False,
                               securityContext=dict(runAsNonRoot=True,runAsUser=1000,runAsGroup=1000,fsGroup=1000,seccompProfile=dict(type='RuntimeDefault')),
-                              containers=[dict(name='workload',image=NODE_IMAGE,command=['node','/work/runner.mjs'],
+                              containers=[dict(name='workload',image=NODE_IMAGE,command=['node','/work/scripts/runner.mjs'],
                                                env=[dict(name='DATABASE_URL',value='http://durable-db:7654'),dict(name='DATABASE_PREFIX',value=report['configuration']['database_prefix']),
                                                     dict(name='WRITER_ORIGINS',value=','.join(report['configuration']['writer_origins']))],
                                                resources=dict(requests=dict(cpu='25m',memory='64Mi'),limits=dict(cpu='250m',memory='256Mi')),
                                                securityContext=dict(allowPrivilegeEscalation=False,readOnlyRootFilesystem=True,capabilities=dict(drop=['ALL'])),
                                                volumeMounts=[dict(name='work',mountPath='/work',readOnly=True),dict(name='credentials',mountPath='/run/credentials',readOnly=True)])],
-                              volumes=[dict(name='work',configMap=dict(name='workload')),dict(name='credentials',secret=dict(secretName='workload-credentials',defaultMode=0o440))]))
+                              volumes=[dict(name='work',configMap=dict(name='workload',items=[dict(key='runner.mjs',path='scripts/runner.mjs'),dict(key='transport.mjs',path='clients/javascript/transport.mjs')])),dict(name='credentials',secret=dict(secretName='workload-credentials',defaultMode=0o440))]))
         kube('apply','-f','-',body=runner)
         kube('wait','--for=condition=Ready','pod/workload','--timeout=120s',timeout=150)
         with args.output.with_suffix('.forward.log').open('w') as log:

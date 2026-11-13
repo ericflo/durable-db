@@ -2,6 +2,28 @@
 
 Current local and cloud serving use the native engine. The [native cloud CLI](#native-cloud-cli), [DNS membership](#dns-membership) and [resident-owner accounting](#resident-owner-accounting) sections describe the latest integration. Earlier publication-engine and timed-ownership experiments below retain their original scope; they do not qualify the replacement. The [production gates](production-readiness.md) state what is still required.
 
+## Client connection reuse
+
+The Node.js SDK scopes disposable HTTP/1 pools by origin and database, with
+bounded cached pools and active requests. Pool membership grants no ownership
+or permission: every request still reaches the ordinary server authorization,
+revision and permit checks. The transport performs one attempt, refuses
+redirects and returns uncertainty to the existing identical-request retry layer.
+No ownership, journal or collection transition changes. The unchanged
+`OwnerRouting` instance checks **728 states**, depth 11, and nine negative
+controls, including automatic replay; this is not a model of Node sockets,
+pool eviction or a proof of transport liveness.
+
+A local TCP Service fixture separates two databases onto opposite backends,
+checks repeated reuse and credential rotation, changes owners, and loses a
+commit acknowledgement. Explicit retries preserve the exact body and apply once.
+Other fixtures fill the pool/active-request bounds, cancel requests, evict idle
+pools, bound stalled/oversized bodies, and verify HTTPS trust and hostname checks.
+Mutations that share one origin pool or automatically replay a reset fail the
+regression. The SDK/Pi contracts and web application tests also pass against the
+released local server. Cloud measurements remain separate from these checks;
+pooling cannot establish continuous availability behind every proxy or split.
+
 ## Native checkpoint retention
 
 The operator control handle can retain one already published namespace checkpoint and release it explicitly by fresh UUID. The authoritative record binds that identity to the complete checkpoint descriptor, including its exact journal cut. Retain/release use the existing conditional control invocation and uncertainty handling. A losing comparison cannot resurrect an old image; a lost response requires exact validation. An empty-slot release still compares, so a delayed retry cannot remove a new slot. The retained field is bounded to 1 KiB and reserved alongside worst-case owner, collection and budget metadata within the common B2 limit. No object upload or tenant allocation is needed. Old decoders refuse the new field until explicit release removes it.

@@ -134,12 +134,14 @@ or redirect following. Status zero denotes an incomplete/failed probe, not an
 HTTP status. Statuses and elapsed times distinguish ingress selection
 from availability through each pod; a direct pod request can itself forward and
 does not identify the owner. Endpoint and request observations are not atomic;
-probes prolong isolation outside the measured hold. The workload observes fetch's actual pooled sockets through
-[Undici diagnostics](https://undici.nodejs.org/api/DiagnosticsChannel), recording
+probes prolong isolation outside the measured hold. The workload uses the SDK's
+bounded per-database transport and observes its actual pooled sockets through
+[Node HTTP diagnostics](https://nodejs.org/docs/latest-v24.x/api/diagnostics_channel.html#http), recording
 response counts for at most eight numeric connection identities per RPC, plus
 an overflow bucket. `unobserved` means no socket assignment was seen. It does not
-record headers, addresses or credentials, and does not change connection reuse
-or retry behavior. [Current results and missed targets](verification-results.md)
+record headers, addresses or credentials. The report hashes the shared transport
+source and identifies its bounds; older runs used fetch's shared origin pool.
+Explicit retry bodies and deadlines remain unchanged. [Current results and missed targets](verification-results.md)
 retain exact binaries, configurations and timings. These short runs qualify their
 bounded fault/recovery histories, not permanent-partition availability or a
 production SLO. Rolling and scale-down still need broader qualification.

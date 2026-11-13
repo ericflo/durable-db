@@ -4,6 +4,7 @@ FROM node AS autoscaling-check
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY scripts/cluster-workload.mjs scripts/check-autoscaling-history.py scripts/test-autoscaling.mjs scripts/qualify-multinode.py scripts/
+COPY clients/javascript/transport.mjs clients/javascript/transport.mjs
 RUN node --test scripts/test-autoscaling.mjs \
     && python3 -m py_compile scripts/qualify-multinode.py \
     && mkdir -p /checks && touch /checks/autoscaling.passed
