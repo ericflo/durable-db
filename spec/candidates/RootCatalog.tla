@@ -1,7 +1,7 @@
 -------------------------- MODULE RootCatalog --------------------------
 EXTENDS Naturals, Integers, Sequences, FiniteSets
 CONSTANTS Epochs, Attempts, LogLength, UnsafeCompare, UnsafeInherit,
-          UnsafeReseal, UnsafeEarly, UnsafeScan
+          UnsafeReseal, UnsafeEarly, UnsafeScan, UnsafeRefresh
 
 \* Conditional prefix catalogs with explicit captured requests and late apply.
 \* Drain is an abstraction boundary: RevocableOwner establishes the required
@@ -9,8 +9,11 @@ CONSTANTS Epochs, Attempts, LogLength, UnsafeCompare, UnsafeInherit,
 \* Ordered winning epochs and durable journal registrations are assumed here.
 \* A confirmed seal preserves all prior cuts. The implementation may retain
 \* its immutable ancestry cursor across that seal, loading the new confirmed
-\* catalog before BeginScan for the next journal. After exact validation an
-\* unchanged snapshot can reuse its completed scan. Each retry has fresh catalog
+\* catalog before BeginScan for the next journal. An observed unchanged snapshot
+\* can reuse its completed scan: StartSeal captures the new comparison and its
+\* successful Apply validates it, without an intervening StartRenew. Observation
+\* grants no confirmation. A changed snapshot still requires validation and a
+\* new cursor in Rust. Each retry has fresh catalog
 \* uploads and a captured comparison; no request or uncertain PUT is replayed.
 \* Collection is abstracted out here. Rust also compares the captured collection
 \* generation, checkpoint and owner; tests exercise those invalidation guards.
@@ -89,7 +92,8 @@ StartFence(p, a, source) ==
 \* after an uncertain seal. A changed catalog requires new discovery; an
 \* unchanged one permits reusing a finished scan, even after late uploads.
 \* An adopted selection is never extended by a late old journal upload.
-\* Refreshing a scan's comparison requires an unchanged catalog snapshot.
+\* Refreshing a scan's comparison requires an unchanged catalog snapshot,
+\* including when StartSeal itself performs validation after an uncertain seal.
 StartRenew(p, a, source) ==
     /\ NextId(a) /\ pending[p] = 0 /\ source.owner = p
     /\ requests' = [requests EXCEPT ![a] =
@@ -101,7 +105,7 @@ StartRenew(p, a, source) ==
 StartSeal(p, a, source) ==
     /\ NextId(a) /\ pending[p] = 0 /\ p \in active
     /\ scans[p].epochs # {} /\ scans[p].finished = scans[p].epochs
-    /\ source.owner = p /\ source.cuts = scans[p].source.cuts
+    /\ source.owner = p /\ (source.cuts = scans[p].source.cuts \/ UnsafeRefresh)
     /\ LET s == scans[p] IN
          requests' = [requests EXCEPT ![a] =
            [status |-> "pending", kind |-> "seal", owner |-> p,

@@ -1,6 +1,6 @@
 # Architecture experiments
 
-These models explore possible replacements for the current serving protocol. They are not the implemented serving protocol and do not authorize changing runtime assumptions. The maintained journal component model and its unbounded abstract proof now live in `spec/Journal.tla` and `spec/JournalProof.tla`, replacing the former `WalHandoff` experiment. Run `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` for that component.
+These models retain their candidate names. RootAcquisition, RootRegistration, RootCatalog and CatalogReplay now describe components of native serving; the other experiments do not authorize changing runtime assumptions. Their composition and correspondence to Rust remain separate obligations. The maintained journal component model and its unbounded abstract proof now live in `spec/Journal.tla` and `spec/JournalProof.tla`, replacing the former `WalHandoff` experiment. Run `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` for that component.
 
 ## RootAcquisition
 
@@ -16,9 +16,9 @@ This is a byte-stream property, not a proof of the catalog's durability, storage
 
 ## RootCatalog
 
-Conditional prefix catalogs with separate scan, immutable upload, positive knowledge, provider send, apply, reply and timeout events. Claims inherit existing selections, and exact comparison rejects stale publications. Renewal may refresh a scan's comparison only while its catalog is unchanged. Old uploads may arrive after selection; scans before the ownership drain are forbidden.
+Conditional prefix catalogs with separate scan, immutable upload, positive knowledge, provider send, apply, reply and timeout events. Claims inherit existing selections, and exact comparison rejects stale publications. A fresh observation may refresh a scan's comparison only while its catalog is unchanged; the selection CAS validates it without an intervening renewal. Old uploads may arrive after selection; scans before the ownership drain are forbidden.
 
-Run `scripts/check-candidate.sh RootCatalog`. Two epochs, three invocations and two frames check 2,816,947 distinct states. Three epochs, three invocations and one frame check 4,196,373 states. Five unsafe controls exercise comparison, inheritance, reselection, premature publication and early scans; two coverage controls witness late application after timeout and inheritance across a third epoch. No symmetry reduction or guided constraint is used.
+Run `scripts/check-candidate.sh RootCatalog`. Two epochs, three invocations and one frame check 455,553 distinct states. Three epochs, three invocations and empty journals check 173,635 states. Six unsafe controls exercise comparison, inheritance, reselection, changed-snapshot refresh, premature publication and early scans; four coverage controls witness late application, inheritance, batched selection and a direct scan retry. No symmetry reduction or guided constraint is used.
 
 Drain completion abstracts the ending of every earlier acknowledgement interval. Ordered epochs and discoverable journals are assumptions, established separately by other components rather than composed into this model. It does not prove physical timing, complete database/receipt recovery, collection, bounded service time, liveness or Rust refinement.
 

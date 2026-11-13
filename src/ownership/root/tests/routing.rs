@@ -114,6 +114,51 @@ async fn owner(provider: &Arc<Provider>, faults: Arc<Faults>) -> (Server, Uuid) 
 }
 
 #[tokio::test]
+async fn selection_retry_preserves_http_receipts_and_refuses_the_live_predecessor() {
+    let provider = Provider::new();
+    let (old, _) = owner(&provider, Arc::new(Faults::default())).await;
+    let admin = auth().administrator_token(60).unwrap();
+    old.ok(
+        "PUT",
+        "/v1/databases/app",
+        &admin,
+        json!({"request_id":"create","limits":{"max_keys":10,"max_bytes":1000}}),
+    )
+    .await;
+    let commit = json!({"request_id":"write","expected_revision":0,
+        "writes":[{"key":"x","value":"eA=="}]});
+    let acknowledged = old
+        .ok("POST", "/v1/databases/app/commit", &admin, commit.clone())
+        .await;
+    let mut root = active(&provider).await;
+    let identity = root.identity().unwrap();
+    provider.fail_replacements.store(1, Ordering::SeqCst);
+    let calls = provider.calls.load(Ordering::SeqCst);
+    root.select_journals().await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst) - calls, 2);
+    assert_eq!(root.identity().unwrap(), identity);
+    let recovered = live::open(root, crate::transactions::live::Limits::default()).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let next = Server::serve(listener, app(Arc::new(Native::new(recovered, 16).unwrap())));
+    let retry = next
+        .ok("POST", "/v1/databases/app/commit", &admin, commit)
+        .await;
+    assert_eq!(retry["replayed"], true);
+    assert_eq!(retry["revision"], acknowledged["revision"]);
+    let read = json!({"keys":["x"]});
+    let values = next
+        .ok("POST", "/v1/databases/app/read", &admin, read.clone())
+        .await;
+    assert_eq!(values["values"][0], "eA==");
+    assert_eq!(
+        old.call("POST", "/v1/databases/app/read", &admin, read)
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[tokio::test]
 async fn advertised_route_is_bound_to_claim_and_never_inherited() {
     let provider = Provider::new();
     for address in [

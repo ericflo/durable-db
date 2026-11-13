@@ -376,9 +376,10 @@ impl Root {
     }
 
     /// Discover and select ancestral journals after activation. Resolve an
-    /// unconfirmed publication by exact validation of this same incarnation,
-    /// retaining completed scans only while their full recovery snapshot is
-    /// unchanged. Each retry stages fresh objects; never replay uncertain PUTs.
+    /// unconfirmed publication against a fresh observation of this incarnation.
+    /// An unchanged recovery snapshot lets the next selection CAS validate the
+    /// observation; a changed snapshot requires validation before rediscovery.
+    /// Each retry stages fresh objects; never replay uncertain PUTs.
     pub async fn select_journals(&mut self) -> Result<(), Error> {
         let started = std::time::Instant::now();
         let owner = self.incarnation;
@@ -391,6 +392,7 @@ impl Root {
         let mut recovery = self.recovery()?;
         let (mut discovered, mut frames) = (0u64, 0u64);
         let mut journals = Vec::new();
+        let mut retry = None;
         loop {
             if journals.is_empty() {
                 progress("discovery", discovered, frames);
@@ -413,21 +415,34 @@ impl Root {
                 return Ok(());
             }
             progress("publication", discovered, frames);
-            let select = self.select_prefixes(&journals)?;
+            let select = match retry.take() {
+                Some(observed) => self.select_prefixes_observed(observed, &journals)?,
+                None => self.select_prefixes(&journals)?,
+            };
             let outcome = self.finish(select.execute().await)?;
-            let confirmed = matches!(outcome, Outcome::Confirmed);
-            progress("validation", discovered, frames);
-            self.confirm_outcome(outcome, &mut validations).await?;
-            progress("advance", discovered, frames);
-            let current = self.recovery_record()?;
-            if confirmed {
+            if matches!(outcome, Outcome::Confirmed) {
+                progress("advance", discovered, frames);
                 journals.clear();
-                recovery.advance(current).await?;
-            } else if !current.same_recovery(journals[0].record) {
-                // A new catalog, checkpoint or collection generation invalidates
-                // the captured scan. Unrelated control changes do not.
-                journals.clear();
-                recovery = self.recovery()?;
+                recovery.advance(self.recovery_record()?).await?;
+            } else {
+                progress("validation", discovered, frames);
+                let observed = self.retry_observation(outcome, &mut validations).await?;
+                if observed
+                    .record
+                    .is_some_and(|r| r.same_recovery(journals[0].record))
+                {
+                    // Capture before fresh uploads, including after a metadata
+                    // sweep. Observation alone grants no confirmation/readiness.
+                    retry = Some(observed);
+                } else {
+                    let validate = self.validate(observed)?;
+                    let outcome = self.finish(validate.execute().await)?;
+                    self.confirm_outcome(outcome, &mut validations).await?;
+                    // A new catalog, checkpoint or collection generation requires
+                    // a fresh cursor, including an applied-but-lost selection.
+                    journals.clear();
+                    recovery = self.recovery()?;
+                }
             }
         }
     }
@@ -440,24 +455,32 @@ impl Root {
         validations: &mut u8,
     ) -> Result<(), Error> {
         while !matches!(outcome, Outcome::Confirmed) {
-            if matches!(outcome, Outcome::Ignored) {
-                return Err(Error::NotReady);
-            }
-            if *validations == 0 {
-                let error = match outcome {
-                    Outcome::Uncertain(error) => error,
-                    _ => anyhow::anyhow!("root publication validation remained contended"),
-                };
-                return Err(Error::Provider(
-                    error.context("root publication unconfirmed"),
-                ));
-            }
-            *validations -= 1;
-            let observed = self.observe().await?;
+            let observed = self.retry_observation(outcome, validations).await?;
             let validate = self.validate(observed)?;
             outcome = self.finish(validate.execute().await)?;
         }
         Ok(())
+    }
+
+    async fn retry_observation(
+        &self,
+        outcome: Outcome,
+        validations: &mut u8,
+    ) -> Result<Observation, Error> {
+        if matches!(outcome, Outcome::Ignored) {
+            return Err(Error::NotReady);
+        }
+        if *validations == 0 {
+            let error = match outcome {
+                Outcome::Uncertain(error) => error,
+                _ => anyhow::anyhow!("root publication validation remained contended"),
+            };
+            return Err(Error::Provider(
+                error.context("root publication unconfirmed"),
+            ));
+        }
+        *validations -= 1;
+        self.observe().await
     }
 
     pub(crate) async fn activate_confirmed(&mut self, validations: &mut u8) -> Result<(), Error> {
@@ -720,24 +743,36 @@ impl Root {
     }
 
     fn select_prefixes(&mut self, recovered: &[JournalRecovery]) -> Result<Prepared, Error> {
-        let identity = self.identity()?.ok_or(Error::NotReady)?;
         let raw = self.session.confirmed().cloned().ok_or(Error::NotReady)?;
-        let confirmed =
-            metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?
-                .ok_or(Error::NotReady)?;
+        let record = metadata::decode(raw.metadata(), &self.prefix, self.encoding, self.budgeted)?;
+        self.select_prefixes_observed(Observation { raw, record }, recovered)
+    }
+
+    fn select_prefixes_observed(
+        &mut self,
+        observed: Observation,
+        recovered: &[JournalRecovery],
+    ) -> Result<Prepared, Error> {
+        let identity = self.identity()?.ok_or(Error::NotReady)?;
+        let mut record = observed.record.ok_or(Error::NotOwner)?;
+        if record.identity != identity {
+            return Err(Error::NotOwner);
+        }
+        if record.phase != Phase::Open {
+            return Err(Error::NotReady);
+        }
         for journal in recovered {
             if journal.record.identity != identity {
                 return Err(Error::NotOwner);
             }
-            if !confirmed.same_recovery(journal.record) {
+            if !record.same_recovery(journal.record) {
                 return Err(Error::StaleRecovery);
             }
         }
         let id = Uuid::new_v4();
         let catalog = catalog::Publication::new(self.files.clone(), id, recovered)?;
-        let mut record = confirmed;
         record.catalog = Some(id);
-        let mut prepared = self.begin(raw, record)?;
+        let mut prepared = self.begin(observed.raw, record)?;
         prepared.catalog = Some(catalog);
         Ok(prepared)
     }

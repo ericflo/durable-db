@@ -216,6 +216,7 @@ async fn selection_retry_reuses_completed_scan_without_adopting_late_frames() {
             if mode >= 2 { mode - 1 } else { 0 },
         );
         root.files = files.clone();
+        let calls = provider.calls.load(Ordering::SeqCst);
         if mode == 0 {
             provider.pause.store(true, Ordering::SeqCst);
         } else {
@@ -241,6 +242,17 @@ async fn selection_retry_reuses_completed_scan_without_adopting_late_frames() {
         let _completion = late.send().await;
         provider.release.notify_one();
         let mut root = selecting.await.unwrap();
+        // Conflict/unknown CAS: two selection comparisons, no validation CAS.
+        // Failed catalog PUT: only the retry reaches the register. Mode 0 also
+        // includes the fixture's unrelated administrative update.
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst) - calls,
+            match mode {
+                0 => 3,
+                1 => 2,
+                _ => 1,
+            }
+        );
         assert_eq!(files.frame_reads.load(Ordering::SeqCst), 2);
         assert_eq!(root.identity().unwrap(), Some(identity));
         // Each retry stages fresh objects; an old delayed PUT is never replayed
@@ -260,6 +272,71 @@ async fn selection_retry_reuses_completed_scan_without_adopting_late_frames() {
         assert!(journal.is_selected());
         assert_eq!(journal.finished_prefix().unwrap().position(), 1);
     }
+}
+
+#[tokio::test]
+async fn observed_selection_retry_validates_only_at_publication_and_preserves_metadata() {
+    for race in 0..3 {
+        let provider = Provider::new();
+        let (_old, _late) = source(&provider).await;
+        let mut root = successor(&provider).await;
+        let journal = scan(&mut root).await;
+        root.abandon();
+        let before = provider.read().await.unwrap();
+        let mut info = before.info.clone();
+        info.insert("administrative-fixture".into(), "preserved".into());
+        let challenge = Uuid::new_v4();
+        info.insert(
+            "ddb-challenge".into(),
+            format!("{}:{challenge}", root.incarnation),
+        );
+        provider.replace(&before, info).await.unwrap().unwrap();
+        let observed = root.observe().await.unwrap();
+        assert!(matches!(root.recovery(), Err(Error::NotReady)));
+        let select = root.select_prefixes_observed(observed, &[journal]).unwrap();
+        assert!(matches!(root.recovery(), Err(Error::NotReady)));
+        match race {
+            1 => {
+                root.collection().collect().await.unwrap();
+            }
+            2 => {
+                let _next = successor(&provider).await;
+            }
+            _ => {}
+        }
+        let before = provider.calls.load(Ordering::SeqCst);
+        let result = root.finish(select.execute().await).unwrap();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), before + 1);
+        if race == 0 {
+            assert!(matches!(result, Outcome::Confirmed));
+            assert_eq!(provider.record().challenge, Some(challenge));
+            assert_eq!(
+                provider.read().await.unwrap().info["administrative-fixture"],
+                "preserved"
+            );
+            assert!(scan(&mut root).await.is_selected());
+        } else {
+            assert!(matches!(result, Outcome::Conflict));
+            assert!(matches!(root.recovery(), Err(Error::NotReady)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn selection_retry_budget_bounds_fresh_uploads_and_never_confirms_failed_writes() {
+    let provider = Provider::new();
+    let (_old, _late) = source(&provider).await;
+    let mut root = successor(&provider).await;
+    let files = registration::Faults::fail_at(provider.files.clone(), "never/", 0);
+    root.files = files.clone();
+    provider.fail_replacements.store(10, Ordering::SeqCst);
+    let calls = provider.calls.load(Ordering::SeqCst);
+    assert!(root.select_journals().await.is_err());
+    assert_eq!(provider.calls.load(Ordering::SeqCst) - calls, 5);
+    assert_eq!(files.puts.load(Ordering::SeqCst), 15); // Initial plus four fresh retries.
+    assert_eq!(files.frame_reads.load(Ordering::SeqCst), 2);
+    assert!(matches!(root.recovery(), Err(Error::NotReady)));
+    assert!(provider.record().catalog.is_none());
 }
 
 #[tokio::test]
