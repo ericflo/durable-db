@@ -81,8 +81,11 @@ impl Storage for Files {
         }
         if key.starts_with("tables/") && self.faults.pause_checkpoint.swap(false, Ordering::SeqCst)
         {
+            // The immutable object already exists if staging is cancelled.
+            self.inner.put(key, bytes).await?;
             self.faults.entered.notify_one();
             self.faults.release.notified().await;
+            return Ok(());
         }
         if key.starts_with("tables/") && self.faults.fail_checkpoint.load(Ordering::SeqCst) {
             self.faults
@@ -686,6 +689,131 @@ async fn native_http_reads_continue_during_checkpoint_staging_and_recheck_permis
                 StatusCode::OK
             );
         }
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn native_http_handoff_staging_yields_to_writes_but_required_checkpoints_do_not() {
+    for required in [false, true] {
+        let (router, provider, faults, token) = fixture(8, 128).await;
+        create(&router, &token, "app").await;
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                "/v1/databases/app/commit",
+                &token,
+                commit()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        drop(router);
+        let connection = Connection::new(
+            Arc::new(Files {
+                inner: provider.files.clone(),
+                faults: faults.clone(),
+            }),
+            provider.clone(),
+            "test",
+        )
+        .with_upload_budget(crate::upload_budget::UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        })
+        .await
+        .unwrap();
+        connection.fund_claim().await.unwrap();
+        let mut root = connection.root().unwrap();
+        claim(&mut root).await;
+        activate(&mut root).await;
+        root.select_journals().await.unwrap();
+        let owner = Opening::new(
+            root,
+            live::Limits {
+                checkpoint_frames: if required { 1 } else { 128 },
+                ..Default::default()
+            },
+            Arc::new(Cache::new(0, None).unwrap()),
+        )
+        .unwrap()
+        .recover()
+        .await
+        .unwrap();
+        assert_eq!(owner.checkpoint_due(), required);
+        faults.pause_checkpoint.store(true, Ordering::SeqCst);
+        let router = api::router(Arc::new(App::with_rate_limits(
+            Arc::new(Native::new(owner, 8).unwrap()),
+            Auth::new(&"31".repeat(32)).unwrap(),
+            64,
+            RateLimits::new(20000, 20000).unwrap(),
+        )));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/databases/app", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
+            .await
+            .unwrap();
+        assert!(provider.record().checkpoint.is_none());
+        let client = reqwest::Client::new();
+        let mut write = commit();
+        write["request_id"] = json!("after-handoff");
+        write["expected_revision"] = json!(1);
+        write["writes"][0]["value"] = json!("eQ==");
+        let (writer, endpoint, credential, body) =
+            (client.clone(), url.clone(), token.clone(), write.clone());
+        let mut pending = tokio::spawn(async move {
+            tcp_call(
+                &writer,
+                "POST",
+                &format!("{endpoint}/commit"),
+                &credential,
+                body,
+            )
+            .await
+        });
+        if required {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut pending)
+                    .await
+                    .is_err(),
+                "foreground traffic must not cancel a capacity checkpoint"
+            );
+            faults.release.notify_one();
+        }
+        let reply = tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .expect("optional handoff staging must yield to a queued write")
+            .unwrap();
+        assert_eq!(reply.0, StatusCode::OK);
+        assert_eq!(reply.1["revision"], 2);
+        let replay = tcp_call(&client, "POST", &format!("{url}/commit"), &token, write).await;
+        assert_eq!(replay.0, StatusCode::OK);
+        assert_eq!(replay.1["replayed"], true);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while provider
+                .record()
+                .checkpoint
+                .is_none_or(|c| c.cut.prefix.position() != 1)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("idle maintenance must retry with the new journal cut");
+        let read = tcp_call(
+            &client,
+            "POST",
+            &format!("{url}/read"),
+            &token,
+            json!({"expected_revision":2,"keys":["x"]}),
+        )
+        .await;
+        assert_eq!(read.0, StatusCode::OK);
+        assert_eq!(read.1["values"], json!(["eQ=="]));
         server.abort();
         let _ = server.await;
     }

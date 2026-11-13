@@ -24,6 +24,7 @@ pub enum Operation {
     ForwardRequest,
     NativeReadLock,
     NativeRead,
+    NativePrepare,
     AuthorityRead,
     AuthorityReplace,
     ReadBarrier,
@@ -41,7 +42,7 @@ pub enum Operation {
     NativeAuthorize,
     NativeOther,
 }
-const OPERATIONS: [&str; 28] = [
+const OPERATIONS: [&str; 29] = [
     "http_info",
     "http_create",
     "http_read",
@@ -54,6 +55,7 @@ const OPERATIONS: [&str; 28] = [
     "forward_request",
     "native_read_lock",
     "native_read",
+    "native_prepare",
     "authority_read",
     "authority_replace",
     "read_barrier",

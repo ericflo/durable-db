@@ -57,7 +57,12 @@ Expire == /\ live /\ live' = FALSE
    cut, while ordinary reads still seal and validate their committed result.
    Publication/rebase remains exclusive in Rust, as before; Checkpoint and
    collection models retain its separate register and immutable-object rules.
-   Ending also abstracts cancellation before publication: it grants no authority. *)
+   Ending also abstracts cancellation before publication: it grants no authority.
+   Optional handoff staging may end when a foreground command arrives. Its
+   abandoned immutable PUTs may still finish; publication never starts for that
+   cut. Rust retains charges/retry pacing and never yields a required checkpoint.
+   Those scheduling/resource rules are implementation obligations; no new
+   authority or transition is introduced here. *)
 BeginCheckpoint == /\ checkpoint.phase = "idle" /\ live
                    /\ visible > 0 /\ visible = Len(history)
                    /\ checkpoint' = [phase |-> "building", cut |-> visible]

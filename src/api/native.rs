@@ -323,19 +323,38 @@ async fn validate_response(owner: &Owner) -> Result<()> {
 // The worker is the sole mutator. Downgrade during immutable staging so reads
 // keep their existing view; reacquire exclusive access before publication can
 // let collection retire old tables. No second projection or worker is needed.
-async fn maintain(owner: &Resident) -> anyhow::Result<bool> {
+async fn maintain(
+    owner: &Resident,
+    queue: &mut mpsc::Receiver<Command>,
+) -> anyhow::Result<Option<Command>> {
     let mut state = owner.write().await;
+    let required = state.checkpoint_due();
     let Some(mut checkpoint) = state.begin_checkpoint()? else {
-        return Ok(false);
+        return Ok(None);
     };
     let state = RwLockWriteGuard::downgrade(state);
-    let staged = checkpoint.stage(&state).await;
+    let staged = if required {
+        checkpoint.stage(&state).await
+    } else {
+        // Handoff-only work may yield before publication. Immutable uploads
+        // can finish late; their charges and retry pacing remain in force.
+        // Capacity checkpoints and uncertain publications never take this path.
+        tokio::select! {
+            biased;
+            command = queue.recv() => {
+                tracing::info!(owner = %state.identity().incarnation,
+                    "native handoff checkpoint yielded to queued work");
+                return Ok(command);
+            }
+            result = checkpoint.stage(&state) => result,
+        }
+    };
     drop(state);
     let result = match staged {
         Ok(()) => checkpoint.publish(&mut *owner.write().await).await,
         Err(error) => Err(error),
     };
-    checkpoint.finish(result)
+    checkpoint.finish(result).map(|_| None)
 }
 
 async fn run(
@@ -364,6 +383,7 @@ async fn run(
         tokio::time::interval_at(tokio::time::Instant::now() + maintenance, maintenance);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending: Vec<Pending> = Vec::new();
+    let mut queued = None;
     let mut unknown = BTreeSet::new();
     let mut unsent = BTreeMap::new();
     let mut admission = tokio::time::interval(Duration::from_secs(1));
@@ -390,10 +410,17 @@ async fn run(
             result = collections.join_next(), if !collections.is_empty() => {
                 if !matches!(result, Some(Ok((Ok(Ok(_)), _)))) { tracing::warn!("native storage collection deferred"); }
             }
-            command = queue.recv() => {
+            command = async {
+                match queued.take() {
+                    Some(command) => Some(command),
+                    None => queue.recv().await,
+                }
+            } => {
                 let Some(command) = command else { return };
                 if !command.response.send.is_closed() {
-                    let prepared = prepare(&mut *owner.write().await, command.write).await;
+                    let prepared = metrics::measure(Operation::NativePrepare, async {
+                        prepare(&mut *owner.write().await, command.write).await
+                    }).await;
                     match prepared {
                         Ok((ticket, upload)) => {
                             if let Some(upload) = upload {
@@ -505,6 +532,8 @@ async fn run(
         }
         // Reply before maintenance starts, then quiesce new admissions until
         // its cut is published. The retry tick also drives idle/paced work.
-        let _ = maintain(&owner).await;
+        if queued.is_none() {
+            queued = maintain(&owner, &mut queue).await.unwrap_or_default();
+        }
     }
 }
