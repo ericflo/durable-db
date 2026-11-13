@@ -890,6 +890,19 @@ removes its dedicated firewall table on exit. It stays opt-in because ordinary
 CI containers may forbid user/network namespaces. Real-cloud timing and complete
 partition availability require separate evidence in the [results](verification-results.md).
 
+The exact v0.24.21 static binary recovers all **608 acknowledged writes** in the
+shared-Service B2 campaign. Healing takes **18.71s / 22.01s**, and cold recovery
+**41.33s** after readiness. The final bounded logs have established-connection
+failures at 2.21s and 5.42s, with no sampled long forwarding cancellation. Only two
+writers pass the progress check during the two-way hold; repeated failed
+connection attempts still produce long RPC retries. These observations do not establish
+continuous availability or an overall performance improvement. See the
+[comparison and limits](verification-results.md#bound-unacknowledged-peer-traffic-v02421-2026-11-13).
+The same binary recovers another **838 writes** through two rollouts and cold
+restart. Direct readback gaps are **66.73s / 51.97s**, so the first misses 60s;
+the worst commit includes 28 HTTP 503s and 23.51s of backoff. Correct recovered
+histories do not imply that availability targets passed.
+
 HTTP/1 API 503 responses now close their connection after the complete error
 reply, allowing explicit client retries to select another ingress. A real TCP
 test selects an unavailable endpoint for the first connection and an available

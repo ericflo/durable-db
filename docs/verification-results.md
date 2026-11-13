@@ -1,5 +1,89 @@
 # Verification results
 
+## Bound unacknowledged peer traffic (v0.24.21, 2026-11-13)
+
+Forwarding now configures a two-second TCP user timeout on Linux peer sockets.
+Unlike the existing connect timeout, this also applies to unacknowledged traffic
+on a reused connection. Requests acknowledged by the peer's TCP stack retain the
+25-second HTTP deadline. Failure remains uncertain and returns to the caller;
+there is no internal replay, new worker, authority change or storage-format change.
+The implementation adds **four net production lines**. Kernel scheduling and TCP
+retransmission behavior mean the configured timer is not a hard latency bound.
+
+A real-kernel fixture warms a connection, drops its outgoing packets inside an
+isolated Linux network namespace, publishes a replacement route and checks
+capacity release followed by explicit rediscovery. The inherited timeout fails
+the five-second guard; the fix returns in **2.24–2.28s** locally. The existing
+2.1-second acknowledged-response test passes. Shortening the overall deadline to
+two seconds fails its connection-error classification check. All **380 routine
+Rust checks**, formatting and strict clippy pass; the packet-loss fixture is an
+additional opt-in check. OwnerRouting's transitions are unchanged: **728 states**,
+3,197 generated, depth 11 and nine negative controls pass. TCP/kernel behavior
+remains an implementation obligation, not a model proof.
+
+[Woodpecker 352](https://ci.eflorenzano.com/repos/18/pipeline/352/1) verifies the
+static binary from `b60112e`, audits, client/Pi contracts and both 10,005-entry
+capacity fixtures (**212.83s** combined). The downloaded artifact also passes
+installation without a toolchain, transactions/exact retries, ordered reads,
+export/restore and kill/reopen. Builds use kache; Actions remains disabled.
+
+The exact runtime passes the same shared-Service B2 isolation configuration as
+v0.24.20: three existing hosts, 16 partitions, four sequential writers, 30-second
+asymmetric and two-way holds, then total compute loss and cold recovery. Fresh
+and retained peer probes validate both cuts, every pod can still read B2-backed
+control state, and process identities remain unchanged during isolation.
+
+| Observation | v0.24.20 | v0.24.21 |
+| --- | ---: | ---: |
+| Acknowledgements / readbacks / recovered keys | 531 | 608 |
+| Readback increments during asymmetric hold, writers 0–3 | 16 / 14 / 12 / 18 | 16 / 34 / 11 / 16 |
+| Readback increments during two-way hold, writers 0–3 | 1 / 7 / 8 / 1 | 0 / 12 / 21 / 1 |
+| Recovery after asymmetric / two-way healing | 18.31s / 11.22s | 18.71s / 22.01s |
+| Cold recovery after API readiness | 41.17s | 41.33s |
+| Sampled forwarding cancellations of at least 20 seconds | 5 | 0 |
+| Sampled new-connection failures | 28 | 71 |
+
+The new final log sample captures established-connection failures at **2.21s and
+5.42s**, and 71 new-connection failures at **2.000–2.003s**. These are bounded
+samples without request-ID correlation: absence from the sample does not prove
+absence from the run. Only two writers pass the two-readback check during the
+two-way hold. One writer's first following commit takes **65.62s** across **21
+503 replies**, including **16.51s** of backoff; its subsequent read takes 0.08s.
+Shorter transport failure has not solved repeated reachability refusals. The next
+investigation must separate ingress selection, advertised owner reachability
+and actual owner availability during the split, rather than shorten every
+operation deadline.
+
+Recorded data RPCs contain **165 HTTP 503s, one 429 and 57 transport/decode errors**.
+The socket observer identifies 98 of the 165 unavailable responses, with no
+repeated 503 on an identified connection; **67** fall into its bounded overflow
+bucket. The histories differ, and these samples establish neither an overall
+performance improvement nor continuous partition availability. No new AWS or
+MinIO qualification is claimed for this Linux transport change.
+
+The same binary then recovers all **838 acknowledged writes, readbacks and keys**
+through 1→3→6 scaling, two rollouts, zero compute and cold restart. Direct rollout
+readback gaps are **66.73s / 51.97s**: the first misses the 60-second target
+(v0.24.20 recorded 50.88s / 56.88s). The worst first-rollout commit takes **66.39s**,
+including **28 HTTP 503 replies** and **23.51s** of backoff; its readback takes
+0.09s. It has no transport/decode error. This is repeated refusal, not evidence
+that every delay comes from one blocked TCP send. The record cannot attribute the
+miss to the socket change or establish a latency improvement.
+
+Scale-up progress bounds are **51.63s / 17.12s**; cold recovery is **51.03s** after
+API readiness. Whole-rollout bounds are **109.55s / 106.77s**, including serial
+replacement and polling; they do not prove application outages of those lengths.
+The final direct-gap windows have open tails below 0.72s. Data RPCs record **456
+HTTP 503s and 63 transport/decode errors**, with no 429. All four independent
+histories pass. The rollout namespace, scoped key, bucket and **1,544 versions**
+are removed.
+
+The isolation namespace, scoped key, bucket and **1,012 physical versions** are
+removed. Replaced the inherited peer socket timeout and obsolete version-specific
+deployment wording; removed ten model scratch directories while retaining result
+logs. The [evidence record](evidence/native-recovery-2026-11-11.json) pins the
+binary, configuration, histories, model bounds and cleanup.
+
 ## Release unavailable client connections (v0.24.20, 2026-11-13)
 
 An API 503 now finishes its HTTP/1 response with `Connection: close`, allowing
@@ -57,9 +141,9 @@ The two slow writers' first readbacks after the two-way cut spend **25.19s /
 25.18s after acknowledgement**, each including one transport/decode error.
 Bounded server logs also capture forwarded requests cancelled at about 25 seconds.
 These logs lack request-ID correlation; not every delay has the same cause.
-The next experiment targets stalled peer traffic on existing connections while
-preserving the longer operation deadline. All healed/cold targets pass, but
-continuous split availability remains unqualified.
+The v0.24.21 experiment above targets stalled peer traffic on existing
+connections while preserving the longer operation deadline. All healed/cold
+targets pass in this run, but continuous split availability remains unqualified.
 
 The same new binary then recovers all **772 acknowledgements, readbacks and keys**
 through 1→3→6, two rollouts, zero compute and cold restart. Direct rollout gaps

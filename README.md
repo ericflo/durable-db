@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!WARNING]
-> **Experimental. Latest release: v0.24.20. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
+> **Experimental. Latest release: v0.24.21. Not ready for production data.** Read the [release gates](docs/production-readiness.md) and [verification limits](docs/verification.md) before storing anything you cannot lose.
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -142,14 +142,14 @@ This is the contract the first production release must qualify:
 | **Experimental** | Native clustered serving on S3 and B2, DNS membership, owner forwarding and bounded resident state. Namespace upload ceilings, tenant admission and maintenance funding. Production performance, failure qualification and complete cost isolation remain open. |
 | **Not yet** | Production or irreplaceable data. Public multitenant hosting. Scheduled backups and point-in-time recovery. Prebuilt binaries beyond Linux x86_64. |
 
-v0.24.20 closes HTTP/1 connections after an API 503 so explicit retries can
-select another ingress. It retains concurrent HTTP/route shutdown draining.
-The exact binary recovers all **772 acknowledged writes** through B2 scaling,
-two rollouts, total compute loss and cold restart. Direct rollout readback gaps
-are **50.88s / 56.88s**, both below the 60-second fixture target. A separate
-shared-Service isolation run recovers another **531 writes**, but only two of
-four writers meet the progress check during its two-way hold. Roughly 25-second
-forwarding waits remain, alongside 429/503 responses and transport errors.
+v0.24.21 bounds unacknowledged peer traffic on reused connections while retaining
+the 25-second HTTP operation deadline. The exact binary recovers **608 acknowledged
+writes** through shared-Service B2 isolation and another **838** through scaling,
+two rollouts and cold restart. Direct rollout readback gaps are **66.73s / 51.97s**;
+the first misses the 60-second fixture target. Only two of four writers pass the
+progress check during two-way isolation. Faster transport failure has not solved
+repeated reachability refusals; the next experiment compares Service endpoint
+readiness with direct per-pod reads during the split.
 These short samples establish neither an overall performance improvement nor an SLO.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the

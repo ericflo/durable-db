@@ -134,13 +134,21 @@ Use a registry address reachable by the **nodes' container runtime**, not just b
 
 ## Request budgets
 
+Peer forwarding keeps a 25-second HTTP operation deadline and a two-second
+connection deadline. Linux peer sockets also set a two-second TCP user timeout
+for unacknowledged traffic, including reused connections. This is a kernel timer,
+not a hard real-time guarantee or a health/ownership signal. Acknowledged requests
+retain their operation deadline; a missing response still leaves writes uncertain.
+The forwarder returns the failure and releases its slot without replaying. Clients
+must retry the identical write identity. See the [transport checks](verification.md#owner-discovery-and-forwarding).
+
 `--concurrency` bounds admitted tenant HTTP requests. Two additional slots are
 reserved for authenticated budget, access-policy, token and metrics operations; these requests
 retain their per-principal rate/concurrency limits. Budget for at most
 `concurrency + 2` admitted HTTP requests per process. Tenant traffic cannot use
 the control reserve, even with a control-like path or database name.
 
-v0.19.0 exposes two per-principal, per-pod overload settings:
+Two settings control per-principal, per-pod overload:
 
 | Flag | Environment variable | Default | Accepted range |
 | --- | --- | --- | --- |
