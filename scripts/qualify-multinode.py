@@ -433,12 +433,17 @@ Promise.all(JSON.parse(process.argv[1]).map(async ip=>{try{
             time.sleep(3)
         raise RuntimeError('Per-writer acknowledged/readback progress deadline exceeded')
 
-    def rolling(name):
-        def readback_point():
-            state=snapshot()
-            return dict(seconds=state['monotonic_seconds'],verified=state['verified'])
+    def readback_point():
+        state=snapshot()
+        return dict(seconds=state['monotonic_seconds'],verified=state['verified'])
+
+    def start_readbacks(name):
         window=dict(name=name,target_seconds=60,start=readback_point())
         report.setdefault('readback_windows',[]).append(window);save()
+        return window
+
+    def rolling(name):
+        window=start_readbacks(name)
         timing=recovery(name)
         kube('rollout','restart','statefulset/durable-db')
         kube('rollout','status','statefulset/durable-db','--timeout=240s',timeout=270)
@@ -617,8 +622,9 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1))
             for mode in ('asymmetric','symmetric'):
                 phase(mode+'-baseline',network=require_network('connected'),provider_statuses=provider_access(),ingress_observation=ingress_access('connected'))
+                window=start_readbacks(mode+'-peer-isolation')
                 restrict(mode)
-                phase(mode+'-peer-isolation-start',network=require_network(mode),provider_statuses=provider_access())
+                phase(mode+'-peer-isolation-start',network=require_network(mode),provider_statuses=provider_access(),readback_window=window['name'])
                 before=snapshot()['verified']
                 deadline=time.monotonic()+args.peer_hold_seconds
                 while (remaining:=deadline-time.monotonic())>0:
@@ -629,7 +635,9 @@ Promise.all(JSON.parse(process.argv[1]).map(async origin=>{try{
                       before=before,after=after,writer_progress=[b>=a+2 for a,b in zip(before,after)],ingress_observation=ingress_access(mode))
                 timing=recovery(mode+'-peer-isolation-healed')
                 heal();require_network('connected')
-                phase(mode+'-peer-isolation-healed',writes_acknowledged=progress(timing))
+                acknowledged=progress(timing)
+                window['end']=readback_point();save()
+                phase(mode+'-peer-isolation-healed',writes_acknowledged=acknowledged)
             # Stable writer URLs must also reach replacement pods after the
             # final total-compute fault, when the one-off side labels disappear.
             for side in (() if args.peer_ingress=='shared' else ('isolated','majority')):

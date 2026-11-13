@@ -89,6 +89,15 @@ test('checker measures verified readbacks, rejects broken evidence, and preserve
   assert.deepEqual(window.open_readback_gap_seconds, [1, 1, 1, 1]);
   assert.deepEqual(window.readbacks, [2, 2, 2, 2]);
   assert.equal(window.observed_within_target, false);
+  for (const mode of ['asymmetric', 'symmetric']) {
+    const name = `${mode}-peer-isolation`, peer = structuredClone(report);
+    peer.phases = [{name: `${name}-start`, readback_window: name}];
+    peer.readback_windows[0].name = name;
+    const result = await checked(directory, peer, history);
+    assert.deepEqual(result.readback_windows, [{...window, name}], 'hold-wide progress cannot hide a long gap');
+    peer.readback_windows = [];
+    await checked(directory, peer, history, false);
+  }
   const mutations = [
     (_, h) => { h[1].readback_end = null; },
     (_, h) => { h[1].readback_end = true; },

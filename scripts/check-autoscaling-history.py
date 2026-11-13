@@ -2,7 +2,7 @@
 """Check sequential append histories from the Kubernetes qualification harness.
 
 This checks the fixture's identities, invocation order, hashes and recovered
-counts. Schema 2 also checks verified readback times and rollout-window gaps on
+counts. Schema 2 also checks verified readback times and fault-window gaps on
 the workload's single monotonic clock. It is not a general linearizability checker.
 """
 import argparse
@@ -96,9 +96,10 @@ def check(report, raw):
     if schema == 2:
         if len(previous) != 4:
             raise ValueError('Missing writer history')
-        expected = [p['name'] for p in report['phases'] if p['name'].startswith('rolling-replacement')]
+        expected = [p.get('readback_window',p['name']) for p in report['phases']
+                    if 'readback_window' in p or p['name'].startswith('rolling-replacement')]
         if [w['name'] for w in report.get('readback_windows', [])] != expected:
-            raise ValueError('Missing or unexpected rollout readback window')
+            raise ValueError('Missing or unexpected readback window')
         result['readback_windows'] = readback_windows(records, report.get('readback_windows', []))
         result['readback_scope'] = ('Workload monotonic clock only. Completed gaps include the last readback before window start; '
                                     'the open gap ends at the closing observation and is right-censored. '
