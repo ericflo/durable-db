@@ -35,8 +35,9 @@ overall and one idle socket per pool. Active pools are not evicted; local
 capacity refusal returns `DbError` status 429 before sending. HTTPS trust and
 hostname checks remain enabled, and the 35-second request deadline includes
 body reads. Bodies are bounded to 1 MiB. This replaces global fetch pooling;
-it preserves the one-attempt wire contract and identical retry rules. See the
-[SDK guide](../clients/javascript/README.md) for scope and deployment limits.
+it preserves the one-attempt wire contract and identical retry rules. The bounds
+apply to one loaded SDK module, not across Node workers. Pooling cannot guarantee
+availability behind every external proxy or permanent split.
 
 For provisioning with a current source build, persist a creation intent and call `await db.createProtected({request_id, limits})` using administrator credentials. Retry that same object after an unknown outcome. It returns `{info, replayed}` with the original creation info. `db.create(limits)` remains the legacy format-1 operation for compatibility. `db.changeAccess({request_id, expected_policy_revision, change})` exposes the administrative [policy API](api.md#durable-token-revocation) with explicit retry identity. Use `await db.issueToken({write: true, ttl_seconds: 3600})` for a database-scoped application credential. Protected databases return its `token_id` alongside the bearer token for later revocation. Tenant applications receive this scoped token instead of the provisioning credential.
 
