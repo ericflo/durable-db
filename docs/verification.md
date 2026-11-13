@@ -930,9 +930,28 @@ existing exact register/permit protocol; it is neither Rust refinement nor a pro
 of arbitrary-round liveness. RootAcquisition and OwnerRouting remain separate
 checks of acquisition and response authority.
 
-The CLI now closes admission, aborts and joins the cluster scheduler and
-maintenance task, retires every local resident before storage I/O, and
-conditionally withdraws the final resident routes. Four
+The CLI closes admission and signals graceful HTTP shutdown before awaiting
+route withdrawal. Both drains are awaited: HTTP completion cannot cancel a
+pending hint, and withdrawal completion or timeout cannot cancel an admitted
+request. There is no new background worker. This removes the provider-dependent
+window where an already-refusing process still accepted new HTTP connections.
+Socket shutdown remains asynchronously scheduled, not a hard real-time guarantee.
+
+Two real TCP lifecycle regressions hold a backend request and route withdrawal,
+then require the listener and an idle keep-alive connection to close. They test
+both successful withdrawal and its five-second timeout, advancing virtual time
+only after real socket closure. Admitted work survives and process exit waits
+for both drains. The original shutdown order fails the listener-close deadline;
+the corrected checks pass in **0.03s** after compilation. Returning after only
+one drain also fails both checks. All **379 routine Rust checks**, formatting
+and strict clippy pass. The unchanged
+OwnerChallenge transition system checks **3,968 distinct states**, 24,897
+generated, depth 14, and ten fault/coverage controls. Transport closure stutters
+in that model; socket behavior and joining both drains are Rust obligations.
+Exact-runtime cloud qualification is pending.
+
+The cluster aborts and joins its scheduler and maintenance task, retires every
+local resident before storage I/O, and conditionally withdraws the final resident routes. Four
 hints can run concurrently within the CLI's five-second deadline. Each hint
 checks the old incarnation and captures the exact metadata comparison; it neither
 activates that incarnation nor revokes its permit. The existing owner-bound

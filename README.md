@@ -150,6 +150,8 @@ readback gaps are **67.49s / 32.62s**; one misses the 60-second target. Scale-up
 cold recovery meet their targets; whole-rollout bounds still miss, and 429/503
 responses remain. Logs capture 71 confirmations after helper admission. These
 short, different-history samples do not establish an overall improvement or SLO.
+Main also signals HTTP shutdown before awaiting route withdrawal; TCP lifecycle
+checks pass, with exact-runtime cloud qualification pending.
 Continuous split availability, worst-case memory, sustained performance and
 public multitenancy remain open. See the
 [measured results and limits](docs/verification-results.md) and the

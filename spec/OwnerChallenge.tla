@@ -44,6 +44,9 @@ Forget(c) == /\ s.captured[c] >= 0
 \* One shutdown hint captured at revision zero, allowed to arrive arbitrarily late.
 \* The responder stops first. With no route, nonce 3 names returning member 1;
 \* member 2 must join/wait before falling back. This hint never grants authority.
+\* HTTP acceptance may stop before or during withdrawal. Transport shutdown
+\* stutters here; admitted requests still require the separate permit protocol.
+\* Socket closure and bounded drain scheduling are Rust lifecycle obligations.
 Withdraw == /\ s.revision < 4
   /\ (s.revision = 0 \/ Fault = "WithdrawCompare")
   /\ s' = [s EXCEPT !.withdrawn = TRUE, !.nonce = 3, !.alive = FALSE, !.revision = @ + 1]

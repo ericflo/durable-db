@@ -422,25 +422,43 @@ async fn main() -> anyhow::Result<()> {
             }
             let app = Arc::new(app);
             tracing::info!(address = %listen, cluster, "durable-db HTTP listener started");
-            let shutdown_app = app.clone();
-            axum::serve(listener, router(app))
-                .with_graceful_shutdown(async move {
-                    shutdown().await;
-                    shutdown_app.ready.store(false, Ordering::Relaxed);
-                    if tokio::time::timeout(Duration::from_secs(5), shutdown_app.backend.drain())
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("routing withdrawal deadline reached");
-                    }
-                    drop(membership);
-                    tracing::info!("draining requests");
-                })
-                .await?;
+            serve(listener, app, shutdown(), membership).await?;
         }
     }
     Ok(())
 }
+async fn serve(
+    listener: tokio::net::TcpListener,
+    app: Arc<App>,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+    membership: Option<Membership>,
+) -> std::io::Result<()> {
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let http = axum::serve(listener, router(app.clone())).with_graceful_shutdown(async {
+        let _ = stopped.await;
+    });
+    let withdrawal = async move {
+        signal.await;
+        app.ready.store(false, Ordering::Relaxed);
+        // Stop acceptance and idle keep-alives before provider I/O can stall.
+        // Admitted requests and best-effort route withdrawal drain together.
+        let _ = stop.send(());
+        tracing::info!("draining requests");
+        if tokio::time::timeout(Duration::from_secs(5), app.backend.drain())
+            .await
+            .is_err()
+        {
+            tracing::warn!("routing withdrawal deadline reached");
+        }
+        drop(membership);
+        Ok(())
+    };
+    // Keep withdrawal alive even when HTTP has no remaining requests, and
+    // admitted requests alive if withdrawal completes or reaches its bound.
+    tokio::try_join!(async { http.await }, withdrawal)?;
+    Ok(())
+}
+
 fn keygen(path: &Path) -> anyhow::Result<()> {
     let key: [u8; 32] = rand::random();
     write_secret(path, format!("{}\n", hex::encode(key)).as_bytes())
@@ -479,5 +497,178 @@ async fn shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use durable_db::{
+        api::Backend,
+        auth::Access,
+        engine::{ReadRequest, ReadResult},
+    };
+    use std::sync::atomic::AtomicBool;
+    use tokio::{net::TcpStream, sync::Notify};
+
+    #[derive(Default)]
+    struct HeldBackend {
+        read_entered: Notify,
+        read_release: Notify,
+        drain_entered: Notify,
+        drain_release: Notify,
+        drain_stopped: AtomicBool,
+        drain_finished: AtomicBool,
+    }
+    struct Stopped<'a>(&'a AtomicBool);
+    impl Drop for Stopped<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    #[async_trait::async_trait]
+    impl Backend for HeldBackend {
+        async fn memory_bytes(&self) -> usize {
+            0
+        }
+        async fn read(
+            &self,
+            _: &str,
+            _: &ReadRequest,
+            _: &Access,
+        ) -> durable_db::Result<ReadResult> {
+            self.read_entered.notify_one();
+            self.read_release.notified().await;
+            Err(durable_db::Error::NotFound)
+        }
+        async fn drain(&self) {
+            let _stopped = Stopped(&self.drain_stopped);
+            self.drain_entered.notify_one();
+            self.drain_release.notified().await;
+            self.drain_finished.store(true, Ordering::Relaxed);
+        }
+    }
+
+    async fn shutdown_case(expire_withdrawal: bool) {
+        let backend = Arc::new(HeldBackend::default());
+        let auth = Arc::new(Auth::new(&"ab".repeat(32)).unwrap());
+        let token = auth.issue("app".into(), false, 3600).unwrap();
+        let app = Arc::new(App::new(backend.clone(), auth, 4));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let origin = format!("http://{address}");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve(
+            listener,
+            app.clone(),
+            async { stopped.await.unwrap() },
+            None,
+        ));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .retry(reqwest::retry::never())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        // Keep an idle pooled connection as well as an admitted request alive.
+        assert_eq!(
+            client
+                .get(format!("{origin}/health/live"))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "ok"
+        );
+        let request = client
+            .post(format!("{origin}/v1/databases/app/read"))
+            .bearer_auth(&token)
+            .timeout(Duration::from_secs(30))
+            .json(&serde_json::json!({"keys":[]}));
+        let pending = tokio::spawn(async move { request.send().await });
+        tokio::time::timeout(Duration::from_secs(1), backend.read_entered.notified())
+            .await
+            .unwrap();
+        // Warm a second connection while the first request is held.
+        client
+            .get(format!("{origin}/health/live"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        stop.send(()).unwrap();
+        backend.drain_entered.notified().await;
+        assert!(!app.ready.load(Ordering::Relaxed));
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while TcpStream::connect(address).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("listener must close while route withdrawal is still held");
+        assert!(!backend.drain_stopped.load(Ordering::Relaxed));
+        assert!(!server.is_finished());
+        // The existing idle connection must also close, not keep returning 429.
+        assert!(
+            client
+                .post(format!("{origin}/v1/databases/app/read"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({"keys":[]}))
+                .send()
+                .await
+                .is_err()
+        );
+        if expire_withdrawal {
+            // Advance only after real socket shutdown, then resume before I/O.
+            // This must cancel withdrawal, not the still-admitted request.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::time::resume();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !backend.drain_stopped.load(Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!backend.drain_finished.load(Ordering::Relaxed));
+            assert!(!server.is_finished());
+        }
+        backend.read_release.notify_one();
+        assert_eq!(
+            pending.await.unwrap().unwrap().status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+        if !expire_withdrawal {
+            assert!(
+                !server.is_finished(),
+                "HTTP completion must not drop withdrawal"
+            );
+            backend.drain_release.notify_one();
+        }
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(backend.drain_stopped.load(Ordering::Relaxed));
+        assert_eq!(
+            backend.drain_finished.load(Ordering::Relaxed),
+            !expire_withdrawal
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_http_before_withdrawal_and_waits_for_both_drains() {
+        shutdown_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_bounds_withdrawal_without_cancelling_admitted_requests() {
+        shutdown_case(true).await;
     }
 }
