@@ -36,7 +36,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. The next performance qualification increases native B2 concurrency and measures process-resource behavior against the published limits. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) now covers 1/4/16/32 workers. Small-value operations complete, but write tails and conservative tenant precharging remain concrete performance limits. The next work reduces repeated copy prepayment, then qualifies write-path improvements and sustained load. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 
@@ -76,4 +76,4 @@ This fixture uses 64 MiB memory caches, no disk cache, 128 MiB resident allowanc
 
 After a failed measured phase, the harness still checks final state, allowing an uncertain write to be either visible or absent at that read. This does not turn the timed-out operation into a success or establish that a delayed write can never arrive later. A lost-acknowledgement fixture checks failure accounting and identical retry bodies.
 
-This is a closed-loop baseline: each worker waits for its preceding operation. It does not measure queue growth under a fixed arrival rate, establish a p99 SLO from a small sample, measure provider billing, or replace an open-loop overload test and soak campaign. The first B2 run [failed its progress gate](verification-results.md#b2-contention-baseline-release-gate-failed); that older serving path remains a baseline for the native replacement.
+This is a closed-loop baseline: each worker waits for its preceding operation. It does not measure queue growth under a fixed arrival rate, establish a p99 SLO from a small sample, measure provider billing, or replace an open-loop overload test and soak campaign. The current native measurements, including failed large-value and startup cases, are in the [load results](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14).

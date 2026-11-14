@@ -277,6 +277,14 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
             .await
             .unwrap();
         assert_eq!(
+            projection
+                .admission_rewrite_bytes(db, &mutations)
+                .await
+                .unwrap(),
+            copies,
+            "a new checkpoint base needs new prepayment"
+        );
+        assert_eq!(
             copies,
             table_bytes + reference.tree.unwrap().1.size(),
             "deduplicate receipt/value routes to the same table"
@@ -327,8 +335,36 @@ async fn shared_copy_admission_covers_neighbors_new_databases_and_dirty_writes()
                 .await
                 .unwrap(),
             copies,
-            "dirty writes conservatively pay again; no auxiliary paid-table state"
+            "checkpoint construction still claims its full copy allowance"
         );
+        assert_eq!(
+            projection
+                .admission_rewrite_bytes(db, &mutations)
+                .await
+                .unwrap(),
+            0,
+            "committed tombstones also cover an overwrite of the same key"
+        );
+        for (database, key) in [
+            (db, "new-key"),
+            (Database { name: "bee", ..db }, "x"),
+            (
+                Database {
+                    generation: Uuid::from_u128(8),
+                    ..db
+                },
+                "x",
+            ),
+        ] {
+            assert!(
+                projection
+                    .admission_rewrite_bytes(database, &[Mutation { key, value: None }])
+                    .await
+                    .unwrap()
+                    > 0,
+                "new keys, tenants and generations need their own prepayment"
+            );
+        }
         reference = build_projection(&projection, files.clone(), cut())
             .await
             .unwrap();

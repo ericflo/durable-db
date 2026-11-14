@@ -300,12 +300,19 @@ impl Owner {
         let Some(budget) = self.cached_budget(payer)? else {
             return Ok(true);
         };
+        let copies = if database == catalog::CATALOG || !self.reuse_copy_prepayment() {
+            // Catalog entries have different payers. One tenant's committed
+            // creation never prepays another tenant's catalog rewrite.
+            self.projection
+                .checkpoint_rewrite_bytes(database, mutations)
+                .await?
+        } else {
+            self.projection
+                .admission_rewrite_bytes(database, mutations)
+                .await?
+        };
         let bytes = (bytes as u64)
-            .checked_add(
-                self.projection
-                    .checkpoint_rewrite_bytes(database, mutations)
-                    .await?,
-            )
+            .checked_add(copies)
             .context("database admission overflow")?;
         match budget.charge(bytes).await {
             Ok(()) => Ok(true),

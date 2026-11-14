@@ -1,5 +1,67 @@
 # Verification results
 
+## Native B2 load exposes funding and write-tail costs (2026-11-14)
+
+The exact **v1.0.6** release image was tested through a Kubernetes Service on
+three existing hosts. The workload uses the shipped SDK transport, one database
+per worker and one overwritten key per database. It runs 20 operations per worker
+at each concurrency, with writes and reads in separate closed-loop phases.
+Maintenance remains enabled. These short runs establish a baseline, not a
+throughput or latency SLO.
+
+With **1 KiB values and eight admission slots per pod**, all **2,120 measured
+operations** completed and all **32 final database states** verified:
+
+| Workers | Writes/s | Reads/s | Write p95 | Read p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.00 | 12.66 | 1.10s | 85ms |
+| 4 | 4.30 | 33.95 | 1.74s | 164ms |
+| 16 | 6.91 | 90.27 | 2.60s | 164ms |
+| 32 | 9.34 | 141.38 | 4.87s | 163ms |
+
+Elapsed throughput and latency include retries and backoff. The largest write
+latency was **53.18s**. The 32-worker write phase saw 413 HTTP 429 responses and
+15 HTTP 503 responses; each operation ultimately completed. Logs record two
+ambiguous journal uploads followed by owner retirement during the 16/32-worker
+write phases. The provider status behind their `other` classification was not
+captured. These results are poor write performance for the project's target;
+spare CPU and memory do not resolve the I/O and recovery delays.
+
+With **64 KiB values and 32 admission slots per pod**, the 1/4/16-worker phases
+completed. The 32-worker write phase completed **597 of 640** planned writes,
+refused **six with HTTP 413**, and left **37 unstarted**. Its subsequent read phase
+was skipped. All 32 final values/revisions still verified. This run **failed**
+the complete-load check; changing both payload and admission size also prevents
+attributing a performance difference to either setting alone.
+
+A focused repeat used four databases, 100 planned writes each, 64 KiB values and
+the same 64 MiB tenant ceiling. Every writer completed **88 writes**, then received
+`tenant_funding` refusal. All four final states verified. Each ledger had allocated
+its complete **64 MiB**, including **32 MiB** of maintenance reserve; just **873,193
+bytes across two constructions** had been claimed from each reserve. Namespace
+allocation was **40 MiB of 1 GiB**. These are conservative allocation counters,
+not stored bytes or provider billing. The original six 413 responses lacked
+categories; the repeat establishes the funding problem without retroactively
+assigning a category to each earlier response.
+
+The highest sampled per-pod RSS was **7.45 MiB** in the small-value run and
+**26.12 MiB** in the larger-value run. There were **no pod replacements, restarts
+or OOMs**. Containers had two-CPU/768 MiB limits, 64 MiB shared caches, 128 MiB
+resident allowances, 16 partitions, no disk cache and 60-second collection.
+CPU interval samples stayed below 0.04 cores and 0.15 cores respectively.
+Ten-second controller sampling can miss peaks; kubelet timestamps govern the
+CPU calculations. Data cardinality was small, so this is not a resident-capacity
+or long-running memory qualification.
+
+An earlier startup attempt exhausted twelve retries in seven seconds before
+creating a database. Its failure remains in the evidence. The benchmark now
+allows up to 128 attempts within its existing 120-second operation deadline,
+records fixed refusal categories and retains final upload counters. Setup took
+283 seconds in the successful baseline and is excluded from phase throughput.
+No tenant or namespace ceiling was raised during these runs. Each disposable
+namespace, bucket and workload key was removed. The exact source, samples,
+resource counters, failed attempts and cleanup are in the [load evidence](evidence/native-load-2026-11-14.json).
+
 ## Recovery reuses authenticated catalog pages (2026-11-13)
 
 **v1.0.6**, the exact `88c1e7e` artifact from Woodpecker **404**,

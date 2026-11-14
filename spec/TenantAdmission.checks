@@ -5,3 +5,5 @@ unsafe TenantAdmissionUnsafeCopies.cfg tenant-admission-copies 512m ScopeCoverag
 unsafe TenantAdmissionUnsafeRestore.cfg tenant-admission-restore 512m ScopeCoverage
 unsafe TenantAdmissionUnsafeRefund.cfg tenant-admission-refund 512m ScopeCoverage
 unsafe TenantAdmissionUnsafeOwner.cfg tenant-admission-owner 512m ScopeCoverage
+unsafe TenantAdmissionUnsafeReuse.cfg tenant-admission-reuse 512m ScopeCoverage
+unsafe TenantAdmissionReuseCoverage.cfg tenant-admission-coverage 512m NoReuse

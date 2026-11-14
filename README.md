@@ -144,12 +144,12 @@ The 1.0 contract applies within the [supported deployment scope](docs/production
 
 Use one dedicated bucket per deployment, private peer networking and TLS at
 application ingress. Fund upload allowances, set process/replica limits and
-keep independently protected backups. v1.0.6 reuses authenticated catalog pages
-during recovery within the existing cache budget. Its B2 run recovered **385/385**
-acknowledged writes, with a largest scale-down readback gap of **41.31s**,
-which meets the 60-second fixture target. The preceding v1.0.5 run measured
-**41.55s**. These short samples do not establish a general speedup or an
-availability/latency commitment.
+keep independently protected backups. v1.0.6 recovered **385/385** acknowledged
+writes in its scale-down run, with a **41.31s** largest readback gap. Its separate
+32-worker, 1 KiB B2 load baseline completed all operations at **9.34 writes/s**
+and **141.38 reads/s**. Write tails reached **53.18s**; a larger-value run hit
+cumulative funding limits. Write performance and conservative maintenance
+precharging need improvement. These are short fixtures, not SLOs.
 See the [measured results](docs/verification-results.md),
 [operating scope and deferrals](docs/production-readiness.md), and [recovery procedure](docs/recovery.md).
 

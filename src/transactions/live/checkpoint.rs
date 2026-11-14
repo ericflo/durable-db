@@ -44,6 +44,12 @@ pub(crate) struct Checkpoint {
     staged: Option<Publishing>,
 }
 impl Owner {
+    pub(super) fn reuse_copy_prepayment(&self) -> bool {
+        // A failed/cancelled attempt may have spent the previous reserve.
+        // After takeover, first establish this owner's funded checkpoint.
+        !self.maintenance.handoff && self.maintenance.retry.is_none()
+    }
+
     pub(crate) fn files(&self) -> Arc<dyn Storage> {
         self.maintenance.files.clone()
     }

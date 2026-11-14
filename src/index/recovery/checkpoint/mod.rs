@@ -66,6 +66,37 @@ fn copy_contribution(data_bytes: u64) -> u64 {
 }
 
 impl Projection {
+    /// A committed suffix already prepaid the base copies for its changed keys
+    /// and metadata. Repeated overwrites add direct rows, not another base copy.
+    /// Use only for a database with one payer; shared catalog entries differ.
+    pub(crate) async fn admission_rewrite_bytes(
+        &self,
+        database: Database<'_>,
+        mutations: &[Mutation<'_>],
+    ) -> anyhow::Result<u64> {
+        if let Some(resident) = self
+            .databases
+            .get(&(database.name.into(), database.generation))
+        {
+            let base = resident.base.as_ref().map_or(0, DatabaseSnapshot::revision);
+            if resident.state.as_ref().is_some_and(|s| s.revision() > base) {
+                let mut covered = true;
+                for mutation in mutations {
+                    covered &= resident
+                        .memory
+                        .get(mutation.key.as_bytes(), u64::MAX)?
+                        .is_some_and(|row| row.revision > base);
+                }
+                if covered {
+                    return Ok(0);
+                }
+            }
+        }
+        // A newly touched key conservatively pays the full affected routes.
+        // Rebase clears the suffix; recovery rebuilds it from funded commits.
+        self.checkpoint_rewrite_bytes(database, mutations).await
+    }
+
     /// Recompute the attempt allowance from the exact recovered projection.
     /// Old receipts are covered by base copies; only new receipts add rows.
     pub(crate) async fn checkpoint_charges(

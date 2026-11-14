@@ -1492,3 +1492,119 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn repeated_large_overwrites_reuse_copy_prepayment_and_recover() {
+    use crate::{
+        auth::Access,
+        engine::{CommitRequest, CreateRequest, ReadRequest},
+        transactions::live::Limits,
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let provider = Provider::new();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 1024 * 1024 * 1024,
+            attempts: 100_000,
+        })
+        .await
+        .unwrap();
+    let limits = Limits::resident(128 * 1024 * 1024)
+        .unwrap()
+        .share(16)
+        .unwrap();
+    let root = super::checkpoint::budgeted_active(&connection).await;
+    let mut owner = live::open(root, limits).await;
+    let admin = Access::Administrator;
+    let name = "overwrite-load";
+    let ledger = owner.database_budget(name).unwrap().unwrap();
+    ledger
+        .replenish(&UploadRequest {
+            request_id: "fund".into(),
+            expected_configuration_revision: 0,
+            limits: UploadLimits {
+                bytes: 64 * 1024 * 1024,
+                attempts: 10_000,
+            },
+        })
+        .await
+        .unwrap();
+    let mut create = owner
+        .prepare_creation(
+            name,
+            &CreateRequest {
+                request_id: "create".into(),
+                limits: crate::engine::Limits {
+                    max_bytes: 1024 * 1024,
+                    max_keys: 1000,
+                },
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+    owner
+        .complete(create.upload.take().unwrap().send().await)
+        .await
+        .unwrap();
+    owner.maintain().await.unwrap();
+    let mut last = None;
+    for revision in 0..100 {
+        let request: CommitRequest = serde_json::from_value(serde_json::json!({
+            "expected_revision": revision, "request_id": format!("write-{revision:04}"),
+            "writes": [{"key":"value", "value":STANDARD.encode(vec![revision as u8; 64 * 1024])}],
+        }))
+        .unwrap();
+        let mut batch = owner
+            .prepare_authorized(&[(name, &request, &admin)])
+            .await
+            .unwrap();
+        assert!(
+            batch.upload.is_some(),
+            "write {revision} refused under the unchanged 64 MiB ceiling"
+        );
+        owner
+            .complete(batch.upload.take().unwrap().send().await)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner
+                .authorized_result(&batch.tickets[0], &admin)
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            revision + 1
+        );
+        owner.maintain().await.unwrap();
+        last = Some(request);
+    }
+    let status = ledger.status().await.unwrap();
+    assert!(status.allocated.bytes < status.limits.bytes);
+    assert!(status.maintenance.unwrap().allocated.bytes > 0);
+    drop(owner);
+    let mut root = super::checkpoint::budgeted_active(&connection).await;
+    root.select_journals().await.unwrap();
+    let mut owner = live::open(root, limits).await;
+    let request = last.unwrap();
+    let replay = owner
+        .prepare_authorized(&[(name, &request, &admin)])
+        .await
+        .unwrap();
+    assert!(replay.upload.is_none());
+    let result = owner
+        .authorized_result(&replay.tickets[0], &admin)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.replayed);
+    assert_eq!(result.revision, 100);
+    let read: ReadRequest = serde_json::from_value(serde_json::json!({"keys":["value"]})).unwrap();
+    let result = owner.read_authorized(name, &read, &admin).await.unwrap();
+    assert_eq!(result.revision, 100);
+    assert_eq!(
+        result.values,
+        vec![Some(STANDARD.encode(vec![99; 64 * 1024]))]
+    );
+}
