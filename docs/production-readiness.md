@@ -72,7 +72,7 @@ python3 scripts/benchmark-kubernetes.py --disposable \
   --output load-results
 ```
 
-This fixture uses 64 MiB memory caches, no disk cache, 128 MiB resident allowances, eight admitted requests per process, and the manifest's two-CPU/768 MiB container limits. Maintenance runs every 60 seconds. Its 32 databases each receive a 64 MiB/10,000-attempt upload budget; the namespace has a 1 GiB/100,000-attempt ceiling. These are upload admission allowances, not measurements of billed storage. Sampling can miss transient resource peaks, and RSS is not bounded by cache allowances alone.
+This fixture uses 64 MiB memory caches, no disk cache, 128 MiB resident allowances, eight admitted requests per process, and the manifest's two-CPU/768 MiB container limits. Maintenance runs every 60 seconds. Its 32 databases each receive a 64 MiB/10,000-attempt upload budget; the namespace has a 1 GiB/100,000-attempt ceiling. These are upload admission allowances, not measurements of billed storage. Use `--concurrency 32 --value-bytes 65536` for a separate larger-value admission experiment. Sampling can miss transient resource peaks, and RSS is not bounded by cache allowances alone.
 
 After a failed measured phase, the harness still checks final state, allowing an uncertain write to be either visible or absent at that read. This does not turn the timed-out operation into a success or establish that a delayed write can never arrive later. A lost-acknowledgement fixture checks failure accounting and identical retry bodies.
 

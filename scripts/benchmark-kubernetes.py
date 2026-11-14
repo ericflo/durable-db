@@ -20,8 +20,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['context', 'image', 'storage-env-file', 'signing-key-file', 'admin-token-file', 'output']:
         parser.add_argument('--'+name, required=True)
+    parser.add_argument('--concurrency', type=int, default=8)
+    parser.add_argument('--value-bytes', type=int, default=1024)
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
+    if not 1<=args.concurrency<=128 or not 32<=args.value_bytes<=65536:
+        parser.error('Concurrency must be 1..128 and values 32..65536 bytes')
     import re
     if not re.search(r'@sha256:[0-9a-f]{64}$', args.image):
         parser.error('Pin the database image by digest')
@@ -36,7 +40,8 @@ def main():
                   source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
                   scripts_sha256={name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in
                       [__file__,'scripts/benchmark-http.mjs','clients/javascript/transport.mjs']},
-                  configuration=dict(replicas=3, partitions=16, concurrency_per_process=8,
+                  configuration=dict(replicas=3, partitions=16, concurrency_per_process=args.concurrency,
+                      value_bytes=args.value_bytes,
                       memory_cache_mib=64, resident_memory_mib=128, disk_cache=False,
                       cpu_limit='2', memory_limit='768Mi', maintenance_seconds=60,
                       namespace_upload_budget=dict(bytes=1073741824,attempts=100000),
@@ -94,8 +99,8 @@ def main():
                 spec=resource['spec']['template']['spec']
                 spec['topologySpreadConstraints'][0]['whenUnsatisfiable']='DoNotSchedule'
                 container=spec['containers'][0];container['image']=args.image
-                container['args']=[arg for arg in container['args'] if not arg.startswith('--disk-cache')]
-                container['args']+=['--maintenance-seconds=60','--upload-budget-bytes=1073741824','--upload-budget-attempts=100000']
+                container['args']=[arg for arg in container['args'] if not arg.startswith(('--disk-cache','--concurrency='))]
+                container['args']+=[f'--concurrency={args.concurrency}','--maintenance-seconds=60','--upload-budget-bytes=1073741824','--upload-budget-attempts=100000']
                 container['volumeMounts']=[m for m in container['volumeMounts'] if m['name']=='keys']
                 spec['volumes']=[v for v in spec['volumes'] if v['name']=='keys']
             resources.append(resource)
@@ -123,7 +128,7 @@ def main():
         sample()
         command=['node','/work/scripts/benchmark-http.mjs','--urls','http://durable-db:7654',
             '--token-file','/run/credentials/admin.token','--databases','32','--workers','1,4,16,32',
-            '--operations','20','--value-bytes','1024','--upload-budget-bytes','67108864',
+            '--operations','20','--value-bytes',str(args.value_bytes),'--upload-budget-bytes','67108864',
             '--upload-budget-attempts','10000','--output','/output/benchmark.json',
             '--context','Three stock Kubernetes hosts; B2; native release image '+args.image+'; see resources.json for limits and counters.']
         report['command']=command;save()
