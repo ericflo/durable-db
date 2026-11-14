@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!IMPORTANT]
-> **Latest release: v1.0.8.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
+> **Latest release: v1.0.9.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -144,14 +144,16 @@ The 1.0 contract applies within the [supported deployment scope](docs/production
 
 Use one dedicated bucket per deployment, private peer networking and TLS at
 application ingress. Fund upload allowances, set process/replica limits and
-keep independently protected backups. Queued HTTP commits now share bounded
-journal frames. The 32-worker, 64 KiB B2 load matrix completed all **2,120
-operations** and verified all **32 final states**, with unchanged allowances.
-Its 32-worker phase achieved **8.19 writes/s** and **213.53 reads/s**, but write
-p95 was **12.59s**, worse than the previous sample's **9.87s**. The largest write
-took **26.69s**. This remains poor write performance for the project's goal.
-Grouping was sparse; checkpoint/funding stalls and failed-upload recovery need
-further work. The earlier scale-down campaign recovered **385/385**
+keep independently protected backups. Larger attempt grants reduce repeated
+funding publications within the same ceilings, at the cost of more potentially
+stranded credit after crashes. The 32-worker, 64 KiB B2 matrix completed all
+**2,120 operations** and verified all **32 final states**. Its 32-worker phase
+measured **13.32 writes/s** and **2.15s write p95**, versus **8.19 writes/s** and
+**12.59s p95** in the previous sample. Read throughput was **186.54 reads/s**.
+The largest write across the matrix still took **17.91s**; write performance
+remains short of the project's goal. Checkpoint pressure from retained value
+history and failed-upload recovery are the next targets. The earlier scale-down
+campaign recovered **385/385**
 acknowledged writes with a **41.31s** largest readback gap. These are short
 fixtures, not SLOs.
 See the [measured results](docs/verification-results.md),

@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.8, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.9, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -36,7 +36,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) covers 1/4/16/32 workers. [v1.0.7](verification-results.md#repeated-overwrites-reuse-funded-checkpoint-copies-2026-11-14) removes redundant overwrite prepayment; [v1.0.8](verification-results.md#http-commits-share-bounded-journal-frames-2026-11-14) connects bounded grouping to HTTP. Both larger-value matrices complete at unchanged allowances. The new 32-worker phase reaches 8.19 writes/s, but write p95 is 12.59s versus the previous sample's 9.87s. Grouping is sparse, and short runs with different placement/provider conditions cannot establish a general speedup. The next work targets checkpoint/funding stalls under load and failed-upload recovery costs, then sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) covers 1/4/16/32 workers. Recent releases remove redundant overwrite prepayment and connect bounded grouping to HTTP. [v1.0.9](verification-results.md#larger-attempt-grants-reduce-funding-contention-2026-11-14) amortizes funding across more attempts within the same ceilings; a lost process or acknowledgement can strand more credit. Its 32-worker phase reaches 13.32 writes/s and 2.15s write p95, versus the preceding 8.19 writes/s and 12.59s. All operations complete, but the matrix's largest write still takes 17.91s. Different placement/provider conditions and short samples prevent a general performance guarantee. The next work targets checkpoint pressure from retained value history and failed-upload recovery, then sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 

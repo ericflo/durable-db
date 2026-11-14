@@ -1,5 +1,77 @@
 # Verification results
 
+## Larger attempt grants reduce funding contention (2026-11-14)
+
+**v1.0.9**, source `415a70c` from Woodpecker **417**, changes one runtime
+constant: upload allocators grant up to **256 attempts instead of 32**, within
+the same configured ceilings. Byte grants, checkpoint scheduling, journal
+grouping and transport retry rules are unchanged. A larger grant amortizes
+shared metadata publication but can strand more unused credit after process
+loss or an unknown grant reply. Credit is never restored or refunded. See
+[the admission contract](design-upload-admission.md#format-and-operation).
+
+The exact downloaded binary/image completes all **2,120 measured operations**
+and verifies all **32 final values/revisions** in the unchanged **64 KiB / 32
+admission slots / 32 databases** B2 matrix:
+
+| Workers | Writes/s | Reads/s | Write p95 | Read p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.06 | 11.32 | 896ms | 94ms |
+| 4 | 4.26 | 35.73 | 1.20s | 174ms |
+| 16 | 8.27 | 110.82 | 1.36s | 217ms |
+| 32 | 13.32 | 186.54 | 2.15s | 243ms |
+
+The 32-worker write phase improves from [v1.0.8's](#http-commits-share-bounded-journal-frames-2026-11-14)
+**8.19 writes/s and 12.59s p95**. It has nine HTTP 429 responses and no HTTP 503
+responses before every write completes. Grouping is sparse: **1,125 prepared
+records in 1,089 frames**, versus 1,065 frames previously. The gains therefore
+do not coincide with larger batches. These counters include setup/catalog work
+and frames whose uploads fail; they are not successful PUTs or billed operations.
+
+The 16-worker phase is slightly slower overall than the previous sample's
+8.80 writes/s. One ambiguous upload retires an owner during that phase, which
+records 20 HTTP 503 responses and the matrix's largest write, **17.91s**.
+The 32-worker largest write is **13.34s**. Different database placement and
+provider conditions prevent attributing every difference to grant sizing or
+claiming a general throughput/latency guarantee.
+
+The busiest phase logs **13 completed checkpoints**, reaching **10.55s**, and
+successful preparation reaches **6.11s**. It records 46 slow successful shared
+publications and no slow failed publications, versus 109 and ten previously.
+The phase also ends sooner, and the timers overlap; this is diagnostic evidence
+of reduced contention, not a complete client-time or provider-call breakdown.
+Maintenance still stalls writes for several seconds.
+
+A separate in-memory reproduction identifies the next target. With the same
+resident allowance and partition count, repeatedly overwriting one **64 KiB**
+value triggers checkpoints at revisions **41 and 82**: retained versions occupy
+about **2.56 MiB**, crossing half the partition's **5.12 MiB** value allowance. The
+current user value is still only 64 KiB. Safe reclamation of superseded versions,
+preserving snapshot rules and receipts, is follow-up work; this release does
+not implement it. The temporary usage instrumentation was removed immediately.
+
+A focused regression makes **100 uploads of 64 KiB with one funding
+publication**, versus four with the old constant. After process loss, the
+unused **156 attempts** remain unavailable; the replacement can use only the
+remaining **44** under the unchanged **300-attempt ceiling**. All **21 budget
+tests** pass in **0.38s**, along with **394 enabled Rust tests**, formatting,
+strict Clippy and Woodpecker's audits/client/Pi/capacity checks. The existing
+`UploadCredits` model retains **11,006 states**, with five passing negative
+controls and no new state variables. It remains a bounded component check,
+not Rust refinement or a composed protocol proof.
+
+Setup takes **305.33s**, excluded from measured throughput. Peak sampled
+per-pod RSS is **22.97 MiB**, the maximum sampled CPU interval is **0.144 cores**,
+and no pod restarts or replacements occur. These short, closed-loop samples
+do not qualify sustained load, open-loop overload, p99 or availability SLOs.
+
+The [exact evidence](evidence/attempt-grants-2026-11-14.json) retains samples,
+funding/maintenance observations, the checkpoint reproduction, source and
+artifact hashes, and cleanup. The namespace, bucket and test key are removed;
+cleanup deletes **438 remaining physical versions** after automatic collection.
+The old grant setting and its obsolete documentation are replaced; model scratch
+is removed. The existing 1.0 support scope is unchanged.
+
 ## HTTP commits share bounded journal frames (2026-11-14)
 
 **v1.0.8**, source `ddd9b4e` from Woodpecker **414**, connects the HTTP worker
