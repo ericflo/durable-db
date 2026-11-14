@@ -124,6 +124,12 @@ impl DiskCache {
         if size > self.budget.min(DISK_OBJECT_BYTES) {
             return;
         }
+        // A table never changes, and one that a read missed while it was
+        // being fetched is fetched again. It is here already: writing it
+        // again would count its bytes twice.
+        if fs::metadata(self.path(key)).is_ok_and(|meta| meta.len() == size) {
+            return;
+        }
         let tmp = self.dir.join(format!(
             "tmp-{}-{}",
             std::process::id(),

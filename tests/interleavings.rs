@@ -854,9 +854,7 @@ async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
 
     gate.clear();
     gate.release(Op::Get);
-    // Every table reaches the disk: a pass of reads then misses none. The
-    // bytes the cache counts do not say so, because a table that is fetched
-    // twice is counted twice until the cache is next trimmed.
+    // Every table reaches the disk: a pass of reads then misses none.
     let misses = || disk.misses.load(std::sync::atomic::Ordering::Relaxed);
     let filled = async {
         loop {
@@ -871,7 +869,11 @@ async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
     tokio::time::timeout(Duration::from_secs(60), filled)
         .await
         .expect("every table reaches the disk cache");
-    assert!(disk.used() >= tables.len() as u64 * SIZE);
+    // A table that a read missed while it was being fetched is fetched
+    // again, and one that is put there twice is counted once.
+    let body = Bytes::from(vec![7u8; SIZE as usize]);
+    io.remember(&tables[0], body).await;
+    assert_eq!(disk.used(), tables.len() as u64 * SIZE);
 }
 
 /// A store may decline a spare upload. That stores nothing: the commit waits
