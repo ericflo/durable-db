@@ -9,7 +9,7 @@ const out = new URL('.site/', root);
 const repository = 'https://github.com/ericflo/durable-db';
 
 // The explicit public whitelist, in reading order: [page, label, source, summary].
-// Only these documents are published. docs/integration.md must never be added.
+// Only these documents are published.
 const pages = [
   ['deployment', 'Deployment', 'docs/deployment.md', 'Install, run on one machine, on a bucket and on Kubernetes. Configuration, tokens and operations.'],
   ['api', 'HTTP API', 'docs/api.md', 'Reads, scans, commits, checks, idempotency keys, errors and limits.'],

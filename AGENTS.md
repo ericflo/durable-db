@@ -27,6 +27,6 @@ Cap heavy jobs. TLC, load tests and anything else that can grow must run with ex
 
 ## Tooling
 
-Use [kache](https://github.com/kunobi-ninja/kache) for all Rust builds, with the pinned toolchain; keep the kache client and engine versions together. CI, releases and website publication run on the owner's Woodpecker. Never add GitHub Actions workflows or enable Actions builds: they cost the owner credits. Documentation is Markdown in `docs/`; the website is generated from it by `site/` and published to GitHub Pages. Keep service-specific integration planning only in `docs/integration.md`, which is not published.
+Use [kache](https://github.com/kunobi-ninja/kache) for all Rust builds, with the pinned toolchain; keep the kache client and engine versions together. CI, releases and website publication run on the owner's Woodpecker. Never add GitHub Actions workflows or enable Actions builds: they cost the owner credits. Documentation is Markdown in `docs/`; the website is generated from it by `site/` and published to GitHub Pages. Keep service-specific integration planning out of the repository, in the ignored `.dev/integration/`.
 
 Ship verified milestones as releases; state their scope and limits honestly, and keep the installer and docs current.
