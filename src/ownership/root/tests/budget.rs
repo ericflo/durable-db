@@ -309,6 +309,97 @@ async fn native_budget_unknown_grant_and_late_upload_never_refund_credit() {
 }
 
 #[tokio::test]
+async fn tenant_grant_readback_confirms_once_and_cancellation_strands_credit() {
+    use crate::upload_budget::Allocator;
+    let provider = Provider::new();
+    let connection = provider
+        .connection("test")
+        .with_upload_budget(UploadLimits {
+            bytes: 1024 * 1024,
+            attempts: 1024,
+        })
+        .await
+        .unwrap();
+    let root = connection.root().unwrap();
+    for name in ["confirmed", "cancelled", "unsent"] {
+        root.database_budget(name)
+            .unwrap()
+            .unwrap()
+            .replenish(&UploadRequest {
+                request_id: "fund".into(),
+                expected_configuration_revision: 0,
+                limits: UploadLimits {
+                    bytes: 200,
+                    attempts: 3,
+                },
+            })
+            .await
+            .unwrap();
+    }
+    let confirmed = root.database_budget("confirmed").unwrap().unwrap();
+    let calls = provider.calls.load(Ordering::SeqCst);
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    confirmed.charge(40).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 1);
+    confirmed.charge(20).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 1);
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    Allocator::fund_maintenance(&[(confirmed.clone(), 30)], |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls + 2);
+    assert_eq!(
+        confirmed
+            .status()
+            .await
+            .unwrap()
+            .maintenance
+            .unwrap()
+            .allocated,
+        UploadLimits {
+            bytes: 30,
+            attempts: 1
+        }
+    );
+    confirmed.charge(40).await.unwrap();
+    assert!(
+        confirmed.charge(1).await.is_err(),
+        "readback must not double the grant"
+    );
+
+    let cancelled = root.database_budget("cancelled").unwrap().unwrap();
+    provider.pause.store(true, Ordering::SeqCst);
+    let task = {
+        let cancelled = cancelled.clone();
+        tokio::spawn(async move { cancelled.charge(50).await })
+    };
+    provider.entered.notified().await;
+    provider.pause_all_reads.store(true, Ordering::SeqCst);
+    provider.lose_reply.store(true, Ordering::SeqCst);
+    provider.release.notify_one();
+    provider.entered.notified().await; // Exact-root readback is now in flight.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    provider.pause_all_reads.store(false, Ordering::SeqCst);
+    assert!(cancelled.charge(1).await.is_err());
+    for name in ["confirmed", "cancelled"] {
+        let reopened = root.database_budget(name).unwrap().unwrap();
+        assert!(
+            reopened.charge(1).await.is_err(),
+            "restart cannot rediscover rights"
+        );
+        assert_eq!(reopened.status().await.unwrap().allocated.bytes, 200);
+    }
+
+    let unsent = root.database_budget("unsent").unwrap().unwrap();
+    provider.fail_replacements.store(1, Ordering::SeqCst);
+    assert!(unsent.charge(100).await.is_err());
+    assert_eq!(unsent.status().await.unwrap().allocated.bytes, 0);
+    unsent.charge(100).await.unwrap();
+    assert!(unsent.charge(1).await.is_err());
+}
+
+#[tokio::test]
 async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
     let provider = Provider::new();
     let connection = provider
@@ -385,8 +476,11 @@ async fn database_budget_isolation_lost_reply_reopen_and_directory_split() {
     })
     .await
     .unwrap();
+    // A stale observation cannot confirm this fresh grant.
+    *provider.stale.lock().unwrap() = Some(provider.history.lock().unwrap().len() - 1);
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(d.charge(50).await.is_err());
+    *provider.stale.lock().unwrap() = None;
     assert!(
         d.charge(50).await.is_err(),
         "a lost allocation response creates no local rights"
@@ -1111,12 +1205,15 @@ async fn maintenance_reserve_survives_uncertainty_and_takeover_without_reissuing
             .bytes,
         40
     );
+    // A stale observation cannot confirm this fresh grant.
+    *provider.stale.lock().unwrap() = Some(provider.history.lock().unwrap().len() - 1);
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(
         Allocator::fund_maintenance(&[(a.clone(), 40), (b.clone(), 40)], check)
             .await
             .is_err()
     );
+    *provider.stale.lock().unwrap() = None;
     for budget in [&a, &b] {
         let reserve = budget.status().await.unwrap().maintenance.unwrap();
         assert_eq!(
@@ -1323,6 +1420,8 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
         Err(crate::Error::NotFound)
     ));
 
+    // A stale observation cannot confirm this fresh grant.
+    *provider.stale.lock().unwrap() = Some(provider.history.lock().unwrap().len() - 1);
     provider.lose_reply.store(true, Ordering::SeqCst);
     assert!(
         owner
@@ -1330,6 +1429,7 @@ async fn catalog_admission_charges_creation_without_blocking_policy_revocation()
             .await
             .is_err()
     );
+    *provider.stale.lock().unwrap() = None;
     let refused = owner
         .prepare_creation("lost", &create, &admin)
         .await

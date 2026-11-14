@@ -318,7 +318,7 @@ impl Allocator {
             }
             record.status.allocated.attempts += grant.attempts;
             if self.publish(&before, &record).await? {
-                // An unknown CAS result exits above without adding any
+                // An unresolved CAS result exits above without adding any
                 // unconfirmed local rights. Unused rights remain volatile.
                 *remaining = UploadLimits {
                     bytes: remaining.bytes + grant.bytes,

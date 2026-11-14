@@ -1,3 +1,5 @@
 # kind config log-tag heap expected-counterexample
 safe PublicationRetry.cfg retry 1g -
 unsafe UnsafePublicationRetry.cfg retry-unsafe 1g ReferencedManifestExists
+unsafe PublicationRetryConfirmOther.cfg retry-confirm-other 1g ConfirmedOnce
+unsafe PublicationRetryConfirmTwice.cfg retry-confirm-twice 1g ConfirmedOnce

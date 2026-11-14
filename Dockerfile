@@ -59,7 +59,7 @@ RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locke
     && rm -rf .tools/tlc-* && touch /checks/passed
 
 FROM model-tools AS model-publicationretry
-COPY spec/PublicationRetry.tla spec/PublicationRetry.checks spec/PublicationRetry.cfg spec/UnsafePublicationRetry.cfg spec/
+COPY spec/PublicationRetry.tla spec/PublicationRetry.checks spec/PublicationRetry*.cfg spec/UnsafePublicationRetry.cfg spec/
 RUN --mount=type=cache,id=durable-db-model-lock,target=/model-lock,sharing=locked \
     scripts/check-model.sh PublicationRetry && mkdir -p /checks && cp .tools/model-*.log /checks/ \
     && rm -rf .tools/tlc-* && touch /checks/passed

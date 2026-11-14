@@ -1749,12 +1749,18 @@ async fn native_http_database_budget_refuses_before_journal_and_preserves_neighb
         tcp_call(&client, "POST", &budget, &token, exact).await.0,
         StatusCode::OK
     );
+    // The first write after checkpointing needs a new tenant byte grant.
+    // Losing its publication reply must not force a 503 or a second grant
+    // when the original fresh ledger root is positively observed.
+    provider.lose_reply.store(true, Ordering::SeqCst);
     assert_eq!(
         tcp_call(&client, "POST", &a, writer, commit()).await.0,
         StatusCode::OK
     );
+    assert!(!provider.lose_reply.load(Ordering::SeqCst));
     let (status, before) = tcp_call(&client, "GET", &budget, &token, json!({})).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["allocated"]["bytes"], first_admission);
     assert_eq!(
         before["limits"]["attempts"], 3,
         "creation preserved the administrative ceiling"

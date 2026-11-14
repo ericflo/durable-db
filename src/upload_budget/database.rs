@@ -111,8 +111,25 @@ impl Ledger {
             let mut info = comparison.info.clone();
             info.insert(FIELD.into(), directory.clone());
             crate::publication::budget(&info)?;
-            if authority.replace(&comparison, info).await?.is_some() {
-                return Ok(true);
+            match authority.replace(&comparison, info).await {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) => (),
+                Err(error) => {
+                    // Every staged ledger has a fresh identity. Only this live
+                    // invocation can confirm its exact directory once; counters
+                    // or another root cannot reconstruct a grant. No PUT retry.
+                    if let Ok(observed) = authority.read().await
+                        && root(&observed).is_ok()
+                        && check(&observed).is_ok()
+                        && observed.info.get(FIELD) == Some(&directory)
+                    {
+                        tracing::info!(
+                            "tenant ledger publication confirmed by exact root readback"
+                        );
+                        return Ok(true);
+                    }
+                    return Err(error);
+                }
             }
             comparison = authority.read().await?;
             check(&comparison)?;
@@ -194,7 +211,8 @@ impl Allocator {
     }
 
     /// Atomically claim every tenant's allowance before any checkpoint PUT.
-    /// A lost reply strands the entire attempt. No observation recreates it.
+    /// An unresolved reply strands the attempt. Only the originating invocation
+    /// can confirm its fresh directory; reopening never recreates rights.
     pub(crate) async fn fund_maintenance(
         charges: &[(Arc<Self>, u64)],
         check: impl Fn(&Bucket) -> anyhow::Result<()>,
