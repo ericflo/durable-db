@@ -176,9 +176,11 @@ fn message(body: &Value) -> &str {
     body["error"]["message"].as_str().unwrap_or_default()
 }
 
-/// Wait until `holds`, or fail with `what`.
+/// Wait until `holds`, or fail with `what`. Nothing a test waits for takes
+/// a second on the machine these were written on; the limit is for one many
+/// times slower.
 async fn eventually(what: &str, holds: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !holds() {
         assert!(Instant::now() < deadline, "never happened: {what}");
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -658,32 +660,55 @@ async fn a_read_is_refused_when_its_result_passes_the_limit_not_after() {
     .await;
 }
 
-#[tokio::test]
-async fn an_answer_nobody_reads_is_not_kept() {
-    let server = Server::start(ApiLimits {
-        max_read_total: 80 << 20,
-        stall_timeout: Duration::from_secs(1),
-        ..limits()
-    })
-    .await;
-    let token = server.create("app").await;
-    let commit = format!("{}/commit", server.db("app"));
+/// A server whose database `app` holds 24 values of 1 MiB, a token for it,
+/// and a request for all of them. A scan answers with a part at a time; keys
+/// asked for by name all come in one answer, which is more than a connection
+/// takes in when its caller reads nothing.
+async fn large(servers: &[Server]) -> (String, String) {
+    let token = servers[0].create("app").await;
+    let owner = servers
+        .iter()
+        .find(|server| server.app.node.serving("app"))
+        .unwrap();
+    let commit = format!("{}/commit", owner.db("app"));
     let value = "v".repeat(1 << 20);
     for i in 0..24 {
         let write = json!({"writes": [{"key": format!("k{i:02}"), "value": value}]});
         assert_eq!(call("POST", &commit, &token, Some(write)).await.0, 200);
     }
-    let request = |body: String| {
-        format!(
-            "POST /v1/databases/app/read HTTP/1.1\r\nhost: x\r\nauthorization: Bearer {token}\r\ncontent-length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    };
-    // A scan answers with a part at a time; keys asked for by name all come.
     let keys: Vec<String> = (0..24).map(|i| format!("k{i:02}")).collect();
-    let everything = request(json!({"keys": keys}).to_string());
+    let everything = read_request(&token, json!({"keys": keys}));
+    (token, everything)
+}
+
+fn read_request(token: &str, body: Value) -> String {
+    let body = body.to_string();
+    format!(
+        "POST /v1/databases/app/read HTTP/1.1\r\nhost: x\r\nauthorization: Bearer {token}\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// These servers never give up on a caller that does not read, so that
+/// what such a caller holds stays held for as long as a test looks at it,
+/// however slow the machine.
+fn patient() -> ApiLimits {
+    ApiLimits {
+        stall_timeout: Duration::from_secs(3600),
+        ..limits()
+    }
+}
+
+#[tokio::test]
+async fn an_answer_that_waits_to_be_read_is_counted() {
+    let server = Server::start(ApiLimits {
+        max_read_total: 80 << 20,
+        ..patient()
+    })
+    .await;
+    let (token, everything) = large(std::slice::from_ref(&server)).await;
     let held = || server.app.results.in_use().0;
-    // Callers that ask for 24 MiB and never take it. Each answer is counted
+    // Callers that ask for 24 MiB and do not take it. Each answer is counted
     // twice while it is put together, and once while it waits to be sent.
     let mut idle = Vec::new();
     for waiting in 1..=2 {
@@ -702,23 +727,16 @@ async fn an_answer_nobody_reads_is_not_kept() {
     assert!(message(&body).contains("too many read results"));
     assert_eq!(server.rejected(), 1);
     let (status, body) = server
-        .raw(&request(json!({"keys": ["absent", "k00"]}).to_string()))
+        .raw(&read_request(&token, json!({"keys": ["absent", "k00"]})))
         .await;
     assert_eq!(status, 200);
     assert_eq!(body["values"][0], Value::Null);
-    // The connections are closed once nothing has been taken for a while,
-    // and what they held is free again.
-    let started = Instant::now();
+    // When the callers go away, what was kept for them is free again.
+    drop(idle);
     eventually("the results are released", || {
         server.app.results.in_use() == (0, 0)
     })
     .await;
-    assert!(started.elapsed() < Duration::from_secs(4));
-    for mut stream in idle {
-        let mut rest = Vec::new();
-        let _ = stream.read_to_end(&mut rest).await;
-        assert!(rest.len() < 24 << 20, "the answer was cut short");
-    }
     let (status, body) = server.raw(&everything).await;
     assert_eq!(status, 200);
     assert_eq!(body["values"].as_array().unwrap().len(), 24);
@@ -729,26 +747,42 @@ async fn an_answer_nobody_reads_is_not_kept() {
 }
 
 #[tokio::test]
+async fn an_answer_nobody_reads_is_not_kept() {
+    let server = Server::start(ApiLimits {
+        stall_timeout: Duration::from_millis(500),
+        ..limits()
+    })
+    .await;
+    let (_, everything) = large(std::slice::from_ref(&server)).await;
+    // A caller asks for 24 MiB, stays connected and reads nothing. While the
+    // answer waits for it nothing else happens here, so this sees it wait.
+    let mut idle = server.connect().await;
+    idle.write_all(everything.as_bytes()).await.unwrap();
+    let most = std::cell::Cell::new(0);
+    eventually("the result waited and was released", || {
+        let held = server.app.results.in_use().0;
+        most.set(most.get().max(held));
+        held == 0 && most.get() >= 24 << 20
+    })
+    .await;
+    // The server closed the connection: the answer was cut short.
+    let mut rest = Vec::new();
+    let _ = idle.read_to_end(&mut rest).await;
+    assert!(rest.len() < 24 << 20, "the whole answer was sent");
+    // Read normally, it arrives whole.
+    let (status, body) = server.raw(&everything).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["values"].as_array().unwrap().len(), 24);
+}
+
+#[tokio::test]
 async fn a_relayed_answer_is_counted_where_it_waits() {
-    let servers = Server::cluster(2, limits()).await;
-    let token = servers[0].create("app").await;
+    let servers = Server::cluster(2, patient()).await;
+    let (_, everything) = large(&servers).await;
     let owner = (0..2)
         .find(|i| servers[*i].app.node.serving("app"))
         .unwrap();
     let relay = &servers[1 - owner];
-    let commit = format!("{}/commit", servers[owner].db("app"));
-    let value = "v".repeat(1 << 20);
-    for i in 0..24 {
-        let write = json!({"writes": [{"key": format!("k{i:02}"), "value": value}]});
-        assert_eq!(call("POST", &commit, &token, Some(write)).await.0, 200);
-    }
-    // A scan answers with a part at a time; keys asked for by name all come.
-    let keys: Vec<String> = (0..24).map(|i| format!("k{i:02}")).collect();
-    let body = json!({"keys": keys}).to_string();
-    let everything = format!(
-        "POST /v1/databases/app/read HTTP/1.1\r\nhost: x\r\nauthorization: Bearer {token}\r\ncontent-length: {}\r\n\r\n{body}",
-        body.len()
-    );
     let mut idle = relay.connect().await;
     idle.write_all(everything.as_bytes()).await.unwrap();
     eventually("the relayed result is held by the relay", || {
@@ -757,8 +791,16 @@ async fn a_relayed_answer_is_counted_where_it_waits() {
     })
     .await;
     assert!(!relay.app.node.serving("app"));
-    eventually("and released when nobody takes it", || {
-        relay.app.results.in_use() == (0, 0) && servers[owner].app.results.in_use() == (0, 0)
+    // The owner has sent it and holds nothing; the relay does until the
+    // caller takes it or goes away.
+    eventually("the owner has sent it", || {
+        servers[owner].app.results.in_use() == (0, 0)
+    })
+    .await;
+    assert!(relay.app.results.in_use().0 >= 24 << 20);
+    drop(idle);
+    eventually("and released when the caller goes away", || {
+        relay.app.results.in_use() == (0, 0)
     })
     .await;
     // Read normally, it arrives whole.

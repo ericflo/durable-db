@@ -21,6 +21,7 @@ cargo test                            # about 30 seconds
 scripts/check-model.sh                # the TLA+ model and its negative controls
 scripts/test-clients.sh               # the TypeScript SDK, pi-durable adapter and example
 scripts/soak-memory.sh                # a server under the manifest's memory limit, loaded for three minutes
+scripts/test-slow.sh                  # every test alone on 28% of a processor, as on a slow build machine
 ```
 
 | Suite | What it covers |
