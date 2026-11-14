@@ -19,7 +19,7 @@ curl localhost:7654/v1/databases/demo/keys/greeting -H "Authorization: Bearer $T
 
 - **It scales like a web server.** A Kubernetes Deployment with no volumes and an ordinary autoscaler. No consensus cluster, no leader election service, no leases, no synchronized clocks.
 - **It needs almost nothing from storage.** PUT, GET, LIST and DELETE with read-after-write consistency. No conditional writes, which Backblaze B2 does not have, so B2 and S3 run the same algorithm.
-- **It is small enough to read.** About 7,700 lines of Rust, one TLA+ model, and a protocol you can hold in your head: immutable objects, one writer per database holding a claim, and a check of that claim before every acknowledgement.
+- **It is small enough to read.** About 9,800 lines of Rust, one TLA+ model, and a protocol you can hold in your head: immutable objects, one writer per database holding a claim, and a check of that claim before every acknowledgement.
 
 ## Quick start
 
@@ -97,13 +97,13 @@ Measured with the built-in `durable-db bench`, 256-byte values, one server. [Ful
 
 | | Local directory, fsync on | Backblaze B2, 22 ms away |
 | --- | ---: | ---: |
-| One commit | 5.9 ms | 118 ms |
-| Commits/s, 256 clients on one database | 17,166 | 866 |
-| Commits/s, 64 clients over 64 databases | 5,310 | 314 |
-| Strong reads/s, 256 clients | 335,187 | 6,342 (39 ms each) |
-| Session reads/s, 32 clients | 276,569 | 244,743 (0.11 ms each) |
+| One commit | 5.2 ms | 76 ms |
+| Commits/s, 256 clients on one database | 17,067 | 1,117 |
+| Commits/s, 64 clients over 64 databases | 5,488 | 177 |
+| Strong reads/s, 256 clients | 379,480 | 6,610 (38 ms each) |
+| Session reads/s, 32 clients | 301,523 | 263,257 (0.10 ms each) |
 
-On a bucket, a commit costs one upload and one HEAD, so the provider's upload time is the floor. B2's upload time varies by a factor of two between hours and far more between its storage pods; durable-db races identical uploads to different pods and keeps the ones that prove fast. Many clients share each upload, which is why throughput rises with load while latency does not.
+On a bucket, a commit costs one upload and one HEAD, so the provider's upload time is the floor. B2's upload time varies by a factor of two between hours and far more between its storage pods; durable-db races identical uploads to different pods and keeps the ones that prove fast. Many clients share each upload, which is why throughput rises with load while latency does not. Many databases committing at once share nothing, and that is where B2 was slowest: with 64 of them one commit in a hundred took over two seconds.
 
 ## On a bucket
 
@@ -123,7 +123,7 @@ kubectl -n durable-db create secret generic durable-db-storage --from-literal=DU
 kubectl -n durable-db apply -k deploy/kubernetes
 ```
 
-A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in the recorded run the autoscaler went from 2 to 3 pods and back, one pod was force-deleted, and a ledger of 18,838 transfers balanced exactly with no failed request.
+A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in the recorded run the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and a ledger of 20,933 transfers balanced exactly. A read load without retries ran alongside: 102 of its 13 million reads failed, with a pod deleted under them.
 
 ## Verification
 
@@ -135,14 +135,15 @@ Bounded model checking is not a proof of the implementation. [Verification](docs
 
 ## Limits and status
 
-Release 2.0.0 is a complete rewrite; earlier releases used a different design and storage format.
+Release 2.0.0 was a complete rewrite; earlier releases used a different design and storage format. Release 2.1.0 keeps the format, fixes what a review of 2.0.0 found, and limits what one caller or one database can cost a server. The read figures published with 2.0.0 were not those of the binary it shipped: [performance](docs/performance.md) has the correction.
 
 - One server writes a database at a time. Spread load over databases, not over servers per database.
 - Transactions do not span databases. There are no historical reads and no point-in-time restore.
 - A deleted database's name cannot be reused.
-- A database should fit in a server's memory when merged; the default quota is 1 GiB.
+- A database is rewritten in full each time it grows by half. The default quota is 1 GiB; larger databases have not been measured.
 - Among cloud stores only Backblaze B2 has been exercised. Amazon S3 and others share the code but are untested.
-- No soak of many hours on a real multi-node cluster yet, and no independent review.
+- With many databases committing at once on B2, one commit in a hundred took over two seconds in the last measurement.
+- Memory was measured for minutes on a local directory, not for hours and not on a bucket. No soak of many hours on a real multi-node cluster yet, and no independent review.
 - The prebuilt binary is Linux x86_64. The repository is private for now, so the installer uses the `gh` CLI.
 
 ## Documentation

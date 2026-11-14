@@ -100,6 +100,8 @@ A scan selects keys by any combination of:
 
 `next` is the last key returned when more keys remain, otherwise `null`. A page also ends early at 8 MiB. Fields that together select nothing, such as a `start` that follows the `end`, give an empty page.
 
+One read returns at most 64 MiB of keys and values. A read that would return more is refused with `400` as soon as it passes that, without the rest being fetched: ask for fewer keys, or page through a scan with `next`.
+
 For `"consistency": "session"`, add `"min_revision": N` with the highest revision you have seen from this database. If that revision is still being stored, the read waits for it. A `min_revision` the database has never reached is a `400`.
 
 ## Commit
@@ -131,7 +133,9 @@ All writes apply together or not at all. A transaction needs at least one write 
 | `{"range": {...}, "revision": R}` | No key in the range was written after revision `R`. The range takes `prefix`, `start` and `end` as in a scan. Use the `revision` of the read that scanned it. |
 | top-level `"if_revision": R` | The whole database is still at revision `R`. |
 
-Read, compute, and commit with a check for each key and range you read: the transaction then behaves as if it ran alone. On `409`, read again and recompute. The conflict carries `"revision"`: pass it as `min_revision` and the read is guaranteed to include whatever caused the conflict. Range checks are verified against recent writes only; a range read too long ago fails with `409` and is simply read again.
+A check has the fields of one of the first two rows and no others.
+
+Read, compute, and commit with a check for each key and range you read: the transaction then behaves as if it ran alone. On `409`, read again and recompute. The conflict carries `"revision"`: pass it as `min_revision` and the read is guaranteed to include whatever caused the conflict. Range checks are verified against recent writes only: the last 100,000 keys a database wrote, or 8 MiB of them, and fewer when many databases on a server write at once. A range read longer ago than that fails with `409` and is simply read again.
 
 There is no read at an exact past revision. Two separate reads may see different revisions; the checks catch it at commit.
 
@@ -147,7 +151,7 @@ There is no read at an exact past revision. Two separate reads may see different
 {"results": [{"revision": 1209}, {"error": {"code": "conflict", "message": "...", "retryable": false}}]}
 ```
 
-Each transaction takes the same fields as a single one, including its own `idempotency_key`; nothing but `transactions` may appear at the top level. The first failure stops the request; later transactions report `conflict` with the message "not attempted". The status is `200` whenever the request itself was understood. If any transaction is malformed the whole request is a `400` and none is applied.
+Each transaction takes the same fields as a single one, including its own `idempotency_key`; nothing but `transactions` may appear at the top level. One request holds at most 10,000 writes and checks, however they are divided among its transactions. The first failure stops the request; later transactions report `conflict` with the message "not attempted". The status is `200` whenever the request itself was understood. If any transaction is malformed the whole request is a `400` and none is applied.
 
 ## Single keys
 
@@ -158,6 +162,8 @@ Each transaction takes the same fields as a single one, including its own `idemp
 | `DELETE /v1/databases/{name}/keys/{key}` | Delete the key. Returns `{"revision": N}`. |
 
 Percent-encode the key in the path; `/` may be left as is.
+
+A path with a segment that is `.` or `..`, percent-encoded or not, or with a backslash, is refused with `400`: HTTP clients and proxies rewrite such paths before they are sent. A key like `a/../b` is an ordinary key, reached through `read` and `commit`, where keys travel in the body.
 
 ## Errors
 
@@ -171,12 +177,13 @@ Percent-encode the key in the path; `/` may be left as is.
 | 401 | `unauthorized` | Missing, forged, expired or revoked token. | Obtain a token. |
 | 403 | `forbidden` | The token does not cover this database or action. | |
 | 404 | `not_found` | No such database, or no such key on a single-key `GET`. | |
+| 408 | `timeout` | The request body did not arrive in time. Nothing was applied. | Send the request again. |
 | 409 | `conflict` | A check failed. The error carries `revision`. | Read at that revision or later, and recompute. |
 | 409 | `exists` | The database exists with different settings. | |
 | 410 | `deleted` | The database was deleted. | |
 | 413 | `too_large` | The request body exceeds 32 MiB. | Split the request. |
 | 429 | `rate_limited` | The database's request budget is spent. | Retry after `Retry-After` seconds. |
-| 503 | `busy`, `ownership_moved`, `storage_unavailable` | The request could not be completed now: ownership is moving, storage did not answer, or the server is shedding load. | Repeat the identical request. |
+| 503 | `busy`, `ownership_moved`, `storage_unavailable` | The request could not be completed now: ownership is moving, storage did not answer, or the server has no room for another request, request body or read result. | Repeat the identical request. |
 | 507 | `quota_exceeded` | The database is at `max_bytes`. | Delete data or raise the quota. |
 
 A `503` on a commit means the outcome is **unknown**: the transaction may have been applied. Repeating it with the same `idempotency_key` is always safe and returns the definite result. Servers repeat such commits themselves when a key is present, so clients see this rarely.
@@ -187,13 +194,26 @@ A `503` on a commit means the outcome is **unknown**: the transaction may have b
 | --- | --- |
 | Key | 1 to 1,024 bytes |
 | Value | 4 MiB (`--max-value-bytes`) |
+| Request head (request line and headers) | 32 KiB |
 | Request body | 32 MiB |
-| Writes plus checks per transaction | 10,000 |
+| Writes plus checks per commit request | 10,000 |
 | Keys plus scans per read | 10,000 |
 | Scan page | 10,000 items or 8 MiB |
-| One read's result | 64 MiB |
+| One read's result | 64 MiB of keys and values, counting 64 bytes for each item besides (`--result-bytes` lowers it) |
 | Database size | 1 GiB (`max_bytes`, per database) |
+
+A server also limits what all requests together may hold in memory, and how much of that one database may use; see [tenants](deployment.md#tokens-and-tenants). A request that does not fit is answered `503` with code `busy`.
+
+| Time limit | |
+| --- | --- |
+| Sending a request's head, or staying connected between requests | 75 seconds |
+| Sending a request body | 30 seconds, plus one second for every 256 KiB |
+| Not taking any of a response | 30 seconds |
+
+A connection that passes a limit is closed. A body that arrives too slowly is answered `408` first.
 
 ## Health and metrics
 
-`GET /healthz` answers `200` while the process runs. `GET /readyz` answers `200` when storage is reachable; use it as the readiness probe. `GET /metrics` returns Prometheus text: request and storage latency histograms, cache statistics and open databases. No key, value, token or database name appears in metrics or logs.
+`GET /healthz` answers `200` while the process runs. `GET /readyz` answers `200` when storage is reachable; use it as the readiness probe. It asks storage at most every two seconds, however often it is called. `GET /metrics` returns Prometheus text: request and storage latency histograms, cache statistics, open databases and the memory that requests hold.
+
+No key, value, token or database name appears in metrics or logs. A log line identifies a database by the first 12 hexadecimal digits of the SHA-256 of its name, which you can compute for a name you know: `printf %s demo | sha256sum | cut -c1-12`.

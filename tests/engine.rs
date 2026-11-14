@@ -5,7 +5,9 @@ use durable_db::{
     Error,
     db::{Check, Ctx, Db, Options, ReadReq, Scan, Txn},
     io::{DiskCache, Io},
-    layout::DbConfig,
+    layout::{ConfigChange, DbConfig},
+    metrics::Metrics,
+    node::{Limits, Node},
     store::{ObjectStore, fs::FsStore, memory::MemoryStore},
 };
 use std::{sync::Arc, time::Duration};
@@ -412,9 +414,9 @@ async fn the_quota_refuses_growth_but_not_deletes() {
     .await
     .unwrap();
     // Raising the limit is an ordinary logged change.
-    db.set_config(DbConfig {
-        max_bytes: 1 << 20,
-        ..DbConfig::default()
+    db.configure(ConfigChange {
+        max_bytes: Some(1 << 20),
+        ..ConfigChange::default()
     })
     .await
     .unwrap();
@@ -492,7 +494,6 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
             .unwrap();
     }
     db.close().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(first.io.disk.as_ref().unwrap().used() > 10_000);
 
     let second = process();
@@ -520,7 +521,484 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
     let small = DiskCache::open(dir.path(), 1).unwrap();
     assert!(small.used() > 1);
     let tiny = Io::new(store.clone(), 1 << 20, Some(small));
-    tiny.remember("anything", Bytes::from_static(b"x"));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tiny.remember("anything", Bytes::from_static(b"x")).await;
     assert!(tiny.disk.as_ref().unwrap().used() <= 1);
+}
+
+/// A change is applied to the configuration as it stands when its turn
+/// comes, so none of several made at once is lost.
+#[tokio::test]
+async fn configuration_changes_made_at_once_all_take_effect() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let db = create(&ctx, "app").await;
+    let changes = (0..40).map(|i| {
+        let db = db.clone();
+        let change = match i % 4 {
+            0 => ConfigChange {
+                max_bytes: Some(7 << 20),
+                ..ConfigChange::default()
+            },
+            1 => ConfigChange {
+                max_requests_per_second: Some(9),
+                ..ConfigChange::default()
+            },
+            _ => ConfigChange {
+                revoke_tokens: true,
+                ..ConfigChange::default()
+            },
+        };
+        async move { db.configure(change).await }
+    });
+    for changed in futures::future::join_all(changes).await {
+        changed.unwrap();
+    }
+    let config = db.config();
+    assert_eq!(
+        (
+            config.max_bytes,
+            config.max_requests_per_second,
+            config.token_generation
+        ),
+        (7 << 20, 9, 20)
+    );
+    db.close().await;
+    assert_eq!(open(&ctx, "app").await.config(), config);
+}
+
+/// Room for a result of `most` bytes; remembers the most it was asked for.
+struct Limited {
+    most: usize,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+impl Limited {
+    fn new(most: usize) -> Self {
+        Self {
+            most,
+            asked: Default::default(),
+        }
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl durable_db::db::Room for Limited {
+    fn room(&self, held: usize) -> Result<usize, Error> {
+        self.asked
+            .fetch_max(held, std::sync::atomic::Ordering::Relaxed);
+        self.most.checked_sub(held).ok_or(Error::TooLarge)
+    }
+}
+
+/// A read asks for room as its result grows, and stops when there is none,
+/// long before it has gathered everything that was asked for.
+#[tokio::test]
+async fn a_read_stops_when_there_is_no_more_room_for_its_result() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let db = create(&ctx, "app").await;
+    let value = "v".repeat(1000);
+    let keys: Vec<Bytes> = (0..200).map(|i| b(&format!("k{i:03}"))).collect();
+    let writes = keys.iter().map(|key| (key.clone(), Some(b(&value))));
+    committed(
+        &db,
+        Txn {
+            writes: writes.collect(),
+            ..Txn::default()
+        },
+    )
+    .await;
+    let everything = Scan {
+        lo: Bytes::new(),
+        hi: Bytes::new(),
+        reverse: false,
+        limit: 1000,
+    };
+    let by_key = ReadReq {
+        keys: keys.clone(),
+        ..ReadReq::default()
+    };
+    let by_scan = ReadReq {
+        scans: vec![everything.clone()],
+        ..ReadReq::default()
+    };
+    // From memory first, then from a table.
+    for flushed in [false, true] {
+        if flushed {
+            db.request_flush();
+            while db.info().tables != 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        let tight = Limited::new(10_000);
+        let refused = db.read_within(by_key.clone(), &tight).await;
+        assert!(matches!(refused, Err(Error::TooLarge)), "{flushed}");
+        // It stopped near the limit, not at the 200,000 bytes asked for.
+        assert!(tight.asked() < 60_000, "{}", tight.asked());
+        let refused = db.read_within(by_scan.clone(), &Limited::new(10_000)).await;
+        assert!(matches!(refused, Err(Error::TooLarge)), "{flushed}");
+        // With room, the same reads say how much they came to hold.
+        let ample = Limited::new(1 << 20);
+        let found = db.read_within(by_key.clone(), &ample).await.unwrap();
+        assert_eq!(found.values.iter().flatten().count(), 200);
+        assert!(
+            (200_000..220_000).contains(&ample.asked()),
+            "{}",
+            ample.asked()
+        );
+        let ample = Limited::new(1 << 20);
+        let found = db.read_within(by_scan.clone(), &ample).await.unwrap();
+        assert_eq!(found.scans[0].items.len(), 200);
+        assert!(ample.asked() >= 200_000);
+    }
+    // Deleted keys still in memory hide what a table holds. A scan has to
+    // step over each of them, and counts them as it does.
+    committed(
+        &db,
+        Txn {
+            writes: keys.iter().map(|key| (key.clone(), None)).collect(),
+            ..Txn::default()
+        },
+    )
+    .await;
+    let tight = Limited::new(5_000);
+    let refused = db.read_within(by_scan.clone(), &tight).await;
+    assert!(matches!(refused, Err(Error::TooLarge)));
+    // It was stopped while stepping over them, not once it held them all.
+    assert!(tight.asked() <= 5_000, "{}", tight.asked());
+    let ample = Limited::new(1 << 20);
+    let found = db.read_within(by_scan, &ample).await.unwrap();
+    assert!(found.scans[0].items.is_empty());
+    assert!(ample.asked() >= 200 * 64, "{}", ample.asked());
+}
+
+/// Commit, waiting out a database that is busy flushing.
+async fn committed(db: &Arc<Db>, txn: Txn) -> u64 {
+    loop {
+        match commit(db, txn.clone()).await {
+            Err(Error::Busy(_)) => tokio::time::sleep(Duration::from_millis(2)).await,
+            done => return done.unwrap(),
+        }
+    }
+}
+
+/// Text that does not compress, so that tables have the size of their data.
+fn noise(mut seed: u64, len: usize) -> String {
+    let mut out = String::with_capacity(len + 16);
+    while out.len() < len {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        out.push_str(&format!("{seed:016x}"));
+    }
+    out.truncate(len);
+    out
+}
+
+/// The tables the newest manifest lists: size, first key, last key, part.
+async fn listed_tables(store: &MemoryStore) -> Vec<(u64, String, String, u64)> {
+    let newest = store
+        .keys()
+        .into_iter()
+        .filter(|key| key.contains("/m/") && !key.ends_with('~'))
+        .max()
+        .expect("a manifest");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&store.get(&newest).await.unwrap().unwrap()).unwrap();
+    let text = |value: &serde_json::Value| value.as_str().unwrap().to_owned();
+    manifest["tables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|table| {
+            (
+                table["size"].as_u64().unwrap(),
+                text(&table["first"]),
+                text(&table["last"]),
+                table["part"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
+/// A merge writes its result as tables of limited size, so it holds that
+/// much in memory whatever the size of the database. They are read as the
+/// one table they stand for, by this owner and by the next.
+#[tokio::test]
+async fn a_merge_writes_tables_of_limited_size() {
+    const TABLE: usize = 8 << 10;
+    let store = Arc::new(MemoryStore::new());
+    let opts = Options {
+        flush_bytes: 16 << 10,
+        idle_flush: Duration::from_millis(10),
+        block_bytes: 512,
+        table_bytes: TABLE,
+        ..Options::default()
+    };
+    let ctx = ctx_with(store.clone(), opts);
+    let db = create(&ctx, "app").await;
+    let key = |i: usize| format!("k{i:04}");
+    let value =
+        |round: u64, i: usize| format!("{round}-{}", noise(round * 1000 + i as u64 + 1, 120));
+    for round in 0..5 {
+        let writes = (0..400).map(|i| (b(&key(i)), Some(b(&value(round, i)))));
+        committed(
+            &db,
+            Txn {
+                writes: writes.collect(),
+                ..Txn::default()
+            },
+        )
+        .await;
+        db.request_flush();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    // Merging settles on one run: tables that follow one another in key order.
+    let settled = async {
+        loop {
+            let tables = listed_tables(&store).await;
+            let parts: Vec<u64> = tables.iter().map(|table| table.3).collect();
+            if tables.len() > 3 && parts == (0..tables.len() as u64).collect::<Vec<_>>() {
+                return tables;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let tables = tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the tables are merged into one run");
+    // 400 keys of about 130 bytes: 52 KiB, in tables of 8 KiB and a little.
+    assert!((6..=9).contains(&tables.len()), "{tables:?}");
+    for (i, (size, first, last, _)) in tables.iter().enumerate() {
+        assert!(*size as usize <= TABLE + (2 << 10), "{tables:?}");
+        assert!(first <= last);
+        assert!(i == 0 || tables[i - 1].2 < *first, "{tables:?}");
+    }
+    assert_eq!(db.info().tables, tables.len());
+    // Whoever reads, the newest owner or the next, sees one ordered map.
+    for reopened in [false, true] {
+        let db = if reopened {
+            db.close().await;
+            open(&ctx, "app").await
+        } else {
+            db.clone()
+        };
+        let everything: Vec<String> = (0..400).map(key).collect();
+        let (forward, more) = scan(&db, "", "", false, 1000).await;
+        assert_eq!((&forward, more), (&everything, false));
+        let (backward, _) = scan(&db, "", "", true, 1000).await;
+        assert_eq!(
+            backward,
+            everything.iter().rev().cloned().collect::<Vec<_>>()
+        );
+        for i in [0, 1, 57, 199, 200, 398, 399] {
+            assert_eq!(get(&db, &key(i)).await.unwrap().1, value(4, i), "{i}");
+        }
+        assert_eq!(get(&db, "k0400").await, None);
+        // Ranges that begin and end inside tables, and pages that end where
+        // one table gives way to the next.
+        for (_, first, last, _) in &tables {
+            let (page, more) = scan(&db, last, "", false, 3).await;
+            let from: usize = last[1..].parse().unwrap();
+            let expected: Vec<String> = (from..400).take(3).map(key).collect();
+            assert_eq!((page, more), (expected, from + 3 < 400), "{last}");
+            let (page, _) = scan(&db, "", &format!("{first}\u{1}"), true, 3).await;
+            let upto: usize = first[1..].parse().unwrap();
+            let expected: Vec<String> = (0..=upto).rev().take(3).map(key).collect();
+            assert_eq!(page, expected, "{first}");
+        }
+        let (middle, more) = scan(&db, "k0100", "k0300", false, 1000).await;
+        assert_eq!((middle.len(), more), (200, false));
+        if reopened {
+            // Deletions, flushed to a table of their own above the run,
+            // hide every table of it.
+            let deletes = (0..400).map(|i| (b(&key(i)), None));
+            committed(
+                &db,
+                Txn {
+                    writes: deletes.collect(),
+                    ..Txn::default()
+                },
+            )
+            .await;
+            db.request_flush();
+            while db.info().tables != tables.len() + 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(scan(&db, "", "", false, 1000).await.0.len(), 0);
+            assert_eq!(scan(&db, "k0100", "k0300", true, 1000).await.0.len(), 0);
+            assert_eq!(get(&db, &key(57)).await, None);
+        }
+    }
+}
+
+/// A table's index is held by the cache, not by the table. With far more
+/// index than the cache has room for, what is in memory stays within the
+/// cache, and every key is still found.
+#[tokio::test]
+async fn table_indexes_stay_within_the_cache() {
+    const CACHE: u64 = 1 << 20;
+    let store = Arc::new(MemoryStore::new());
+    let ctx = Arc::new(Ctx {
+        io: Io::new(store.clone(), CACHE, None),
+        opts: Options {
+            flush_bytes: 128 << 10,
+            idle_flush: Duration::from_millis(10),
+            block_bytes: 256,
+            table_bytes: 64 << 10,
+            ..Options::default()
+        },
+        root: "root/".into(),
+    });
+    let db = create(&ctx, "app").await;
+    // Keys of a kilobyte with one-byte values: every block holds one key,
+    // so the index is as large as the data. Four megabytes of each.
+    let key = |i: usize| format!("{i:04}-{}", noise(i as u64 + 1, 995));
+    for batch in 0..40 {
+        let writes = (batch * 100..batch * 100 + 100).map(|i| (b(&key(i)), Some(b("1"))));
+        committed(
+            &db,
+            Txn {
+                writes: writes.collect(),
+                ..Txn::default()
+            },
+        )
+        .await;
+    }
+    db.request_flush();
+    while db.mem_bytes() > 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let indexes = || {
+        ctx.io
+            .index_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    // Whatever was read last is in use; everything else must fit the cache.
+    let within = |what: &str| {
+        assert!(indexes() <= CACHE + (256 << 10), "{what}: {}", indexes());
+        assert!(ctx.io.cache_bytes() <= CACHE, "{what}");
+    };
+    within("after writing");
+    for i in (0..4000).step_by(7) {
+        assert_eq!(get(&db, &key(i)).await.unwrap().1, "1", "{i}");
+        within("while looking keys up");
+    }
+    let (keys, more) = scan(&db, "", "", false, 5000).await;
+    assert_eq!((keys.len(), more), (4000, false));
+    within("after a scan of everything");
+    let (keys, _) = scan(&db, "2000", "3000", true, 5000).await;
+    assert_eq!(keys.len(), 1000);
+    within("after a scan backwards");
+    // A full cache keeps nothing it has seen only once, so a scan of
+    // everything does not displace what is in use. A table that is read
+    // again and again keeps its index: a read of it then asks storage for
+    // no more than a read that touches no table does.
+    let asked = || store.gets.load(std::sync::atomic::Ordering::Relaxed);
+    let before = asked();
+    assert_eq!(get(&db, "zzzz").await, None);
+    let nothing = asked() - before;
+    for _ in 0..4 {
+        get(&db, &key(5)).await.unwrap();
+    }
+    let before = asked();
+    get(&db, &key(5)).await.unwrap();
+    assert_eq!(asked() - before, nothing);
+    assert!(indexes() > 0);
+    within("after reading one table repeatedly");
+    // Tables that are gone hold nothing.
+    db.close().await;
+    drop(db);
+    let db = open(&ctx, "app").await;
+    assert_eq!(get(&db, &key(3999)).await.unwrap().1, "1");
+    within("after reopening");
+}
+
+/// Each database remembers the keys it wrote recently, to check ranges
+/// against. All of them together stay within a budget: those that remember
+/// most give up their oldest, and their range checks from before that are
+/// refused rather than passed.
+#[tokio::test]
+async fn databases_together_remember_a_limited_amount_of_written_keys() {
+    const BUDGET: usize = 256 << 10;
+    let limits = Limits {
+        recent_bytes: BUDGET,
+        ..Limits::default()
+    };
+    let node = Node::new(
+        ctx(Arc::new(MemoryStore::new())),
+        limits,
+        Arc::new(Metrics::default()),
+    );
+    let write = |name: &'static str, keys: std::ops::Range<usize>| {
+        let node = node.clone();
+        async move {
+            let db = node.db(name).await.unwrap();
+            let writes =
+                keys.map(|i| (b(&format!("{i:05}-{}", noise(i as u64, 900))), Some(b("1"))));
+            committed(
+                &db,
+                Txn {
+                    writes: writes.collect(),
+                    ..Txn::default()
+                },
+            )
+            .await
+        }
+    };
+    let since = |name: &'static str, since: u64| {
+        let node = node.clone();
+        async move {
+            let db = node.db(name).await.unwrap();
+            let check = Check::Range {
+                lo: b("9"),
+                hi: Bytes::new(),
+                since,
+            };
+            commit(
+                &db,
+                Txn {
+                    checks: vec![check],
+                    ..Txn::default()
+                },
+            )
+            .await
+        }
+    };
+    // Four databases write 200 KiB of keys each, and one writes a little.
+    let large = ["a", "b", "c", "d"];
+    let mut first = Vec::new();
+    for name in large.into_iter().chain(["small"]) {
+        node.create(name, DbConfig::default()).await.unwrap();
+        first.push(write(name, 0..1).await);
+    }
+    for name in large {
+        write(name, 1..200).await;
+    }
+    assert!(node.recent_bytes() > 3 * BUDGET);
+    for (name, first) in large.into_iter().chain(["small"]).zip(&first) {
+        since(name, *first).await.unwrap();
+    }
+
+    node.tend().await;
+    assert!(node.recent_bytes() <= BUDGET);
+    let each = node.db("a").await.unwrap().recent_bytes();
+    assert!(each > BUDGET / 5 && each <= BUDGET / 4, "{each}");
+    // What a database forgot it no longer vouches for.
+    for (name, first) in large.into_iter().zip(&first) {
+        let refused = since(name, *first).await.unwrap_err();
+        assert!(matches!(refused, Error::Conflict(_)), "{refused:?}");
+    }
+    // The one that remembered little lost nothing.
+    since("small", first[4]).await.unwrap();
+
+    // It stays that way while they go on writing.
+    for name in large {
+        write(name, 200..400).await;
+        assert!(node.db(name).await.unwrap().recent_bytes() <= BUDGET / 4);
+    }
+    assert!(node.recent_bytes() <= BUDGET);
+    let latest = write("a", 400..401).await;
+    since("a", latest).await.unwrap();
 }

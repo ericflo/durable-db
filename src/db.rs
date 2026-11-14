@@ -9,21 +9,23 @@ use crate::{
     Error, Result,
     io::{Io, retry},
     layout::{
-        Claim, DbConfig, Epoch, FORMAT, Frame, FrameTxn, INTERNAL, Layout, Manifest, is_receipt,
-        receipt_key,
+        Claim, ConfigChange, DbConfig, Epoch, FORMAT, Frame, FrameTxn, INTERNAL, Layout, Manifest,
+        is_receipt, receipt_key,
     },
     mem::Mem,
     store::{StoreError, list_all, list_from},
-    table::{Entry, Table, TableBuilder, TableScan},
+    table::{Entry, Table, TableBuilder, TableMeta, TableScan},
 };
 use bytes::Bytes;
+use futures::{StreamExt, TryStreamExt};
 use parking_lot::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
+    pin::Pin,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -60,8 +62,13 @@ pub struct Options {
     /// Retries are recognized for this many revisions.
     pub receipt_window: u64,
     pub block_bytes: usize,
-    /// Keys remembered for range checks.
+    /// A merge starts a new table when the one it is writing reaches this
+    /// size, so that it holds this much in memory whatever the size of the
+    /// database.
+    pub table_bytes: usize,
+    /// Keys remembered for range checks, and the bytes they may take.
     pub recent_keys: usize,
+    pub recent_bytes: usize,
 }
 
 impl Default for Options {
@@ -81,7 +88,9 @@ impl Default for Options {
             resweep_after: Duration::from_secs(30),
             receipt_window: 100_000,
             block_bytes: 32 << 10,
+            table_bytes: 32 << 20,
             recent_keys: 100_000,
+            recent_bytes: 8 << 20,
         }
     }
 }
@@ -154,6 +163,26 @@ pub struct ReadReq {
     pub min_revision: u64,
 }
 
+/// What one item of a result is counted as, beyond its key and value.
+pub const ITEM_BYTES: usize = 64;
+
+/// Asked as a result grows, with the bytes it holds so far: each item's key
+/// and value plus `ITEM_BYTES`. Answers how many more it may take, or
+/// refuses, and the read stops there instead of assembling a result that
+/// will not be sent.
+pub trait Room: Sync {
+    fn room(&self, held: usize) -> Result<usize>;
+}
+
+/// Room for anything.
+struct Unmetered;
+
+impl Room for Unmetered {
+    fn room(&self, _held: usize) -> Result<usize> {
+        Ok(usize::MAX)
+    }
+}
+
 #[derive(Debug)]
 pub struct ScanResult {
     pub items: Vec<Entry>,
@@ -182,7 +211,7 @@ type Reply = oneshot::Sender<Result<Vec<Result<Committed>>>>;
 
 enum Cmd {
     Commit { txns: Vec<Txn>, reply: Reply },
-    Config { config: DbConfig, reply: Reply },
+    Config { change: ConfigChange, reply: Reply },
     Close(oneshot::Sender<()>),
 }
 
@@ -235,6 +264,8 @@ struct Recovered {
 
 pub struct Db {
     pub name: String,
+    /// What logs call this database; see `layout::tag`.
+    tag: String,
     ctx: Arc<Ctx>,
     uploads: Uploader,
     layout: Layout,
@@ -256,7 +287,13 @@ pub struct Db {
     newest: AtomicU64,
     /// The newest acknowledged revision, for readers waiting on one.
     confirmed_tx: tokio::sync::watch::Sender<u64>,
+    /// Keys written recently. The writer records and checks; the server
+    /// may shorten it.
+    recent: Mutex<Recent>,
 }
+
+/// A turn at merging tables: one of the few that run at once on a server.
+type Turn = tokio::sync::OwnedSemaphorePermit;
 
 /// Objects above this size are uploaded once at a time: racing them would
 /// spend real bandwidth, and they are never on the path of a commit.
@@ -345,7 +382,8 @@ impl Uploader {
             match self.raced(key, &body).await {
                 Ok(()) => return Ok(()),
                 Err(StoreError::Unavailable(reason)) if Instant::now() + delay < deadline => {
-                    tracing::debug!(%reason, key, "upload failed; retrying");
+                    let object = crate::layout::object(key);
+                    tracing::debug!(%reason, object, "upload failed; retrying");
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_secs(1));
                 }
@@ -641,6 +679,7 @@ impl Db {
         let (tx, rx) = mpsc::channel(4096);
         let db = Arc::new(Db {
             name: name.to_owned(),
+            tag: crate::layout::tag(name),
             ctx: ctx.clone(),
             uploads,
             claim_key: layout.claim(epoch),
@@ -676,10 +715,16 @@ impl Db {
             last_commit_ms: AtomicU64::new(0),
             newest: AtomicU64::new(revision),
             confirmed_tx: tokio::sync::watch::channel(revision).0,
+            // Nothing is known about writes before this epoch.
+            recent: Mutex::new(Recent::new(
+                revision,
+                ctx.opts.recent_keys,
+                ctx.opts.recent_bytes,
+            )),
         });
         tokio::spawn(Writer::run(db.clone(), rx, revision));
         tokio::spawn(db.clone().maintain());
-        tracing::debug!(db = %db.name, epoch = %epoch, revision, created, "database opened");
+        tracing::debug!(db = %db.tag, epoch = %epoch, revision, created, "database opened");
         Ok((db, created))
     }
 
@@ -701,7 +746,7 @@ impl Db {
     /// Stop serving. Nothing in flight will be acknowledged.
     fn poison(&self, error: Error) {
         if self.closed.set(error.clone()).is_ok() {
-            tracing::info!(db = %self.name, epoch = %self.epoch, %error, "database closed");
+            tracing::info!(db = %self.tag, epoch = %self.epoch, %error, "database closed");
         }
         self.wake_writer.notify_one();
         self.wake_maint.notify_one();
@@ -793,6 +838,20 @@ impl Db {
         self.state.read().mem.bytes()
     }
 
+    /// Bytes of recently written keys remembered for range checks.
+    pub fn recent_bytes(&self) -> usize {
+        self.recent.lock().bytes
+    }
+
+    /// Remember at most `bytes` of recently written keys from now on, and
+    /// forget the oldest beyond that. A range check that reaches back past
+    /// what was forgotten is refused, and its transaction reads again.
+    pub fn remember_at_most(&self, bytes: usize) {
+        let mut recent = self.recent.lock();
+        recent.capacity_bytes = bytes.min(self.ctx.opts.recent_bytes);
+        recent.trim();
+    }
+
     /// Ask for a flush regardless of thresholds, to give memory back.
     pub fn request_flush(&self) {
         self.flush_requested.store(true, Ordering::Release);
@@ -832,7 +891,16 @@ impl Db {
         !Arc::ptr_eq(tables, &self.state.read().tables)
     }
 
-    pub async fn read(self: &Arc<Self>, mut request: ReadReq) -> Result<ReadResp> {
+    pub async fn read(self: &Arc<Self>, request: ReadReq) -> Result<ReadResp> {
+        self.read_within(request, &Unmetered).await
+    }
+
+    /// A read whose result is accounted for while it is built.
+    pub async fn read_within(
+        self: &Arc<Self>,
+        mut request: ReadReq,
+        room: &dyn Room,
+    ) -> Result<ReadResp> {
         self.touch();
         if let Some(error) = self.closed.get() {
             return Err(error.clone());
@@ -872,22 +940,30 @@ impl Db {
                 Ok(())
             }
         };
-        let (checked, response) = tokio::join!(check, self.read_snapshot(&request));
+        let (checked, response) = tokio::join!(check, self.read_snapshot(&request, room));
         checked?;
         response
     }
 
-    async fn read_snapshot(&self, request: &ReadReq) -> Result<ReadResp> {
+    async fn read_snapshot(&self, request: &ReadReq, room: &dyn Room) -> Result<ReadResp> {
         loop {
             let tables = self.state.read().tables.clone();
-            match self.read_once(request).await {
+            match self.read_once(request, room).await {
                 Err(Error::Lost(_)) if self.replaced(&tables) => {}
                 other => return other,
             }
         }
     }
 
-    async fn read_once(&self, request: &ReadReq) -> Result<ReadResp> {
+    async fn read_once(&self, request: &ReadReq, room: &dyn Room) -> Result<ReadResp> {
+        // Everything the result comes to hold is reported as it is found.
+        let held = AtomicUsize::new(0);
+        let spend = |bytes: usize| {
+            room.room(
+                held.fetch_add(bytes, Ordering::Relaxed)
+                    .saturating_add(bytes),
+            )
+        };
         // One lock hold fixes the revision, the tables and everything the
         // in-memory table contributes.
         let (revision, tables, hits, ranges) = {
@@ -898,41 +974,49 @@ impl Db {
                 .iter()
                 .map(|key| state.mem.get(key, snapshot))
                 .collect();
-            let ranges: Vec<_> = request
-                .scans
-                .iter()
-                .map(|scan| {
-                    state.mem.range(
-                        &scan.lo,
-                        &scan.hi,
-                        scan.reverse,
-                        snapshot,
-                        scan.limit.saturating_add(1),
-                    )
-                })
-                .collect();
+            let mut ranges = Vec::with_capacity(request.scans.len());
+            for scan in &request.scans {
+                let live = scan.limit.saturating_add(1);
+                let most = spend(0)? / ITEM_BYTES;
+                let entries = state
+                    .mem
+                    .range(&scan.lo, &scan.hi, scan.reverse, snapshot, live, most)
+                    .ok_or(Error::TooLarge)?;
+                spend(entries.len() * ITEM_BYTES)?;
+                ranges.push(entries);
+            }
             (snapshot, state.tables.clone(), hits, ranges)
         };
         let io = &self.ctx.io;
-        let values =
-            futures::future::try_join_all(request.keys.iter().zip(hits).map(|(key, hit)| {
-                let tables = &tables;
-                async move {
-                    if let Some((version, value)) = hit {
-                        return Ok(value.map(|value| (version, value)));
-                    }
+        let lookups = request.keys.iter().zip(hits).map(|(key, hit)| {
+            let (tables, spend) = (&tables, &spend);
+            async move {
+                let mut found = hit;
+                if found.is_none() {
                     for table in tables.iter() {
                         if let Some(entry) = table.get(io, key).await? {
-                            return Ok(entry.value.map(|value| (entry.version, value)));
+                            found = Some((entry.version, entry.value));
+                            break;
                         }
                     }
-                    Ok::<_, Error>(None)
                 }
-            }))
+                let found = found.and_then(|(version, value)| Some((version, value?)));
+                spend(ITEM_BYTES + found.as_ref().map_or(0, |(_, value)| value.len()))?;
+                Ok::<_, Error>(found)
+            }
+        });
+        // A few at a time: one request does not start a storage call for
+        // every key it names, and stops at the first refusal.
+        let lookups: Vec<_> = lookups.collect();
+        let values: Vec<_> = futures::stream::iter(lookups)
+            .buffered(32)
+            .try_collect()
             .await?;
         let mut scans = Vec::with_capacity(request.scans.len());
         for (scan, mem) in request.scans.iter().zip(ranges) {
-            scans.push(merge(io, mem, &tables, scan).await?);
+            let found = merge(io, mem, &tables, scan).await?;
+            spend(found.items.iter().map(Entry::weight).sum())?;
+            scans.push(found);
         }
         Ok(ReadResp {
             revision,
@@ -952,8 +1036,10 @@ impl Db {
         self.send(|reply| Cmd::Commit { txns, reply }).await
     }
 
-    pub async fn set_config(&self, config: DbConfig) -> Result<Committed> {
-        let mut results = self.send(|reply| Cmd::Config { config, reply }).await?;
+    /// Change the configuration. The writer applies `change` to the
+    /// configuration as it then stands, so concurrent changes all take effect.
+    pub async fn configure(&self, change: ConfigChange) -> Result<Committed> {
+        let mut results = self.send(|reply| Cmd::Config { change, reply }).await?;
         results
             .pop()
             .unwrap_or_else(|| Err(Error::Busy("no result".into())))
@@ -988,6 +1074,11 @@ impl Db {
         // notices. Sweep once more after it has had time to.
         let mut resweep = Some(tokio::time::Instant::now() + self.ctx.opts.resweep_after);
         let mut unflushed = false;
+        // Merges take turns across the server. This database's place in
+        // the queue, and its turn once that has come: it goes on flushing
+        // while it waits.
+        let mut queued: Option<Pin<Box<dyn Future<Output = Option<Turn>> + Send>>> = None;
+        let mut turn: Option<Turn> = None;
         loop {
             // An idle database with nothing to flush sleeps until it is used.
             let idle = async {
@@ -1003,10 +1094,20 @@ impl Db {
                     None => std::future::pending::<()>().await,
                 }
             };
+            let granted = async {
+                match queued.as_mut() {
+                    Some(waiting) => waiting.await,
+                    None => std::future::pending().await,
+                }
+            };
             let sweep_now = tokio::select! {
                 _ = self.wake_maint.notified() => false,
                 _ = idle => false,
                 _ = straggler => true,
+                granted = granted => {
+                    (turn, queued) = (granted, None);
+                    false
+                }
             };
             if self.is_closed() || self.closing.load(Ordering::Acquire) {
                 return;
@@ -1026,21 +1127,38 @@ impl Db {
             if self.should_flush(&maint)
                 && let Err(error) = self.flush(&mut maint, false).await
             {
-                report(&self.name, "flush failed", &error);
+                report(&self.tag, "flush failed", &error);
+                // Storage is failing: a turn would only be kept from others.
+                (turn, queued) = (None, None);
                 continue;
             }
-            unflushed = self.state.read().confirmed_frame > maint.covered;
+            let mut failed = false;
             loop {
-                match self.compact(&mut maint).await {
+                match self.compact(&mut maint, &mut turn).await {
                     Ok(true) => continue,
                     Ok(false) => break,
                     Err(error) => {
-                        report(&self.name, "compaction failed", &error);
+                        report(&self.tag, "compaction failed", &error);
+                        failed = true;
                         break;
                     }
                 }
             }
+            unflushed = self.state.read().confirmed_frame > maint.covered;
+            // A merge that failed is tried again when the database is next
+            // written to, not at once: asking for another turn now would
+            // repeat it for as long as storage is failing.
+            if failed || merge_plan(&self.state.read().tables).is_none() || self.closing() {
+                (turn, queued) = (None, None);
+            } else if turn.is_none() && queued.is_none() {
+                let merges = self.ctx.io.merges.clone();
+                queued = Some(Box::pin(async move { merges.acquire_owned().await.ok() }));
+            }
         }
+    }
+
+    fn closing(&self) -> bool {
+        self.is_closed() || self.closing.load(Ordering::Acquire)
     }
 
     fn should_flush(&self, maint: &Maint) -> bool {
@@ -1083,39 +1201,87 @@ impl Db {
             .await
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
-                maint.next_table += 1;
-                maint.unpublished.push(meta.key.clone());
-                self.uploads.put(&meta.key, body.clone()).await?;
-                self.ctx.io.remember(&meta.key, body);
-                tables.insert(0, Table::new(meta));
+                tables.insert(0, self.store_table(maint, body, meta).await?);
             }
         }
         self.publish(maint, tables, revision, frame, seal, Some(revision))
             .await
     }
 
-    /// Merge the newest tables when they have grown comparable to the next.
-    async fn compact(self: &Arc<Self>, maint: &mut Maint) -> Result<bool> {
+    /// Upload a table that the next manifest will list.
+    async fn store_table(
+        &self,
+        maint: &mut Maint,
+        body: Bytes,
+        meta: TableMeta,
+    ) -> Result<Arc<Table>> {
+        maint.next_table += 1;
+        maint.unpublished.push(meta.key.clone());
+        self.uploads.put(&meta.key, body.clone()).await?;
+        self.ctx.io.remember(&meta.key, body).await;
+        Ok(Table::new(meta))
+    }
+
+    /// Merge the newest tables when they have grown comparable to the next,
+    /// and this database has a turn or can take one. Returns whether it did.
+    async fn compact(self: &Arc<Self>, maint: &mut Maint, turn: &mut Option<Turn>) -> Result<bool> {
         let tables = self.state.read().tables.clone();
         let Some(count) = merge_plan(&tables) else {
             return Ok(false);
         };
-        // A merge builds its table in memory; only a few run at once.
-        let _turn = self.ctx.io.merges.acquire().await;
+        // A merge holds one table of its output in memory; only a few run
+        // at once.
+        if turn.is_none() {
+            *turn = self.ctx.io.merges.clone().try_acquire_owned().ok();
+        }
+        let Some(_turn) = turn.take() else {
+            return Ok(false);
+        };
         let bottom = count == tables.len();
         let io = &self.ctx.io;
-        let mut scans: Vec<TableScan> = tables[..count]
-            .iter()
-            .map(|table| table.scan(io.clone(), Bytes::new(), Bytes::new(), false))
+        let everything = Scan {
+            lo: Bytes::new(),
+            hi: Bytes::new(),
+            reverse: false,
+            limit: usize::MAX,
+        };
+        let mut scans: Vec<RunScan> = runs(&tables[..count])
+            .filter_map(|run| RunScan::over(io, run, &everything))
             .collect();
-        let mut heads = Vec::with_capacity(count);
+        let mut heads = Vec::with_capacity(scans.len());
         for scan in &mut scans {
             heads.push(scan.next().await?);
         }
-        let mut builder = TableBuilder::new(self.ctx.opts.block_bytes);
-        while let Some(best) = first_key(&heads, false) {
+        // The result is written as tables of limited size, each uploaded
+        // before the next is begun.
+        let (block_bytes, table_bytes) = (self.ctx.opts.block_bytes, self.ctx.opts.table_bytes);
+        let mut merged: Vec<Arc<Table>> = Vec::new();
+        let mut builder = TableBuilder::new(block_bytes);
+        loop {
+            let next = first_key(&heads, false);
+            if !builder.is_empty() && (next.is_none() || builder.len() >= table_bytes) {
+                let full = std::mem::replace(&mut builder, TableBuilder::new(block_bytes));
+                let (body, mut meta) = full.finish(self.layout.table(self.epoch, maint.next_table));
+                meta.part = merged.len() as u32;
+                merged.push(self.store_table(maint, body, meta).await?);
+                // Between tables, a merge gives way to what must not wait
+                // for it: a release, and writes that are due to be flushed.
+                if next.is_some() && self.closing() {
+                    return Ok(false);
+                }
+                if next.is_some() && self.should_flush(maint) {
+                    // The flush publishes a manifest, which discards tables
+                    // no manifest lists. These are not finished, not lost.
+                    let at = maint.unpublished.len() - merged.len();
+                    let mine = maint.unpublished.split_off(at);
+                    let flushed = self.flush(maint, false).await;
+                    maint.unpublished.extend(mine);
+                    flushed?;
+                }
+            }
+            let Some(best) = next else { break };
             let entry = heads[best].take().expect("chosen head exists");
-            for i in 0..count {
+            for i in 0..scans.len() {
                 if i == best
                     || heads[i]
                         .as_ref()
@@ -1128,18 +1294,13 @@ impl Db {
                 builder.add(&entry);
             }
         }
-        let mut merged: Vec<Arc<Table>> = Vec::new();
-        if !builder.is_empty() {
-            let (body, meta) = builder.finish(self.layout.table(self.epoch, maint.next_table));
-            maint.next_table += 1;
-            maint.unpublished.push(meta.key.clone());
-            self.uploads.put(&meta.key, body.clone()).await?;
-            self.ctx.io.remember(&meta.key, body);
-            merged.push(Table::new(meta));
-        }
-        merged.extend(tables[count..].iter().cloned());
+        // Tables flushed meanwhile are newer than everything merged.
+        let current = self.state.read().tables.clone();
+        let mut result = current[..current.len() - tables.len()].to_vec();
+        result.extend(merged);
+        result.extend(tables[count..].iter().cloned());
         let (revision, covered, sealed) = (maint.revision, maint.covered, maint.sealed);
-        self.publish(maint, merged, revision, covered, sealed, None)
+        self.publish(maint, result, revision, covered, sealed, None)
             .await?;
         Ok(true)
     }
@@ -1234,7 +1395,7 @@ impl Db {
         }
         maint.garbage = remaining;
         if let Some(error) = failed {
-            tracing::debug!(db = %self.name, %error, "collection incomplete; will retry");
+            tracing::debug!(db = %self.tag, %error, "collection incomplete; will retry");
         }
     }
 
@@ -1256,7 +1417,7 @@ impl Db {
                 .is_some_and(|epoch| epoch < self.epoch && !referenced.contains(key))
         };
         if let Err(error) = store.purge(self.layout.everything(), None, &doomed).await {
-            tracing::debug!(db = %self.name, %error, "sweep incomplete");
+            tracing::debug!(db = %self.tag, %error, "sweep incomplete");
         }
     }
 
@@ -1287,7 +1448,7 @@ impl Db {
                             .await;
                     }
                 }
-                Err(error) => report(&self.name, "release without a sealed manifest", &error),
+                Err(error) => report(&self.tag, "release without a sealed manifest", &error),
             }
         }
         self.poison(Error::Busy("database is closing".into()));
@@ -1385,22 +1546,48 @@ fn keep(entry: &Entry, bottom: bool, revision: u64, receipt_window: u64) -> bool
     !(is_receipt(&entry.key) && entry.version + receipt_window < revision)
 }
 
-/// How many of the newest tables to merge, if any.
+/// The tables in runs, newest first. A run is what one merge wrote: tables
+/// whose key ranges follow one another. It is read, weighed and merged as
+/// the single table it would be if size allowed.
+fn runs(tables: &[Arc<Table>]) -> impl Iterator<Item = &[Arc<Table>]> {
+    let mut rest = tables;
+    std::iter::from_fn(move || {
+        let mut len = usize::from(!rest.is_empty());
+        // Believed only where the keys bear it out: a server that knows
+        // nothing of runs may have merged part of one.
+        while len > 0
+            && len < rest.len()
+            && rest[len].meta.part > 0
+            && rest[len - 1].meta.last < rest[len].meta.first
+        {
+            len += 1;
+        }
+        let (run, older) = rest.split_at(len);
+        rest = older;
+        (len > 0).then_some(run)
+    })
+}
+
+/// How many of the newest tables to merge, if any: whole runs, taken while
+/// they are together at least half the size of the next.
 fn merge_plan(tables: &[Arc<Table>]) -> Option<usize> {
-    const MAX_TABLES: usize = 12;
+    const MAX_RUNS: usize = 12;
+    let runs: Vec<(usize, u64)> = runs(tables)
+        .map(|run| (run.len(), run.iter().map(|table| table.meta.size).sum()))
+        .collect();
     let mut count = 1;
-    let mut size = tables.first()?.meta.size;
-    while count < tables.len() && size * 2 >= tables[count].meta.size {
-        size += tables[count].meta.size;
+    let mut size = runs.first()?.1;
+    while count < runs.len() && size * 2 >= runs[count].1 {
+        size += runs[count].1;
         count += 1;
     }
-    if count >= 2 {
-        Some(count)
-    } else if tables.len() > MAX_TABLES {
-        Some(tables.len())
-    } else {
-        None
+    if count < 2 {
+        if runs.len() <= MAX_RUNS {
+            return None;
+        }
+        count = runs.len();
     }
+    Some(runs[..count].iter().map(|(tables, _)| tables).sum())
 }
 
 /// The source holding the next key in scan order; the earliest source wins a tie.
@@ -1425,14 +1612,69 @@ fn first_key(heads: &[Option<Entry>], reverse: bool) -> Option<usize> {
 
 enum Source {
     Mem(std::vec::IntoIter<Entry>),
-    Table(TableScan),
+    Run(RunScan),
 }
 
 impl Source {
     async fn next(&mut self) -> Result<Option<Entry>> {
         match self {
             Self::Mem(entries) => Ok(entries.next()),
-            Self::Table(scan) => scan.next().await,
+            Self::Run(scan) => scan.next().await,
+        }
+    }
+}
+
+/// A scan of one run. Its tables do not overlap, so they are visited one
+/// after another, and one that the scan never reaches is never opened.
+struct RunScan {
+    io: Arc<Io>,
+    /// Tables still to visit, the next one last.
+    rest: Vec<Arc<Table>>,
+    lo: Bytes,
+    hi: Bytes,
+    reverse: bool,
+    current: Option<TableScan>,
+}
+
+impl RunScan {
+    /// `None` when no table of the run can hold a key the scan selects.
+    fn over(io: &Arc<Io>, run: &[Arc<Table>], scan: &Scan) -> Option<Self> {
+        let within = |table: &&Arc<Table>| {
+            let meta = &table.meta;
+            meta.entries > 0
+                && meta.last.as_bytes() >= scan.lo.as_ref()
+                && (scan.hi.is_empty() || meta.first.as_bytes() < scan.hi.as_ref())
+        };
+        let mut rest: Vec<Arc<Table>> = run.iter().filter(within).cloned().collect();
+        if !scan.reverse {
+            rest.reverse();
+        }
+        (!rest.is_empty()).then(|| Self {
+            io: io.clone(),
+            rest,
+            lo: scan.lo.clone(),
+            hi: scan.hi.clone(),
+            reverse: scan.reverse,
+            current: None,
+        })
+    }
+
+    async fn next(&mut self) -> Result<Option<Entry>> {
+        loop {
+            if let Some(scan) = &mut self.current
+                && let Some(entry) = scan.next().await?
+            {
+                return Ok(Some(entry));
+            }
+            let Some(table) = self.rest.pop() else {
+                return Ok(None);
+            };
+            self.current = Some(table.scan(
+                self.io.clone(),
+                self.lo.clone(),
+                self.hi.clone(),
+                self.reverse,
+            ));
         }
     }
 }
@@ -1454,20 +1696,11 @@ async fn merge(
         });
     }
     let mut sources = vec![Source::Mem(mem.into_iter())];
-    for table in tables {
-        let meta = &table.meta;
-        let outside = meta.entries == 0
-            || meta.last.as_bytes() < scan.lo.as_ref()
-            || (!scan.hi.is_empty() && meta.first.as_bytes() >= scan.hi.as_ref());
-        if !outside {
-            sources.push(Source::Table(table.scan(
-                io.clone(),
-                scan.lo.clone(),
-                scan.hi.clone(),
-                scan.reverse,
-            )));
-        }
-    }
+    sources.extend(
+        runs(tables)
+            .filter_map(|run| RunScan::over(io, run, scan))
+            .map(Source::Run),
+    );
     let mut heads = Vec::with_capacity(sources.len());
     for source in &mut sources {
         heads.push(source.next().await?);
@@ -1497,21 +1730,47 @@ async fn merge(
     Ok(ScanResult { items, more: false })
 }
 
-/// Keys written recently, for range checks.
+/// Keys written recently, for range checks. Bounded in number and in
+/// bytes: it outlives the flush of the writes it remembers, so nothing
+/// else limits what it holds.
 struct Recent {
     keys: BTreeMap<Bytes, u64>,
     order: VecDeque<(u64, Bytes)>,
     /// Writes at or below this revision may have been forgotten.
     horizon: u64,
     capacity: usize,
+    bytes: usize,
+    capacity_bytes: usize,
 }
 
 impl Recent {
+    /// What remembering one write costs besides its key.
+    const EACH: usize = 96;
+
+    fn new(horizon: u64, capacity: usize, capacity_bytes: usize) -> Self {
+        Self {
+            keys: BTreeMap::new(),
+            order: VecDeque::new(),
+            horizon,
+            capacity,
+            bytes: 0,
+            capacity_bytes,
+        }
+    }
+
     fn record(&mut self, key: Bytes, revision: u64) {
+        self.bytes += key.len() + Self::EACH;
         self.keys.insert(key.clone(), revision);
         self.order.push_back((revision, key));
-        while self.order.len() > self.capacity {
-            let (old, key) = self.order.pop_front().expect("non-empty");
+        self.trim();
+    }
+
+    fn trim(&mut self) {
+        while self.order.len() > self.capacity || self.bytes > self.capacity_bytes {
+            let Some((old, key)) = self.order.pop_front() else {
+                break;
+            };
+            self.bytes -= key.len() + Self::EACH;
             self.horizon = self.horizon.max(old);
             if self.keys.get(&key) == Some(&old) {
                 self.keys.remove(&key);
@@ -1568,7 +1827,6 @@ struct Writer {
     /// The newest revision handed out, acknowledged or not.
     assigned: u64,
     next_frame: u64,
-    recent: Recent,
     frames: VecDeque<Pending>,
     waiters: Vec<Waiter>,
     configs: Vec<(u64, DbConfig)>,
@@ -1578,18 +1836,10 @@ struct Writer {
 impl Writer {
     async fn run(db: Arc<Db>, mut rx: mpsc::Receiver<Cmd>, revision: u64) {
         let _fuse = Fuse(db.clone());
-        let capacity = db.ctx.opts.recent_keys;
         let mut writer = Writer {
             db: db.clone(),
             assigned: revision,
             next_frame: 1,
-            // Nothing is known about writes before this epoch.
-            recent: Recent {
-                keys: BTreeMap::new(),
-                order: VecDeque::new(),
-                horizon: revision,
-                capacity,
-            },
             frames: VecDeque::new(),
             waiters: Vec::new(),
             configs: Vec::new(),
@@ -1759,7 +2009,12 @@ impl Writer {
             }
             match command {
                 Cmd::Close(done) => stopping = Some(done),
-                Cmd::Config { config, reply } => {
+                Cmd::Config { change, reply } => {
+                    let mut config = match self.configs.last() {
+                        Some((_, pending)) => pending.clone(),
+                        None => self.db.config(),
+                    };
+                    change.apply(&mut config);
                     self.assigned += 1;
                     self.configs.push((self.assigned, config.clone()));
                     txns.push(FrameTxn {
@@ -1923,7 +2178,7 @@ impl Writer {
                         )));
                     }
                 }
-                Check::Range { lo, hi, since } => self.recent.check(lo, hi, *since)?,
+                Check::Range { lo, hi, since } => self.db.recent.lock().check(lo, hi, *since)?,
             }
         }
         let added: usize = txn
@@ -1946,7 +2201,7 @@ impl Writer {
         }
         // Writes arriving faster than they can be flushed are refused rather
         // than accumulated without bound.
-        if added > 0 && state.mem.bytes() > db.ctx.opts.flush_bytes.saturating_mul(4) {
+        if state.mem.bytes() > db.ctx.opts.flush_bytes.saturating_mul(4) {
             drop(state);
             db.request_flush();
             return Err(Error::Busy(
@@ -1964,7 +2219,7 @@ impl Writer {
             state
                 .mem
                 .put(key.clone(), revision, value.clone(), confirmed);
-            self.recent.record(key.clone(), revision);
+            self.db.recent.lock().record(key.clone(), revision);
         }
         drop(state);
         *bytes += size + 64;
@@ -1973,5 +2228,137 @@ impl Writer {
             config: None,
         });
         Ok(revision)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(size: u64, first: &str, last: &str, part: u32) -> Arc<Table> {
+        Table::new(TableMeta {
+            key: format!("t/{first}-{last}-{size}"),
+            size,
+            entries: 1,
+            first: first.into(),
+            last: last.into(),
+            part,
+        })
+    }
+
+    fn lengths(tables: &[Arc<Table>]) -> Vec<usize> {
+        runs(tables).map(<[_]>::len).collect()
+    }
+
+    #[test]
+    fn tables_written_by_one_merge_are_one_run() {
+        assert_eq!(lengths(&[]), Vec::<usize>::new());
+        let tables = [
+            table(10, "m", "p", 0),
+            table(30, "a", "c", 0),
+            table(30, "d", "f", 1),
+            table(30, "g", "i", 2),
+            table(500, "a", "z", 0),
+        ];
+        assert_eq!(lengths(&tables), [1, 3, 1]);
+        // A table says it continues a run only where its keys follow the
+        // last one's. A server that knows nothing of runs may have merged
+        // the first tables of one, leaving the rest behind.
+        let tables = [
+            table(60, "a", "h", 0),
+            table(30, "g", "i", 2),
+            table(30, "j", "l", 3),
+        ];
+        assert_eq!(lengths(&tables), [1, 2]);
+        let tables = [table(60, "a", "f", 0), table(30, "g", "i", 2)];
+        assert_eq!(lengths(&tables), [2]);
+    }
+
+    #[test]
+    fn runs_are_merged_whole_when_they_are_comparable_in_size() {
+        let run = |size: u64, pieces: u32, from: u8| -> Vec<Arc<Table>> {
+            (0..pieces)
+                .map(|part| {
+                    let letter =
+                        |offset: u32| ((from + (part * 2 + offset) as u8) as char).to_string();
+                    table(size / u64::from(pieces), &letter(0), &letter(1), part)
+                })
+                .collect()
+        };
+        // One run, however many tables it has, is left alone.
+        assert_eq!(merge_plan(&run(400, 4, b'a')), None);
+        assert_eq!(merge_plan(&[]), None);
+        // A small new table waits until it is half the size of the run below.
+        let small = [vec![table(100, "a", "z", 0)], run(400, 4, b'a')].concat();
+        assert_eq!(merge_plan(&small), None);
+        let grown = [vec![table(200, "a", "z", 0)], run(400, 4, b'a')].concat();
+        assert_eq!(merge_plan(&grown), Some(5));
+        // The merge takes whole runs, and as many as have become comparable.
+        let three = [run(90, 3, b'a'), run(120, 2, b'a'), run(1000, 5, b'a')].concat();
+        assert_eq!(merge_plan(&three), Some(5));
+        let all = [run(300, 3, b'a'), run(400, 2, b'a'), run(1000, 5, b'a')].concat();
+        assert_eq!(merge_plan(&all), Some(10));
+        // Too many runs are merged whatever their sizes.
+        let many: Vec<Arc<Table>> = (0..13).map(|i| table(1 << (2 * i), "a", "z", 0)).collect();
+        assert_eq!(merge_plan(&many[1..]), None);
+        assert_eq!(merge_plan(&many), Some(13));
+    }
+
+    #[test]
+    fn recent_writes_are_remembered_within_a_number_and_a_size() {
+        let key = |i: u64, len: usize| Bytes::from(format!("{i:0len$}"));
+        let (lo, hi) = (Bytes::new(), Bytes::new());
+        // Few enough to remember: a range is known unchanged since 0, and
+        // known changed since before the last write.
+        let mut recent = Recent::new(0, 1000, 1 << 20);
+        for i in 1..=1000 {
+            recent.record(key(i, 16), i);
+        }
+        assert!(recent.check(&lo, &hi, 1000).is_ok());
+        assert!(matches!(
+            recent.check(&lo, &hi, 999),
+            Err(Error::Conflict(_))
+        ));
+        assert!(recent.check(&key(0, 16), &key(1, 16), 0).is_ok());
+        // One more, and the oldest is forgotten: what happened since then
+        // can no longer be vouched for.
+        recent.record(key(1001, 16), 1001);
+        assert_eq!((recent.order.len(), recent.horizon), (1000, 1));
+        assert!(recent.check(&key(0, 16), &key(1, 16), 0).is_err());
+        assert!(recent.check(&key(0, 16), &key(1, 16), 1).is_ok());
+        // Long keys are forgotten sooner: by size, not by number.
+        let mut recent = Recent::new(0, 100_000, 1 << 20);
+        for i in 1..=10_000 {
+            recent.record(key(i, 1024), i);
+        }
+        assert!(recent.bytes <= 1 << 20);
+        assert_eq!(recent.order.len(), (1 << 20) / (1024 + Recent::EACH));
+        assert_eq!(recent.keys.len(), recent.order.len());
+        assert_eq!(recent.horizon as usize, 10_000 - recent.order.len());
+        // A key written again is remembered once, at its newest revision.
+        let mut recent = Recent::new(0, 10, 1 << 20);
+        for revision in 1..=25 {
+            recent.record(key(revision % 3, 8), revision);
+        }
+        assert_eq!((recent.keys.len(), recent.order.len()), (3, 10));
+        assert_eq!(recent.bytes, 10 * (8 + Recent::EACH));
+    }
+
+    #[test]
+    fn a_manifest_names_a_part_only_when_there_is_one() {
+        let alone = table(10, "a", "b", 0);
+        let text = serde_json::to_string(&alone.meta).unwrap();
+        assert!(!text.contains("part"), "{text}");
+        assert_eq!(
+            serde_json::from_str::<TableMeta>(&text).unwrap(),
+            alone.meta
+        );
+        let third = table(10, "a", "b", 2);
+        let text = serde_json::to_string(&third.meta).unwrap();
+        assert!(text.contains("\"part\":2"), "{text}");
+        assert_eq!(
+            serde_json::from_str::<TableMeta>(&text).unwrap(),
+            third.meta
+        );
     }
 }

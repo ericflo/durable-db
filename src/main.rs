@@ -5,7 +5,7 @@ use durable_db::{
     bench,
     cluster::Cluster,
     db::{Ctx, Options},
-    http::{ApiLimits, App, router},
+    http::{ApiLimits, App},
     io::{DiskCache, Io, retry},
     metrics::{Metered, Metrics},
     node::{Limits, Node},
@@ -95,6 +95,16 @@ struct Serve {
     /// Largest value accepted, in bytes.
     #[arg(long, env = "DURABLE_DB_MAX_VALUE_BYTES", default_value_t = 4 << 20)]
     max_value_bytes: usize,
+    /// Memory for request bodies, across all requests. One database may use a quarter.
+    #[arg(long, env = "DURABLE_DB_BODY_BYTES", default_value_t = 512 << 20)]
+    body_bytes: usize,
+    /// Memory for read results being put together or waiting to be sent, across all requests.
+    /// One database may use a quarter. One read returns at most an eighth, up to 64 MiB.
+    #[arg(long, env = "DURABLE_DB_RESULT_BYTES", default_value_t = 512 << 20)]
+    result_bytes: usize,
+    /// Connections open at once. Further ones wait to be accepted.
+    #[arg(long, env = "DURABLE_DB_MAX_CONNECTIONS", default_value_t = 8192)]
+    max_connections: usize,
     /// Do not flush directory writes to disk. Faster; a power loss can lose acknowledged writes.
     #[arg(long, env = "DURABLE_DB_NO_FSYNC")]
     no_fsync: bool,
@@ -284,13 +294,22 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
         max_open: args.max_open,
         idle_close: Duration::from_secs(args.idle_seconds),
         mem_bytes: args.memtable_bytes,
+        recent_bytes: args.memtable_bytes / 4,
         requests_per_second: args.requests_per_second,
     };
     let node = Node::new(ctx, limits, metrics);
     let cluster = Arc::new(Cluster::new(args.advertise.clone()));
+    let defaults = ApiLimits::default();
     let api = ApiLimits {
         max_value: args.max_value_bytes,
-        ..ApiLimits::default()
+        max_connections: args.max_connections,
+        max_body: defaults.max_body.min(args.body_bytes),
+        max_body_total: args.body_bytes,
+        // Counted twice while it is encoded, one read at its largest takes
+        // a quarter of the budget: one database's part.
+        max_read_bytes: defaults.max_read_bytes.min(args.result_bytes / 8),
+        max_read_total: args.result_bytes,
+        ..defaults
     };
     let app = App::new(node.clone(), keys, cluster.clone(), api);
 
@@ -359,9 +378,7 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
             }
         }
     };
-    axum::serve(listener, router(app))
-        .with_graceful_shutdown(drain)
-        .await?;
+    durable_db::server::serve(listener, app, drain).await?;
 
     // Hand every database back so the next owner opens without recovery.
     housekeeping.abort();
@@ -450,6 +467,22 @@ async fn admin_request(
     }
     Ok(value)
 }
+
+/// The allocator is built in, so that neither speed nor memory depends on
+/// the C library the binary is linked with. The static binary is linked
+/// with musl, whose allocator takes one lock for all threads: reads were a
+/// tenth as fast with it. glibc's keeps freed memory in an arena for each
+/// thread, which came to three times the memory under the same load.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// A few arenas whatever the number of threads, and freed memory given
+/// back to the system within a second: what the server holds then stays
+/// close to what its flags allow.
+#[cfg(not(target_env = "msvc"))]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: &[u8] = b"narenas:8,dirty_decay_ms:1000,muzzy_decay_ms:0\0";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

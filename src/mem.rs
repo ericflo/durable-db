@@ -16,8 +16,10 @@ pub struct Mem {
     bytes: usize,
 }
 
+/// What an entry costs: its bytes, and roughly what the map, the version
+/// list and two allocations cost around them. Small entries are mostly this.
 fn weight(key: &Bytes, value: &Option<Bytes>) -> usize {
-    key.len() + value.as_ref().map_or(0, Bytes::len) + 48
+    key.len() + value.as_ref().map_or(0, Bytes::len) + 128
 }
 
 impl Mem {
@@ -57,6 +59,7 @@ impl Mem {
     /// Entries with `lo <= key < hi` (an empty `hi` is unbounded) visible at
     /// `snapshot`, in scan order, until `live` values have been collected.
     /// Tombstones met on the way are included so they can hide older tables.
+    /// `None` when that would take more than `most` entries.
     pub fn range(
         &self,
         lo: &[u8],
@@ -64,11 +67,12 @@ impl Mem {
         reverse: bool,
         snapshot: u64,
         live: usize,
-    ) -> Vec<Entry> {
+        most: usize,
+    ) -> Option<Vec<Entry>> {
         let mut out = Vec::new();
         // A range that ends at or before its start is empty.
         if live == 0 || (!hi.is_empty() && lo >= hi) {
-            return out;
+            return Some(out);
         }
         let upper = if hi.is_empty() {
             Bound::Unbounded
@@ -86,7 +90,7 @@ impl Mem {
                     value: value.clone(),
                 });
             }
-            remaining > 0
+            remaining > 0 && out.len() <= most
         };
         if reverse {
             for (key, versions) in range.rev() {
@@ -101,13 +105,14 @@ impl Mem {
                 }
             }
         }
-        out
+        (out.len() <= most).then_some(out)
     }
 
     /// Every key's newest version at or below `upto`, ascending: the content
     /// of the next table.
     pub fn snapshot(&self, upto: u64) -> Vec<Entry> {
-        self.range(&[], &[], false, upto, usize::MAX)
+        self.range(&[], &[], false, upto, usize::MAX, usize::MAX)
+            .expect("no limit was set")
     }
 
     /// Forget versions at or below `upto`; a table holds them now.
@@ -160,14 +165,19 @@ mod tests {
         }
         let keys = |entries: Vec<Entry>| entries.into_iter().map(|e| e.key).collect::<Vec<_>>();
         assert_eq!(
-            keys(mem.range(b"a", b"", false, 9, 2)),
+            keys(mem.range(b"a", b"", false, 9, 2, 9).unwrap()),
             [b("a"), b("b"), b("c")]
         );
         assert_eq!(
-            keys(mem.range(b"b", b"e", true, 9, 9)),
+            keys(mem.range(b"b", b"e", true, 9, 9, 9).unwrap()),
             [b("d"), b("c"), b("b")]
         );
-        assert_eq!(keys(mem.range(b"a", b"", false, 2, 9)), [b("a"), b("b")]);
+        assert_eq!(
+            keys(mem.range(b"a", b"", false, 2, 9, 9).unwrap()),
+            [b("a"), b("b")]
+        );
+        assert!(mem.range(b"a", b"", false, 9, 9, 3).is_none());
+        assert!(mem.range(b"a", b"", false, 9, 9, 5).is_some());
     }
 
     #[test]

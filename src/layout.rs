@@ -51,6 +51,56 @@ impl FromStr for Epoch {
     }
 }
 
+/// How logs refer to a database: the start of the SHA-256 of its name, so
+/// that a log shows which lines concern one database without naming it.
+pub fn tag(name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(name.as_bytes())[..6])
+}
+
+/// An object key without the prefix that names its database, for messages:
+/// `l/<epoch>/<number>`, `c/<epoch>`, `m/~`.
+pub fn object(key: &str) -> &str {
+    let mut parts = key.rsplitn(4, '/');
+    let (Some(last), Some(middle)) = (parts.next(), parts.next()) else {
+        return key;
+    };
+    let from = |length: usize| &key[key.len() - length..];
+    let two = middle.len() + 1 + last.len();
+    match parts.next() {
+        // A frame, manifest or table: its kind, its epoch and its number.
+        Some(kind) if middle.parse::<Epoch>().is_ok() => from(kind.len() + 1 + two),
+        // A claim or the tombstone, directly below their kind.
+        _ if matches!(middle, "c" | "m") => from(two),
+        _ => last,
+    }
+}
+
+/// A change to a database's configuration: what to set, leaving the rest.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigChange {
+    pub max_bytes: Option<u64>,
+    pub max_requests_per_second: Option<u32>,
+    /// Refuse every token minted for the database so far.
+    pub revoke_tokens: bool,
+}
+
+impl ConfigChange {
+    pub fn apply(&self, config: &mut DbConfig) {
+        if let Some(max_bytes) = self.max_bytes {
+            config.max_bytes = max_bytes;
+        }
+        if let Some(rate) = self.max_requests_per_second {
+            config.max_requests_per_second = rate;
+        }
+        if self.revoke_tokens {
+            config.token_generation = config.token_generation.saturating_add(1);
+        }
+    }
+}
+
+pub const NAME_RULE: &str = "a database name is 1-128 characters of letters, digits, '.', '_' and '-', and does not begin with '.'";
+
 /// Database names become path segments and URL segments.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -285,6 +335,72 @@ mod tests {
                     0
                 )
         );
+    }
+
+    #[test]
+    fn a_message_shows_an_object_without_its_database() {
+        let epoch = Epoch {
+            number: 3,
+            nonce: 9,
+        };
+        // Names that look like parts of a key included.
+        for name in [
+            "customer-records",
+            "l",
+            "c",
+            "m",
+            "000000000003-0000000000000009",
+        ] {
+            let layout = Layout::new("tenants/root/", name);
+            for (key, shown) in [
+                (layout.claim(epoch), format!("c/{epoch}")),
+                (layout.manifest(epoch, 2), format!("m/{epoch}/00000002")),
+                (layout.frame(epoch, 7), format!("l/{epoch}/000000000007")),
+                (layout.table(epoch, 1), format!("t/{epoch}/00000001")),
+                (layout.tombstone(), "m/~".to_owned()),
+            ] {
+                assert_eq!(object(&key), shown, "{key}");
+            }
+        }
+        assert_eq!(object("ready-probe"), "ready-probe");
+    }
+
+    #[test]
+    fn a_log_tag_tells_databases_apart_without_naming_them() {
+        let tagged = tag("customer-records");
+        assert_eq!(tagged.len(), 12);
+        assert!(tagged.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(tagged, tag("customer-records"));
+        assert_ne!(tagged, tag("customer-record"));
+    }
+
+    #[test]
+    fn a_change_sets_only_what_it_names() {
+        let mut config = DbConfig::default();
+        let before = config.clone();
+        ConfigChange::default().apply(&mut config);
+        assert_eq!(config, before);
+        ConfigChange {
+            max_requests_per_second: Some(5),
+            revoke_tokens: true,
+            ..ConfigChange::default()
+        }
+        .apply(&mut config);
+        assert_eq!(
+            (
+                config.max_bytes,
+                config.max_requests_per_second,
+                config.token_generation
+            ),
+            (before.max_bytes, 5, before.token_generation + 1)
+        );
+        config.token_generation = u32::MAX;
+        ConfigChange {
+            revoke_tokens: true,
+            ..ConfigChange::default()
+        }
+        .apply(&mut config);
+        assert_eq!(config.token_generation, u32::MAX);
     }
 
     #[test]

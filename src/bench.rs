@@ -61,6 +61,10 @@ pub struct Bench {
     /// Distinct keys per database.
     #[arg(long, default_value_t = 10_000)]
     keys: usize,
+    /// Give every write a different value that does not compress, so that
+    /// what is stored is as large as what is written.
+    #[arg(long)]
+    random_values: bool,
     /// Send an idempotency key with every write, as the SDK does.
     #[arg(long)]
     idempotent: bool,
@@ -78,10 +82,14 @@ struct Shared {
     token: String,
     names: Vec<String>,
     value: String,
+    /// Length of the text in a value that is made up for each write.
+    random: Option<usize>,
     keys: usize,
     idempotent: bool,
     stop: AtomicBool,
     errors: AtomicU64,
+    /// Answers of 503: the server asked the client to come back.
+    refused: AtomicU64,
 }
 
 impl Shared {
@@ -117,8 +125,25 @@ impl Shared {
         };
         format!(
             "{{\"writes\":[{{\"key\":\"key/{key:08}\",\"value\":{}}}]{idempotency}}}",
-            self.value
+            self.value(unique)
         )
+    }
+
+    /// The value of one write: the same for all, or text made from `seed`.
+    fn value(&self, seed: u64) -> std::borrow::Cow<'_, str> {
+        let Some(len) = self.random else {
+            return std::borrow::Cow::Borrowed(&self.value);
+        };
+        let mut pad = String::with_capacity(len + 16);
+        let mut state = seed | 1;
+        while pad.len() < len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            pad.push_str(&format!("{state:016x}"));
+        }
+        pad.truncate(len);
+        std::borrow::Cow::Owned(format!("{{\"pad\":\"{pad}\"}}"))
     }
 }
 
@@ -152,10 +177,12 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
             .map(|i| format!("bench-{run_id:08x}-{i}"))
             .collect(),
         value: json!({"pad": "x".repeat(padding)}).to_string(),
+        random: args.random_values.then_some(padding),
         keys: args.keys,
         idempotent: args.idempotent,
         stop: AtomicBool::new(false),
         errors: AtomicU64::new(0),
+        refused: AtomicU64::new(0),
     });
 
     for name in &shared.names {
@@ -195,18 +222,24 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
         for name in &shared.names {
             for start in (0..args.keys).step_by(500) {
                 let writes: Vec<String> = (start..(start + 500).min(args.keys))
-                    .map(|key| format!("{{\"key\":\"key/{key:08}\",\"value\":{}}}", shared.value))
+                    .map(|key| {
+                        let value = shared.value(rand::random());
+                        format!("{{\"key\":\"key/{key:08}\",\"value\":{value}}}")
+                    })
                     .collect();
-                let status = shared
-                    .post(
-                        0,
-                        name,
-                        "commit",
-                        format!("{{\"writes\":[{}]}}", writes.join(",")),
-                    )
-                    .await?;
-                if !status.is_success() {
-                    bail!("loading {name}: {status}");
+                let body = format!("{{\"writes\":[{}]}}", writes.join(","));
+                // A database that is flushing says so; wait as a client would.
+                let mut attempt = 0;
+                loop {
+                    attempt += 1;
+                    let status = shared.post(0, name, "commit", body.clone()).await?;
+                    if status.is_success() {
+                        break;
+                    }
+                    if status != 503 || attempt >= 400 {
+                        bail!("loading {name}: {status}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
                 }
             }
         }
@@ -252,6 +285,9 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
                         latencies
                             .push(began.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
                     }
+                    Ok(status) if status == 503 => {
+                        shared.refused.fetch_add(1, Ordering::Relaxed);
+                    }
                     _ => {
                         shared.errors.fetch_add(1, Ordering::Relaxed);
                     }
@@ -295,6 +331,7 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
         "seconds": (elapsed * 100.0).round() / 100.0,
         "requests": latencies.len(),
         "errors": shared.errors.load(Ordering::Relaxed),
+        "refused": shared.refused.load(Ordering::Relaxed),
         "requests_per_second": (latencies.len() as f64 / elapsed).round(),
         "latency_ms": {
             "p50": percentile(&latencies, 0.50),
@@ -304,14 +341,16 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
             "max": percentile(&latencies, 1.0),
         },
     });
+    // A 503 is the server asking the client to wait, not a failure.
     println!(
-        "{workload}: {} requests/s   p50 {:.2} ms   p99 {:.2} ms   p99.9 {:.2} ms   max {:.2} ms   errors {}",
+        "{workload}: {} requests/s   p50 {:.2} ms   p99 {:.2} ms   p99.9 {:.2} ms   max {:.2} ms   errors {}   told to wait {}",
         result["requests_per_second"],
         result["latency_ms"]["p50"].as_f64().unwrap_or(0.0),
         result["latency_ms"]["p99"].as_f64().unwrap_or(0.0),
         result["latency_ms"]["p999"].as_f64().unwrap_or(0.0),
         result["latency_ms"]["max"].as_f64().unwrap_or(0.0),
         result["errors"],
+        result["refused"],
     );
     if let Some(path) = args.output {
         std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")?;

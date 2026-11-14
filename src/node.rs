@@ -6,7 +6,7 @@
 use crate::{
     Error, Result,
     db::{Committed, Ctx, Db, Info, ReadReq, ReadResp, Txn},
-    layout::{DbConfig, Layout, valid_name},
+    layout::{ConfigChange, DbConfig, Layout, NAME_RULE, valid_name},
     metrics::Metrics,
 };
 use parking_lot::{Mutex, RwLock};
@@ -24,6 +24,9 @@ pub struct Limits {
     pub idle_close: Duration,
     /// Unflushed bytes across all open databases before the largest are flushed.
     pub mem_bytes: usize,
+    /// Bytes of recently written keys that all open databases together
+    /// remember for range checks.
+    pub recent_bytes: usize,
     /// Requests per second per database unless its configuration says otherwise. Zero is unlimited.
     pub requests_per_second: u32,
 }
@@ -34,6 +37,7 @@ impl Default for Limits {
             max_open: 4096,
             idle_close: Duration::from_secs(300),
             mem_bytes: 256 << 20,
+            recent_bytes: 64 << 20,
             requests_per_second: 0,
         }
     }
@@ -92,9 +96,7 @@ impl Node {
             return Ok((db, false));
         }
         if !valid_name(name) {
-            return Err(Error::Invalid(
-                "a database name is 1-128 characters of letters, digits, '.', '_' and '-'".into(),
-            ));
+            return Err(Error::Invalid(NAME_RULE.into()));
         }
         // One activation per database at a time on this node.
         let gate = self
@@ -271,15 +273,17 @@ impl Node {
         .await
     }
 
-    pub async fn configure(&self, name: &str, change: impl Fn(&mut DbConfig)) -> Result<Info> {
+    /// Change a database's configuration. The change is applied to the
+    /// configuration as it stands when its turn comes, so two changes made
+    /// at once both take effect.
+    pub async fn configure(&self, name: &str, change: ConfigChange) -> Result<Info> {
         let db = self.db(name).await?;
-        let mut config = db.config();
-        change(&mut config);
-        db.set_config(config).await?;
+        db.configure(change).await?;
         Ok(db.info())
     }
 
-    /// Release idle databases and keep unflushed memory within its budget.
+    /// Release idle databases, and keep unflushed writes and remembered keys
+    /// within their budgets.
     pub async fn tend(&self) {
         let mut open: Vec<Arc<Db>> = self.open.read().values().cloned().collect();
         self.open.write().retain(|_, db| !db.is_closed());
@@ -305,6 +309,18 @@ impl Node {
             db.request_flush();
             total -= bytes;
         }
+        let most = level(
+            open.iter().map(|db| db.recent_bytes()).collect(),
+            self.limits.recent_bytes,
+        );
+        for db in &open {
+            db.remember_at_most(most);
+        }
+    }
+
+    /// Bytes of recently written keys remembered by all open databases.
+    pub fn recent_bytes(&self) -> usize {
+        self.open.read().values().map(|db| db.recent_bytes()).sum()
     }
 
     /// Hand every database back so successors open without recovery.
@@ -323,5 +339,45 @@ impl Node {
 
     pub fn open_names(&self) -> Vec<String> {
         self.open.read().keys().cloned().collect()
+    }
+}
+
+/// The most that each of several holders may keep so that together they keep
+/// no more than `budget`: those holding less keep what they have, and the
+/// others share the rest equally.
+fn level(mut held: Vec<usize>, budget: usize) -> usize {
+    held.sort_unstable();
+    let mut left = budget;
+    for (i, bytes) in held.iter().enumerate() {
+        let share = left / (held.len() - i);
+        if *bytes > share {
+            return share;
+        }
+        left -= bytes;
+    }
+    usize::MAX
+}
+
+#[cfg(test)]
+mod tests {
+    use super::level;
+
+    #[test]
+    fn a_budget_is_shared_among_those_that_hold_most() {
+        // Within the budget nobody is limited.
+        assert_eq!(level(vec![], 100), usize::MAX);
+        assert_eq!(level(vec![10, 20, 70], 100), usize::MAX);
+        // Small holders keep theirs; the large ones share what is left.
+        assert_eq!(level(vec![80, 5, 80, 15], 100), 40);
+        assert_eq!(level(vec![50, 50, 50, 50], 100), 25);
+        assert_eq!(level(vec![1000], 100), 100);
+        for (held, budget) in [
+            (vec![80, 5, 80, 15], 100),
+            (vec![9, 9, 9], 4),
+            (vec![3, 1], 0),
+        ] {
+            let most = level(held.clone(), budget);
+            assert!(held.iter().map(|bytes| (*bytes).min(most)).sum::<usize>() <= budget);
+        }
     }
 }

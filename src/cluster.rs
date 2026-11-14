@@ -4,6 +4,7 @@
 //! any database at any time; the claim protocol keeps that safe. Routing
 //! only makes it rare, so a database is normally served from one node's
 //! memory instead of being taken back and forth.
+use crate::http::{FREE, RESULTS_FULL, Shares, kept};
 use axum::{
     body::Bytes,
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
@@ -13,6 +14,7 @@ use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -46,7 +48,9 @@ impl Cluster {
             suspects: RwLock::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
             client: reqwest::Client::builder()
-                .pool_idle_timeout(Duration::from_secs(60))
+                // Shorter than a server keeps an idle connection, so a
+                // relayed request is not sent into one being closed.
+                .pool_idle_timeout(Duration::from_secs(30))
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(60))
                 .build()
@@ -99,7 +103,10 @@ impl Cluster {
     }
 
     /// Relay a request to `peer`. `None` means the peer could not be reached
-    /// and the caller should serve the request itself.
+    /// and the caller should serve the request itself. `proof` shows the
+    /// peer that a node sent this. With `hold`, a budget and the database's
+    /// name, an answer of any size is reserved for there, or refused.
+    #[allow(clippy::too_many_arguments)]
     pub async fn forward(
         &self,
         peer: &str,
@@ -107,11 +114,13 @@ impl Cluster {
         path_and_query: &str,
         headers: &HeaderMap,
         body: Bytes,
+        proof: &HeaderValue,
+        hold: Option<(&Arc<Shares>, &str)>,
     ) -> Option<Response> {
         let mut request = self
             .client
             .request(method, format!("http://{peer}{path_and_query}"))
-            .header(FORWARDED, "1")
+            .header(FORWARDED, proof)
             .body(body);
         for name in [header::AUTHORIZATION, header::CONTENT_TYPE] {
             if let Some(value) = headers.get(&name) {
@@ -121,12 +130,15 @@ impl Cluster {
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) if error.is_connect() || error.is_timeout() => {
+                // The address it failed on names the database.
+                let error = error.without_url();
                 tracing::debug!(peer, %error, "peer unreachable; serving locally");
                 self.suspect(peer);
                 return None;
             }
             // The request may have reached the peer: its outcome is unknown.
             Err(error) => {
+                let error = error.without_url();
                 tracing::debug!(peer, %error, "forwarded request failed");
                 return Some(crate::http::error_response(&crate::Error::Lost(
                     "the owning node did not answer".into(),
@@ -147,8 +159,21 @@ impl Cluster {
                 relayed.insert(name, value);
             }
         }
+        // The answer waits in this node's memory until the client takes it.
+        let size = response.content_length().unwrap_or(0) as usize;
+        let held = match hold {
+            Some((results, name)) if size > FREE => match results.take(name, size) {
+                Some(held) => Some(held),
+                None => {
+                    return Some(crate::http::error_response(&crate::Error::Busy(
+                        RESULTS_FULL.into(),
+                    )));
+                }
+            },
+            _ => None,
+        };
         match response.bytes().await {
-            Ok(body) => Some((status, relayed, body).into_response()),
+            Ok(body) => Some((status, relayed, kept(body, held)).into_response()),
             Err(_) => Some(crate::http::error_response(&crate::Error::Lost(
                 "the owning node did not finish its answer".into(),
             ))),

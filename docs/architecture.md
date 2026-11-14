@@ -76,12 +76,14 @@ Writes accumulate in memory and in frames. A **flush** writes the acknowledged i
 
 Tables are merged so that the newest tables stay small and the count stays logarithmic: the newest tables are merged whenever together they are at least half the size of the next one. Deleted keys are dropped when a merge includes the oldest table.
 
-A table is blocks of about 32 KiB, compressed with LZ4, each with a CRC, followed by an index of the last key of each block. A lookup reads the index once, then one block. Small tables arrive whole in a single request.
+A merge writes its result as a **run**: tables of at most 32 MiB whose key ranges follow one another, each uploaded before the next is begun. A run is read, weighed and merged as the single table it would otherwise be, so a merge holds about one table in memory however large the database is. Two merges run at once on a server. A database that waits for its turn goes on flushing. A merge under way flushes between two of its tables when writes fall due, and stops there when the database is being released. The tables of a merge that did not finish are in no manifest, and are collected. A merge that failed is tried again when the database is next written to.
+
+A table is blocks of about 32 KiB, compressed with LZ4, each with a CRC, followed by an index of the last key of each block. A lookup reads the index, then one block. Small tables arrive whole in a single request.
 
 Two caches hold table data, both bounded and both disposable:
 
-- **Memory** (`--cache-bytes`): decoded blocks, shared by all databases.
-- **Disk** (`--cache-dir`, optional): whole table files. A damaged file fails its checksum, is deleted and is fetched again.
+- **Memory** (`--cache-bytes`): decoded blocks and table indexes, shared by all databases. When it is full it keeps what has been read more than once, so a scan of everything does not displace what is in use.
+- **Disk** (`--cache-dir`, optional): whole table files, written when a table is made and otherwise fetched in the background, two at a time. A damaged file fails its checksum, is deleted and is fetched again.
 
 ## Collection
 
@@ -141,5 +143,5 @@ Membership is only a routing preference. Two servers with different views of the
 - **A strong read costs one HEAD**, shared among concurrent reads. Session reads cost none.
 - **Transactions do not span databases.**
 - **A deleted database's name cannot be reused.** The tombstone is permanent, so that a late upload from a server that owned the old database can never be mistaken for the new one.
-- **Merges build a table in memory**, so a database should fit comfortably in a server's memory when merged. The default quota is 1 GiB.
+- **Merging the oldest table rewrites the database**, each time it grows by half. Memory does not grow with the database, but the uploads do. The default quota is 1 GiB; larger databases have not been measured.
 - **No historical reads.** Only the current state is kept.

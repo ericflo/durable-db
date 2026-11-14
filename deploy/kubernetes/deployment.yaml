@@ -42,8 +42,13 @@ spec:
             - --key-file=/run/keys/admin.key
             - --cache-dir=/cache
             - --cache-dir-bytes=1073741824
-            - --cache-bytes=268435456
-            - --memtable-bytes=134217728
+            # Sized for the memory limit below; see "Resources" in
+            # docs/deployment.md before changing either.
+            - --cache-bytes=201326592
+            - --memtable-bytes=100663296
+            - --body-bytes=134217728
+            - --result-bytes=134217728
+            - --max-connections=1024
           env:
             - name: POD_IP
               valueFrom:

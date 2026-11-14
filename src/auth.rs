@@ -60,6 +60,10 @@ impl Grant {
 #[derive(Clone)]
 pub struct Keys(Vec<Vec<u8>>);
 
+/// What a relay proof signs. No token payload can equal it: those are
+/// base64url, which has no space.
+const RELAY: &str = "durable-db relay";
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -117,6 +121,24 @@ impl Keys {
         mac.finalize().into_bytes().to_vec()
     }
 
+    /// What a node sends with a request it relays to a peer. Only a holder
+    /// of the signing key can produce it, so a client cannot claim to be one.
+    pub fn relay_proof(&self) -> String {
+        hex::encode(Self::sign(&self.0[0], RELAY))
+    }
+
+    /// Whether `proof` was made by a node that holds one of the keys.
+    pub fn relayed(&self, proof: &[u8]) -> bool {
+        let Ok(proof) = hex::decode(proof) else {
+            return false;
+        };
+        self.0.iter().any(|key| {
+            let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+            mac.update(RELAY.as_bytes());
+            mac.verify_slice(&proof).is_ok()
+        })
+    }
+
     pub fn mint(&self, grant: &Grant) -> String {
         let payload = B64.encode(serde_json::to_vec(grant).expect("grant encodes"));
         let signature = B64.encode(Self::sign(&self.0[0], &payload));
@@ -153,7 +175,7 @@ pub fn expiry(ttl_seconds: u64) -> u64 {
     if ttl_seconds == 0 {
         0
     } else {
-        now() + ttl_seconds
+        now().saturating_add(ttl_seconds)
     }
 }
 
@@ -192,6 +214,37 @@ mod tests {
             generation: 0,
         };
         assert!(!sneaky.allows("app", Access::Read));
+    }
+
+    #[test]
+    fn only_a_key_holder_can_say_it_relayed() {
+        let keys = Keys::from_secret(&[7; 32]);
+        let proof = keys.relay_proof();
+        assert!(keys.relayed(proof.as_bytes()));
+        for forged in ["1", "", "true", &proof[2..], &hex::encode([0u8; 32])] {
+            assert!(!keys.relayed(forged.as_bytes()), "{forged:?}");
+        }
+        assert!(!Keys::from_secret(&[8; 32]).relayed(proof.as_bytes()));
+        // During a rotation, peers that sign with the older key are still peers.
+        let rotated = Keys::parse(&format!(
+            "{}\n{}\n",
+            hex::encode([9; 32]),
+            hex::encode([7; 32])
+        ))
+        .unwrap();
+        assert!(rotated.relayed(proof.as_bytes()));
+        // A token's signature is not a proof, nor the other way around.
+        let token = keys.mint(&Grant::admin());
+        let signature = token.rsplit('.').next().unwrap();
+        assert!(!keys.relayed(signature.as_bytes()));
+        assert!(keys.verify(&format!("ddb_{RELAY}.{proof}")).is_err());
+    }
+
+    #[test]
+    fn a_lifetime_beyond_the_calendar_does_not_wrap() {
+        assert_eq!(expiry(0), 0);
+        assert_eq!(expiry(u64::MAX), u64::MAX);
+        assert!(expiry(60) > now());
     }
 
     #[test]

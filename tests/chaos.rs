@@ -413,6 +413,8 @@ async fn run(seed: u64) {
         flush_frames: 6,
         idle_flush: Duration::from_millis(30),
         block_bytes: 1 << 10,
+        // Small enough that merges write their result in several tables.
+        table_bytes: 4 << 10,
         store_deadline: Duration::from_secs(5),
         ..Options::default()
     };
@@ -556,8 +558,24 @@ async fn acknowledged_writes_survive_arbitrary_faults() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // The clock of these schedules is not the wall clock, so one that never
+    // ends would not time out by itself. It is stopped from outside, and
+    // named.
+    let current = Arc::new(std::sync::Mutex::new((first, std::time::Instant::now())));
+    let watched = current.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let (seed, started) = *watched.lock().unwrap();
+            if started.elapsed() > Duration::from_secs(300) {
+                eprintln!("seed {seed} has not finished in five minutes");
+                std::process::abort();
+            }
+        }
+    });
     for seed in first..first + seeds {
         let started = std::time::Instant::now();
+        *current.lock().unwrap() = (seed, started);
         run(seed).await;
         eprintln!("seed {seed} held in {:?}", started.elapsed());
     }

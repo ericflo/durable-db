@@ -9,7 +9,7 @@
 use crate::{
     Error, Result,
     store::{ObjectStore, StoreError, StoreResult},
-    table::Block,
+    table::{Block, Index},
 };
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -28,17 +28,35 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// What the memory cache holds of a table: its blocks, and its index under
+/// a block number no block has.
 #[derive(Clone)]
-struct BlockWeight;
+enum Part {
+    Block(Arc<Block>),
+    Index(Arc<Index>),
+}
 
-impl Weighter<(Arc<str>, u32), Arc<Block>> for BlockWeight {
-    fn weight(&self, key: &(Arc<str>, u32), block: &Arc<Block>) -> u64 {
-        (key.0.len() + block.weight()) as u64
+const INDEX: u32 = u32::MAX;
+
+#[derive(Clone)]
+struct PartWeight;
+
+impl Weighter<(Arc<str>, u32), Part> for PartWeight {
+    fn weight(&self, key: &(Arc<str>, u32), part: &Part) -> u64 {
+        let held = match part {
+            Part::Block(block) => block.weight(),
+            Part::Index(index) => index.weight(),
+        };
+        (key.0.len() + held) as u64
     }
 }
 
 /// Tables larger than this are read from the bucket by range only.
 const DISK_OBJECT_BYTES: u64 = 64 << 20;
+
+/// A table is in memory while it is fetched for the disk cache, so only
+/// this many are fetched at a time.
+const FILLS: usize = 2;
 
 pub struct DiskCache {
     dir: PathBuf,
@@ -165,12 +183,15 @@ impl DiskCache {
 
 pub struct Io {
     pub store: Arc<dyn ObjectStore>,
-    blocks: Cache<(Arc<str>, u32), Arc<Block>, BlockWeight>,
+    blocks: Cache<(Arc<str>, u32), Part, PartWeight>,
     pub disk: Option<Arc<DiskCache>>,
     pub block_hits: AtomicU64,
     pub block_misses: AtomicU64,
+    /// Bytes of table indexes in memory, in the cache or in use by a reader.
+    pub index_bytes: Arc<AtomicU64>,
     /// Bounds how many table merges run at once on this server.
-    pub merges: tokio::sync::Semaphore,
+    pub merges: Arc<tokio::sync::Semaphore>,
+    fills: Arc<tokio::sync::Semaphore>,
 }
 
 impl Io {
@@ -185,17 +206,22 @@ impl Io {
             blocks: Cache::with_weighter(
                 (cache_bytes / 16_384) as usize + 16,
                 cache_bytes,
-                BlockWeight,
+                PartWeight,
             ),
             disk: disk.map(Arc::new),
             block_hits: AtomicU64::new(0),
             block_misses: AtomicU64::new(0),
-            merges: tokio::sync::Semaphore::new(2),
+            index_bytes: Arc::default(),
+            merges: Arc::new(tokio::sync::Semaphore::new(2)),
+            fills: Arc::new(tokio::sync::Semaphore::new(FILLS)),
         })
     }
 
     pub fn cached_block(&self, table: &Arc<str>, block: u32) -> Option<Arc<Block>> {
-        let found = self.blocks.get(&(table.clone(), block));
+        let found = match self.blocks.get(&(table.clone(), block)) {
+            Some(Part::Block(block)) => Some(block),
+            _ => None,
+        };
         let counter = if found.is_some() {
             &self.block_hits
         } else {
@@ -206,7 +232,22 @@ impl Io {
     }
 
     pub fn cache_block(&self, table: &Arc<str>, block: u32, data: Arc<Block>) {
-        self.blocks.insert((table.clone(), block), data);
+        self.blocks
+            .insert((table.clone(), block), Part::Block(data));
+    }
+
+    pub fn cached_index(&self, table: &Arc<str>) -> Option<Arc<Index>> {
+        match self.blocks.get(&(table.clone(), INDEX)) {
+            Some(Part::Index(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Keep a table's index for as long as the cache has room for it. The
+    /// table itself only remembers where it is.
+    pub fn cache_index(&self, table: &Arc<str>, index: Arc<Index>) {
+        self.blocks
+            .insert((table.clone(), INDEX), Part::Index(index));
     }
 
     pub fn cache_bytes(&self) -> u64 {
@@ -237,31 +278,48 @@ impl Io {
         }
         let bytes = retry(|| self.store.get_range(key, start, end))
             .await?
-            .ok_or_else(|| Error::Lost(format!("{key} was collected by a newer owner")))?;
+            .ok_or_else(|| {
+                let object = crate::layout::object(key);
+                Error::Lost(format!("{object} was collected by a newer owner"))
+            })?;
         if let Some(disk) = &self.disk {
             if start == 0 && end >= size {
-                self.remember(key, bytes.clone());
-            } else if size <= DISK_OBJECT_BYTES && disk.filling.lock().insert(key.to_owned()) {
-                // Fetch the whole object once, off the request's path.
-                let (io, key) = (self.clone(), key.to_owned());
-                tokio::spawn(async move {
-                    if let Ok(Some(body)) = retry(|| io.store.get(&key)).await {
-                        io.remember(&key, body);
-                    }
-                    if let Some(disk) = &io.disk {
-                        disk.filling.lock().remove(&key);
-                    }
-                });
+                self.remember(key, bytes.clone()).await;
+            } else if size <= DISK_OBJECT_BYTES {
+                self.fill(disk, key);
             }
         }
         Ok(bytes)
     }
 
+    /// Fetch a whole table for the disk cache, off the request's path. One
+    /// that has no turn now is fetched after a later read of it.
+    fn fill(self: &Arc<Self>, disk: &Arc<DiskCache>, key: &str) {
+        let Ok(turn) = self.fills.clone().try_acquire_owned() else {
+            return;
+        };
+        if !disk.filling.lock().insert(key.to_owned()) {
+            return;
+        }
+        let (io, key) = (self.clone(), key.to_owned());
+        tokio::spawn(async move {
+            if let Ok(Some(body)) = retry(|| io.store.get(&key)).await {
+                io.remember(&key, body).await;
+            }
+            if let Some(disk) = &io.disk {
+                disk.filling.lock().remove(&key);
+            }
+            drop(turn);
+        });
+    }
+
     /// Put a whole table into the disk cache, such as one just written.
-    pub fn remember(&self, key: &str, body: Bytes) {
+    /// Returns when it is there, so that its bytes are not left waiting in
+    /// memory.
+    pub async fn remember(&self, key: &str, body: Bytes) {
         if let Some(disk) = &self.disk {
             let (disk, key) = (disk.clone(), key.to_owned());
-            tokio::task::spawn_blocking(move || disk.write(&key, &body));
+            let _ = tokio::task::spawn_blocking(move || disk.write(&key, &body)).await;
         }
     }
 

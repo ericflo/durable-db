@@ -13,7 +13,10 @@
 use crate::{Error, Result, io::Io};
 use bytes::{Buf, BufMut, Bytes};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicU64, Ordering},
+};
 
 const MAGIC: &[u8; 8] = b"DDBTBL02";
 const FOOTER: usize = 8 + 4 + 4 + 8 + 8;
@@ -42,6 +45,15 @@ pub struct TableMeta {
     pub entries: u64,
     pub first: String,
     pub last: String,
+    /// A merge writes its result as several tables of limited size, one
+    /// after another in key order. This is the table's place among them;
+    /// zero for the first, and for a table written alone.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub part: u32,
+}
+
+fn is_zero(part: &u32) -> bool {
+    *part == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,6 +183,7 @@ impl TableBuilder {
             entries: self.entries,
             first: lossy(self.first.as_deref().unwrap_or_default()),
             last: lossy(&self.last),
+            part: 0,
         };
         (Bytes::from(self.out), meta)
     }
@@ -255,14 +268,48 @@ impl Block {
     }
 }
 
-struct Index {
+/// Where each block of a table is, and the last key in it.
+pub struct Index {
     blocks: Vec<IndexEntry>,
+    weight: usize,
+    /// Bytes of all indexes in memory; this one's are taken off when it goes.
+    loaded: Arc<AtomicU64>,
+}
+
+impl Index {
+    fn new(blocks: Vec<IndexEntry>, loaded: &Arc<AtomicU64>) -> Self {
+        let weight = blocks
+            .iter()
+            .map(|block| block.last.len() + std::mem::size_of::<IndexEntry>())
+            .sum::<usize>()
+            + 64;
+        loaded.fetch_add(weight as u64, Ordering::Relaxed);
+        Self {
+            blocks,
+            weight,
+            loaded: loaded.clone(),
+        }
+    }
+
+    pub fn weight(&self) -> usize {
+        self.weight
+    }
+}
+
+impl Drop for Index {
+    fn drop(&mut self) {
+        self.loaded.fetch_sub(self.weight as u64, Ordering::Relaxed);
+    }
 }
 
 pub struct Table {
     pub meta: TableMeta,
     key: Arc<str>,
-    index: tokio::sync::OnceCell<Index>,
+    /// The index, while the cache or a reader holds it. A table does not
+    /// keep its own: an index can be as large as the table, and the tables
+    /// of every open database would hold theirs at once.
+    index: parking_lot::Mutex<Weak<Index>>,
+    loading: tokio::sync::Mutex<()>,
 }
 
 impl Table {
@@ -270,7 +317,8 @@ impl Table {
         Arc::new(Self {
             key: Arc::from(meta.key.as_str()),
             meta,
-            index: tokio::sync::OnceCell::new(),
+            index: parking_lot::Mutex::new(Weak::new()),
+            loading: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -281,26 +329,39 @@ impl Table {
             && key <= self.meta.last.as_bytes()
     }
 
-    async fn index(&self, io: &Arc<Io>) -> Result<&Index> {
-        self.index
-            .get_or_try_init(|| async {
-                match self.load_index(io).await {
-                    // A damaged copy in the disk cache: discard it and read
-                    // the bucket's.
-                    Err(Error::Corrupt(_)) if io.forget(&self.key).await => {
-                        self.load_index(io).await
-                    }
-                    loaded => loaded,
-                }
-            })
-            .await
+    async fn index(&self, io: &Arc<Io>) -> Result<Arc<Index>> {
+        // Asking the cache is also what tells it the index is in use.
+        if let Some(index) = io.cached_index(&self.key) {
+            return Ok(index);
+        }
+        // One reader fetches it; the others wait for that.
+        let _loading = self.loading.lock().await;
+        let held = self.index.lock().upgrade();
+        if let Some(index) = held {
+            // Dropped by the cache while a reader still had it.
+            io.cache_index(&self.key, index.clone());
+            return Ok(index);
+        }
+        let index = match self.load_index(io).await {
+            // A damaged copy in the disk cache: discard it and read the
+            // bucket's.
+            Err(Error::Corrupt(_)) if io.forget(&self.key).await => self.load_index(io).await,
+            loaded => loaded,
+        };
+        let index = Arc::new(index?);
+        *self.index.lock() = Arc::downgrade(&index);
+        io.cache_index(&self.key, index.clone());
+        Ok(index)
     }
 
     async fn load_index(&self, io: &Arc<Io>) -> Result<Index> {
         let size = self.meta.size;
         let tail_start = size.saturating_sub(TAIL);
         let tail = io.range(&self.key, size, tail_start, size).await?;
-        let corrupt = || Error::Corrupt(format!("table {} has a bad footer", self.key));
+        let corrupt = || {
+            let object = crate::layout::object(&self.key);
+            Error::Corrupt(format!("table {object} has a bad footer"))
+        };
         if tail.len() < FOOTER || tail.len() as u64 != size - tail_start {
             return Err(corrupt());
         }
@@ -339,7 +400,7 @@ impl Table {
                 );
             }
         }
-        Ok(Index { blocks })
+        Ok(Index::new(blocks, &io.index_bytes))
     }
 
     async fn block(&self, io: &Arc<Io>, index: &Index, i: usize) -> Result<Arc<Block>> {
@@ -373,7 +434,7 @@ impl Table {
         if i == index.blocks.len() {
             return Ok(None);
         }
-        let block = self.block(io, index, i).await?;
+        let block = self.block(io, &index, i).await?;
         let at = block.lower_bound(key);
         Ok((at < block.len() && block.key(at) == key).then(|| block.entry(at)))
     }
@@ -386,6 +447,7 @@ impl Table {
             lo,
             hi,
             reverse,
+            index: None,
             block: None,
             started: false,
         }
@@ -398,6 +460,8 @@ pub struct TableScan {
     lo: Bytes,
     hi: Bytes,
     reverse: bool,
+    /// Held from the first entry to the last.
+    index: Option<Arc<Index>>,
     /// The current block, its number, and the next position within it
     /// (for a reverse scan, one past the next entry).
     block: Option<(Arc<Block>, usize, usize)>,
@@ -409,7 +473,10 @@ impl TableScan {
         if self.table.meta.entries == 0 {
             return Ok(None);
         }
-        let index = self.table.index(&self.io).await?;
+        if self.index.is_none() {
+            self.index = Some(self.table.index(&self.io).await?);
+        }
+        let index: &Index = self.index.as_deref().expect("just loaded");
         if !self.started {
             self.started = true;
             let blocks = &index.blocks;

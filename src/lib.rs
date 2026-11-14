@@ -15,6 +15,7 @@ pub mod layout;
 pub mod mem;
 pub mod metrics;
 pub mod node;
+pub mod server;
 pub mod store;
 pub mod table;
 
