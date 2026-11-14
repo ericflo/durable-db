@@ -63,6 +63,22 @@ def main():
     def save():
         (output/'resources.json').write_text(json.dumps(report,indent=2)+'\n')
 
+    def journal_counters():
+        # Use the workload's mounted token; only fixed counters leave the pod.
+        peers = [dict(pod=p['metadata']['name'], host=p['status']['podIP']) for p in
+                 json.loads(kube('get','pods','-l','app=durable-db','-o','json'))['items']]
+        script = r"""const fs=require('fs');const token=fs.readFileSync('/run/credentials/admin.token','utf8').trim();
+Promise.all(JSON.parse(process.argv[1]).map(async ({pod,host})=>{
+ try {
+  const r=await fetch(`http://${host.includes(':')?'['+host+']':host}:7654/metrics`,{headers:{authorization:'Bearer '+token},redirect:'error',signal:AbortSignal.timeout(10000)});
+  if(!r.ok) return {pod,status:r.status};
+  const body=await r.text();if(body.length>1048576)throw Error();
+  const count=name=>{const m=body.match(new RegExp('^durable_db_events_total\\{event="journal_'+name+'_prepared"\\} ([0-9]+)$','m'));return m?Number(m[1]):null;};
+  return {pod,status:200,frames:count('frames'),records:count('records')};
+ }catch{return {pod,status:'unreachable'};}
+})).then(rows=>console.log(JSON.stringify(rows)));"""
+        return dict(time_utc=now(),pods=json.loads(kube('exec','benchmark','--','node','-e',script,json.dumps(peers),timeout=20)))
+
     def sample():
         pods = json.loads(kube('get','pods','-l','app=durable-db','-o','json'))['items']
         observed = []
@@ -133,6 +149,7 @@ def main():
         kube('apply','-f','-',body=runner)
         kube('wait','--for=condition=Ready','pod/benchmark','--timeout=120s',timeout=150)
         sample()
+        report['journal_counters_start']=journal_counters();save()
         command=['node','/work/scripts/benchmark-http.mjs','--urls','http://durable-db:7654',
             '--token-file','/run/credentials/admin.token','--databases',str(args.databases),'--workers',args.workers,
             '--operations',str(args.operations),'--value-bytes',str(args.value_bytes),'--upload-budget-bytes','67108864',
@@ -147,6 +164,7 @@ def main():
                 sample();time.sleep(10)
         report['benchmark_exit_code']=load.returncode
         (output/'benchmark.json').write_bytes(kube('exec','benchmark','--','cat','/output/benchmark.json'))
+        report['journal_counters_end']=journal_counters()
         sample()
         report['complete']=load.returncode==0
     finally:

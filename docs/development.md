@@ -33,6 +33,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Native budget metadata cleanup | `cargo test --locked --lib database_budget`, `cargo test --locked --lib automatically_collects`, `scripts/check-model.sh PublicationSafety` and `scripts/check-proof.sh PublicationSafety` |
 | HTTP admission | `cargo test --locked --lib api::rate`, `cargo test --locked --test http` and `scripts/check-model.sh RequestBudget` |
 | Native lifecycle and logical quotas | `cargo test --locked --lib native_lifecycle` and `scripts/check-model.sh MemoryIndex` |
+| HTTP journal grouping | `cargo test --locked --lib native_http_batch` and `scripts/check-model.sh LiveTransactions` |
 | Live native transactions | `cargo test --locked --lib live_` and `scripts/check-model.sh LiveTransactions` |
 | Transaction validator | `cargo test --locked --lib transactions::validation` and `scripts/check-model.sh TransactionValidation` |
 | Native checkpoints | `cargo test --locked --lib checkpoint` and `scripts/check-model.sh Checkpoint` |

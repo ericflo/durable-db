@@ -250,6 +250,10 @@ pub struct Owner {
     maintenance: checkpoint::Maintenance,
 }
 impl Owner {
+    pub(crate) fn available_journal_bytes(&self) -> usize {
+        self.writer.available_bytes()
+    }
+
     pub async fn outcome(&self, ticket: Ticket) -> anyhow::Result<Outcome> {
         let result = self.outcome_unvalidated(ticket);
         self.validate().await?;

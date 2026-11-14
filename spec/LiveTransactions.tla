@@ -28,7 +28,13 @@ Accept(request, snapshot, condition) ==
 Revoke == /\ live /\ Len(history) < MaxWrites /\ (~Staging \/ UnsafeCheckpoint) /\ Authorized(Len(history))
           /\ history' = Append(history, [id |-> "revoke", condition |-> TRUE, kind |-> "policy"])
           /\ UNCHANGED <<stored, visible, live, conflicts, answers, reads, checkpoint>>
-Upload(i) == /\ i \in 1..Len(history) /\ stored' = stored \cup {i}
+(* HTTP coalescing refines successive Accept/Reject steps, then one immutable
+   upload of a contiguous group. Catalog operations delimit admission groups;
+   every response still resolves its own identity/policy and checks permission.
+   Singleton/partial arrivals remain allowed as a safety overapproximation.
+   Queue bytes, request-local errors and physical PUT counts are Rust checks. *)
+Upload(i,j) == /\ i \in 1..Len(history) /\ j \in i..Len(history)
+             /\ stored' = stored \cup (i..j)
              /\ UNCHANGED <<history, visible, live, conflicts, answers, reads, checkpoint>>
 Publish(i) == /\ i \in (visible+1)..Len(history)
               /\ IF UnsafeGap THEN i \in stored ELSE 1..i \subseteq stored
@@ -77,7 +83,8 @@ EndCheckpoint == /\ Staging
 CheckpointCut == Staging => checkpoint.cut = visible /\ visible = Len(history)
 NoReadDuringStaging == \A r \in reads: r.phase # "building"
 Next == (\E r \in Requests, s \in 0..MaxWrites, c \in BOOLEAN: Accept(r,s,c))
-        \/ (\E i \in 1..MaxWrites: Upload(i) \/ Publish(i)
+        \/ (\E i,j \in 1..MaxWrites: Upload(i,j))
+        \/ (\E i \in 1..MaxWrites: Publish(i)
             \/ Answer(i,"commit") \/ Answer(i,"reject"))
         \/ (\E s \in 0..MaxWrites: Reject(s)) \/ Read \/ Expire \/ Revoke \/ BeginCheckpoint \/ StageCheckpoint \/ EndCheckpoint
 Spec == Init /\ [][Next]_vars

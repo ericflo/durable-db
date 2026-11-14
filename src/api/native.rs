@@ -54,7 +54,15 @@ impl std::ops::Deref for Resident {
 enum Write {
     Create(String, CreateRequest),
     Policy(String, PolicyRequest),
-    Commit(String, CommitRequest, Access),
+    Commit(String, CommitRequest, Access, usize),
+}
+impl Write {
+    fn batch_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Commit(_, _, _, bytes) => Some(*bytes),
+            _ => None,
+        }
+    }
 }
 enum Reply {
     Catalog(CatalogResult),
@@ -252,8 +260,13 @@ impl Backend for Native {
         access: Access,
     ) -> Result<CommitResult> {
         engine::validate_db(&db)?;
-        request.decode()?;
-        match self.submit(Write::Commit(db, request, access)).await? {
+        // JSON overestimates decoded keys/values and mutation framing. Add the
+        // record envelope and database name; coalescing adds one frame envelope.
+        let bytes = request.decode()?.bytes + 120 + db.len();
+        match self
+            .submit(Write::Commit(db, request, access, bytes))
+            .await?
+        {
             Reply::Commit(result) => Ok(result),
             _ => unreachable!("typed worker reply"),
         }
@@ -291,7 +304,7 @@ async fn prepare(
                 .prepare_policy(&db, &request, &Access::Administrator)
                 .await?
         }
-        Write::Commit(db, request, access) => {
+        Write::Commit(db, request, access, _) => {
             let mut batch = owner
                 .prepare_authorized(&[(&db, &request, &access)])
                 .await?;
@@ -303,6 +316,87 @@ async fn prepare(
     };
     let upload = change.upload.take();
     Ok((Ticket::Catalog(change), upload))
+}
+
+type Uploads = JoinSet<(u64, journal::Completion, Option<Arc<OwnedSemaphorePermit>>)>;
+
+fn send_upload(owner: &Resident, uploads: &mut Uploads, upload: Option<journal::PreparedUpload>) {
+    if let Some(upload) = upload {
+        // Accepted work belongs to the server before the next await.
+        let reservation = owner.reservation.clone();
+        uploads.spawn(async move { (upload.position(), upload.send().await, reservation) });
+    }
+}
+
+async fn admit(
+    owner: &Resident,
+    uploads: &mut Uploads,
+    pending: &mut Vec<Pending>,
+    mut commands: Vec<Command>,
+) {
+    commands.retain(|command| !command.response.send.is_closed());
+    if commands.len() > 1 {
+        let requests: Vec<_> = commands
+            .iter()
+            .map(|command| match &command.write {
+                Write::Commit(db, request, access, _) => (db.as_str(), request, access),
+                _ => unreachable!("catalog changes delimit HTTP groups"),
+            })
+            .collect();
+        let result = metrics::measure(Operation::NativePrepare, async {
+            owner.write().await.prepare_authorized(&requests).await
+        })
+        .await;
+        match result {
+            Ok(batch) => {
+                send_upload(owner, uploads, batch.upload);
+                for (command, ticket) in commands.into_iter().zip(batch.tickets) {
+                    let Write::Commit(_, _, access, _) = command.write else {
+                        unreachable!()
+                    };
+                    pending.push(Pending {
+                        ticket: Ticket::Commit(ticket, access),
+                        response: command.response,
+                    });
+                }
+                return;
+            }
+            Err(Error::Storage(_)) => {
+                // Funding/observation may have failed partway through the group.
+                // Do not repeat it automatically or report a definite rejection.
+                let _ = validate_response(&*owner.read().await).await;
+                for command in commands {
+                    let _ = command.response.send.send(Err(unavailable()));
+                }
+                return;
+            }
+            Err(_) => (), // Isolate request-local failures using the same single-request path.
+        }
+    }
+    for command in commands {
+        if command.response.send.is_closed() {
+            continue;
+        }
+        let result = metrics::measure(Operation::NativePrepare, async {
+            prepare(&mut *owner.write().await, command.write).await
+        })
+        .await;
+        match result {
+            Ok((ticket, upload)) => {
+                send_upload(owner, uploads, upload);
+                pending.push(Pending {
+                    ticket,
+                    response: command.response,
+                });
+            }
+            Err(error) => {
+                let result = validate_response(&*owner.read().await)
+                    .await
+                    .and(Err(error));
+                let _ = command.response.send.send(result);
+            }
+        }
+    }
 }
 
 // A failed observation suppresses this response, not the worker. Only a
@@ -420,27 +514,27 @@ async fn run(
             } => {
                 let Some(command) = command else { return };
                 if !command.response.send.is_closed() {
-                    let prepared = metrics::measure(Operation::NativePrepare, async {
-                        prepare(&mut *owner.write().await, command.write).await
-                    }).await;
-                    match prepared {
-                        Ok((ticket, upload)) => {
-                            if let Some(upload) = upload {
-                                // No await between acceptance and handing the upload to
-                                // the server. The owner lock never covers its PUT.
-                                let reservation = owner.reservation.clone();
-                                uploads.spawn(async move {
-                                    let position = upload.position();
-                                    (position, upload.send().await, reservation)
-                                });
+                    let mut bytes = 120 + command.write.batch_bytes().unwrap_or(0);
+                    let commits = command.write.batch_bytes().is_some();
+                    let mut commands = vec![command];
+                    if commits {
+                        // One scheduler yield gathers already concurrent callers;
+                        // no timer or minimum group size delays a lone request.
+                        tokio::task::yield_now().await;
+                        let limit = owner.read().await.available_journal_bytes();
+                        for _ in 1..128 {
+                            let Ok(next) = queue.try_recv() else { break };
+                            if next.response.send.is_closed() { continue; }
+                            match next.write.batch_bytes() {
+                                Some(size) if bytes + size <= limit => {
+                                    bytes += size;
+                                    commands.push(next);
+                                }
+                                _ => { queued = Some(next); break; }
                             }
-                            pending.push(Pending { ticket, response: command.response });
-                        }
-                        Err(error) => {
-                            let result = validate_response(&*owner.read().await).await.and(Err(error));
-                            let _ = command.response.send.send(result);
                         }
                     }
+                    admit(&owner, &mut uploads, &mut pending, commands).await;
                 }
             }
             completed = uploads.join_next(), if !uploads.is_empty() => {

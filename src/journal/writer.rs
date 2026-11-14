@@ -114,6 +114,10 @@ impl Writer {
         self.budget.reserved_bytes()
     }
 
+    pub(crate) fn available_bytes(&self) -> usize {
+        (self.limits.bytes - self.reserved_bytes()).min(super::MAX_BATCH_BYTES)
+    }
+
     pub fn prepare(&mut self, records: &[Bytes]) -> anyhow::Result<PreparedUpload> {
         self.reserve(frame::encoded_len(records)?)?.finish(records)
     }
@@ -180,6 +184,9 @@ impl Reserved<'_> {
         writer.pending_bytes += bytes.len();
         writer.previous = digest;
         writer.planned = self.position;
+        crate::metrics::REGISTRY.event(crate::metrics::Event::JournalFramesPrepared, 1);
+        crate::metrics::REGISTRY
+            .event(crate::metrics::Event::JournalRecordsPrepared, records.len());
         Ok(PreparedUpload {
             storage: writer.storage.clone(),
             prefix: Prefix {

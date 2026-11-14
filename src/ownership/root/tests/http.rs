@@ -31,6 +31,8 @@ pub(super) struct Faults {
     entered: Notify,
     release: Notify,
     puts: AtomicU64,
+    journal_puts: AtomicU64,
+    max_journal_bytes: AtomicU64,
     range_reads: AtomicU64,
     pub(super) metadata_reads: AtomicU64,
 }
@@ -77,9 +79,14 @@ impl Storage for Files {
     }
     async fn put(&self, key: &str, bytes: Bytes) -> anyhow::Result<()> {
         self.faults.puts.fetch_add(1, Ordering::SeqCst);
-        if key.split('/').any(|part| part == "journal")
-            && self.faults.fail_journal.swap(false, Ordering::SeqCst)
-        {
+        let journal = key.split('/').any(|part| part == "journal");
+        if journal {
+            self.faults.journal_puts.fetch_add(1, Ordering::SeqCst);
+            self.faults
+                .max_journal_bytes
+                .fetch_max(bytes.len() as u64, Ordering::SeqCst);
+        }
+        if journal && self.faults.fail_journal.swap(false, Ordering::SeqCst) {
             *self.faults.late_upload.lock().unwrap() = Some((key.to_owned(), bytes));
             anyhow::bail!("uncertain journal upload, delayed at the provider");
         }
@@ -134,6 +141,22 @@ async fn fixture_budget(
     checkpoints: u64,
     limits: crate::upload_budget::UploadLimits,
 ) -> Fixture {
+    fixture_limits(
+        capacity,
+        live::Limits {
+            checkpoint_frames: checkpoints,
+            receipt_window: 128,
+            ..Default::default()
+        },
+        limits,
+    )
+    .await
+}
+async fn fixture_limits(
+    capacity: usize,
+    live_limits: live::Limits,
+    limits: crate::upload_budget::UploadLimits,
+) -> Fixture {
     let provider = Provider::new();
 
     let faults = Arc::new(Faults::default());
@@ -159,19 +182,11 @@ async fn fixture_budget(
 
     validate(&mut root).await;
     activate(&mut root).await;
-    let owner = Opening::new(
-        root,
-        live::Limits {
-            checkpoint_frames: checkpoints,
-            receipt_window: 128,
-            ..Default::default()
-        },
-        Arc::new(Cache::new(0, None).unwrap()),
-    )
-    .unwrap()
-    .recover()
-    .await
-    .unwrap();
+    let owner = Opening::new(root, live_limits, Arc::new(Cache::new(0, None).unwrap()))
+        .unwrap()
+        .recover()
+        .await
+        .unwrap();
     let auth = Auth::new(&"31".repeat(32)).unwrap();
     let token = auth.admin_token();
     // Keep contract tests independent of the production default refill delay.
@@ -589,6 +604,317 @@ async fn native_http_disconnect_keeps_accepted_work_bounded_and_reads_run_during
         calls,
         "ordinary reads and writes never renew control"
     );
+}
+
+#[tokio::test]
+async fn native_http_batches_commits_without_losing_retries_or_permission_checks() {
+    for revoke in [false, true] {
+        let (router, provider, faults, token) = fixture(32, 256).await;
+        for n in 0..8 {
+            let db = format!("batch{n}");
+            create(&router, &token, &db).await;
+            assert_eq!(
+                call(
+                    &router,
+                    "POST",
+                    &format!("/v1/databases/{db}/commit"),
+                    &token,
+                    commit()
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+        }
+        let mut write = commit();
+        write["request_id"] = json!("group");
+        write["expected_revision"] = json!(1);
+        let puts = faults.journal_puts.load(Ordering::SeqCst);
+        faults.pause.store(true, Ordering::SeqCst);
+        let group = {
+            let router = router.clone();
+            let token = token.clone();
+            let write = write.clone();
+            tokio::spawn(async move {
+                // Poll every HTTP request before yielding to the serving worker.
+                // Duplicate identity and conflicting snapshot share the group.
+                futures::future::join_all((0..10).map(|n| {
+                    let router = router.clone();
+                    let token = token.clone();
+                    let mut write = write.clone();
+                    if n == 9 {
+                        write["request_id"] = json!("conflict");
+                    }
+                    async move {
+                        call(
+                            &router,
+                            "POST",
+                            &format!("/v1/databases/batch{}/commit", n.min(7)),
+                            &token,
+                            write,
+                        )
+                        .await
+                    }
+                }))
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), faults.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            faults.journal_puts.load(Ordering::SeqCst) - puts,
+            1,
+            "eight commits must share one physical PUT"
+        );
+        assert!(
+            !group.is_finished(),
+            "no success or dependent conflict across an upload gap"
+        );
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                "/v1/databases/batch7/read",
+                &token,
+                json!({"keys":["x"]})
+            )
+            .await
+            .1["revision"],
+            1
+        );
+        if revoke {
+            provider.revoke_current().await;
+        } else {
+            group.abort();
+        }
+        faults.release.notify_one(); // The group lands, but its upload reply is lost.
+        if revoke {
+            let replies = group.await.unwrap();
+            assert!(
+                replies
+                    .iter()
+                    .all(|r| r.0 == StatusCode::SERVICE_UNAVAILABLE)
+            );
+        } else {
+            let _ = group.await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let retry = call(
+                        &router,
+                        "POST",
+                        "/v1/databases/batch7/commit",
+                        &token,
+                        write.clone(),
+                    )
+                    .await;
+                    if retry.0 == StatusCode::OK {
+                        assert_eq!(retry.1["replayed"], true);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            faults.journal_puts.load(Ordering::SeqCst) - puts,
+            1,
+            "lost reply never repeats the group PUT"
+        );
+        drop(router);
+        let connection = provider
+            .connection("test")
+            .with_upload_budget(crate::upload_budget::UploadLimits {
+                bytes: 64 * 1024 * 1024,
+                attempts: 10_000,
+            })
+            .await
+            .unwrap();
+        let mut root = super::checkpoint::budgeted_active(&connection).await;
+        root.select_journals().await.unwrap();
+        let owner = Opening::new(
+            root,
+            live::Limits::default(),
+            Arc::new(Cache::new(0, None).unwrap()),
+        )
+        .unwrap()
+        .recover()
+        .await
+        .unwrap();
+        let auth = Auth::new(&"31".repeat(32)).unwrap();
+        let app = App::with_rate_limits(
+            Arc::new(Native::new(owner, 32).unwrap()),
+            auth,
+            64,
+            RateLimits::new(20_000, 20_000).unwrap(),
+        );
+        let recovered = api::router(Arc::new(app));
+        for n in 0..8 {
+            let path = format!("/v1/databases/batch{n}");
+            let retry = call(
+                &recovered,
+                "POST",
+                &format!("{path}/commit"),
+                &token,
+                write.clone(),
+            )
+            .await;
+            assert_eq!(retry.0, StatusCode::OK);
+            assert_eq!(retry.1, json!({"revision":2,"replayed":true}));
+            let read = call(
+                &recovered,
+                "POST",
+                &format!("{path}/read"),
+                &token,
+                json!({"keys":["x"]}),
+            )
+            .await;
+            assert_eq!(read.1["revision"], 2);
+            assert_eq!(read.1["values"], json!(["eA=="]));
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_http_batches_fit_the_configured_journal_allowance() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let (router, _, faults, token) = fixture_limits(
+        32,
+        live::Limits {
+            journal: crate::journal::QueueLimits::new(16, 512 * 1024).unwrap(),
+            ..Default::default()
+        },
+        crate::upload_budget::UploadLimits {
+            bytes: 64 * 1024 * 1024,
+            attempts: 10_000,
+        },
+    )
+    .await;
+    for n in 0..16 {
+        create(&router, &token, &format!("bound{n}")).await;
+    }
+    let puts = faults.journal_puts.load(Ordering::SeqCst);
+    let mut write = commit();
+    write["writes"][0]["value"] = json!(STANDARD.encode(vec![42; 64 * 1024]));
+    let replies = futures::future::join_all((0..16).map(|n| {
+        let router = router.clone();
+        let token = token.clone();
+        let write = write.clone();
+        async move {
+            call(
+                &router,
+                "POST",
+                &format!("/v1/databases/bound{n}/commit"),
+                &token,
+                write,
+            )
+            .await
+            .0
+        }
+    }))
+    .await;
+    // The burst exceeds the entire journal allowance. Refused callers retain
+    // their original identity while earlier server-owned uploads drain.
+    for (n, status) in replies.into_iter().enumerate() {
+        if status == StatusCode::OK {
+            continue;
+        }
+        assert!(matches!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let retry = call(
+                    &router,
+                    "POST",
+                    &format!("/v1/databases/bound{n}/commit"),
+                    &token,
+                    write.clone(),
+                )
+                .await;
+                if retry.0 == StatusCode::OK {
+                    assert_eq!(retry.1["revision"], 1);
+                    break;
+                }
+                assert!(matches!(
+                    retry.0,
+                    StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+                ));
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let groups = faults.journal_puts.load(Ordering::SeqCst) - puts;
+    assert!(
+        (2..16).contains(&groups),
+        "bounded grouped uploads: {groups}"
+    );
+    assert!(faults.max_journal_bytes.load(Ordering::SeqCst) <= 512 * 1024);
+}
+
+#[tokio::test]
+async fn native_http_batch_errors_do_not_reject_valid_neighbors() {
+    let (router, _, _, token) = fixture(16, 256).await;
+    for db in ["a", "b", "denied"] {
+        create(&router, &token, db).await;
+    }
+    let issued = call(
+        &router,
+        "POST",
+        "/v1/tokens",
+        &token,
+        json!({"database":"denied","write":true,"ttl_seconds":3600}),
+    )
+    .await
+    .1;
+    assert_eq!(call(&router, "POST", "/v1/databases/denied/access", &token,
+        json!({"request_id":"revoke","expected_policy_revision":1,"change":{"action":"revoke","token_id":issued["token_id"]}})).await.0, StatusCode::OK);
+    let requests = [
+        ("a", token.as_str()),
+        ("denied", issued["token"].as_str().unwrap()),
+        ("missing", token.as_str()),
+        ("a", token.as_str()),
+        ("b", token.as_str()),
+    ];
+    let replies = futures::future::join_all(requests.iter().enumerate().map(|(n, (db, token))| {
+        let router = router.clone();
+        let path = format!("/v1/databases/{db}/commit");
+        let mut write = commit();
+        if n == 3 {
+            write["writes"][0]["value"] = json!("eQ==");
+        }
+        async move { call(&router, "POST", &path, token, write).await.0 }
+    }))
+    .await;
+    assert_eq!(
+        replies,
+        [
+            StatusCode::OK,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::BAD_REQUEST,
+            StatusCode::OK
+        ]
+    );
+    for db in ["a", "b"] {
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/v1/databases/{db}/commit"),
+                &token,
+                commit()
+            )
+            .await
+            .1["replayed"],
+            true
+        );
+    }
 }
 
 #[tokio::test]
