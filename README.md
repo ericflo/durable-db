@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!IMPORTANT]
-> **Latest release: v1.0.6.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
+> **Latest release: v1.0.7.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -144,12 +144,15 @@ The 1.0 contract applies within the [supported deployment scope](docs/production
 
 Use one dedicated bucket per deployment, private peer networking and TLS at
 application ingress. Fund upload allowances, set process/replica limits and
-keep independently protected backups. v1.0.6 recovered **385/385** acknowledged
-writes in its scale-down run, with a **41.31s** largest readback gap. Its separate
-32-worker, 1 KiB B2 load baseline completed all operations at **9.34 writes/s**
-and **141.38 reads/s**. Write tails reached **53.18s**; a larger-value run hit
-cumulative funding limits. Write performance and conservative maintenance
-precharging need improvement. These are short fixtures, not SLOs.
+keep independently protected backups. Repeated overwrites now reuse funded
+checkpoint copies. The 32-worker, 64 KiB B2 load matrix completed all **2,120
+operations** within the same allowances that previously caused refusals.
+Its 32-worker phase achieved **7.27 writes/s** and **82.60 reads/s**; write tails
+across the matrix reached **38.05s**. This remains poor write performance for
+the project's goal. HTTP transaction grouping and failed-upload recovery are
+the next targets. The earlier scale-down campaign recovered **385/385**
+acknowledged writes with a **41.31s** largest readback gap. These are short
+fixtures, not SLOs.
 See the [measured results](docs/verification-results.md),
 [operating scope and deferrals](docs/production-readiness.md), and [recovery procedure](docs/recovery.md).
 

@@ -1,5 +1,83 @@
 # Verification results
 
+## Repeated overwrites reuse funded checkpoint copies (2026-11-14)
+
+**v1.0.7**, source `b7f949c` from Woodpecker **410**, removes repeated
+prepayment for base-table copies already funded by committed overwrites in the
+same checkpoint interval. The exact downloaded binary and Kubernetes image
+match. The [preceding failures](#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14)
+remain recorded; no tenant or namespace allowance was raised.
+
+The same **64 KiB / 32 admission slots / 32 databases** load matrix now completes
+all **2,120 measured operations**, with no exhausted operations or funding
+refusals, and verifies all **32 final values and revisions**. The earlier run
+stopped six writers with HTTP 413 and skipped its final read phase. New random
+database names, placement and provider conditions prevent treating these short
+runs as a controlled throughput comparison.
+
+The focused four-database reproduction also completes: **100 overwrites per
+writer**, all **400 writes and 400 reads**, and all four final values/revisions.
+Each tenant allocates **32 MiB**, compared with the full **64 MiB** before refusing
+its 89th write in the prior run. The maintenance claim remains **873,193 bytes
+across two constructions per tenant**, and namespace allocation remains **40
+MiB**. The fix reduces redundant prepayment; these counters are not stored bytes
+or provider billing. Already spent allocations are not refunded, so an existing
+exhausted allowance may still require an administrator refill.
+
+| Workers | Writes/s | Reads/s | Write p95 | Read p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.49 | 9.96 | 1.54s | 164ms |
+| 4 | 3.28 | 30.36 | 2.20s | 191ms |
+| 16 | 4.72 | 89.54 | 4.73s | 208ms |
+| 32 | 7.27 | 82.60 | 9.87s | 253ms |
+
+**Write performance remains poor.** The largest write takes **38.05s**.
+Two ambiguous uploads retire their owners; two provably unsent uploads retain
+their original handles. The 32-worker write phase includes five HTTP 429 and
+63 HTTP 503 responses before all writes complete. Readback never reports an
+incorrect value, but eventual completion is not a latency qualification.
+The HTTP worker still sends individual transaction frames despite the owner's
+existing grouped-write API. Connecting that path and reducing failed-upload
+recovery costs are the next performance work.
+
+Peak sampled per-pod RSS is **28.23 MiB**, maximum sampled CPU interval is
+**0.135 cores**, and there are no restarts or replacements. Setup takes
+**318.28s** and is excluded from measured phases. Cache, memory, replica and
+upload limits match the preceding larger-value run. One tenant still allocates
+its full 64 MiB allowance; cumulative limits and other conservative charging
+remain in force. This is not a large-cardinality or sustained-resource check.
+
+The implementation reuses existing committed suffix rows and maintenance flags;
+there is no new credit map, format or refund. A new key, database generation or
+checkpoint base pays its full affected routes. Catalog changes retain full
+pricing because their entries have different payers. Failed/cancelled
+construction and takeover disable reuse until a successful checkpoint. Actual
+maintenance attempts still claim the complete construction allowance; direct
+journal, new row, receipt and split contributions remain per transaction.
+
+The old pricing fails the focused Rust regression at its **92nd write**. The
+new path completes **100** 64 KiB overwrites below the unchanged 64 MiB ceiling,
+claims maintenance funding, replaces the owner and verifies the recovered value
+and exact retry receipt in **1.28s**. A **0.05s** checkpoint fixture checks
+tombstones, new keys/generations/databases, rebase reset and unchanged neighbors.
+All **390 enabled Rust tests** pass, with formatting and strict Clippy. Woodpecker
+also passes client/Pi, audits, capacity and formal checks. The downloaded static
+archive independently passes the API, export/restore and forced-stop checks.
+
+The existing `TenantAdmission` model checks **123,076 distinct states**, seven
+unsafe controls and a positive copy-reuse control in **one second**. Its bounds
+are two tenants, one grant, at most two writes per tenant, one base change, one
+takeover and three construction attempts. Byte/key coverage, Rust refinement,
+full composition and liveness remain separate obligations.
+
+The [exact evidence](evidence/copy-prepayment-2026-11-14.json) retains samples,
+counters, source/artifact hashes, upload failures and confirmed cleanup. The
+obsolete repeated-copy charge is replaced, not retained as an alternative;
+local model scratch trees are removed. The test namespace, bucket and scoped
+key are removed for both runs; cleanup confirms **520 + 173 physical versions**
+removed, in addition to automatic collection during the workloads. This
+follow-up retains the existing 1.0 support scope.
+
 ## Native B2 load exposes funding and write-tail costs (2026-11-14)
 
 The exact **v1.0.6** release image was tested through a Kubernetes Service on

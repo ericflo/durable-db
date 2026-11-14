@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.6, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.7, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -36,7 +36,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) now covers 1/4/16/32 workers. Small-value operations complete, but write tails and conservative tenant precharging remain concrete performance limits. The next work reduces repeated copy prepayment, then qualifies write-path improvements and sustained load. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) now covers 1/4/16/32 workers. The initial small-value operations complete, but write tails and conservative tenant precharging expose concrete performance limits. [v1.0.7](verification-results.md#repeated-overwrites-reuse-funded-checkpoint-copies-2026-11-14) reuses already funded copies for repeated overwrites and completes the larger-value matrix at unchanged allowances. Its 32-worker phase still achieves only 7.27 writes/s, with a 9.87-second write p95. The next work connects bounded transaction grouping to HTTP and reduces failed-upload recovery costs, then qualifies sustained load. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 
