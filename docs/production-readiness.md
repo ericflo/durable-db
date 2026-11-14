@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.10, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.11, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -36,11 +36,13 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. [v1.0.10](verification-results.md#reclaim-overwritten-values-before-checkpointing-2026-11-14) reclaims superseded resident values during both publication and replay, preserving current values, tombstones, receipts and conflict checks. The 100-overwrite fixture needs no checkpoint under the unchanged allowance; the previous path checkpointed at write 41. The 32-worker B2 phase reaches **18.24 writes/s and 1.92s write p95**, versus **13.32 writes/s and 2.15s** previously, with two completed checkpoints instead of thirteen. All 2,120 operations and 32 final-state checks pass. Reads are slower in this sample (**90.77 versus 186.54 reads/s**), and a **16.90s** write outlier remains. Placement/provider variation and short samples prevent a general performance guarantee.
+These remain follow-up work, not discarded goals. [v1.0.11](verification-results.md#confirm-uncertain-tenant-funding-2026-11-14) confirms uncertain tenant-ledger publications only when the originating invocation can read its exact fresh directory root. The TCP fault regression eliminates a post-checkpoint HTTP 503 with one grant; cancellation and restart create no credit.
+
+All **2,120 B2 operations** and **32 final-state checks** pass, but the 32-worker phase is worse than v1.0.10: **8.66 writes/s, 7.02s write p95 and a 29.51s worst write**, with five ambiguous journal uploads requiring owner recovery. No new funding confirmations occur in this cloud sample. It therefore establishes neither a throughput improvement nor a causal explanation for the earlier preparation failure. The next investigation targets those upload failures and their recovery/checkpoint costs.
 
 The [B2 cold-start check](verification-results.md#long-journal-cold-recovery-on-b2-2026-11-14) recovers a **102-frame uncheckpointed suffix** after every database process is frozen and all three pods are replaced. Revision 101, the current value, ordered scan and identical retry receipt survive; a new revision 102 commits and reads back. The first correct read takes **37.67s after client retries resume**; this is one fixture, not a recovery SLO.
 
-Longer overwrite suffixes rely on reclamation during replay; use one release across all replicas. Mixed-version rolling upgrades and rollback remain unqualified. Fewer checkpoints retain more journal objects until the existing receipt, validation or frame bounds require a durable cut. The next work targets remaining funding/publication waits and recovery latency, followed by sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+Longer overwrite suffixes rely on reclamation during replay; use one release across all replicas. Mixed-version rolling upgrades and rollback remain unqualified. Fewer checkpoints retain more journal objects until the existing receipt, validation or frame bounds require a durable cut. Funding/publication waits and recovery latency remain open, followed by sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 

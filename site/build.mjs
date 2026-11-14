@@ -144,6 +144,7 @@ for (const file of [
   'attempt-grants-2026-11-14.json',
   'value-reclamation-2026-11-14.json',
   'long-journal-cold-2026-11-14.json',
+  'funding-confirmation-2026-11-14.json',
   'http-batching-2026-11-14.json',
   'copy-prepayment-2026-11-14.json',
   'native-load-2026-11-14.json',

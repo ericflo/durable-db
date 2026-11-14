@@ -304,7 +304,7 @@ metadata GETs for a warm grant and two for a cold grant (three without caching),
 fresh grants after allocator replacement, corrupt-cache fallback, disabled/tiny
 caches and authority failure. Existing lost-reply/split and collection-race
 checks run with caching enabled; an uncached observer verifies the published
-ledger after collection. Cache operations stutter in the unchanged model;
+ledger after collection. Cache operations stutter in the model;
 digest checking and memory bounds remain implementation obligations.
 
 The metadata retry regression pauses initialization, refill and grant publication across an unrelated read barrier. Each operation retains its original ledger and directory objects: six objects for the three operations, without retry copies. Permanently stale comparisons stop within eight attempts without more uploads; a changed format fails closed. Existing competing-ledger, lost-response and collection races still pass. Four Rust negative controls independently force reuploads or omit the directory, metadata-fence or format check. This reduces retry amplification; administrative uploads remain namespace-funded and per-tenant attribution is still open.

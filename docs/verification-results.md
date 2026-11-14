@@ -1,5 +1,67 @@
 # Verification results
 
+## Confirm uncertain tenant funding (2026-11-14)
+
+**v1.0.11**, source `b70ff41` from Woodpecker **425**, adds one bounded readback
+after an uncertain tenant-ledger publication. Only the exact fresh directory
+staged by the originating invocation can confirm its grant or construction
+claim. No immutable PUT or authority comparison is retried after uncertainty.
+Stale observations, another root, failed reads and cancellation leave the
+outcome unresolved. Restart cannot reconstruct rights. Namespace grants retain
+their existing behavior.
+
+The TCP fault regression loses the first post-checkpoint write's funding reply
+and returns **HTTP 200 with one debit**, preserving the exact retry receipt.
+Disabling only the new confirmation reproduces **HTTP 503**. All **396 enabled
+Rust tests**, formatting and strict Clippy pass. The existing `PublicationRetry`
+model now checks **83,230 states**, 245,634 generated, depth 22, in one second.
+Its three unsafe controls detect a missing collection fence, confirmation of
+another identity and duplicate confirmation. Existing `UploadCredits` and
+`TenantAdmission` checks also pass. These bounded component checks do not prove
+Rust refinement or complete protocol composition.
+
+The exact static release binary and matching image complete all **2,120 measured
+operations** and verify **32 final values/revisions** in the unchanged
+**64 KiB / 32 admission slots / 32 databases** B2 matrix on three hosts:
+
+| Workers | Writes/s | Reads/s | Write p95 | Read p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.39 | 11.94 | 1.30s | 85ms |
+| 4 | 5.55 | 38.25 | 1.27s | 102ms |
+| 16 | 15.32 | 90.71 | 1.63s | 253ms |
+| 32 | 8.66 | 148.54 | 7.02s | 297ms |
+
+The 32-worker write phase is **worse** than v1.0.10's **18.24/s and 1.92s p95**.
+Five ambiguous journal uploads trigger owner retirement/recovery: one is
+classified as a request error and four as `other`. The retained diagnostics
+do not identify their precise provider status or cause. That phase records
+**18 HTTP 429 and 264 HTTP 503 responses**, all retried, and a **29.51s** worst
+write. It completes eight checkpoints, up to **15.54s**, and logs successful
+preparation up to **8.06s**, a failed PUT up to **10.88s**, and successful HTTP
+commit handling up to **19.98s**. These timers overlap; they are not a complete
+causal breakdown of client time.
+
+**No exact-root funding confirmations occur in the cloud run.** The deterministic
+fault test demonstrates the fixed failure class; this sample does not demonstrate
+a throughput improvement or identify the cause of v1.0.10's preparation error.
+The new highest-priority evidence is the ambiguous upload failures and their
+recovery/checkpoint costs. Short runs, randomized partition placement and
+provider conditions prevent a general performance comparison or SLO claim.
+
+Setup takes **335.02s**, excluded from throughput, with fourteen HTTP 503
+responses. Peak sampled database-container RSS is **25.72 MiB**, with a maximum
+sampled CPU interval of **0.177 cores** and no pod replacements/restarts. The
+journal counters record **1,132 prepared records in 1,066 frames**, including
+setup/catalog work and failed uploads; these are not successful PUTs or billing.
+
+The [exact evidence](evidence/funding-confirmation-2026-11-14.json) retains all
+samples, hashes, resource observations, failure events and cleanup. The release
+also passes static-binary export/restore and kill/reopen checks. The namespace,
+bucket, **700 remaining physical versions** and scoped key are removed. The
+existing ledger publisher, model and HTTP fixture are reused. Blanket lost-reply
+wording was corrected, and temporary mutations and model scratch were removed.
+The scoped 1.0 support boundary is unchanged.
+
 ## Long-journal cold recovery on B2 (2026-11-14)
 
 The released **v1.0.10** binary, source `0771128` from Woodpecker **420**,

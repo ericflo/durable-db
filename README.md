@@ -5,7 +5,7 @@
 durable-db is one Rust binary that serves atomic transactions and ordered scans over HTTP. S3 or Backblaze B2 holds the authoritative data. API servers keep only disposable state, so you can add, replace or stop all of them without moving the database. On a laptop, a local directory replaces the bucket.
 
 > [!IMPORTANT]
-> **Latest release: v1.0.10.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
+> **Latest release: v1.0.11.** Production scope: one application or organization trust domain per deployment, with B2 or a local directory. Shared hosting of mutually untrusted tenants, AWS qualification and scheduled backups are deferred. Read the [supported scope](docs/production-readiness.md) and [verification limits](docs/verification.md).
 
 [Quick start](#quick-start) · [Application code](#application-code) · [How it works](#how-it-works) · [Run on S3 or B2](#run-on-s3-or-b2) · [Contract and limits](#contract-and-limits) · [Status](#status) · [Verification](#verification) · [Documentation](#documentation) · [Website](https://ericflo.github.io/durable-db-site/)
 
@@ -144,22 +144,22 @@ The 1.0 contract applies within the [supported deployment scope](docs/production
 
 Use one dedicated bucket per deployment, private peer networking and TLS at
 application ingress. Fund upload allowances, set process/replica limits and
-keep independently protected backups. Superseded in-memory values are reclaimed
-before they force checkpoints; affected old snapshots expire while receipts and
-conflict checks keep their existing bounds. The focused fixture completes 100
-64 KiB overwrites without a checkpoint, versus the previous trigger at write 41.
-The B2 matrix completes all **2,120 operations** and verifies all **32 final
-states**. At 32 workers it measures **18.24 writes/s** and **1.92s write p95**,
-versus **13.32 writes/s** and **2.15s** previously, with two completed checkpoints
-instead of thirteen during that phase. Reads are slower in this sample:
-**90.77 reads/s**, versus **186.54**. A **16.90s** write outlier remains;
-funding/publication waits need follow-up. A separate B2 cold-start check recovers
-a **102-frame uncheckpointed journal** after replacing every database process,
-verifies revision 101 and its exact retry receipt, then commits revision 102.
-The first correct read takes **37.67s after client retries resume** on the new
-pods; this does not establish a recovery-time guarantee.
-The earlier scale-down campaign recovered **385/385** acknowledged writes with
-a **41.31s** largest readback gap. These are short fixtures, not SLOs.
+keep independently protected backups. The latest fix confirms an uncertain
+tenant funding publication when its exact fresh directory root is readable.
+The post-checkpoint TCP fault test now returns HTTP 200 with one grant; disabling
+that confirmation reproduces HTTP 503. Restart never reconstructs credit.
+
+The latest B2 matrix completes **2,120 operations** and verifies **32 final
+states**, but its 32-worker phase measures **8.66 writes/s and 7.02s write p95**,
+worse than v1.0.10's **18.24/s and 1.92s**. Five ambiguous journal uploads trigger
+owner recovery; the worst write takes **29.51s**. The new funding-confirmation
+path is not used in this sample, so it demonstrates no throughput improvement.
+Diagnosing those upload failures and reducing recovery costs come next.
+
+A separate B2 cold-start check recovers a **102-frame uncheckpointed journal**
+after replacing every database process, including the exact retry receipt and
+a subsequent write. Its first correct read takes **37.67s after client retries
+resume**. These short fixtures do not establish latency or availability SLOs.
 See the [measured results](docs/verification-results.md),
 [operating scope and deferrals](docs/production-readiness.md), and [recovery procedure](docs/recovery.md).
 
