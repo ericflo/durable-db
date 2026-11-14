@@ -4,7 +4,7 @@ use bytes::Bytes;
 use durable_db::{
     Error,
     db::{Check, Ctx, Db, Options, ReadReq, Scan, Txn},
-    io::Io,
+    io::{DiskCache, Io},
     layout::DbConfig,
     store::{ObjectStore, fs::FsStore, memory::MemoryStore},
 };
@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 
 fn ctx_with(store: Arc<dyn ObjectStore>, opts: Options) -> Arc<Ctx> {
     Arc::new(Ctx {
-        io: Io::new(store, 32 << 20),
+        io: Io::new(store, 32 << 20, None),
         opts,
         root: "root/".into(),
     })
@@ -463,4 +463,64 @@ async fn a_directory_behaves_like_a_bucket() {
     assert_eq!(scan(&db, "", "", false, 100).await.0.len(), 20);
     assert_eq!(commit(&db, put("k20", "v")).await.unwrap(), 21);
     db.close().await;
+}
+
+#[tokio::test]
+async fn the_disk_cache_serves_tables_and_survives_damage() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        flush_frames: 8,
+        idle_flush: Duration::from_millis(20),
+        block_bytes: 512,
+        ..Options::default()
+    };
+    // Each call is a new process: empty memory, the same cache directory.
+    let process = || {
+        let disk = DiskCache::open(dir.path(), 4 << 20).unwrap();
+        Arc::new(Ctx {
+            io: Io::new(store.clone(), 1 << 20, Some(disk)),
+            opts: opts.clone(),
+            root: "root/".into(),
+        })
+    };
+    let first = process();
+    let db = create(&first, "app").await;
+    for i in 0..300 {
+        commit(&db, put(&format!("k{i:04}"), &"v".repeat(200)))
+            .await
+            .unwrap();
+    }
+    db.close().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(first.io.disk.as_ref().unwrap().used() > 10_000);
+
+    let second = process();
+    let db = open(&second, "app").await;
+    assert_eq!(scan(&db, "", "", false, 1000).await.0.len(), 300);
+    let disk = second.io.disk.as_ref().unwrap();
+    assert!(disk.hits.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert_eq!(disk.misses.load(std::sync::atomic::Ordering::Relaxed), 0);
+    db.close().await;
+
+    // Damage every cached file. Checksums catch it and the bucket is read.
+    for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
+        let mut bytes = std::fs::read(entry.path()).unwrap();
+        for byte in bytes.iter_mut().step_by(97) {
+            *byte ^= 0x5a;
+        }
+        std::fs::write(entry.path(), bytes).unwrap();
+    }
+    let third = process();
+    let db = open(&third, "app").await;
+    assert_eq!(get(&db, "k0123").await.unwrap().1, "v".repeat(200));
+    assert_eq!(scan(&db, "", "", true, 1000).await.0.len(), 300);
+
+    // The budget is enforced by deleting the least recently used objects.
+    let small = DiskCache::open(dir.path(), 1).unwrap();
+    assert!(small.used() > 1);
+    let tiny = Io::new(store.clone(), 1 << 20, Some(small));
+    tiny.remember("anything", Bytes::from_static(b"x"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(tiny.disk.as_ref().unwrap().used() <= 1);
 }

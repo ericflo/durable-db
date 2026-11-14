@@ -6,7 +6,7 @@ use durable_db::{
     cluster::Cluster,
     db::{Ctx, Options},
     http::{ApiLimits, App, router},
-    io::Io,
+    io::{DiskCache, Io},
     metrics::{Metered, Metrics},
     node::{Limits, Node},
     store::{
@@ -28,7 +28,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run a server.
-    Serve(Serve),
+    Serve(Box<Serve>),
     /// Mint a bearer token from the signing key.
     Token(Token),
     /// Create a database and print a write token for it.
@@ -74,6 +74,12 @@ struct Serve {
     /// Memory for cached table blocks, in bytes.
     #[arg(long, env = "DURABLE_DB_CACHE_BYTES", default_value_t = 256 << 20)]
     cache_bytes: u64,
+    /// Directory for a disk cache of table objects. Disposable; useful with a bucket.
+    #[arg(long, env = "DURABLE_DB_CACHE_DIR")]
+    cache_dir: Option<PathBuf>,
+    /// Bytes the disk cache may hold.
+    #[arg(long, env = "DURABLE_DB_CACHE_DIR_BYTES", default_value_t = 4 << 30)]
+    cache_dir_bytes: u64,
     /// Memory for writes not yet flushed to tables, across all databases.
     #[arg(long, env = "DURABLE_DB_MEMTABLE_BYTES", default_value_t = 256 << 20)]
     memtable_bytes: usize,
@@ -242,12 +248,19 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
         .await
         .context("the storage check failed")?;
 
+    let disk = match &args.cache_dir {
+        Some(dir) => Some(
+            DiskCache::open(dir, args.cache_dir_bytes)
+                .with_context(|| format!("cannot use the cache directory {}", dir.display()))?,
+        ),
+        None => None,
+    };
     let mut prefix = args.prefix.trim_matches('/').to_owned();
     if !prefix.is_empty() {
         prefix.push('/');
     }
     let ctx = Arc::new(Ctx {
-        io: Io::new(store, args.cache_bytes),
+        io: Io::new(store, args.cache_bytes, disk),
         opts: Options {
             node: args.advertise.clone().unwrap_or_default(),
             upload_attempts: if args.bucket.is_some() {
@@ -426,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     match Cli::parse().command {
-        Command::Serve(args) => serve(args).await,
+        Command::Serve(args) => serve(*args).await,
         Command::Token(args) => {
             let keys = Keys::load(&args.key.key_file)?;
             let grant = match args.database {

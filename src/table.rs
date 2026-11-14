@@ -281,68 +281,86 @@ impl Table {
             && key <= self.meta.last.as_bytes()
     }
 
-    async fn index(&self, io: &Io) -> Result<&Index> {
+    async fn index(&self, io: &Arc<Io>) -> Result<&Index> {
         self.index
             .get_or_try_init(|| async {
-                let size = self.meta.size;
-                let tail_start = size.saturating_sub(TAIL);
-                let tail = io.range(&self.key, tail_start, size).await?;
-                let corrupt = || Error::Corrupt(format!("table {} has a bad footer", self.key));
-                if tail.len() < FOOTER || tail.len() as u64 != size - tail_start {
-                    return Err(corrupt());
-                }
-                let mut footer = &tail[tail.len() - FOOTER..];
-                let index_offset = footer.get_u64_le();
-                let index_len = footer.get_u32_le() as u64;
-                let index_crc = footer.get_u32_le();
-                let _entries = footer.get_u64_le();
-                if footer != MAGIC || index_offset + index_len + FOOTER as u64 != size {
-                    return Err(corrupt());
-                }
-                let bytes = if index_offset >= tail_start {
-                    let start = (index_offset - tail_start) as usize;
-                    tail.slice(start..start + index_len as usize)
-                } else {
-                    io.range(&self.key, index_offset, index_offset + index_len)
-                        .await?
-                };
-                if crc32fast::hash(&bytes) != index_crc {
-                    return Err(corrupt());
-                }
-                let blocks: Vec<IndexEntry> =
-                    postcard::from_bytes(&bytes).map_err(|_| corrupt())?;
-                // Blocks that arrived with the footer need no second request.
-                for (i, block) in blocks.iter().enumerate() {
-                    if block.offset >= tail_start {
-                        let start = (block.offset - tail_start) as usize;
-                        let packed = &tail[start..start + block.len as usize];
-                        io.cache_block(
-                            &self.key,
-                            i as u32,
-                            Arc::new(Block::decode(packed, block.crc)?),
-                        );
+                match self.load_index(io).await {
+                    // A damaged copy in the disk cache: discard it and read
+                    // the bucket's.
+                    Err(Error::Corrupt(_)) if io.forget(&self.key).await => {
+                        self.load_index(io).await
                     }
+                    loaded => loaded,
                 }
-                Ok(Index { blocks })
             })
             .await
     }
 
-    async fn block(&self, io: &Io, index: &Index, i: usize) -> Result<Arc<Block>> {
+    async fn load_index(&self, io: &Arc<Io>) -> Result<Index> {
+        let size = self.meta.size;
+        let tail_start = size.saturating_sub(TAIL);
+        let tail = io.range(&self.key, size, tail_start, size).await?;
+        let corrupt = || Error::Corrupt(format!("table {} has a bad footer", self.key));
+        if tail.len() < FOOTER || tail.len() as u64 != size - tail_start {
+            return Err(corrupt());
+        }
+        let mut footer = &tail[tail.len() - FOOTER..];
+        let index_offset = footer.get_u64_le();
+        let index_len = footer.get_u32_le() as u64;
+        let index_crc = footer.get_u32_le();
+        let _entries = footer.get_u64_le();
+        if footer != MAGIC || index_offset + index_len + FOOTER as u64 != size {
+            return Err(corrupt());
+        }
+        let bytes = if index_offset >= tail_start {
+            let start = (index_offset - tail_start) as usize;
+            tail.slice(start..start + index_len as usize)
+        } else {
+            io.range(&self.key, size, index_offset, index_offset + index_len)
+                .await?
+        };
+        if crc32fast::hash(&bytes) != index_crc {
+            return Err(corrupt());
+        }
+        let blocks: Vec<IndexEntry> = postcard::from_bytes(&bytes).map_err(|_| corrupt())?;
+        // Blocks that arrived with the footer need no second request.
+        for (i, block) in blocks.iter().enumerate() {
+            if block.offset >= tail_start {
+                let start = (block.offset - tail_start) as usize;
+                let packed = tail
+                    .get(start..start + block.len as usize)
+                    .ok_or_else(corrupt)?;
+                io.cache_block(
+                    &self.key,
+                    i as u32,
+                    Arc::new(Block::decode(packed, block.crc)?),
+                );
+            }
+        }
+        Ok(Index { blocks })
+    }
+
+    async fn block(&self, io: &Arc<Io>, index: &Index, i: usize) -> Result<Arc<Block>> {
         if let Some(block) = io.cached_block(&self.key, i as u32) {
             return Ok(block);
         }
         let entry = &index.blocks[i];
-        let packed = io
-            .range(&self.key, entry.offset, entry.offset + u64::from(entry.len))
-            .await?;
-        let block = Arc::new(Block::decode(&packed, entry.crc)?);
+        let (start, end) = (entry.offset, entry.offset + u64::from(entry.len));
+        let packed = io.range(&self.key, self.meta.size, start, end).await?;
+        let block = match Block::decode(&packed, entry.crc) {
+            Err(Error::Corrupt(_)) if io.forget(&self.key).await => {
+                let packed = io.range(&self.key, self.meta.size, start, end).await?;
+                Block::decode(&packed, entry.crc)?
+            }
+            decoded => decoded?,
+        };
+        let block = Arc::new(block);
         io.cache_block(&self.key, i as u32, block.clone());
         Ok(block)
     }
 
     /// The entry for `key`, which may be a tombstone.
-    pub async fn get(&self, io: &Io, key: &[u8]) -> Result<Option<Entry>> {
+    pub async fn get(&self, io: &Arc<Io>, key: &[u8]) -> Result<Option<Entry>> {
         if !self.covers(key) {
             return Ok(None);
         }

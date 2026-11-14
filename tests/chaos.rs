@@ -209,7 +209,7 @@ async fn run(seed: u64) {
     };
     let ctx = |store: Arc<MemoryStore>| {
         Arc::new(Ctx {
-            io: Io::new(store as Arc<dyn ObjectStore>, 8 << 20),
+            io: Io::new(store as Arc<dyn ObjectStore>, 8 << 20, None),
             opts: opts.clone(),
             root: String::new(),
         })

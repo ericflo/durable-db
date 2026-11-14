@@ -921,7 +921,8 @@ impl Db {
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
                 maint.next_table += 1;
-                put_retry(&self.ctx, &meta.key, body).await?;
+                put_retry(&self.ctx, &meta.key, body.clone()).await?;
+                self.ctx.io.remember(&meta.key, body);
                 tables.insert(0, Table::new(meta));
             }
         }
@@ -965,7 +966,8 @@ impl Db {
         if !builder.is_empty() {
             let (body, meta) = builder.finish(self.layout.table(self.epoch, maint.next_table));
             maint.next_table += 1;
-            put_retry(&self.ctx, &meta.key, body).await?;
+            put_retry(&self.ctx, &meta.key, body.clone()).await?;
+            self.ctx.io.remember(&meta.key, body);
             merged.push(Table::new(meta));
         }
         merged.extend(tables[count..].iter().cloned());
