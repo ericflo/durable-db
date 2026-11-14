@@ -71,7 +71,7 @@ Each protocol rule is a switch in the model. Turning one off must produce a coun
 | `tests/http.rs` | The documented API against a real server process, including a killed server. | 8 pass. |
 | `tests/cluster.rs` | Up to three server processes on one store: routing to one owner, a killed owner, a graceful handover, a joining node, a contended counter while nodes are killed and restarted. | 5 pass. |
 | `tests/bucket.rs` | On a real bucket: the storage contract including versions and delete markers; read-after-write (8 workers × 40 rounds, each PUT and each DELETE followed at once by HEAD, GET and LIST); the engine with a takeover, a release and a deletion. | 3 pass on Backblaze B2. |
-| `durable-db bench --workload ledger` | Transfers between accounts, each with a log entry in the same transaction; afterwards the balances must sum to the starting total and the log must hold exactly the acknowledged transfers. | 11,774 transfers verified on three local servers while one was killed and one terminated. |
+| `durable-db bench --workload ledger` | Transfers between accounts, each with a log entry in the same transaction; afterwards the balances must sum to the starting total and the log must hold exactly the acknowledged transfers. | 11,774 transfers verified on three servers sharing a directory, and 4,902 on three servers sharing a B2 bucket, each while one server was killed and one terminated. |
 | `scripts/test-kubernetes.sh` | The shipped manifests on a three-node kind cluster backed by Backblaze B2. The ledger runs through the Service while the autoscaler adds pods under CPU load, a pod is force-deleted, and the autoscaler removes pods. | Scaled 2 → 3 → 2; 18,838 transfers in 240 s verified; no request failed. |
 
 ### What these checks found
