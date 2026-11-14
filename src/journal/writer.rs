@@ -6,6 +6,7 @@ use crate::storage::Storage;
 use anyhow::{Context, ensure};
 use bytes::Bytes;
 use std::{collections::BTreeMap, sync::Arc};
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Clone, Copy)]
@@ -305,6 +306,8 @@ impl PreparedUpload {
                 &self.prefix.log.key(self.prefix.position),
                 self.bytes.clone(),
             )
+            .instrument(tracing::info_span!("journal_upload",
+                owner = %self.prefix.log.epoch(), position = self.prefix.position))
             .await;
         let unsent = result
             .as_ref()

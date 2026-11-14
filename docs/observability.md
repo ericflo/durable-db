@@ -65,6 +65,13 @@ incarnation after activation succeeds. The same owner ID links the following fix
   Only `unsent=true` preserves the original handle for retry; spent credit is
   never refunded. `other` includes admission errors and unclassified provider
   errors, so it does not identify an HTTP status or prove a write reached storage.
+- `provider upload response`: numeric HTTP status and milliseconds to response
+  headers for a non-successful PUT. `provider upload transport failed` records
+  the typed transport error instead, without a response status. Journal PUTs
+  carry a `journal_upload` span with owner and position for correlation. Neither
+  record includes URLs, headers, bodies or raw error messages. A successful
+  status can still be followed by a response-body or SDK error, so absence of
+  these records does not establish success. No retry decision uses these logs.
 - `native worker retired`: the fixed retirement reason, linked to subsequent
   resident removal and acquisition by owner/partition. Process readiness does
   not establish availability of every database during recovery.

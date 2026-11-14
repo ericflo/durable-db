@@ -8,22 +8,58 @@ use anyhow::{Context, bail};
 use object_store::{
     ClientConfigKey as Key, ClientOptions, RetryConfig,
     aws::{AmazonS3, AmazonS3Builder},
-    client::{HttpClient, HttpConnector},
+    client::{HttpClient, HttpConnector, HttpError, HttpRequest, HttpResponse, HttpService},
 };
 use rand::seq::SliceRandom;
 use reqwest::{Client, NoProxy, Proxy, dns};
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug)]
 pub(super) struct Connector;
 impl HttpConnector for Connector {
     fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
         client(options)
-            .map(HttpClient::new)
+            .map(|client| HttpClient::new(Uploads(client)))
             .map_err(|source| object_store::Error::Generic {
                 store: "durable-db HTTP configuration",
                 source: source.into(),
             })
+    }
+}
+
+#[derive(Debug)]
+struct Uploads(Client);
+
+#[async_trait::async_trait]
+impl HttpService for Uploads {
+    async fn call(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let upload = request.method() == reqwest::Method::PUT;
+        let started = Instant::now();
+        let result = self.0.call(request).await;
+        if upload {
+            // Never inspect URLs, headers, bodies or error messages. Return the
+            // original result: diagnostics must not change retry classification.
+            match &result {
+                Ok(response) if !response.status().is_success() => {
+                    tracing::warn!(
+                        status = response.status().as_u16(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "provider upload response"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(kind = ?error.kind(),
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "provider upload transport failed");
+                }
+                _ => {}
+            }
+        }
+        result
     }
 }
 
@@ -158,6 +194,32 @@ mod tests {
     use bytes::Bytes;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone, Default)]
+    struct Logs(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Logs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Logs {
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            let logs = self.clone();
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || logs.clone())
+                .finish()
+        }
+        fn take(&self) -> String {
+            String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
+        }
+    }
 
     fn builder(endpoint: String) -> AmazonS3Builder {
         AmazonS3Builder::new()
@@ -210,14 +272,33 @@ mod tests {
         )
         .unwrap()
         .with_single_attempt_uploads(Arc::new(single_attempt(builder).unwrap()));
+        let logs = Logs::default();
         for bytes in [Bytes::new(), Bytes::from_static(b"fixture payload")] {
-            for status in [200, 301, 302, 303, 307, 308, 429, 500, 503] {
+            for status in [200, 301, 302, 303, 307, 308, 400, 403, 412, 429, 500, 503] {
                 {
                     let mut state = wire.lock().unwrap();
                     state.calls.clear();
                     state.status = status;
                 }
-                let result = remote.put("blocks/fixture", bytes.clone()).await;
+                let result = remote
+                    .put("blocks/fixture", bytes.clone())
+                    .with_subscriber(logs.subscriber())
+                    .await;
+                let text = logs.take();
+                if status == 200 {
+                    assert!(text.is_empty());
+                } else {
+                    assert!(
+                        text.contains(&format!("provider upload response status={status} ")),
+                        "{text}"
+                    );
+                    assert_eq!(text.lines().count(), 1, "{text}");
+                }
+                assert!(
+                    !text.contains("fixture"),
+                    "no path, credentials or body: {text}"
+                );
+                assert!(!text.contains("127.0.0.1"), "no endpoint: {text}");
                 assert_eq!(result.is_ok(), status == 200, "status {status}");
                 if let Err(error) = result {
                     assert!(
@@ -347,12 +428,11 @@ mod tests {
                 .unwrap()
                 .with_single_attempt_uploads(upload),
         );
-        let mut writer = crate::journal::Writer::new(
-            remote,
-            uuid::Uuid::new_v4(),
-            crate::journal::QueueLimits::default(),
-        )
-        .unwrap();
+        let owner = uuid::Uuid::new_v4();
+        let mut writer =
+            crate::journal::Writer::new(remote, owner, crate::journal::QueueLimits::default())
+                .unwrap();
+        let owner = writer.log().epoch();
         let upload = writer.prepare(&[Bytes::from_static(b"delayed")]).unwrap();
         let wire = Arc::new(Mutex::new(Vec::new()));
         let received = wire.clone();
@@ -382,9 +462,25 @@ mod tests {
                 stream.shutdown().await.unwrap();
             }
         });
+        let logs = Logs::default();
         let mut result = tokio::time::timeout(Duration::from_secs(5), upload.send())
+            .with_subscriber(logs.subscriber())
             .await
             .expect("upload should resolve without SDK retry backoff");
+        let text = logs.take();
+        assert!(
+            text.contains(&format!("journal_upload{{owner={owner} position=1}}")),
+            "{text}"
+        );
+        let kind = if stalled { "Timeout" } else { "Request" };
+        assert!(
+            text.contains(&format!("provider upload transport failed kind={kind} ")),
+            "{text}"
+        );
+        assert!(!text.contains("provider upload response"), "{text}");
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        assert!(!text.contains("fixture"), "{text}");
+        assert!(!text.contains("delayed"), "{text}");
         assert_eq!(result.resolution(), crate::journal::Resolution::Unknown);
         assert!(
             result.take_unsent().is_none(),
