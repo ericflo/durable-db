@@ -1,0 +1,752 @@
+//! Particular orderings of storage requests, set up one request at a time.
+//!
+//! Each node sees the shared bucket through a `Gate` that can hold a chosen
+//! request back or make it fail. Nothing here breaks the storage contract:
+//! a held request is a slow one. Every test states a property and the exact
+//! interleaving that once violated it, or would if a rule were dropped.
+use async_trait::async_trait;
+use bytes::Bytes;
+use durable_db::{
+    Error,
+    db::{Check, Ctx, Db, Options, ReadReq, Scan, Txn},
+    io::Io,
+    layout::{DbConfig, Layout},
+    store::{Listed, ObjectStore, StoreError, StoreResult, memory::MemoryStore},
+};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::Semaphore;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Op {
+    Put,
+    PutOnce,
+    Get,
+    GetRange,
+    Exists,
+    Purge,
+}
+
+enum Action {
+    /// The request is slow: it reaches storage only when released.
+    Hold,
+    /// The request never reaches storage and reports a passing failure,
+    /// which the caller may retry.
+    Fail,
+    /// The request never reaches storage and reports a failure that is
+    /// not retried.
+    Break,
+}
+
+/// Whether a request for this key, the n-th of its kind, is the one meant.
+type Matches = Box<dyn Fn(&str, u64) -> bool + Send + Sync>;
+
+struct Rule {
+    op: Op,
+    matches: Matches,
+    action: Action,
+    remaining: usize,
+}
+
+/// One node's view of a shared in-memory bucket, with requests that can be
+/// made slow or made to fail. Nothing here breaks the storage contract.
+struct Gate {
+    inner: Arc<MemoryStore>,
+    rules: Mutex<Vec<Rule>>,
+    held: Mutex<Vec<(Op, String, Arc<Semaphore>)>>,
+}
+
+impl Gate {
+    fn new(inner: &Arc<MemoryStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: inner.clone(),
+            rules: Mutex::default(),
+            held: Mutex::default(),
+        })
+    }
+
+    fn rule(
+        &self,
+        op: Op,
+        action: Action,
+        remaining: usize,
+        matches: impl Fn(&str, u64) -> bool + Send + Sync + 'static,
+    ) {
+        self.rules.lock().unwrap().push(Rule {
+            op,
+            matches: Box::new(matches),
+            action,
+            remaining,
+        });
+    }
+
+    fn clear(&self) {
+        self.rules.lock().unwrap().clear();
+    }
+
+    fn held(&self) -> Vec<(Op, String)> {
+        self.held
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, key, _)| (*op, key.clone()))
+            .collect()
+    }
+
+    fn release(&self, op: Op) {
+        let held = self.held.lock().unwrap();
+        for (_, _, gate) in held.iter().filter(|(o, _, _)| *o == op) {
+            gate.add_permits(1);
+        }
+    }
+
+    async fn wait_held(&self, op: Op) -> String {
+        loop {
+            if let Some((_, key)) = self.held().into_iter().find(|(o, _)| *o == op) {
+                return key;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn pass(&self, op: Op, key: &str, at: u64) -> StoreResult<()> {
+        let hold = {
+            let mut rules = self.rules.lock().unwrap();
+            let Some(rule) = rules
+                .iter_mut()
+                .find(|r| r.op == op && r.remaining > 0 && (r.matches)(key, at))
+            else {
+                return Ok(());
+            };
+            rule.remaining -= 1;
+            match rule.action {
+                Action::Fail => return Err(StoreError::Unavailable("injected".into())),
+                Action::Break => return Err(StoreError::Fatal("injected".into())),
+                Action::Hold => {
+                    let gate = Arc::new(Semaphore::new(0));
+                    self.held
+                        .lock()
+                        .unwrap()
+                        .push((op, key.to_owned(), gate.clone()));
+                    gate
+                }
+            }
+        };
+        hold.acquire().await.unwrap().forget();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ObjectStore for Gate {
+    async fn put(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        self.pass(Op::Put, key, 0).await?;
+        self.inner.put(key, body).await
+    }
+    async fn put_once(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        self.pass(Op::PutOnce, key, 0).await?;
+        self.inner.put_once(key, body).await
+    }
+    async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
+        self.pass(Op::Get, key, 0).await?;
+        self.inner.get(key).await
+    }
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> StoreResult<Option<Bytes>> {
+        self.pass(Op::GetRange, key, start).await?;
+        self.inner.get_range(key, start, end).await
+    }
+    async fn exists(&self, key: &str) -> StoreResult<bool> {
+        self.pass(Op::Exists, key, 0).await?;
+        self.inner.exists(key).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<Listed>> {
+        self.inner.list(prefix, after, limit).await
+    }
+    async fn list_dirs(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<String>> {
+        self.inner.list_dirs(prefix, after, limit).await
+    }
+    async fn delete(&self, key: &str) -> StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn purge(
+        &self,
+        prefix: &str,
+        end: Option<&str>,
+        doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
+    ) -> StoreResult<usize> {
+        self.pass(Op::Purge, prefix, 0).await?;
+        self.inner.purge(prefix, end, doomed).await
+    }
+}
+
+fn ctx_with(store: Arc<dyn ObjectStore>, opts: Options) -> Arc<Ctx> {
+    Arc::new(Ctx {
+        io: Io::new(store, 32 << 20, None),
+        opts,
+        root: "root/".into(),
+    })
+}
+
+fn ctx(store: Arc<dyn ObjectStore>) -> Arc<Ctx> {
+    ctx_with(store, Options::default())
+}
+
+fn b(text: &str) -> Bytes {
+    Bytes::copy_from_slice(text.as_bytes())
+}
+
+fn put(key: &str, value: &str) -> Txn {
+    Txn {
+        writes: vec![(b(key), Some(b(value)))],
+        ..Txn::default()
+    }
+}
+
+async fn commit(db: &Arc<Db>, txn: Txn) -> Result<u64, Error> {
+    db.commit(vec![txn]).await?.remove(0).map(|c| c.revision)
+}
+
+async fn get(db: &Arc<Db>, key: &[u8]) -> Result<Option<(u64, String)>, Error> {
+    let response = db
+        .read(ReadReq {
+            keys: vec![Bytes::copy_from_slice(key)],
+            strong: true,
+            ..ReadReq::default()
+        })
+        .await?;
+    Ok(response.values[0]
+        .clone()
+        .map(|(version, value)| (version, String::from_utf8(value.to_vec()).unwrap())))
+}
+
+/// How many writes and deletes the bucket has been sent.
+fn written(store: &MemoryStore) -> u64 {
+    use std::sync::atomic::Ordering::SeqCst;
+    store.puts.load(SeqCst) + store.deletes.load(SeqCst)
+}
+
+fn claims(store: &MemoryStore) -> Vec<String> {
+    store
+        .keys()
+        .into_iter()
+        .filter(|k| k.contains("/c/"))
+        .collect()
+}
+
+/// A takeover that fails after it has revoked must keep its claim.
+///
+///   X and Y list at the same moment and pick the same epoch number; say
+///     X < Y by nonce. X's claim upload is slow.
+///   Y claims, reads the state and sends its first manifest; that upload is slow.
+///   Z claims above both, revokes Y, then fails to read the manifest.
+///   X's claim arrives.
+///   Y's manifest arrives. Y finds its claim gone and serves nothing, but
+///     its manifest is in the bucket.
+///
+/// Had Z given its claim back, X would have found no higher claim and no
+/// higher manifest, served, and acknowledged a write; Y's manifest, above
+/// X's epoch, would then have hidden that write from every later owner.
+#[tokio::test]
+async fn an_acknowledged_write_survives_a_takeover_that_failed_after_revoking() {
+    let bucket = Arc::new(MemoryStore::new());
+    let node = || {
+        let gate = Gate::new(&bucket);
+        (gate.clone(), ctx(gate))
+    };
+
+    // An existing database, released cleanly: one sealed manifest, no claim.
+    let (_, first) = node();
+    let (db, _) = Db::open(first, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("base", "1")).await.unwrap();
+    db.close().await;
+    assert!(claims(&bucket).is_empty());
+
+    // Two nodes list at the same moment; both claim uploads are slow.
+    let (gate_a, ctx_a) = node();
+    let (gate_b, ctx_b) = node();
+    gate_a.rule(Op::PutOnce, Action::Hold, 1, |_, _| true);
+    gate_b.rule(Op::PutOnce, Action::Hold, 1, |_, _| true);
+    let open_a = tokio::spawn(Db::open(ctx_a, "app", None));
+    let open_b = tokio::spawn(Db::open(ctx_b, "app", None));
+    let claim_a = gate_a.wait_held(Op::PutOnce).await;
+    let claim_b = gate_b.wait_held(Op::PutOnce).await;
+    let (gate_x, open_x, gate_y, open_y) = if claim_a < claim_b {
+        (gate_a, open_a, gate_b, open_b)
+    } else {
+        (gate_b, open_b, gate_a, open_a)
+    };
+
+    // Y's claim arrives; Y recovers and sends its first manifest, slowly.
+    gate_y.rule(Op::Put, Action::Hold, 1, |key, _| key.contains("/m/"));
+    gate_y.release(Op::PutOnce);
+    gate_y.wait_held(Op::Put).await;
+
+    // Z takes over from Y, revokes it, then cannot read the manifest.
+    let (gate_z, ctx_z) = node();
+    gate_z.rule(Op::Get, Action::Fail, usize::MAX, |key, _| {
+        key.contains("/m/")
+    });
+    let failed = Db::open(ctx_z, "app", None).await;
+    assert!(
+        matches!(failed, Err(Error::Unavailable(_))),
+        "Z: {:?}",
+        failed.err()
+    );
+    // Z revoked Y, whose manifest is still on its way. Z's claim must stay
+    // to keep every lower epoch, X's included, from serving.
+    assert_eq!(claims(&bucket).len(), 1, "Z's claim stays");
+
+    // X's claim arrives. Whatever X acknowledges must last.
+    gate_x.release(Op::PutOnce);
+    let acknowledged = match open_x.await.unwrap() {
+        Ok((x, _)) => commit(&x, put("w", "acknowledged")).await.ok(),
+        Err(_) => None,
+    };
+
+    // Y's manifest arrives.
+    gate_y.release(Op::Put);
+    assert!(open_y.await.unwrap().is_err());
+
+    // A fresh node with nothing but the bucket.
+    let (_, fresh) = node();
+    let (db, _) = Db::open(fresh, "app", None).await.unwrap();
+    assert_eq!(
+        get(&db, b"w").await.unwrap().map(|(revision, _)| revision),
+        acknowledged,
+        "an acknowledged write is gone"
+    );
+    assert_eq!(get(&db, b"base").await.unwrap(), Some((1, "1".into())));
+}
+
+/// A range that ends before it starts is empty: a check on it passes and a
+/// scan of it returns nothing. It once stopped the database's writer.
+#[tokio::test]
+async fn an_inverted_range_is_empty() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    assert_eq!(commit(&db, put("m", "1")).await.unwrap(), 1);
+    let inverted = Txn {
+        checks: vec![Check::Range {
+            lo: b("b"),
+            hi: b("a"),
+            since: 1,
+        }],
+        writes: vec![(b("x"), Some(b("1")))],
+        ..Txn::default()
+    };
+    assert_eq!(commit(&db, inverted).await.unwrap(), 2);
+    let scanned = db
+        .read(ReadReq {
+            scans: vec![Scan {
+                lo: b("z"),
+                hi: b("a"),
+                reverse: false,
+                limit: 10,
+            }],
+            strong: true,
+            ..ReadReq::default()
+        })
+        .await
+        .unwrap();
+    assert!(scanned.scans[0].items.is_empty());
+    assert_eq!(commit(&db, put("y", "1")).await.unwrap(), 3);
+}
+
+/// A lookup by the writer that overlaps this owner's own merge must not be
+/// mistaken for a takeover.
+#[tokio::test]
+async fn a_lookup_that_overlaps_a_merge_does_not_close_the_database() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx(gate.clone());
+    let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+
+    // Two tables of about 512 KiB each, with the merge of them held back.
+    let merges = ctx.io.merges.acquire_many(2).await.unwrap();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut noise = |len: usize| {
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            out.extend_from_slice(&seed.to_le_bytes());
+        }
+        Bytes::from(out)
+    };
+    let mut versions = Vec::new();
+    for (round, prefix) in ["a", "b"].into_iter().enumerate() {
+        let txn = Txn {
+            writes: (0..64)
+                .map(|i| (b(&format!("{prefix}{i:03}")), Some(noise(8 << 10))))
+                .collect(),
+            ..Txn::default()
+        };
+        versions.push(commit(&db, txn).await.unwrap());
+        db.request_flush();
+        while db.info().tables != round + 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+    let tables: Vec<String> = bucket
+        .keys()
+        .into_iter()
+        .filter(|k| k.contains("/t/"))
+        .collect();
+    assert_eq!(tables.len(), 2);
+    let oldest = tables[0].clone();
+
+    // The writer validates a version check on a key in the older table. Its
+    // read of that table's first block is slow.
+    let slow = oldest.clone();
+    gate.rule(Op::GetRange, Action::Hold, 1, move |key, start| {
+        key == slow && start == 0
+    });
+    let checked = Txn {
+        checks: vec![Check::Key {
+            key: b("a000"),
+            version: versions[0],
+        }],
+        writes: vec![(b("z"), Some(b("1")))],
+        ..Txn::default()
+    };
+    let pending = {
+        let db = db.clone();
+        tokio::spawn(async move { commit(&db, checked).await })
+    };
+    gate.wait_held(Op::GetRange).await;
+
+    // Meanwhile the merge runs, publishes, and collects the tables it replaced.
+    drop(merges);
+    while bucket.keys().contains(&oldest) {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(db.info().tables, 1);
+    assert_eq!(claims(&bucket).len(), 1, "this node is still the owner");
+
+    gate.release(Op::GetRange);
+    let outcome = pending.await.unwrap();
+    assert!(!db.is_closed(), "the owner closed its own database");
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
+
+/// A refusal describes the state it was judged against, so it is reported
+/// only once that state is acknowledged. Here a compare-and-set is judged
+/// against a write whose upload never completes: it must not be told
+/// "conflict, the key is at version 2" when version 2 never comes to exist.
+#[tokio::test]
+async fn a_conflict_is_not_reported_against_a_write_that_never_commits() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    assert_eq!(commit(&db, put("k", "1")).await.unwrap(), 1);
+
+    // A write to k whose frame upload never completes.
+    gate.rule(Op::Put, Action::Hold, usize::MAX, |key, _| {
+        key.contains("/l/")
+    });
+    let stuck = {
+        let db = db.clone();
+        tokio::spawn(async move { commit(&db, put("k", "2")).await })
+    };
+    gate.wait_held(Op::Put).await;
+
+    // A compare-and-set from what every reader sees: k at version 1.
+    assert_eq!(get(&db, b"k").await.unwrap(), Some((1, "1".into())));
+    let cas = Txn {
+        checks: vec![Check::Key {
+            key: b("k"),
+            version: 1,
+        }],
+        writes: vec![(b("k"), Some(b("3")))],
+        ..Txn::default()
+    };
+    let refused = {
+        let db = db.clone();
+        tokio::spawn(async move { commit(&db, cas).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!refused.is_finished(), "answered from unacknowledged state");
+
+    // Another node takes over; the first write was never stored.
+    let (successor, _) = Db::open(ctx(Gate::new(&bucket)), "app", None)
+        .await
+        .unwrap();
+    assert_eq!(get(&successor, b"k").await.unwrap(), Some((1, "1".into())));
+    // The old owner learns it was replaced and answers neither request.
+    gate.release(Op::Put);
+    assert!(matches!(stuck.await.unwrap(), Err(Error::Lost(_))));
+    assert!(matches!(refused.await.unwrap(), Err(Error::Lost(_))));
+}
+
+/// A scan sees every acknowledged write, whatever else is in memory.
+#[tokio::test]
+async fn a_scan_from_the_start_sees_unflushed_writes() {
+    let (db, _) = Db::open(
+        ctx(Arc::new(MemoryStore::new())),
+        "app",
+        Some(DbConfig::default()),
+    )
+    .await
+    .unwrap();
+    commit(&db, put("a", "old")).await.unwrap();
+    db.request_flush();
+    while db.info().tables != 1 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    for (i, (key, value)) in [("a", "new"), ("b", "1"), ("c", "1"), ("d", "1")]
+        .into_iter()
+        .enumerate()
+    {
+        let txn = Txn {
+            idempotency_key: Some(format!("request-{i}")),
+            ..put(key, value)
+        };
+        commit(&db, txn).await.unwrap();
+    }
+    let response = db
+        .read(ReadReq {
+            scans: vec![Scan {
+                lo: Bytes::new(),
+                hi: Bytes::new(),
+                reverse: false,
+                limit: 2,
+            }],
+            strong: true,
+            ..ReadReq::default()
+        })
+        .await
+        .unwrap();
+    let items: Vec<(String, u64, String)> = response.scans[0]
+        .items
+        .iter()
+        .map(|e| {
+            let text = |bytes: &Bytes| String::from_utf8(bytes.to_vec()).unwrap();
+            (text(&e.key), e.version, text(e.value.as_ref().unwrap()))
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [("a".into(), 2, "new".into()), ("b".into(), 3, "1".into())]
+    );
+}
+
+/// Keys are UTF-8 text that does not begin with U+0000, which is reserved
+/// for the database's own records. The engine refuses anything else.
+#[tokio::test]
+async fn a_key_that_is_not_text_is_refused() {
+    let (db, _) = Db::open(
+        ctx(Arc::new(MemoryStore::new())),
+        "app",
+        Some(DbConfig::default()),
+    )
+    .await
+    .unwrap();
+    for key in [&[0xff, 0x01][..], &[0x00, b'r'][..], &[][..]] {
+        let txn = Txn {
+            writes: vec![(Bytes::copy_from_slice(key), Some(b("v")))],
+            ..Txn::default()
+        };
+        assert!(matches!(commit(&db, txn).await, Err(Error::Invalid(_))));
+    }
+    assert_eq!(commit(&db, put("plain", "v")).await.unwrap(), 1);
+}
+
+/// The same with two nodes and no simultaneous listing: Z fails after
+/// revoking Y, then tries again, as a node does. Its second epoch must be
+/// numbered above Y's, which only Z's surviving claim guarantees.
+#[tokio::test]
+async fn a_retried_takeover_is_numbered_above_the_epoch_it_revoked() {
+    let bucket = Arc::new(MemoryStore::new());
+    let node = || {
+        let gate = Gate::new(&bucket);
+        (gate.clone(), ctx(gate))
+    };
+    let (_, first) = node();
+    let (db, _) = Db::open(first, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("base", "1")).await.unwrap();
+    db.close().await;
+
+    // Y opens; its first manifest upload is slow.
+    let (gate_y, ctx_y) = node();
+    gate_y.rule(Op::Put, Action::Hold, 1, |key, _| key.contains("/m/"));
+    let open_y = tokio::spawn(Db::open(ctx_y, "app", None));
+    let manifest_y = gate_y.wait_held(Op::Put).await;
+
+    // Z takes over, revokes Y, and fails to read the manifest.
+    let (gate_z, ctx_z) = node();
+    gate_z.rule(Op::Get, Action::Fail, usize::MAX, |key, _| {
+        key.contains("/m/")
+    });
+    assert!(matches!(
+        Db::open(ctx_z.clone(), "app", None).await,
+        Err(Error::Unavailable(_))
+    ));
+
+    // Storage recovers and Z tries again.
+    gate_z.clear();
+    let (z, _) = Db::open(ctx_z, "app", None).await.unwrap();
+    let manifests_z = format!("root/db/app/m/{}/", z.info().epoch);
+    assert!(
+        manifests_z > manifest_y,
+        "{manifests_z} is below {manifest_y}"
+    );
+    let acknowledged = commit(&z, put("w", "acknowledged")).await.unwrap();
+
+    // Y's manifest arrives, and changes nothing.
+    gate_y.release(Op::Put);
+    assert!(open_y.await.unwrap().is_err());
+    z.close().await;
+    let (_, fresh) = node();
+    let (db, _) = Db::open(fresh, "app", None).await.unwrap();
+    assert_eq!(
+        get(&db, b"w").await.unwrap(),
+        Some((acknowledged, "acknowledged".into()))
+    );
+}
+
+/// A creation that stopped after its claim leaves a claim and no database.
+/// Requests for that name are answered from a listing: they find no
+/// manifest, and write nothing, however many of them there are.
+#[tokio::test]
+async fn a_database_that_was_never_created_is_not_claimed() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    gate.rule(Op::Put, Action::Break, usize::MAX, |key, _| {
+        key.contains("/m/")
+    });
+    let creation = Db::open(ctx(gate), "app", Some(DbConfig::default())).await;
+    assert!(creation.is_err());
+    let left = bucket.keys();
+    assert_eq!(left, claims(&bucket));
+    assert_eq!(left.len(), 1);
+
+    let writes = written(&bucket);
+    for _ in 0..3 {
+        let opened = Db::open(ctx(bucket.clone()), "app", None).await;
+        assert!(matches!(opened, Err(Error::NotFound)));
+    }
+    assert_eq!(bucket.keys(), left);
+    assert_eq!(written(&bucket), writes);
+
+    // Creating it still works, and removes the abandoned claim.
+    let (db, created) = Db::open(ctx(bucket.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    assert!(created);
+    commit(&db, put("k", "v")).await.unwrap();
+    assert_eq!(claims(&bucket).len(), 1);
+    assert_ne!(claims(&bucket), left);
+}
+
+const TOMBSTONE: &str = "root/db/app/m/~";
+
+/// A deletion is a manifest of the deleting epoch. A successor that took
+/// over before that manifest was stored outranks it, so nothing is deleted,
+/// and no tombstone is left behind to take effect later.
+#[tokio::test]
+async fn a_takeover_during_a_deletion_keeps_the_database() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let (stale, fresh) = (ctx(gate.clone()), ctx(bucket.clone()));
+    let (first, _) = Db::open(stale, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&first, put("a", "1")).await.unwrap();
+
+    gate.rule(Op::Put, Action::Hold, 1, |key, _| key.contains("/m/"));
+    let deleting = tokio::spawn({
+        let first = first.clone();
+        async move { first.destroy().await }
+    });
+    gate.wait_held(Op::Put).await;
+    // The deletion's manifest is on its way. Another node takes over now.
+    let (second, _) = Db::open(fresh.clone(), "app", None).await.unwrap();
+    assert_eq!(commit(&second, put("b", "2")).await.unwrap(), 2);
+    gate.release(Op::Put);
+    assert!(matches!(deleting.await.unwrap(), Err(Error::Lost(_))));
+
+    assert_eq!(commit(&second, put("c", "3")).await.unwrap(), 3);
+    second.close().await;
+    assert!(!bucket.keys().iter().any(|key| key == TOMBSTONE));
+    let (third, _) = Db::open(fresh, "app", None).await.unwrap();
+    for (key, value) in [("a", "1"), ("b", "2"), ("c", "3")] {
+        assert_eq!(get(&third, key.as_bytes()).await.unwrap().unwrap().1, value);
+    }
+}
+
+/// The owner stored the deletion but stopped before it could confirm it.
+/// The next node to take the database finds it deleted and finishes the job.
+#[tokio::test]
+async fn an_unconfirmed_deletion_is_settled_by_the_next_owner() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("a", "1")).await.unwrap();
+    gate.rule(Op::Exists, Action::Break, usize::MAX, |_, _| true);
+    assert!(db.destroy().await.is_err());
+    assert!(db.is_closed(), "it must not serve again");
+    assert!(!bucket.keys().iter().any(|key| key == TOMBSTONE));
+
+    assert!(matches!(
+        Db::open(ctx(bucket.clone()), "app", None).await,
+        Err(Error::Gone)
+    ));
+    assert_eq!(bucket.keys(), [TOMBSTONE]);
+}
+
+/// A deletion that is final but whose cleanup was cut short, first before
+/// the tombstone and then before the purge, is finished by repeating it.
+#[tokio::test]
+async fn an_interrupted_cleanup_is_finished_by_repeating_the_deletion() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx(gate.clone());
+    let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("a", "1")).await.unwrap();
+
+    gate.rule(Op::Put, Action::Break, usize::MAX, |key, _| {
+        key.ends_with("m/~")
+    });
+    assert!(db.destroy().await.is_err());
+    assert!(matches!(get(&db, b"a").await, Err(Error::Gone)));
+    gate.clear();
+
+    gate.rule(Op::Purge, Action::Break, usize::MAX, |_, _| true);
+    assert!(Db::open(ctx.clone(), "app", None).await.is_err());
+    assert!(bucket.len() > 1);
+    gate.clear();
+
+    assert!(matches!(
+        Db::open(ctx.clone(), "app", None).await,
+        Err(Error::Gone)
+    ));
+    Db::erase(&ctx, &Layout::new("root/", "app")).await.unwrap();
+    assert_eq!(bucket.keys(), [TOMBSTONE]);
+}

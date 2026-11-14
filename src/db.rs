@@ -211,6 +211,9 @@ struct Maint {
     next_table: u32,
     /// Tables replaced by a merge, awaiting deletion.
     garbage: Vec<String>,
+    /// Tables uploaded since the last confirmed manifest. One whose manifest
+    /// is never confirmed becomes garbage at the next that is.
+    unpublished: Vec<String>,
 }
 
 #[derive(Default)]
@@ -226,6 +229,8 @@ struct Recovered {
     config: DbConfig,
     created: bool,
     next_table: u32,
+    /// The newest manifest says the database is deleted.
+    deleted: bool,
 }
 
 pub struct Db {
@@ -374,7 +379,7 @@ async fn read_frames(ctx: &Ctx, layout: &Layout, epoch: Epoch, after: u64) -> Re
         let fetched = futures::future::try_join_all(chunk.iter().map(|key| async move {
             retry(|| ctx.io.store.get(key))
                 .await?
-                .ok_or_else(|| Error::Lost(format!("{key} was collected during recovery")))
+                .ok_or_else(|| Error::Busy("the log was collected; a newer owner exists".into()))
         }))
         .await?;
         for body in fetched {
@@ -405,7 +410,10 @@ impl Db {
         if manifests.iter().any(|m| m.key == layout.tombstone()) {
             return Err(Error::Gone);
         }
-        if manifests.is_empty() && claims.is_empty() && create.is_none() {
+        // A database that exists has a manifest, stored before its creation
+        // was acknowledged. Without one there is nothing to take over, and a
+        // claim left by a creation that never finished is not worth another.
+        if manifests.is_empty() && create.is_none() {
             return Err(Error::NotFound);
         }
         let highest = claims
@@ -430,9 +438,16 @@ impl Db {
         let recovered = match Self::recover(&ctx, &uploads, &layout, epoch, create).await {
             Ok(recovered) => recovered,
             Err(error) => {
-                // Nothing of this epoch but its claim exists, so giving the
-                // claim back is safe.
-                let _ = retry(|| store.delete(&claim_key)).await;
+                // The claim is given back only when something above this
+                // epoch stays in the bucket: a higher claim or manifest
+                // (Busy) or the tombstone (Gone). After any other failure
+                // it stays, as after a crash. This epoch may have revoked a
+                // lower one whose first manifest is still on its way; with
+                // both claims gone, the next epoch could be numbered below
+                // that manifest, serve, and then be outranked by it.
+                if matches!(error, Error::Busy(_) | Error::Gone) {
+                    let _ = retry(|| store.delete(&claim_key)).await;
+                }
                 return Err(error);
             }
         };
@@ -503,6 +518,19 @@ impl Db {
                     Error::Busy("the newest manifest was collected; a newer owner exists".into())
                 })?;
                 let manifest = Manifest::decode(&body)?;
+                if manifest.deleted {
+                    // Its owner may never have learned whether this took
+                    // effect. It does now: this epoch carries it forward.
+                    return Ok(Recovered {
+                        mem,
+                        tables: Vec::new(),
+                        revision: manifest.revision,
+                        config: manifest.config,
+                        created: false,
+                        next_table: 1,
+                        deleted: true,
+                    });
+                }
                 let tables: Vec<_> = manifest.tables.into_iter().map(Table::new).collect();
                 let mut revision = manifest.revision;
                 let mut config = manifest.config;
@@ -560,6 +588,7 @@ impl Db {
             config,
             created,
             next_table,
+            deleted: false,
         })
     }
 
@@ -579,6 +608,7 @@ impl Db {
             config,
             created,
             next_table,
+            deleted,
         } = recovered;
         let manifest = Manifest {
             format: FORMAT,
@@ -587,6 +617,7 @@ impl Db {
             sealed: false,
             tables: tables.iter().map(|t| t.meta.clone()).collect(),
             config: config.clone(),
+            deleted,
         };
         uploads
             .put(&layout.manifest(epoch, 0), manifest.encode())
@@ -598,6 +629,13 @@ impl Db {
         let claim_key = layout.claim(epoch);
         if !retry(|| ctx.io.store.exists(&claim_key)).await? {
             return Err(Error::Busy("ownership moved during activation".into()));
+        }
+        if deleted {
+            // A deletion recovered from a predecessor is final now, for the
+            // same reason. Finish it instead of serving.
+            uploads.settle().await;
+            Self::erase(ctx, layout).await?;
+            return Err(Error::Gone);
         }
 
         let (tx, rx) = mpsc::channel(4096);
@@ -631,6 +669,7 @@ impl Db {
                 sealed: false,
                 next_table,
                 garbage: Vec::new(),
+                unpublished: Vec::new(),
             }),
             started: Instant::now(),
             last_used_ms: AtomicU64::new(0),
@@ -762,25 +801,47 @@ impl Db {
 
     /// The newest version of `key`, including writes not yet acknowledged.
     async fn latest(&self, key: &[u8]) -> Result<Option<(u64, Option<Bytes>)>> {
-        let (hit, tables) = {
-            let state = self.state.read();
-            (state.mem.get(key, u64::MAX), state.tables.clone())
-        };
-        if hit.is_some() {
-            return Ok(hit);
-        }
-        for table in tables.iter() {
-            if let Some(entry) = table.get(&self.ctx.io, key).await? {
-                return Ok(Some((entry.version, entry.value)));
+        loop {
+            let (hit, tables) = {
+                let state = self.state.read();
+                (state.mem.get(key, u64::MAX), state.tables.clone())
+            };
+            if hit.is_some() {
+                return Ok(hit);
+            }
+            let found = async {
+                for table in tables.iter() {
+                    if let Some(entry) = table.get(&self.ctx.io, key).await? {
+                        return Ok(Some((entry.version, entry.value)));
+                    }
+                }
+                Ok(None)
+            };
+            match found.await {
+                Err(Error::Lost(_)) if self.replaced(&tables) => {}
+                other => return other,
             }
         }
-        Ok(None)
     }
 
-    pub async fn read(self: &Arc<Self>, request: ReadReq) -> Result<ReadResp> {
+    /// Whether this owner has moved on from `tables`. A merge deletes the
+    /// tables it replaced, so a lookup that began before it can find one of
+    /// them gone. That is this owner's own doing, not a takeover, and the
+    /// lookup starts over on the tables that replaced them.
+    fn replaced(&self, tables: &Arc<Vec<Arc<Table>>>) -> bool {
+        !Arc::ptr_eq(tables, &self.state.read().tables)
+    }
+
+    pub async fn read(self: &Arc<Self>, mut request: ReadReq) -> Result<ReadResp> {
         self.touch();
         if let Some(error) = self.closed.get() {
             return Err(error.clone());
+        }
+        for scan in &mut request.scans {
+            // Keys that begin with U+0000 are the database's own.
+            if scan.lo.first().is_none_or(|byte| *byte == INTERNAL) {
+                scan.lo = Bytes::from_static(&[INTERNAL + 1]);
+            }
         }
         if !request.strong && request.min_revision > self.state.read().confirmed {
             if request.min_revision > self.newest.load(Ordering::Acquire) {
@@ -817,6 +878,16 @@ impl Db {
     }
 
     async fn read_snapshot(&self, request: &ReadReq) -> Result<ReadResp> {
+        loop {
+            let tables = self.state.read().tables.clone();
+            match self.read_once(request).await {
+                Err(Error::Lost(_)) if self.replaced(&tables) => {}
+                other => return other,
+            }
+        }
+    }
+
+    async fn read_once(&self, request: &ReadReq) -> Result<ReadResp> {
         // One lock hold fixes the revision, the tables and everything the
         // in-memory table contributes.
         let (revision, tables, hits, ranges) = {
@@ -831,9 +902,13 @@ impl Db {
                 .scans
                 .iter()
                 .map(|scan| {
-                    state
-                        .mem
-                        .range(&scan.lo, &scan.hi, scan.reverse, snapshot, scan.limit + 1)
+                    state.mem.range(
+                        &scan.lo,
+                        &scan.hi,
+                        scan.reverse,
+                        snapshot,
+                        scan.limit.saturating_add(1),
+                    )
                 })
                 .collect();
             (snapshot, state.tables.clone(), hits, ranges)
@@ -901,6 +976,7 @@ impl Db {
     // ------------------------------------------------------------------
 
     async fn maintain(self: Arc<Self>) {
+        let _fuse = Fuse(self.clone());
         // Activation ended with a claim check after this epoch's manifest
         // was stored, so what earlier epochs left behind can go. Holding the
         // lock makes a release wait for the sweep.
@@ -936,6 +1012,10 @@ impl Db {
                 return;
             }
             let mut maint = self.maint.lock().await;
+            // A release or a deletion may have finished while this waited.
+            if self.is_closed() || self.closing.load(Ordering::Acquire) {
+                return;
+            }
             if sweep_now {
                 resweep = None;
                 if self.check().await.is_ok() {
@@ -965,9 +1045,9 @@ impl Db {
 
     fn should_flush(&self, maint: &Maint) -> bool {
         let state = self.state.read();
-        let pending = state.confirmed_frame - maint.covered;
-        let idle =
-            self.started.elapsed().as_millis() as u64 - self.last_commit_ms.load(Ordering::Relaxed);
+        let pending = state.confirmed_frame.saturating_sub(maint.covered);
+        let idle = (self.started.elapsed().as_millis() as u64)
+            .saturating_sub(self.last_commit_ms.load(Ordering::Relaxed));
         (pending > 0 && self.flush_requested.swap(false, Ordering::AcqRel))
             || state.mem.bytes() >= self.ctx.opts.flush_bytes
             || pending >= self.ctx.opts.flush_frames
@@ -1004,6 +1084,7 @@ impl Db {
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
                 maint.next_table += 1;
+                maint.unpublished.push(meta.key.clone());
                 self.uploads.put(&meta.key, body.clone()).await?;
                 self.ctx.io.remember(&meta.key, body);
                 tables.insert(0, Table::new(meta));
@@ -1051,6 +1132,7 @@ impl Db {
         if !builder.is_empty() {
             let (body, meta) = builder.finish(self.layout.table(self.epoch, maint.next_table));
             maint.next_table += 1;
+            maint.unpublished.push(meta.key.clone());
             self.uploads.put(&meta.key, body.clone()).await?;
             self.ctx.io.remember(&meta.key, body);
             merged.push(Table::new(meta));
@@ -1082,6 +1164,7 @@ impl Db {
             sealed,
             tables: tables.iter().map(|t| t.meta.clone()).collect(),
             config: self.state.read().config.clone(),
+            deleted: false,
         };
         self.uploads
             .put(
@@ -1100,6 +1183,12 @@ impl Db {
                 .map(|t| t.meta.key.clone())
                 .collect()
         };
+        // Tables uploaded for an earlier manifest that was never confirmed
+        // are referenced by nothing a successor could choose any more.
+        let orphaned: Vec<String> = std::mem::take(&mut maint.unpublished)
+            .into_iter()
+            .filter(|key| !kept.contains(key.as_str()))
+            .collect();
         {
             let mut state = self.state.write();
             state.table_bytes = tables.iter().map(|t| t.meta.size).sum();
@@ -1113,6 +1202,7 @@ impl Db {
         maint.covered = covered;
         maint.sealed = sealed;
         maint.garbage.extend(replaced);
+        maint.garbage.extend(orphaned);
         self.collect(maint).await;
         Ok(())
     }
@@ -1203,23 +1293,75 @@ impl Db {
         self.poison(Error::Busy("database is closing".into()));
     }
 
-    /// Delete the database for good: a tombstone first, then every object.
+    /// Delete the database for good.
+    ///
+    /// Deleting is a change of state like any other: a manifest of this
+    /// epoch that says "deleted", then a claim check. If a successor took
+    /// over before the manifest was stored, its manifests outrank this one
+    /// and nothing was deleted. An error means the outcome is unknown until
+    /// the next owner reads the bucket; repeating the request settles it.
     pub async fn destroy(self: &Arc<Self>) -> Result<()> {
         self.closing.store(true, Ordering::Release);
         let (done, stopped) = oneshot::channel();
         if self.tx.send(Cmd::Close(done)).await.is_ok() {
             let _ = stopped.await;
         }
-        let _maint = self.maint.lock().await;
-        // Only the owner may decide this.
-        self.check().await?;
-        let store = &*self.ctx.io.store;
-        let tombstone = self.layout.tombstone();
-        retry(|| store.put(&tombstone, Bytes::from_static(b"{}"))).await?;
+        let mut maint = self.maint.lock().await;
+        if let Some(error) = self.closed.get() {
+            return Err(error.clone());
+        }
+        maint.generation += 1;
+        let manifest = Manifest {
+            format: FORMAT,
+            revision: maint.revision,
+            covered: maint.covered,
+            sealed: maint.sealed,
+            tables: Vec::new(),
+            config: self.state.read().config.clone(),
+            deleted: true,
+        };
+        let key = self.layout.manifest(self.epoch, maint.generation);
+        let confirmed = match self.uploads.put(&key, manifest.encode()).await {
+            Ok(()) => self.check().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = confirmed {
+            // The manifest may still arrive, so this epoch never serves
+            // again and keeps its claim, exactly as after a crash.
+            self.poison(Error::Busy("a deletion was interrupted".into()));
+            return Err(error);
+        }
         self.poison(Error::Gone);
+        self.uploads.settle().await;
+        Self::erase(&self.ctx, &self.layout).await
+    }
+
+    /// Finish a deletion that is already final: record it with the
+    /// tombstone, then remove every other object. The tombstone is written
+    /// only here, after the deletion is final, so any node may trust it
+    /// without holding a claim, and may repeat this.
+    pub async fn erase(ctx: &Ctx, layout: &Layout) -> Result<()> {
+        let store = &*ctx.io.store;
+        let tombstone = layout.tombstone();
+        retry(|| store.put(&tombstone, Bytes::from_static(b"{}"))).await?;
         let doomed = |key: &str| key != tombstone;
-        retry(|| store.purge(self.layout.everything(), None, &doomed)).await?;
+        retry(|| store.purge(layout.everything(), None, &doomed)).await?;
         Ok(())
+    }
+}
+
+/// Closes the database if the task that holds this panics, so that a defect
+/// stops one database until it is opened again instead of leaving it
+/// accepting requests it can never answer.
+struct Fuse(Arc<Db>);
+
+impl Drop for Fuse {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.poison(Error::Busy(
+                "an internal task of this database failed".into(),
+            ));
+        }
     }
 }
 
@@ -1305,6 +1447,12 @@ async fn merge(
     tables: &[Arc<Table>],
     scan: &Scan,
 ) -> Result<ScanResult> {
+    if !scan.hi.is_empty() && scan.lo >= scan.hi {
+        return Ok(ScanResult {
+            items: Vec::new(),
+            more: false,
+        });
+    }
     let mut sources = vec![Source::Mem(mem.into_iter())];
     for table in tables {
         let meta = &table.meta;
@@ -1377,6 +1525,9 @@ impl Recent {
                 "the range was read too long ago to verify; read it again".into(),
             ));
         }
+        if !hi.is_empty() && lo >= hi {
+            return Ok(());
+        }
         let changed = if hi.is_empty() {
             self.keys
                 .range(lo.clone()..)
@@ -1426,6 +1577,7 @@ struct Writer {
 
 impl Writer {
     async fn run(db: Arc<Db>, mut rx: mpsc::Receiver<Cmd>, revision: u64) {
+        let _fuse = Fuse(db.clone());
         let capacity = db.ctx.opts.recent_keys;
         let mut writer = Writer {
             db: db.clone(),
@@ -1661,6 +1813,13 @@ impl Writer {
                         let _ = reply.send(Err(error));
                     } else {
                         let fresh = self.assigned > before;
+                        if !fresh {
+                            // Nothing was stored, so the answer describes the
+                            // state it was judged against, including writes
+                            // still on their way to the bucket. It waits
+                            // until all of them are acknowledged.
+                            needs = self.assigned;
+                        }
                         self.waiters.push(Waiter {
                             needs,
                             fresh,
@@ -1716,6 +1875,13 @@ impl Writer {
     /// this is a retry of a transaction already applied.
     async fn apply(&mut self, txn: Txn, out: &mut Vec<FrameTxn>, bytes: &mut usize) -> Result<u64> {
         let db = self.db.clone();
+        if txn.writes.iter().any(|(key, _)| {
+            key.first().is_none_or(|byte| *byte == INTERNAL) || std::str::from_utf8(key).is_err()
+        }) {
+            return Err(Error::Invalid(
+                "a key is non-empty UTF-8 and does not begin with U+0000".into(),
+            ));
+        }
         let receipt = match &txn.idempotency_key {
             None => None,
             Some(id) => {

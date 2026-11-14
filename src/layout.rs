@@ -173,6 +173,10 @@ pub struct Manifest {
     /// Newest first.
     pub tables: Vec<TableMeta>,
     pub config: DbConfig,
+    /// Set by a deletion: from this manifest on there is no database. Like
+    /// any manifest it counts only if no higher epoch outranks it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
 }
 
 pub const FORMAT: u32 = 2;

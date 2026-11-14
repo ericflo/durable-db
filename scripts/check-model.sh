@@ -38,6 +38,10 @@ run() {
       else tail -40 "$log"; echo "FAIL $name" >&2; exit 1; fi ;;
   esac
 }
+# Configurations named Deep* take much longer and run only when asked for.
 if [ $# -gt 0 ]; then run "$1"; else
-  for cfg in "$repo"/spec/*.cfg; do run "$(basename "$cfg" .cfg)"; done
+  for cfg in "$repo"/spec/*.cfg; do
+    case "$(basename "$cfg")" in Deep*) continue ;; esac
+    run "$(basename "$cfg" .cfg)"
+  done
 fi

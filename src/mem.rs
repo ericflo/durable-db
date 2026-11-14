@@ -65,16 +65,17 @@ impl Mem {
         snapshot: u64,
         live: usize,
     ) -> Vec<Entry> {
+        let mut out = Vec::new();
+        // A range that ends at or before its start is empty.
+        if live == 0 || (!hi.is_empty() && lo >= hi) {
+            return out;
+        }
         let upper = if hi.is_empty() {
             Bound::Unbounded
         } else {
             Bound::Excluded(hi)
         };
         let range = self.map.range::<[u8], _>((Bound::Included(lo), upper));
-        let mut out = Vec::new();
-        if live == 0 {
-            return out;
-        }
         let mut remaining = live;
         let mut visit = |key: &Bytes, versions: &Versions| {
             if let Some((version, value)) = versions.iter().rev().find(|(v, _)| *v <= snapshot) {

@@ -143,9 +143,18 @@ impl Node {
         Ok((db.info(), created))
     }
 
+    /// Delete a database. Repeating it is safe, and finishes a deletion
+    /// that another node began but did not complete.
     pub async fn delete(&self, name: &str) -> Result<()> {
-        let db = self.db(name).await?;
-        let result = db.destroy().await;
+        let result = match self.db(name).await {
+            // In a task of its own: a caller that goes away must not leave
+            // the deletion half done.
+            Ok(db) => tokio::spawn(async move { db.destroy().await })
+                .await
+                .unwrap_or_else(|_| Err(Error::Busy("the deletion was interrupted".into()))),
+            Err(Error::Gone) => Db::erase(&self.ctx, &Layout::new(&self.ctx.root, name)).await,
+            Err(error) => Err(error),
+        };
         self.open.write().remove(name);
         self.buckets.lock().remove(name);
         result
@@ -162,13 +171,18 @@ impl Node {
                 crate::io::retry(|| store.list_dirs(&prefix, after.as_deref(), limit)).await?;
             let Some(last) = page.last() else { break };
             after = Some(last.clone());
-            // A deleted database leaves only its tombstone behind.
+            // A database exists once it has a manifest. A name with only
+            // a claim was never created, and a deleted one keeps only its
+            // tombstone.
             let alive = futures::future::try_join_all(page.iter().map(|name| {
-                let tombstone = Layout::new(&self.ctx.root, name).tombstone();
+                let layout = Layout::new(&self.ctx.root, name);
                 async move {
-                    crate::io::retry(|| store.exists(&tombstone))
-                        .await
-                        .map(|gone| !gone)
+                    let (manifests, tombstone) = (layout.manifests(), layout.tombstone());
+                    let (first, gone) = tokio::try_join!(
+                        crate::io::retry(|| store.list(&manifests, None, 1)),
+                        crate::io::retry(|| store.exists(&tombstone)),
+                    )?;
+                    Ok::<_, Error>(!first.is_empty() && !gone)
                 }
             }))
             .await?;

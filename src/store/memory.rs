@@ -1,7 +1,9 @@
 //! An in-memory store for tests, with injectable faults.
 //!
 //! Faults model what a real network does to a request: it can be delayed,
-//! lost before it reaches storage, or applied with its acknowledgement lost.
+//! lost before it reaches storage, applied with its acknowledgement lost, or
+//! given up on by the sender and applied some time afterwards. A purge
+//! removes one key at a time and can stop partway, as it does on a bucket.
 use super::{Listed, ObjectStore, StoreError, StoreResult};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -9,7 +11,10 @@ use parking_lot::Mutex;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -19,13 +24,17 @@ pub struct Faults {
     pub drop_request: f64,
     /// Probability that a write is applied but reported as failed.
     pub drop_response: f64,
+    /// Probability that a write is reported as failed at once and applied
+    /// later, after a uniform duration up to `max_lateness`.
+    pub late: f64,
+    pub max_lateness: Duration,
     /// Each request sleeps a uniform duration up to this long, before and after.
     pub max_delay: Duration,
 }
 
 #[derive(Default)]
 pub struct MemoryStore {
-    objects: Mutex<BTreeMap<String, Bytes>>,
+    objects: Arc<Mutex<BTreeMap<String, Bytes>>>,
     faults: Mutex<Faults>,
     rng: Mutex<Option<StdRng>>,
     pub puts: AtomicU64,
@@ -74,17 +83,36 @@ impl MemoryStore {
 
     async fn delay(&self) {
         let max = self.faults.lock().max_delay;
-        if max.is_zero() {
-            return;
+        if !max.is_zero() {
+            tokio::time::sleep(self.up_to(max)).await;
         }
+    }
+
+    fn up_to(&self, max: Duration) -> Duration {
         let nanos = self
             .rng
             .lock()
             .as_mut()
             .map(|rng| rng.random_range(0..=max.as_nanos() as u64));
-        if let Some(nanos) = nanos {
-            tokio::time::sleep(Duration::from_nanos(nanos)).await;
+        Duration::from_nanos(nanos.unwrap_or(0))
+    }
+
+    /// Whether this write fails now and takes effect later. If so `change`
+    /// is applied after a while and the caller reports the failure.
+    fn defer(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<String, Bytes>) + Send + 'static,
+    ) -> Option<impl FnOnce(&mut BTreeMap<String, Bytes>) + Send + 'static> {
+        let faults = self.faults.lock().clone();
+        if !self.roll(faults.late) {
+            return Some(change);
         }
+        let (objects, wait) = (self.objects.clone(), self.up_to(faults.max_lateness));
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            change(&mut objects.lock());
+        });
+        None
     }
 
     /// Returns whether the response is to be lost.
@@ -111,7 +139,11 @@ impl ObjectStore for MemoryStore {
     async fn put(&self, key: &str, body: Bytes) -> StoreResult<()> {
         let lost = self.enter().await?;
         self.puts.fetch_add(1, Ordering::Relaxed);
-        self.objects.lock().insert(key.to_owned(), body);
+        let key = key.to_owned();
+        let Some(store) = self.defer(move |objects| drop(objects.insert(key, body))) else {
+            return Err(StoreError::Unavailable("injected: given up on".into()));
+        };
+        store(&mut self.objects.lock());
         self.leave(lost).await
     }
 
@@ -175,19 +207,19 @@ impl ObjectStore for MemoryStore {
         self.enter().await?;
         self.lists.fetch_add(1, Ordering::Relaxed);
         let mut out: Vec<String> = Vec::new();
-        for key in self
-            .objects
-            .lock()
-            .range(prefix.to_owned()..)
-            .map(|(k, _)| k)
-        {
+        // `0` follows `/`, so this skips everything below `after`.
+        let start = match after {
+            Some(after) => format!("{prefix}{after}0"),
+            None => prefix.to_owned(),
+        };
+        for key in self.objects.lock().range(start..).map(|(k, _)| k) {
             let Some(rest) = key.strip_prefix(prefix) else {
                 break;
             };
             let Some((dir, _)) = rest.split_once('/') else {
                 continue;
             };
-            if after.is_some_and(|after| dir <= after) || out.last().is_some_and(|l| l == dir) {
+            if out.last().is_some_and(|l| l == dir) {
                 continue;
             }
             if out.len() >= limit {
@@ -201,7 +233,11 @@ impl ObjectStore for MemoryStore {
     async fn delete(&self, key: &str) -> StoreResult<()> {
         let lost = self.enter().await?;
         self.deletes.fetch_add(1, Ordering::Relaxed);
-        self.objects.lock().remove(key);
+        let key = key.to_owned();
+        let Some(remove) = self.defer(move |objects| drop(objects.remove(&key))) else {
+            return Err(StoreError::Unavailable("injected: given up on".into()));
+        };
+        remove(&mut self.objects.lock());
         self.leave(lost).await
     }
 
@@ -213,18 +249,28 @@ impl ObjectStore for MemoryStore {
     ) -> StoreResult<usize> {
         self.enter().await?;
         self.lists.fetch_add(1, Ordering::Relaxed);
-        let mut objects = self.objects.lock();
-        let keys: Vec<String> = objects
+        let keys: Vec<String> = self
+            .objects
+            .lock()
             .range(prefix.to_owned()..)
             .map(|(key, _)| key)
             .take_while(|key| key.starts_with(prefix) && end.is_none_or(|end| key.as_str() < end))
             .filter(|key| doomed(key))
             .cloned()
             .collect();
-        for key in &keys {
-            objects.remove(key);
+        // One key at a time, with other requests in between, and perhaps
+        // not to the end.
+        let drop_request = self.faults.lock().drop_request;
+        for (i, key) in keys.iter().enumerate() {
+            if i % 4 == 3 {
+                self.delay().await;
+                if self.roll(drop_request) {
+                    return Err(StoreError::Unavailable("injected: purge cut short".into()));
+                }
+            }
+            self.objects.lock().remove(key);
+            self.deletes.fetch_add(1, Ordering::Relaxed);
         }
-        self.deletes.fetch_add(keys.len() as u64, Ordering::Relaxed);
         Ok(keys.len())
     }
 }
