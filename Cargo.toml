@@ -1,48 +1,45 @@
 [package]
 name = "durable-db"
-version = "1.0.12"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"
-description = "Transactional ordered storage with disposable compute and authoritative object storage"
+description = "A transactional ordered database whose source of truth is an object-storage bucket"
 repository = "https://github.com/ericflo/durable-db"
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
 base64 = "0.22"
-bytes = "1"
+bytes = { version = "1", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-fs2 = "0.4"
+crc32fast = "1"
 futures = "0.3"
 hex = "0.4"
 hmac = "0.12"
-humantime = "2"
-object_store = { version = "0.14.2", default-features = false, features = ["aws"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+parking_lot = "0.12"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-quick-xml = { version = "0.41", features = ["serialize"] }
+quick_cache = "0.6"
 rand = "0.9"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
+sha1 = "0.10"
 sha2 = "0.10"
-tempfile = "3"
+smallvec = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tower = { version = "0.5", features = ["util", "limit"] }
-tower-http = { version = "0.6", features = ["cors", "limit", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-http-body-util = "0.1"
-proptest = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-rustix = { version = "1", features = ["process", "time"] }
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

@@ -1,5 +1,0 @@
-# Actual-event coverage; safety invariants remain enabled.
-unsafe LateControlFreeze.cfg late-control-freeze 2g NotLateFreeze
-unsafe LateControlMove.cfg late-control-move 2g NotLateMove
-unsafe LateControlSelection.cfg late-control-selection 2g NotLateSelection
-unsafe LateControlOwnerSelection.cfg late-control-owner-selection 2g NotLateOwnerSelection

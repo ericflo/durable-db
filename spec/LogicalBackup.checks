@@ -1,5 +1,0 @@
-safe LogicalBackup.cfg logical-backup 1g -
-unsafe UnsafeBackupScan.cfg backup-scan 1g ConsistentArchive
-unsafe UnsafeBackupTruncated.cfg backup-truncated 1g ConsistentArchive
-unsafe UnsafeBackupForeign.cfg backup-foreign 1g ForeignUntouched
-unsafe UnsafeBackupReplay.cfg backup-replay 1g RestorePrefix

@@ -1,347 +1,215 @@
-//! Fixed-cardinality operational metrics. Labels never contain caller data.
+//! Counters and latency histograms, rendered in the Prometheus text format.
+//! Labels are fixed strings; no key, value, token or database name is recorded.
+use crate::store::{Listed, ObjectStore, StoreResult};
+use async_trait::async_trait;
+use bytes::Bytes;
 use std::{
     fmt::Write,
-    future::Future,
     sync::{
-        LazyLock,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Operation {
-    HttpInfo,
-    HttpCreate,
-    HttpRead,
-    HttpCommit,
-    HttpGc,
-    HttpAccess,
-    HttpToken,
-    HttpOther,
-    ForwardDiscovery,
-    ForwardRequest,
-    NativeReadLock,
-    NativeRead,
-    NativePrepare,
-    AuthorityRead,
-    AuthorityReplace,
-    ReadBarrier,
-    Publication,
-    ObjectGet,
-    ObjectPut,
-    ObjectList,
-    PhysicalDelete,
-    StorageMaintenance,
-    DatabaseMaintenance,
-    NativeListBuckets,
-    NativeUpdateBucket,
-    NativeListVersions,
-    NativeDeleteVersion,
-    NativeAuthorize,
-    NativeOther,
-}
-const OPERATIONS: [&str; 29] = [
-    "http_info",
-    "http_create",
-    "http_read",
-    "http_commit",
-    "http_gc",
-    "http_access",
-    "http_token",
-    "http_other",
-    "forward_discovery",
-    "forward_request",
-    "native_read_lock",
-    "native_read",
-    "native_prepare",
-    "authority_read",
-    "authority_replace",
-    "read_barrier",
-    "publication",
-    "object_get",
-    "object_put",
-    "object_list",
-    "physical_delete",
-    "storage_maintenance",
-    "database_maintenance",
-    "native_list_buckets",
-    "native_update_bucket",
-    "native_list_versions",
-    "native_delete_version",
-    "native_authorize",
-    "native_other",
-];
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Outcome {
-    Ok,
-    Conflict,
-    Rejected,
-    Unauthorized,
-    Invalid,
-    Unavailable,
-    Error,
-    Cancelled,
-}
-#[derive(Clone, Copy)]
-#[repr(usize)]
-pub enum Event {
-    ReadGroups,
-    ReadGroupMembers,
-    ObservationQueueRejected,
-    PublicationRebase,
-    CacheHit,
-    CacheMiss,
-    DataCandidates,
-    DataDeleteAck,
-    ManifestCandidates,
-    ManifestDeleteAck,
-    IndexCandidates,
-    IndexDeleteAck,
-    ProposalSubmitted,
-    PublicationGroups,
-    PublicationGroupMembers,
-    ProposalCandidates,
-    ProposalRejected,
-    ProposalDeleteAck,
-    UploadChargedBytes,
-    UploadChargedAttempts,
-    UploadGrantBytes,
-    UploadGrantAttempts,
-    UploadBudgetExhausted,
-    ResponseValidationUnavailable,
-    JournalFramesPrepared,
-    JournalRecordsPrepared,
-}
-const EVENTS: [&str; 26] = [
-    "read_groups",
-    "read_group_members",
-    "observation_queue_rejected",
-    "publication_rebase",
-    "cache_hit",
-    "cache_miss",
-    "data_candidates",
-    "data_delete_ack",
-    "manifest_candidates",
-    "manifest_delete_ack",
-    "index_candidates",
-    "index_delete_ack",
-    "proposal_submitted",
-    "publication_groups",
-    "publication_group_members",
-    "proposal_candidates",
-    "proposal_rejected",
-    "proposal_delete_ack",
-    "upload_charged_bytes",
-    "upload_charged_attempts",
-    "upload_grant_bytes",
-    "upload_grant_attempts",
-    "upload_budget_exhausted",
-    "response_validation_unavailable",
-    "journal_frames_prepared",
-    "journal_records_prepared",
-];
-const OUTCOMES: [&str; 8] = [
-    "ok",
-    "conflict",
-    "rejected",
-    "unauthorized",
-    "invalid",
-    "unavailable",
-    "error",
-    "cancelled",
-];
-const BOUNDS: [u64; 12] = [
-    1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000,
-    15_000_000, 30_000_000,
+const BOUNDS_MS: [f64; 15] = [
+    0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0,
+    10000.0,
 ];
 
 #[derive(Default)]
-struct Series {
-    outcomes: [AtomicU64; OUTCOMES.len()],
-    buckets: [AtomicU64; BOUNDS.len()],
-    count: AtomicU64,
+pub struct Histogram {
+    buckets: [AtomicU64; 16],
     micros: AtomicU64,
-    inflight: AtomicU64,
-}
-pub struct Registry {
-    series: [Series; OPERATIONS.len()],
-    events: [AtomicU64; EVENTS.len()],
-}
-impl Default for Registry {
-    fn default() -> Self {
-        Self {
-            series: std::array::from_fn(|_| Series::default()),
-            events: std::array::from_fn(|_| AtomicU64::new(0)),
-        }
-    }
-}
-pub static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default);
-
-pub fn http_outcome(status: u16) -> Outcome {
-    match status {
-        200..=299 => Outcome::Ok,
-        401 | 403 => Outcome::Unauthorized,
-        409 => Outcome::Conflict,
-        429 => Outcome::Rejected,
-        400..=499 => Outcome::Invalid,
-        503 => Outcome::Unavailable,
-        _ => Outcome::Error,
-    }
+    failed: AtomicU64,
 }
 
-impl Registry {
-    pub fn event(&self, event: Event, count: usize) {
-        self.events[event as usize].fetch_add(count as u64, Ordering::Relaxed);
+impl Histogram {
+    pub fn observe(&self, elapsed: Duration) {
+        let ms = elapsed.as_secs_f64() * 1000.0;
+        let slot = BOUNDS_MS
+            .iter()
+            .position(|bound| ms <= *bound)
+            .unwrap_or(BOUNDS_MS.len());
+        self.buckets[slot].fetch_add(1, Ordering::Relaxed);
+        self.micros
+            .fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
     }
-    pub fn start(&self, operation: Operation) -> Timer<'_> {
-        let series = &self.series[operation as usize];
-        series.inflight.fetch_add(1, Ordering::Relaxed);
-        Timer {
-            series,
-            operation,
-            started: Instant::now(),
-            outcome: Outcome::Cancelled,
+
+    pub fn fail(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn count(&self) -> u64 {
+        self.buckets.iter().map(|b| b.load(Ordering::Relaxed)).sum()
+    }
+
+    fn render(&self, out: &mut String, name: &str, label: &str) {
+        let mut total = 0;
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            total += bucket.load(Ordering::Relaxed);
+            let bound = BOUNDS_MS
+                .get(i)
+                .map_or("+Inf".to_owned(), |ms| format!("{}", ms / 1000.0));
+            let _ = writeln!(
+                out,
+                "{name}_seconds_bucket{{{label},le=\"{bound}\"}} {total}"
+            );
         }
-    }
-    pub fn render(&self) -> String {
-        let mut out = String::from(
-            "# HELP durable_db_operations_total Completed or cancelled attempts by fixed operation and outcome.\n# TYPE durable_db_operations_total counter\n# HELP durable_db_operation_duration_seconds Attempt latency including errors and cancellation.\n# TYPE durable_db_operation_duration_seconds histogram\n# HELP durable_db_operations_inflight Attempts currently awaiting completion.\n# TYPE durable_db_operations_inflight gauge\n",
+        let seconds = self.micros.load(Ordering::Relaxed) as f64 / 1e6;
+        let _ = writeln!(out, "{name}_seconds_sum{{{label}}} {seconds}");
+        let _ = writeln!(out, "{name}_seconds_count{{{label}}} {total}");
+        let _ = writeln!(
+            out,
+            "{name}_failures_total{{{label}}} {}",
+            self.failed.load(Ordering::Relaxed)
         );
-        for (operation, series) in OPERATIONS.iter().zip(&self.series) {
-            for (outcome, count) in OUTCOMES.iter().zip(&series.outcomes) {
-                writeln!(out, "durable_db_operations_total{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}", count.load(Ordering::Relaxed)).unwrap();
-            }
-            for (bound, count) in BOUNDS.iter().zip(&series.buckets) {
-                writeln!(out, "durable_db_operation_duration_seconds_bucket{{operation=\"{operation}\",le=\"{}\"}} {}", *bound as f64 / 1_000_000.0, count.load(Ordering::Relaxed)).unwrap();
-            }
-            let count = series.count.load(Ordering::Relaxed);
-            writeln!(out, "durable_db_operation_duration_seconds_bucket{{operation=\"{operation}\",le=\"+Inf\"}} {count}").unwrap();
-            writeln!(
-                out,
-                "durable_db_operation_duration_seconds_count{{operation=\"{operation}\"}} {count}"
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "durable_db_operation_duration_seconds_sum{{operation=\"{operation}\"}} {}",
-                series.micros.load(Ordering::Relaxed) as f64 / 1_000_000.0
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "durable_db_operations_inflight{{operation=\"{operation}\"}} {}",
-                series.inflight.load(Ordering::Relaxed)
-            )
-            .unwrap();
+    }
+}
+
+#[derive(Default)]
+pub struct Metrics {
+    pub reads: Histogram,
+    pub commits: Histogram,
+    pub admin: Histogram,
+    pub opens: Histogram,
+    pub forwarded: AtomicU64,
+    pub rejected: AtomicU64,
+    pub store: [Histogram; 6],
+    pub store_bytes_out: AtomicU64,
+    pub store_bytes_in: AtomicU64,
+}
+
+const STORE_OPS: [&str; 6] = ["put", "get", "exists", "list", "delete", "purge"];
+
+impl Metrics {
+    pub fn render(
+        &self,
+        open_databases: usize,
+        cache_bytes: u64,
+        block_hits: u64,
+        block_misses: u64,
+    ) -> String {
+        let mut out = String::new();
+        out.push_str("# TYPE durable_db_request_seconds histogram\n");
+        self.reads
+            .render(&mut out, "durable_db_request", "kind=\"read\"");
+        self.commits
+            .render(&mut out, "durable_db_request", "kind=\"commit\"");
+        self.admin
+            .render(&mut out, "durable_db_request", "kind=\"admin\"");
+        self.opens
+            .render(&mut out, "durable_db_request", "kind=\"open\"");
+        out.push_str("# TYPE durable_db_storage_seconds histogram\n");
+        for (op, histogram) in STORE_OPS.iter().zip(&self.store) {
+            histogram.render(&mut out, "durable_db_storage", &format!("op=\"{op}\""));
         }
-        out.push_str("# HELP durable_db_events_total Fixed-cardinality protocol, cache, and collection events.\n# TYPE durable_db_events_total counter\n");
-        for (event, count) in EVENTS.iter().zip(&self.events) {
-            writeln!(
-                out,
-                "durable_db_events_total{{event=\"{event}\"}} {}",
-                count.load(Ordering::Relaxed)
-            )
-            .unwrap();
-        }
+        let gauge = |out: &mut String, name: &str, value: u64| {
+            let _ = writeln!(out, "durable_db_{name} {value}");
+        };
+        gauge(
+            &mut out,
+            "storage_sent_bytes_total",
+            self.store_bytes_out.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
+            "storage_received_bytes_total",
+            self.store_bytes_in.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
+            "forwarded_requests_total",
+            self.forwarded.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
+            "rejected_requests_total",
+            self.rejected.load(Ordering::Relaxed),
+        );
+        gauge(&mut out, "open_databases", open_databases as u64);
+        gauge(&mut out, "block_cache_bytes", cache_bytes);
+        gauge(&mut out, "block_cache_hits_total", block_hits);
+        gauge(&mut out, "block_cache_misses_total", block_misses);
         out
     }
 }
-pub struct Timer<'a> {
-    series: &'a Series,
-    operation: Operation,
-    started: Instant,
-    outcome: Outcome,
-}
-impl Timer<'_> {
-    pub fn finish(mut self, outcome: Outcome) {
-        self.outcome = outcome;
-    }
-}
-impl Drop for Timer<'_> {
-    fn drop(&mut self) {
-        let elapsed = self.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        for (bound, bucket) in BOUNDS.iter().zip(&self.series.buckets) {
-            if elapsed <= *bound {
-                bucket.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        self.series.micros.fetch_add(elapsed, Ordering::Relaxed);
-        self.series.count.fetch_add(1, Ordering::Relaxed);
-        self.series.outcomes[self.outcome as usize].fetch_add(1, Ordering::Relaxed);
-        self.series.inflight.fetch_sub(1, Ordering::Relaxed);
-        if elapsed >= 1_000_000 {
-            tracing::info!(
-                operation = OPERATIONS[self.operation as usize],
-                outcome = OUTCOMES[self.outcome as usize],
-                elapsed_ms = elapsed / 1000,
-                "slow operation"
-            );
-        }
-    }
-}
-pub async fn measure<T, E>(
-    operation: Operation,
-    future: impl Future<Output = Result<T, E>>,
-) -> Result<T, E> {
-    let timer = REGISTRY.start(operation);
-    let result = future.await;
-    timer.finish(if result.is_ok() {
-        Outcome::Ok
-    } else {
-        Outcome::Error
-    });
-    result
-}
-pub async fn compare<T, E>(
-    operation: Operation,
-    future: impl Future<Output = Result<Option<T>, E>>,
-) -> Result<Option<T>, E> {
-    let timer = REGISTRY.start(operation);
-    let result = future.await;
-    timer.finish(match &result {
-        Ok(Some(_)) => Outcome::Ok,
-        Ok(None) => Outcome::Conflict,
-        Err(_) => Outcome::Error,
-    });
-    result
+
+/// Times every storage call.
+pub struct Metered {
+    pub inner: Arc<dyn ObjectStore>,
+    pub metrics: Arc<Metrics>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn cancellation_and_completion_release_inflight_and_use_fixed_labels() {
-        let registry = Registry::default();
-        let cancelled = registry.start(Operation::ObjectGet);
-        let completed = registry.start(Operation::ObjectGet);
-        assert!(
-            registry
-                .render()
-                .contains("durable_db_operations_inflight{operation=\"object_get\"} 2\n")
-        );
-        completed.finish(Outcome::Ok);
-        drop(cancelled);
-        let metrics = registry.render();
-        assert!(metrics.contains("durable_db_operations_inflight{operation=\"object_get\"} 0\n"));
-        assert!(
-            metrics.contains(
-                "durable_db_operations_total{operation=\"object_get\",outcome=\"ok\"} 1\n"
-            )
-        );
-        assert!(metrics.contains(
-            "durable_db_operations_total{operation=\"object_get\",outcome=\"cancelled\"} 1\n"
-        ));
-        assert!(metrics.contains(
-            "durable_db_operation_duration_seconds_bucket{operation=\"object_get\",le=\"+Inf\"} 2\n"
-        ));
-        assert!(
-            metrics.contains(
-                "durable_db_operation_duration_seconds_count{operation=\"object_get\"} 2\n"
-            )
-        );
-        assert!(metrics.len() < 64 * 1024);
+impl Metered {
+    async fn timed<T>(
+        &self,
+        op: usize,
+        call: impl Future<Output = StoreResult<T>>,
+    ) -> StoreResult<T> {
+        let started = Instant::now();
+        let result = call.await;
+        self.metrics.store[op].observe(started.elapsed());
+        if result.is_err() {
+            self.metrics.store[op].fail();
+        }
+        result
+    }
+}
+
+#[async_trait]
+impl ObjectStore for Metered {
+    async fn put(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        self.metrics
+            .store_bytes_out
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
+        self.timed(0, self.inner.put(key, body)).await
+    }
+    async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
+        let found = self.timed(1, self.inner.get(key)).await?;
+        let bytes = found.as_ref().map_or(0, Bytes::len) as u64;
+        self.metrics
+            .store_bytes_in
+            .fetch_add(bytes, Ordering::Relaxed);
+        Ok(found)
+    }
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> StoreResult<Option<Bytes>> {
+        let found = self.timed(1, self.inner.get_range(key, start, end)).await?;
+        let bytes = found.as_ref().map_or(0, Bytes::len) as u64;
+        self.metrics
+            .store_bytes_in
+            .fetch_add(bytes, Ordering::Relaxed);
+        Ok(found)
+    }
+    async fn exists(&self, key: &str) -> StoreResult<bool> {
+        self.timed(2, self.inner.exists(key)).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<Listed>> {
+        self.timed(3, self.inner.list(prefix, after, limit)).await
+    }
+    async fn list_dirs(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<String>> {
+        self.timed(3, self.inner.list_dirs(prefix, after, limit))
+            .await
+    }
+    async fn delete(&self, key: &str) -> StoreResult<()> {
+        self.timed(4, self.inner.delete(key)).await
+    }
+    async fn purge(
+        &self,
+        prefix: &str,
+        end: Option<&str>,
+        doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
+    ) -> StoreResult<usize> {
+        self.timed(5, self.inner.purge(prefix, end, doomed)).await
     }
 }

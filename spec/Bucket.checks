@@ -1,3 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe Bucket.cfg bucket 2g -
-unsafe UnsafeBucket.cfg bucket-unsafe 1g ReferencedManifestsExist

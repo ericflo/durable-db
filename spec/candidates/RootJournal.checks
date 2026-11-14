@@ -1,9 +1,0 @@
-safe RootJournal.cfg root-journal 2g -
-safe RootJournalRepeated.cfg root-journal-repeated 2g -
-unsafe RootJournalUnsafePermission.cfg root-journal-permission 2g SelectedHistory
-unsafe RootJournalUnsafeGap.cfg root-journal-gap 2g DurableKnowledge
-unsafe RootJournalUnsafeEarly.cfg root-journal-early 2g SelectedHistory
-unsafe RootJournalUnsafeMissing.cfg root-journal-missing 2g SelectedHistory
-unsafe RootJournalUnsafeReseal.cfg root-journal-reseal 2g ImmutableSelection
-unsafe RootJournalUnsafeReady.cfg root-journal-ready 2g CompleteHistory
-unsafe RootJournalCoverage.cfg root-journal-coverage 2g NotRepeatedHistory

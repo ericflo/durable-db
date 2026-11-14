@@ -1,3 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe ObservationBatch.cfg observation 1g -
-unsafe UnsafeObservationBatch.cfg observation-unsafe 1g ObservationWithinInvocation

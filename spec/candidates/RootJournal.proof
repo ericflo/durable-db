@@ -1,3 +1,0 @@
-tag|root-journal
-dependency|RootControl
-negative|root-journal-permission|AcknowledgeBatchPreserves|AcknowledgeBatch(p)|s!(UnsafeJournalPermission \\/ RootValid(p))!TRUE!

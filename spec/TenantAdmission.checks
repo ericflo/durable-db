@@ -1,9 +1,0 @@
-safe TenantAdmission.cfg tenant-admission 512m -
-unsafe TenantAdmissionUnsafeLateCheck.cfg tenant-admission-late 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeCrossScope.cfg tenant-admission-scope 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeCopies.cfg tenant-admission-copies 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeRestore.cfg tenant-admission-restore 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeRefund.cfg tenant-admission-refund 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeOwner.cfg tenant-admission-owner 512m ScopeCoverage
-unsafe TenantAdmissionUnsafeReuse.cfg tenant-admission-reuse 512m ScopeCoverage
-unsafe TenantAdmissionReuseCoverage.cfg tenant-admission-coverage 512m NoReuse

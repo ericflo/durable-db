@@ -1,674 +1,496 @@
 use anyhow::{Context, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use durable_db::{
-    api::{App, Cluster, ClusterConfig, Member, Membership, RateLimits, router},
-    auth::Auth,
-    cache::Cache,
-    providers::b2::Native,
+    auth::{Access, Grant, Keys, expiry},
+    bench,
+    cluster::Cluster,
+    db::{Ctx, Options},
+    http::{ApiLimits, App, router},
+    io::Io,
+    metrics::{Metered, Metrics},
+    node::{Limits, Node},
+    store::{
+        ObjectStore,
+        fs::FsStore,
+        s3::{S3Config, S3Store},
+    },
 };
-use std::{
-    net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+/// A transactional ordered database whose source of truth is a bucket.
 #[derive(Parser)]
-#[command(
-    version,
-    about = "Transactional ordered storage. One binary, disposable compute."
-)]
+#[command(version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+
 #[derive(Subcommand)]
 enum Command {
-    /// Export, inspect, or restore a consistent logical database archive.
-    Backup {
-        #[command(subcommand)]
-        command: BackupCommand,
-    },
-    /// Start a local development database or a stateless B2/S3-backed server.
-    Serve(Box<Serve>),
-    /// Mint a scoped token offline. Keep the signing key on the service side.
-    Token {
-        #[arg(long, default_value = "./data/admin.key")]
-        key_file: PathBuf,
-        #[arg(long)]
-        database: Option<String>,
-        #[arg(long)]
-        write: bool,
-        #[arg(long, default_value_t = 3600)]
-        ttl_seconds: u64,
-        #[arg(long, conflicts_with = "database")]
-        admin: bool,
-        /// Mint a credential that can only scrape GET /metrics.
-        #[arg(long, conflicts_with_all = ["database", "admin", "write"])]
-        metrics: bool,
-        /// Current database policy incarnation (obtain from administrator info).
-        #[arg(long, requires_all = ["database", "generation"], conflicts_with_all = ["admin", "metrics"])]
-        incarnation: Option<String>,
-        #[arg(long, requires = "incarnation")]
-        generation: Option<u64>,
-    },
-    /// Generate a signing key file with restrictive permissions.
-    Keygen {
-        #[arg(long, default_value = "admin.key")]
-        output: PathBuf,
-    },
-    /// Assemble a bounded rotation keyring from raw hex key files.
-    Keyring {
-        #[arg(long)]
-        active_key_file: PathBuf,
-        #[arg(long, action = clap::ArgAction::Append)]
-        verify_key_file: Vec<PathBuf>,
-        /// Accept the old administrator envelope, which exposes a signing key.
-        #[arg(long)]
-        allow_legacy_admin: bool,
-        #[arg(long)]
-        output: PathBuf,
-    },
+    /// Run a server.
+    Serve(Serve),
+    /// Mint a bearer token from the signing key.
+    Token(Token),
+    /// Create a database and print a write token for it.
+    Create(Create),
+    /// Delete a database for good.
+    Delete(Remote),
+    /// List databases.
+    List(Client),
+    /// Measure a running server.
+    Bench(bench::Bench),
 }
 
-#[derive(clap::Args)]
+#[derive(Args)]
 struct Serve {
-    #[arg(long, default_value = "127.0.0.1:7654", env = "DURABLE_DB_LISTEN")]
+    /// Address to listen on.
+    #[arg(long, env = "DURABLE_DB_LISTEN", default_value = "127.0.0.1:7654")]
     listen: SocketAddr,
-    #[arg(long, default_value = "./data", env = "DURABLE_DB_DATA")]
-    data: PathBuf,
-    #[arg(long, env = "DURABLE_DB_BUCKET")]
+    /// Store data in this directory. The default when no bucket is given.
+    #[arg(long, env = "DURABLE_DB_DATA", conflicts_with = "bucket")]
+    data: Option<PathBuf>,
+    /// Store data in this S3-compatible bucket.
+    #[arg(long, env = "DURABLE_DB_BUCKET", requires = "endpoint")]
     bucket: Option<String>,
-    /// Use B2 native bucket revision publication with B2_APPLICATION_KEY_ID / B2_APPLICATION_KEY.
-    #[arg(long, env = "DURABLE_DB_B2_BUCKET", conflicts_with = "bucket")]
-    b2_bucket: Option<String>,
-    #[arg(long, default_value = "durable-db", env = "DURABLE_DB_PREFIX")]
+    /// The bucket's endpoint, such as https://s3.us-west-002.backblazeb2.com.
+    #[arg(long, env = "DURABLE_DB_ENDPOINT")]
+    endpoint: Option<String>,
+    /// The bucket's region. Derived from a Backblaze or AWS endpoint when omitted.
+    #[arg(long, env = "DURABLE_DB_REGION")]
+    region: Option<String>,
+    /// Key prefix inside the bucket, so one bucket can hold several deployments.
+    #[arg(long, env = "DURABLE_DB_PREFIX", default_value = "")]
     prefix: String,
-    /// Reachable cloud peer IP; defaults to a specific listen address.
-    #[arg(long, env = "DURABLE_DB_ADVERTISE_IP")]
-    advertise_ip: Option<IpAddr>,
-    /// Headless DNS service; omit only for a single cloud process.
-    #[arg(long, env = "DURABLE_DB_DISCOVERY_SERVICE")]
-    discovery_service: Option<String>,
-    /// Stable, unique cloud placement identity; defaults to the advertised address.
-    #[arg(long, env = "DURABLE_DB_MEMBER_ID")]
-    member_id: Option<String>,
-    /// Fixed cloud partition count (default 16); cannot change on reopen.
-    #[arg(long, env = "DURABLE_DB_PARTITIONS", value_parser = clap::value_parser!(u32).range(1..=1024))]
-    partitions: Option<u32>,
-    /// Aggregate native resident payload allowance, separate from cache/RSS (default 128 MiB).
-    #[arg(long, env = "DURABLE_DB_RESIDENT_MEMORY_MIB", value_parser = clap::value_parser!(u32).range(16..=8192))]
-    resident_memory_mib: Option<u32>,
-    /// Initialize a fresh cloud namespace with this cumulative immutable-upload byte ceiling.
-    #[arg(
-        long,
-        env = "DURABLE_DB_UPLOAD_BUDGET_BYTES",
-        requires = "upload_budget_attempts"
-    )]
-    upload_budget_bytes: Option<u64>,
-    /// Cumulative immutable PUT attempt ceiling; authoritative once initialized.
-    #[arg(
-        long,
-        env = "DURABLE_DB_UPLOAD_BUDGET_ATTEMPTS",
-        requires = "upload_budget_bytes"
-    )]
-    upload_budget_attempts: Option<u64>,
-    #[arg(long, env = "DURABLE_DB_ADMIN_KEY_FILE")]
-    admin_key_file: Option<PathBuf>,
-    #[arg(long, default_value_t = 64, env = "DURABLE_DB_MEMORY_CACHE_MIB")]
-    memory_cache_mib: usize,
-    #[arg(long, env = "DURABLE_DB_DISK_CACHE")]
-    disk_cache: Option<PathBuf>,
-    #[arg(long, default_value_t = 1024, env = "DURABLE_DB_DISK_CACHE_MIB")]
-    disk_cache_mib: usize,
-    /// Tenant HTTP slots per pod, plus two reserved administrator/metrics slots.
-    #[arg(long, default_value_t = 8, env = "DURABLE_DB_CONCURRENCY")]
-    concurrency: usize,
-    /// Per-principal, per-pod budget refill. A commit costs 5 units; other requests cost 1.
-    #[arg(long, default_value_t = RateLimits::DEFAULT_UNITS_PER_SECOND, env = "DURABLE_DB_REQUEST_UNITS_PER_SECOND")]
-    request_units_per_second: u32,
-    /// Maximum accumulated request units per principal, including the initial burst.
-    #[arg(long, default_value_t = RateLimits::DEFAULT_BURST_UNITS, env = "DURABLE_DB_REQUEST_BURST_UNITS")]
-    request_burst_units: u32,
-    #[arg(long, default_value_t = 60, env = "DURABLE_DB_MAINTENANCE_SECONDS")]
-    maintenance_seconds: u64,
+    /// File holding the token signing key. Created if missing in directory mode.
+    #[arg(long, env = "DURABLE_DB_KEY_FILE")]
+    key_file: Option<PathBuf>,
+    /// DNS name that resolves to every server, such as a Kubernetes headless Service.
+    #[arg(long, env = "DURABLE_DB_PEERS", requires = "advertise")]
+    peers: Option<String>,
+    /// This server's address as its peers reach it, such as $(POD_IP):7654.
+    #[arg(long, env = "DURABLE_DB_ADVERTISE")]
+    advertise: Option<String>,
+    /// Memory for cached table blocks, in bytes.
+    #[arg(long, env = "DURABLE_DB_CACHE_BYTES", default_value_t = 256 << 20)]
+    cache_bytes: u64,
+    /// Memory for writes not yet flushed to tables, across all databases.
+    #[arg(long, env = "DURABLE_DB_MEMTABLE_BYTES", default_value_t = 256 << 20)]
+    memtable_bytes: usize,
+    /// Databases kept open at once.
+    #[arg(long, env = "DURABLE_DB_MAX_OPEN", default_value_t = 4096)]
+    max_open: usize,
+    /// Seconds a database stays open without requests.
+    #[arg(long, env = "DURABLE_DB_IDLE_SECONDS", default_value_t = 300)]
+    idle_seconds: u64,
+    /// Requests per second allowed per database, unless it sets its own. 0 is unlimited.
+    #[arg(long, env = "DURABLE_DB_REQUESTS_PER_SECOND", default_value_t = 0)]
+    requests_per_second: u32,
+    /// Largest value accepted, in bytes.
+    #[arg(long, env = "DURABLE_DB_MAX_VALUE_BYTES", default_value_t = 4 << 20)]
+    max_value_bytes: usize,
+    /// Do not flush directory writes to disk. Faster; a power loss can lose acknowledged writes.
+    #[arg(long, env = "DURABLE_DB_NO_FSYNC")]
+    no_fsync: bool,
+    /// Use S3 PutObject even on Backblaze, instead of B2's faster upload call.
+    #[arg(long, env = "DURABLE_DB_S3_UPLOADS_ONLY")]
+    s3_uploads_only: bool,
+    /// Identical uploads that may race for one object in a bucket; the first to finish wins.
+    #[arg(long, env = "DURABLE_DB_UPLOAD_ATTEMPTS", default_value_t = 2)]
+    upload_attempts: usize,
+    /// Milliseconds before each further racing upload starts; 0 starts them together.
+    /// Default: 0 on Backblaze, where uploads are free and long-tailed, otherwise 150.
+    #[arg(long, env = "DURABLE_DB_HEDGE_MS")]
+    hedge_ms: Option<u64>,
 }
 
-#[derive(Subcommand)]
-enum BackupCommand {
-    /// Export one revision without overwriting an existing file. Source writes may cause a conflict.
-    Export {
-        #[arg(long)]
-        url: String,
-        #[arg(long)]
-        token_file: PathBuf,
-        #[arg(long)]
-        database: String,
-        #[arg(long)]
-        output: PathBuf,
-    },
-    /// Check every record, count, and checksum without contacting a server.
-    Inspect {
-        #[arg(long)]
-        input: PathBuf,
-    },
-    /// Restore into a new protected destination, or resume the identical archive and destination.
-    Restore {
-        #[arg(long)]
-        url: String,
-        #[arg(long)]
-        token_file: PathBuf,
-        #[arg(long)]
-        database: String,
-        #[arg(long)]
-        input: PathBuf,
-    },
+#[derive(Args)]
+struct KeyFile {
+    /// File holding the token signing key.
+    #[arg(long, env = "DURABLE_DB_KEY_FILE", default_value = "data/admin.key")]
+    key_file: PathBuf,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TokenAccess {
+    Read,
+    Write,
+}
+
+#[derive(Args)]
+struct Token {
+    #[command(flatten)]
+    key: KeyFile,
+    /// Mint an administrator token.
+    #[arg(long, conflicts_with = "database")]
+    admin: bool,
+    /// Mint a token for this database.
+    #[arg(long, required_unless_present = "admin")]
+    database: Option<String>,
+    #[arg(long, value_enum, default_value = "write")]
+    access: TokenAccess,
+    /// Seconds until the token expires. 0 never expires.
+    #[arg(long, default_value_t = 0)]
+    ttl: u64,
+}
+
+#[derive(Args)]
+struct Client {
+    #[command(flatten)]
+    key: KeyFile,
+    /// The server to talk to.
+    #[arg(long, env = "DURABLE_DB_URL", default_value = "http://127.0.0.1:7654")]
+    url: String,
+}
+
+#[derive(Args)]
+struct Remote {
+    name: String,
+    #[command(flatten)]
+    client: Client,
+}
+
+#[derive(Args)]
+struct Create {
+    name: String,
+    #[command(flatten)]
+    client: Client,
+    /// Storage quota in bytes.
+    #[arg(long)]
+    max_bytes: Option<u64>,
+}
+
+fn region_of(endpoint: &str) -> Option<String> {
+    // s3.<region>.backblazeb2.com and s3.<region>.amazonaws.com
+    let host = endpoint.split_once("://")?.1;
+    let mut parts = host.split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("s3"), Some(region), Some("backblazeb2" | "amazonaws")) => Some(region.to_owned()),
+        _ => None,
+    }
+}
+
+fn credential(names: &[&str]) -> anyhow::Result<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .with_context(|| format!("set {}", names.join(" or ")))
+}
+
+async fn serve(args: Serve) -> anyhow::Result<()> {
+    let metrics = Arc::new(Metrics::default());
+    let mut backblaze = false;
+    let (store, key_file, described): (Arc<dyn ObjectStore>, PathBuf, String) = match &args.bucket {
+        Some(bucket) => {
+            let endpoint = args
+                .endpoint
+                .clone()
+                .expect("clap requires an endpoint with a bucket");
+            let region = args
+                .region
+                .clone()
+                .or_else(|| region_of(&endpoint))
+                .context("pass --region: it cannot be derived from this endpoint")?;
+            let store = S3Store::new(S3Config {
+                endpoint: endpoint.clone(),
+                region,
+                bucket: bucket.clone(),
+                access_key_id: credential(&["AWS_ACCESS_KEY_ID", "B2_APPLICATION_KEY_ID"])?,
+                secret_access_key: credential(&["AWS_SECRET_ACCESS_KEY", "B2_APPLICATION_KEY"])?,
+            })?;
+            backblaze = store.is_backblaze();
+            let store = if backblaze && !args.s3_uploads_only {
+                store.with_b2_uploads()
+            } else {
+                store
+            };
+            let key_file = args.key_file.clone().context(
+                "pass --key-file: every server of a deployment shares one signing key (create it with `openssl rand -hex 32`)",
+            )?;
+            (
+                Arc::new(store),
+                key_file,
+                format!("bucket {bucket} at {endpoint}"),
+            )
+        }
+        None => {
+            let dir = args.data.clone().unwrap_or_else(|| PathBuf::from("data"));
+            let store = FsStore::open(&dir, !args.no_fsync)?;
+            let key_file = args
+                .key_file
+                .clone()
+                .unwrap_or_else(|| dir.join("admin.key"));
+            (
+                Arc::new(store),
+                key_file,
+                format!("directory {}", dir.display()),
+            )
+        }
+    };
+    let keys = if args.bucket.is_some() {
+        Keys::load(&key_file)?
+    } else {
+        Keys::load_or_create(&key_file)?
+    };
+    let store: Arc<dyn ObjectStore> = Arc::new(Metered {
+        inner: store,
+        metrics: metrics.clone(),
+    });
+
+    // Refuse to start on storage that does not behave as the protocol needs.
+    probe(&*store, &args.prefix)
+        .await
+        .context("the storage check failed")?;
+
+    let mut prefix = args.prefix.trim_matches('/').to_owned();
+    if !prefix.is_empty() {
+        prefix.push('/');
+    }
+    let ctx = Arc::new(Ctx {
+        io: Io::new(store, args.cache_bytes),
+        opts: Options {
+            node: args.advertise.clone().unwrap_or_default(),
+            upload_attempts: if args.bucket.is_some() {
+                args.upload_attempts
+            } else {
+                1
+            },
+            hedge_after: Duration::from_millis(args.hedge_ms.unwrap_or(if backblaze {
+                0
+            } else {
+                150
+            })),
+            ..Options::default()
+        },
+        root: prefix,
+    });
+    let limits = Limits {
+        max_open: args.max_open,
+        idle_close: Duration::from_secs(args.idle_seconds),
+        mem_bytes: args.memtable_bytes,
+        requests_per_second: args.requests_per_second,
+    };
+    let node = Node::new(ctx, limits, metrics);
+    let cluster = Arc::new(Cluster::new(args.advertise.clone()));
+    let api = ApiLimits {
+        max_value: args.max_value_bytes,
+        ..ApiLimits::default()
+    };
+    let app = App::new(node.clone(), keys, cluster.clone(), api);
+
+    // Housekeeping: release idle databases, bound memory, follow membership.
+    let housekeeping = {
+        let (node, cluster, peers, port) = (
+            node.clone(),
+            cluster.clone(),
+            args.peers.clone(),
+            args.listen.port(),
+        );
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                if let Some(peers) = &peers {
+                    cluster.resolve(peers, port).await;
+                    // Hand over databases that now belong to another member,
+                    // a few at a time, so a membership change is not a stampede.
+                    for name in node
+                        .open_names()
+                        .into_iter()
+                        .filter(|name| cluster.owner(name).is_some())
+                        .take(16)
+                    {
+                        node.release(&name).await;
+                    }
+                }
+                node.tend().await;
+            }
+        })
+    };
+
+    let listener = tokio::net::TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("cannot listen on {}", args.listen))?;
+    tracing::info!(listen = %args.listen, storage = %described, "durable-db {} is serving", env!("CARGO_PKG_VERSION"));
+    axum::serve(listener, router(app))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Hand every database back so the next owner opens without recovery.
+    housekeeping.abort();
+    tracing::info!("releasing databases");
+    node.shutdown().await;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let interrupt = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("signal handler installs");
+        tokio::select! {
+            _ = interrupt => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = interrupt.await;
+}
+
+/// Exercise each storage operation once and check read-after-write.
+async fn probe(store: &dyn ObjectStore, prefix: &str) -> anyhow::Result<()> {
+    let key = format!(
+        "{}probe/{:016x}",
+        prefix.trim_matches('/').to_owned() + if prefix.is_empty() { "" } else { "/" },
+        rand::random::<u64>()
+    );
+    let body = bytes::Bytes::from_static(b"durable-db storage probe");
+    store.put(&key, body.clone()).await?;
+    if store.get(&key).await?.as_ref() != Some(&body) {
+        bail!("an object just written could not be read back");
+    }
+    if store.get_range(&key, 8, 10).await?.as_deref() != Some(&b"db"[..]) {
+        bail!("ranged reads return the wrong bytes");
+    }
+    let listed = store.list(&key, None, 10).await?;
+    if listed.len() != 1 || listed[0].key != key {
+        bail!("an object just written is missing from the listing");
+    }
+    store.delete(&key).await?;
+    if store.exists(&key).await? || !store.list(&key, None, 10).await?.is_empty() {
+        bail!("an object just deleted is still visible");
+    }
+    store
+        .purge(&key, None, &|candidate| candidate == key)
+        .await?;
+    Ok(())
+}
+
+async fn admin_request(
+    client: &Client,
+    method: reqwest::Method,
+    path: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let token = Keys::load(&client.key.key_file)?.mint(&Grant::admin());
+    let response = reqwest::Client::new()
+        .request(
+            method,
+            format!("{}{path}", client.url.trim_end_matches('/')),
+        )
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .with_context(|| format!("cannot reach {}", client.url))?;
+    let status = response.status();
+    let text = response.text().await?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+    if !status.is_success() {
+        bail!(
+            "{status}: {}",
+            value["error"]["message"]
+                .as_str()
+                .unwrap_or(&value.to_string())
+        );
+    }
+    Ok(value)
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "durable_db=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        .with_writer(std::io::stderr)
         .init();
     match Cli::parse().command {
-        Command::Backup { command } => {
-            use durable_db::backup;
-            let result = match command {
-                BackupCommand::Export {
-                    url,
-                    token_file,
-                    database,
-                    output,
-                } => serde_json::to_value(
-                    backup::export(&url, &token_file, &database, &output).await?,
-                )?,
-                BackupCommand::Inspect { input } => serde_json::to_value(backup::inspect(&input)?)?,
-                BackupCommand::Restore {
-                    url,
-                    token_file,
-                    database,
-                    input,
-                } => serde_json::to_value(
-                    backup::restore(&url, &token_file, &database, &input).await?,
-                )?,
+        Command::Serve(args) => serve(args).await,
+        Command::Token(args) => {
+            let keys = Keys::load(&args.key.key_file)?;
+            let grant = match args.database {
+                None => Grant {
+                    exp: expiry(args.ttl),
+                    ..Grant::admin()
+                },
+                Some(db) => Grant {
+                    db,
+                    access: match args.access {
+                        TokenAccess::Read => Access::Read,
+                        TokenAccess::Write => Access::Write,
+                    },
+                    exp: expiry(args.ttl),
+                    generation: 0,
+                },
             };
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("{}", keys.mint(&grant));
+            Ok(())
         }
-        Command::Keygen { output } => {
-            keygen(&output)?;
-            println!("Created {}", output.display());
-        }
-        Command::Keyring {
-            active_key_file,
-            verify_key_file,
-            allow_legacy_admin,
-            output,
-        } => {
-            anyhow::ensure!(
-                verify_key_file.len() <= 3,
-                "at most three verification key files are allowed"
+        Command::Create(args) => {
+            let mut body = serde_json::Map::new();
+            if let Some(max_bytes) = args.max_bytes {
+                body.insert("max_bytes".into(), max_bytes.into());
+            }
+            let path = format!("/v1/databases/{}", args.name);
+            admin_request(&args.client, reqwest::Method::PUT, &path, body.into()).await?;
+            let token = admin_request(
+                &args.client,
+                reqwest::Method::POST,
+                &format!("{path}/tokens"),
+                serde_json::json!({"access": "write"}),
+            )
+            .await?;
+            println!(
+                "{}",
+                token["token"]
+                    .as_str()
+                    .context("the server returned no token")?
             );
-            let active = read_key_file(&active_key_file)?;
-            let verify = verify_key_file
-                .iter()
-                .map(|p| read_key_file(p))
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            let document = Auth::keyring_document(&active, verify, allow_legacy_admin)?;
-            write_secret(&output, document.as_bytes())?;
-            println!("Created {}", output.display());
+            Ok(())
         }
-        Command::Token {
-            key_file,
-            database,
-            write,
-            ttl_seconds,
-            admin,
-            metrics,
-            incarnation,
-            generation,
-        } => {
-            let auth = Auth::new(&read_key_file(&key_file)?)?;
-            if admin {
-                println!("{}", auth.administrator_token(ttl_seconds)?);
-            } else if metrics {
-                println!("{}", auth.metrics_token(ttl_seconds)?);
-            } else if let Some(incarnation) = incarnation {
-                println!(
-                    "{}",
-                    auth.issue_for_policy(
-                        database.context("--database required")?,
-                        write,
-                        ttl_seconds,
-                        incarnation,
-                        generation.context("--generation required")?
-                    )?
-                    .0
-                );
-            } else {
-                println!(
-                    "{}",
-                    auth.issue(
-                        database.context("--database, --admin, or --metrics required")?,
-                        write,
-                        ttl_seconds
-                    )?
-                );
-            }
+        Command::Delete(args) => {
+            let path = format!("/v1/databases/{}", args.name);
+            admin_request(
+                &args.client,
+                reqwest::Method::DELETE,
+                &path,
+                serde_json::Value::Null,
+            )
+            .await?;
+            Ok(())
         }
-        Command::Serve(args) => {
-            let Serve {
-                listen,
-                data,
-                bucket,
-                b2_bucket,
-                prefix,
-                advertise_ip,
-                discovery_service,
-                member_id,
-                partitions,
-                resident_memory_mib,
-                upload_budget_bytes,
-                upload_budget_attempts,
-                admin_key_file,
-                memory_cache_mib,
-                disk_cache,
-                disk_cache_mib,
-                concurrency,
-                request_units_per_second,
-                request_burst_units,
-                maintenance_seconds,
-            } = *args;
-            if concurrency == 0
-                || concurrency > 128
-                || memory_cache_mib > 8192
-                || disk_cache_mib > 1024 * 1024
-                || !(1..=86400).contains(&maintenance_seconds)
-            {
-                bail!("invalid resource configuration");
-            }
-            let rate_limits = RateLimits::new(request_units_per_second, request_burst_units)?;
-            let cluster = bucket.is_some() || b2_bucket.is_some();
-            if !cluster
-                && (advertise_ip.is_some()
-                    || discovery_service.is_some()
-                    || member_id.is_some()
-                    || partitions.is_some()
-                    || resident_memory_mib.is_some())
-            {
-                bail!("native cluster settings require B2/S3 storage");
-            }
-            if discovery_service.is_some() && listen.port() == 0 {
-                bail!("DNS discovery requires a fixed listen port");
-            }
-            let upload_limits = match (upload_budget_bytes, upload_budget_attempts) {
-                (Some(bytes), Some(attempts)) if cluster => {
-                    let limits = durable_db::upload_budget::UploadLimits { bytes, attempts };
-                    limits.validate()?;
-                    Some(limits)
-                }
-                (None, None) if !cluster => None,
-                (None, None) => bail!(
-                    "cloud serving requires --upload-budget-bytes and --upload-budget-attempts"
-                ),
-                _ => bail!("upload budgets require both ceilings and B2/S3 storage"),
-            };
-            let key_file = match admin_key_file {
-                Some(p) => p,
-                None if cluster => bail!(
-                    "cluster mode requires --admin-key-file; mount the same secret into every pod"
-                ),
-                None => {
-                    std::fs::create_dir_all(&data)?;
-                    let p = data.join("admin.key");
-                    if !p.exists() {
-                        keygen(&p)?;
-                    }
-                    p
-                }
-            };
-            let auth = Arc::new(Auth::new(&read_key_file(&key_file)?)?);
-            let cache = Arc::new(Cache::new(
-                memory_cache_mib * 1024 * 1024,
-                disk_cache.map(|p| (p, disk_cache_mib * 1024 * 1024)),
-            )?);
-            let listener = tokio::net::TcpListener::bind(listen).await?;
-            let listen = listener.local_addr()?;
-            let mut member = None;
-            let (backend, membership): (Arc<dyn durable_db::api::Backend>, Option<Membership>) =
-                if cluster {
-                    let ip = advertise_ip.unwrap_or(listen.ip());
-                    anyhow::ensure!(
-                        !ip.is_unspecified(),
-                        "cloud wildcard listeners require --advertise-ip"
-                    );
-                    anyhow::ensure!(
-                        ip.is_ipv4() == listen.is_ipv4()
-                            && (listen.ip().is_unspecified() || listen.ip() == ip),
-                        "advertised IP must match the listen address/family"
-                    );
-                    let address = SocketAddr::new(ip, listen.port());
-                    let mut limits = durable_db::transactions::live::Limits::resident(
-                        resident_memory_mib.unwrap_or(128) as usize * 1024 * 1024,
-                    )?;
-                    limits.receipt_window = 128;
-                    let config = ClusterConfig {
-                        layout: durable_db::providers::partitions::Layout::new(
-                            partitions.unwrap_or(16),
-                        )?,
-                        address,
-                        limits,
-                        capacity: concurrency,
-                        maintenance: Duration::from_secs(maintenance_seconds),
-                        // Shared namespace admission is the effective operator ceiling.
-                        // Internal partition ledgers must not become unrefillable lower ceilings.
-                        upload_limits: durable_db::upload_budget::UploadLimits {
-                            bytes: (1 << 53) - 1,
-                            attempts: (1 << 53) - 1,
-                        },
-                    };
-                    config.validate()?;
-                    let identity = Member {
-                        id: member_id.unwrap_or_else(|| address.to_string()),
-                        address,
-                    };
-                    let membership = Membership::start(identity.clone(), discovery_service)?;
-                    member = Some(identity);
-                    let connection = if let Some(bucket) = b2_bucket {
-                        Native::connect_storage(&bucket, &prefix)
-                            .await
-                            .context("initialize B2 transport")?
-                    } else {
-                        durable_db::providers::s3::S3::connect_storage(
-                            &bucket.expect("cloud provider selected"),
-                            &prefix,
-                        )
-                        .await?
-                    };
-                    let directory = connection
-                        .into_partitions(
-                            upload_limits.expect("cloud ceilings validated"),
-                            cache.clone(),
-                        )
-                        .await?;
-                    let backend = Cluster::open(
-                        directory,
-                        config,
-                        cache,
-                        auth.clone(),
-                        membership.subscribe(),
-                    )
-                    .await?;
-                    (backend, Some(membership))
-                } else {
-                    (
-                        Arc::new(
-                            durable_db::api::open_local(
-                                data.join("store"),
-                                cache,
-                                concurrency,
-                                Duration::from_secs(maintenance_seconds),
-                            )
-                            .await?,
-                        ),
-                        None,
-                    )
+        Command::List(client) => {
+            let mut after: Option<String> = None;
+            loop {
+                let path = match &after {
+                    Some(after) => format!("/v1/databases?limit=1000&after={after}"),
+                    None => "/v1/databases?limit=1000".to_owned(),
                 };
-            let mut app = App::with_rate_limits(backend, auth, concurrency, rate_limits);
-            if let Some(member) = member {
-                app = app.with_member(&member)?;
-            }
-            let app = Arc::new(app);
-            tracing::info!(address = %listen, cluster, "durable-db HTTP listener started");
-            serve(listener, app, shutdown(), membership).await?;
-        }
-    }
-    Ok(())
-}
-async fn serve(
-    listener: tokio::net::TcpListener,
-    app: Arc<App>,
-    signal: impl std::future::Future<Output = ()> + Send + 'static,
-    membership: Option<Membership>,
-) -> std::io::Result<()> {
-    let (stop, stopped) = tokio::sync::oneshot::channel();
-    let http = axum::serve(listener, router(app.clone())).with_graceful_shutdown(async {
-        let _ = stopped.await;
-    });
-    let withdrawal = async move {
-        signal.await;
-        app.ready.store(false, Ordering::Relaxed);
-        // Stop acceptance and idle keep-alives before provider I/O can stall.
-        // Admitted requests and best-effort route withdrawal drain together.
-        let _ = stop.send(());
-        tracing::info!("draining requests");
-        if tokio::time::timeout(Duration::from_secs(5), app.backend.drain())
-            .await
-            .is_err()
-        {
-            tracing::warn!("routing withdrawal deadline reached");
-        }
-        drop(membership);
-        Ok(())
-    };
-    // Keep withdrawal alive even when HTTP has no remaining requests, and
-    // admitted requests alive if withdrawal completes or reaches its bound.
-    tokio::try_join!(async { http.await }, withdrawal)?;
-    Ok(())
-}
-
-fn keygen(path: &Path) -> anyhow::Result<()> {
-    let key: [u8; 32] = rand::random();
-    write_secret(path, format!("{}\n", hex::encode(key)).as_bytes())
-}
-fn read_key_file(path: &Path) -> anyhow::Result<String> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).context("open signing-key file")?;
-    let mut contents = String::new();
-    file.take(16385)
-        .read_to_string(&mut contents)
-        .context("read signing-key file")?;
-    anyhow::ensure!(contents.len() <= 16384, "signing-key file exceeds 16 KiB");
-    Ok(contents)
-}
-fn write_secret(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    Ok(())
-}
-async fn shutdown() {
-    #[cfg(unix)]
-    {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use durable_db::{
-        api::Backend,
-        auth::Access,
-        engine::{ReadRequest, ReadResult},
-    };
-    use std::sync::atomic::AtomicBool;
-    use tokio::{net::TcpStream, sync::Notify};
-
-    #[derive(Default)]
-    struct HeldBackend {
-        read_entered: Notify,
-        read_release: Notify,
-        drain_entered: Notify,
-        drain_release: Notify,
-        drain_stopped: AtomicBool,
-        drain_finished: AtomicBool,
-    }
-    struct Stopped<'a>(&'a AtomicBool);
-    impl Drop for Stopped<'_> {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Relaxed);
-        }
-    }
-    #[async_trait::async_trait]
-    impl Backend for HeldBackend {
-        async fn memory_bytes(&self) -> usize {
-            0
-        }
-        async fn read(
-            &self,
-            _: &str,
-            _: &ReadRequest,
-            _: &Access,
-        ) -> durable_db::Result<ReadResult> {
-            self.read_entered.notify_one();
-            self.read_release.notified().await;
-            Err(durable_db::Error::NotFound)
-        }
-        async fn drain(&self) {
-            let _stopped = Stopped(&self.drain_stopped);
-            self.drain_entered.notify_one();
-            self.drain_release.notified().await;
-            self.drain_finished.store(true, Ordering::Relaxed);
-        }
-    }
-
-    async fn shutdown_case(expire_withdrawal: bool) {
-        let backend = Arc::new(HeldBackend::default());
-        let auth = Arc::new(Auth::new(&"ab".repeat(32)).unwrap());
-        let token = auth.issue("app".into(), false, 3600).unwrap();
-        let app = Arc::new(App::new(backend.clone(), auth, 4));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let origin = format!("http://{address}");
-        let (stop, stopped) = tokio::sync::oneshot::channel();
-        let server = tokio::spawn(serve(
-            listener,
-            app.clone(),
-            async { stopped.await.unwrap() },
-            None,
-        ));
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .retry(reqwest::retry::never())
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
-        // Keep an idle pooled connection as well as an admitted request alive.
-        assert_eq!(
-            client
-                .get(format!("{origin}/health/live"))
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap(),
-            "ok"
-        );
-        let request = client
-            .post(format!("{origin}/v1/databases/app/read"))
-            .bearer_auth(&token)
-            .timeout(Duration::from_secs(30))
-            .json(&serde_json::json!({"keys":[]}));
-        let pending = tokio::spawn(async move { request.send().await });
-        tokio::time::timeout(Duration::from_secs(1), backend.read_entered.notified())
-            .await
-            .unwrap();
-        // Warm a second connection while the first request is held.
-        client
-            .get(format!("{origin}/health/live"))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap();
-        stop.send(()).unwrap();
-        backend.drain_entered.notified().await;
-        assert!(!app.ready.load(Ordering::Relaxed));
-        tokio::time::timeout(Duration::from_millis(250), async {
-            while TcpStream::connect(address).await.is_ok() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("listener must close while route withdrawal is still held");
-        assert!(!backend.drain_stopped.load(Ordering::Relaxed));
-        assert!(!server.is_finished());
-        // The existing idle connection must also close, not keep returning 429.
-        assert!(
-            client
-                .post(format!("{origin}/v1/databases/app/read"))
-                .bearer_auth(&token)
-                .json(&serde_json::json!({"keys":[]}))
-                .send()
-                .await
-                .is_err()
-        );
-        if expire_withdrawal {
-            // Advance only after real socket shutdown, then resume before I/O.
-            // This must cancel withdrawal, not the still-admitted request.
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(5)).await;
-            tokio::time::resume();
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while !backend.drain_stopped.load(Ordering::Relaxed) {
-                    tokio::task::yield_now().await;
+                let page = admin_request(
+                    &client,
+                    reqwest::Method::GET,
+                    &path,
+                    serde_json::Value::Null,
+                )
+                .await?;
+                for name in page["databases"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|n| n.as_str())
+                {
+                    println!("{name}");
                 }
-            })
-            .await
-            .unwrap();
-            assert!(!backend.drain_finished.load(Ordering::Relaxed));
-            assert!(!server.is_finished());
+                match page["next"].as_str() {
+                    Some(next) => after = Some(next.to_owned()),
+                    None => return Ok(()),
+                }
+            }
         }
-        backend.read_release.notify_one();
-        assert_eq!(
-            pending.await.unwrap().unwrap().status(),
-            reqwest::StatusCode::NOT_FOUND
-        );
-        if !expire_withdrawal {
-            assert!(
-                !server.is_finished(),
-                "HTTP completion must not drop withdrawal"
-            );
-            backend.drain_release.notify_one();
-        }
-        tokio::time::timeout(Duration::from_secs(1), server)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(backend.drain_stopped.load(Ordering::Relaxed));
-        assert_eq!(
-            backend.drain_finished.load(Ordering::Relaxed),
-            !expire_withdrawal
-        );
-    }
-
-    #[tokio::test]
-    async fn shutdown_closes_http_before_withdrawal_and_waits_for_both_drains() {
-        shutdown_case(false).await;
-    }
-
-    #[tokio::test]
-    async fn shutdown_bounds_withdrawal_without_cancelling_admitted_requests() {
-        shutdown_case(true).await;
+        Command::Bench(args) => bench::run(args).await,
     }
 }

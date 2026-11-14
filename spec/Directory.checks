@@ -1,3 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe Directory.cfg directory 1g -
-unsafe UnsafeDirectory.cfg directory-unsafe 1g WitnessReachability

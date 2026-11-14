@@ -1,3 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe Cluster.cfg safe 2g -
-unsafe UnsafeGC.cfg unsafe 1g ReferencedObjectsExist

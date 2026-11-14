@@ -1,5 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe PublicationRebase.cfg rebase 1g -
-unsafe UnsafeRebaseFence.cfg rebase-Fence 1g ReferencedManifestExists
-unsafe UnsafeRebaseTarget.cfg rebase-Target 1g TargetWriteNotOverwritten
-unsafe UnsafeRebaseMerge.cfg rebase-Merge 1g OtherWritesPreserved

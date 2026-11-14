@@ -1,736 +1,466 @@
-use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+//! The engine against in-memory and directory storage: the data model,
+//! recovery, ownership transfer, checkpoints and collection.
 use bytes::Bytes;
 use durable_db::{
     Error,
-    cache::Cache,
-    engine::*,
-    storage::{Local, Object, Remote, Storage, Version},
+    db::{Check, Ctx, Db, Options, ReadReq, Scan, Txn},
+    io::Io,
+    layout::DbConfig,
+    store::{ObjectStore, fs::FsStore, memory::MemoryStore},
 };
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-use tokio::sync::Notify;
+use std::{sync::Arc, time::Duration};
 
-async fn page_count(storage: &dyn Storage, database: &str) -> usize {
-    let head = storage
-        .get(&format!("heads/{database}.json"), 512 * 1024)
-        .await
-        .unwrap()
-        .unwrap();
-    serde_json::from_slice::<serde_json::Value>(&head.bytes).unwrap()["pages"]
-        .as_array()
-        .unwrap()
-        .len()
+fn ctx_with(store: Arc<dyn ObjectStore>, opts: Options) -> Arc<Ctx> {
+    Arc::new(Ctx {
+        io: Io::new(store, 32 << 20),
+        opts,
+        root: "root/".into(),
+    })
 }
-fn cache() -> Arc<Cache> {
-    Arc::new(Cache::new(1024 * 1024, None).unwrap())
+
+fn ctx(store: Arc<dyn ObjectStore>) -> Arc<Ctx> {
+    ctx_with(store, Options::default())
 }
-fn remote() -> Arc<Remote> {
-    Arc::new(Remote::new(Arc::new(object_store::memory::InMemory::new()), "test").unwrap())
+
+fn b(text: &str) -> Bytes {
+    Bytes::copy_from_slice(text.as_bytes())
 }
-fn request(revision: u64, id: &str, key: &str, value: Option<&[u8]>) -> CommitRequest {
-    CommitRequest {
-        expected_revision: revision,
-        request_id: id.into(),
-        checks: vec![],
-        writes: vec![Write {
-            key: key.into(),
-            value: value.map(|v| STANDARD.encode(v)),
-        }],
+
+fn put(key: &str, value: &str) -> Txn {
+    Txn {
+        writes: vec![(b(key), Some(b(value)))],
+        ..Txn::default()
     }
 }
-async fn value(engine: &Engine, key: &str) -> Option<Vec<u8>> {
-    let read = engine
-        .read(
-            "test",
-            &ReadRequest {
-                keys: vec![key.into()],
-                ..Default::default()
-            },
-        )
+
+async fn create(ctx: &Arc<Ctx>, name: &str) -> Arc<Db> {
+    Db::open(ctx.clone(), name, Some(DbConfig::default()))
+        .await
+        .unwrap()
+        .0
+}
+
+async fn open(ctx: &Arc<Ctx>, name: &str) -> Arc<Db> {
+    Db::open(ctx.clone(), name, None).await.unwrap().0
+}
+
+async fn commit(db: &Arc<Db>, txn: Txn) -> Result<u64, Error> {
+    db.commit(vec![txn]).await?.remove(0).map(|c| c.revision)
+}
+
+async fn get(db: &Arc<Db>, key: &str) -> Option<(u64, String)> {
+    let response = db
+        .read(ReadReq {
+            keys: vec![b(key)],
+            strong: true,
+            ..ReadReq::default()
+        })
         .await
         .unwrap();
-    read.values[0].as_ref().map(|v| STANDARD.decode(v).unwrap())
+    response.values[0]
+        .clone()
+        .map(|(version, value)| (version, String::from_utf8(value.to_vec()).unwrap()))
+}
+
+async fn scan(
+    db: &Arc<Db>,
+    lo: &str,
+    hi: &str,
+    reverse: bool,
+    limit: usize,
+) -> (Vec<String>, bool) {
+    let response = db
+        .read(ReadReq {
+            scans: vec![Scan {
+                lo: b(lo),
+                hi: b(hi),
+                reverse,
+                limit,
+            }],
+            strong: true,
+            ..ReadReq::default()
+        })
+        .await
+        .unwrap();
+    let result = &response.scans[0];
+    (
+        result
+            .items
+            .iter()
+            .map(|e| String::from_utf8(e.key.to_vec()).unwrap())
+            .collect(),
+        result.more,
+    )
 }
 
 #[tokio::test]
-async fn atomicity_receipts_revisions_checks_and_isolation() {
-    let storage = remote();
-    storage.probe().await.unwrap();
-    let engine = Engine::new(storage, cache());
-    engine.create("test", Limits::default()).await.unwrap();
-    engine
-        .create("test-other", Limits::default())
+async fn commits_reads_and_scans() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    assert!(matches!(
+        Db::open(ctx.clone(), "app", None).await,
+        Err(Error::NotFound)
+    ));
+    let db = create(&ctx, "app").await;
+    assert_eq!(db.info().revision, 0);
+
+    assert_eq!(commit(&db, put("b", "2")).await.unwrap(), 1);
+    let many = Txn {
+        writes: vec![
+            (b("a"), Some(b("1"))),
+            (b("c"), Some(b("3"))),
+            (b("d"), Some(b("4"))),
+        ],
+        ..Txn::default()
+    };
+    assert_eq!(commit(&db, many).await.unwrap(), 2);
+    assert_eq!(get(&db, "a").await, Some((2, "1".into())));
+    assert_eq!(get(&db, "b").await, Some((1, "2".into())));
+    assert_eq!(get(&db, "zz").await, None);
+
+    let delete = Txn {
+        writes: vec![(b("c"), None)],
+        ..Txn::default()
+    };
+    assert_eq!(commit(&db, delete).await.unwrap(), 3);
+    assert_eq!(get(&db, "c").await, None);
+
+    assert_eq!(
+        scan(&db, "", "", false, 10).await,
+        (vec!["a".into(), "b".into(), "d".into()], false)
+    );
+    assert_eq!(
+        scan(&db, "", "", true, 2).await,
+        (vec!["d".into(), "b".into()], true)
+    );
+    assert_eq!(
+        scan(&db, "b", "d", false, 10).await,
+        (vec!["b".into()], false)
+    );
+    assert_eq!(scan(&db, "", "", false, 0).await, (vec![], true));
+}
+
+#[tokio::test]
+async fn checks_make_transactions_conditional() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let db = create(&ctx, "app").await;
+    commit(&db, put("k", "v1")).await.unwrap();
+
+    // A key check names the version that was read; 0 means absent.
+    let stale = Txn {
+        checks: vec![Check::Key {
+            key: b("k"),
+            version: 0,
+        }],
+        ..put("k", "v2")
+    };
+    assert!(matches!(commit(&db, stale).await, Err(Error::Conflict(_))));
+    let fresh = Txn {
+        checks: vec![
+            Check::Key {
+                key: b("k"),
+                version: 1,
+            },
+            Check::Key {
+                key: b("absent"),
+                version: 0,
+            },
+        ],
+        ..put("k", "v2")
+    };
+    assert_eq!(commit(&db, fresh).await.unwrap(), 2);
+
+    // A whole-database check.
+    let behind = Txn {
+        if_revision: Some(1),
+        ..put("k", "v3")
+    };
+    assert!(matches!(commit(&db, behind).await, Err(Error::Conflict(_))));
+    let current = Txn {
+        if_revision: Some(2),
+        ..put("k", "v3")
+    };
+    assert_eq!(commit(&db, current).await.unwrap(), 3);
+
+    // A range check fails only when a key inside the range changed since.
+    let range = |since| Check::Range {
+        lo: b("m"),
+        hi: b("n"),
+        since,
+    };
+    commit(&db, put("m1", "x")).await.unwrap();
+    let inside = Txn {
+        checks: vec![range(3)],
+        ..put("out", "y")
+    };
+    assert!(matches!(commit(&db, inside).await, Err(Error::Conflict(_))));
+    let after = Txn {
+        checks: vec![range(4)],
+        ..put("out", "y")
+    };
+    assert_eq!(commit(&db, after).await.unwrap(), 5);
+    assert_eq!(get(&db, "k").await, Some((3, "v3".into())));
+}
+
+#[tokio::test]
+async fn a_request_stops_at_its_first_failed_transaction() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let db = create(&ctx, "app").await;
+    let results = db
+        .commit(vec![
+            put("a", "1"),
+            Txn {
+                if_revision: Some(99),
+                ..put("b", "2")
+            },
+            put("c", "3"),
+        ])
         .await
         .unwrap();
-    let mut req = request(0, "first", "a", Some(b"hello"));
-    req.writes.push(Write {
-        key: "b".into(),
-        value: Some(STANDARD.encode(b"world")),
-    });
-    assert_eq!(engine.commit("test", &req).await.unwrap().revision, 1);
-    assert!(engine.commit("test", &req).await.unwrap().replayed);
-    assert_eq!(engine.info("test").await.unwrap().keys, 2);
-    assert_eq!(engine.info("test-other").await.unwrap().keys, 0);
+    assert_eq!(results[0].as_ref().unwrap().revision, 1);
+    assert!(results[1].is_err() && results[2].is_err());
+    assert_eq!(scan(&db, "", "", false, 10).await.0, ["a"]);
+}
+
+#[tokio::test]
+async fn an_identical_retry_returns_the_original_result() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let db = create(&ctx, "app").await;
+    let once = |value: &str| Txn {
+        idempotency_key: Some("request-1".into()),
+        ..put("k", value)
+    };
+    assert_eq!(commit(&db, once("v")).await.unwrap(), 1);
+    commit(&db, put("other", "x")).await.unwrap();
+    assert_eq!(commit(&db, once("v")).await.unwrap(), 1);
     assert!(matches!(
-        engine.commit("test", &request(0, "stale", "a", None)).await,
-        Err(Error::Conflict)
-    ));
-    req.expected_revision = 1;
-    assert!(matches!(
-        engine.commit("test", &req).await,
+        commit(&db, once("different")).await,
         Err(Error::Invalid(_))
     ));
-    let mut req = request(1, "check", "a", None);
-    req.checks.push(Check {
-        key: "b".into(),
-        value: None,
-    });
-    assert!(matches!(
-        engine.commit("test", &req).await,
-        Err(Error::Conflict)
-    ));
-    assert_eq!(value(&engine, "a").await.unwrap(), b"hello");
-    req.checks[0].value = Some(STANDARD.encode(b"world"));
-    engine.commit("test", &req).await.unwrap();
-    assert!(value(&engine, "a").await.is_none());
+    assert_eq!(db.info().revision, 2);
+
+    // The receipt survives a restart and stays out of scans.
+    db.close().await;
+    let db = open(&ctx, "app").await;
+    assert_eq!(commit(&db, once("v")).await.unwrap(), 1);
+    assert_eq!(scan(&db, "", "", false, 10).await.0, ["k", "other"]);
 }
 
 #[tokio::test]
-async fn quotas_refuse_before_upload_and_keys_cannot_escape_namespace() {
-    let storage = remote();
-    let engine = Engine::new(storage.clone(), cache());
-    engine
-        .create(
-            "test",
-            Limits {
-                max_bytes: 10,
-                max_keys: 1,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        engine
-            .commit("test", &request(0, "big", "a", Some(b"0123456789")))
-            .await,
-        Err(Error::Limit(_))
-    ));
-    assert!(
-        storage
-            .list("blocks/test.", None, 100)
+async fn acknowledged_writes_survive_a_crash_and_a_clean_restart() {
+    let store = Arc::new(MemoryStore::new());
+    let ctx = ctx(store.clone());
+    let db = create(&ctx, "app").await;
+    for i in 0..50 {
+        commit(&db, put(&format!("k{i:03}"), &format!("v{i}")))
             .await
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(engine.info("test").await.unwrap().revision, 0);
-    assert!(engine.create("../escape", Limits::default()).await.is_err());
-    assert!(
-        engine
-            .commit("test", &request(0, "nul", "\0hidden", Some(b"x")))
-            .await
-            .is_err()
-    );
-    // User key syntax has no filesystem interpretation.
-    engine
-        .commit("test", &request(0, "path", "../x", Some(b"yes")))
-        .await
-        .unwrap();
-    assert_eq!(value(&engine, "../x").await.unwrap(), b"yes");
+            .unwrap();
+    }
+    // A crash: the process disappears without releasing its claim.
+    drop(db);
+    let db = open(&ctx, "app").await;
+    assert_eq!(db.info().revision, 50);
+    assert_eq!(get(&db, "k049").await, Some((50, "v49".into())));
+    commit(&db, put("after", "crash")).await.unwrap();
+
+    db.close().await;
+    let db = open(&ctx, "app").await;
+    assert_eq!(db.info().revision, 51);
+    assert_eq!(scan(&db, "", "", false, 100).await.0.len(), 51);
+    assert_eq!(get(&db, "after").await, Some((51, "crash".into())));
 }
 
 #[tokio::test]
-async fn ordered_scans_across_split_pages_have_stable_exclusive_cursors() {
-    let storage = remote();
-    let engine = Engine::new(storage.clone(), cache());
-    engine.create("test", Limits::default()).await.unwrap();
-    let mut req = request(0, "many", "unused", None);
-    req.writes = (0..100)
-        .map(|n| Write {
-            key: format!("entries/{n:04}"),
-            value: Some(STANDARD.encode(vec![n as u8; 4096])),
-        })
-        .collect();
-    engine.commit("test", &req).await.unwrap();
-    assert!(page_count(storage.as_ref(), "test").await > 1);
-    for reverse in [false, true] {
-        let mut after = None;
-        let mut keys = Vec::new();
-        loop {
-            let result = engine
-                .read(
-                    "test",
-                    &ReadRequest {
-                        expected_revision: Some(1),
-                        keys: vec![],
-                        scans: vec![Scan {
-                            prefix: "entries/".into(),
-                            start: Some("entries/0010".into()),
-                            end: Some("entries/0080".into()),
-                            after,
-                            reverse,
-                            limit: 9,
-                        }],
-                    },
-                )
+async fn a_takeover_revokes_the_previous_owner() {
+    let store = Arc::new(MemoryStore::new());
+    let (first, second) = (ctx(store.clone()), ctx(store.clone()));
+    let old = create(&first, "app").await;
+    commit(&old, put("k", "old")).await.unwrap();
+
+    let new = open(&second, "app").await;
+    assert_eq!(get(&new, "k").await, Some((1, "old".into())));
+    assert_eq!(commit(&new, put("k", "new")).await.unwrap(), 2);
+
+    // The old owner can neither acknowledge a write nor answer a strong read.
+    assert!(matches!(
+        commit(&old, put("k", "zombie")).await,
+        Err(Error::Lost(_))
+    ));
+    let strong = ReadReq {
+        keys: vec![b("k")],
+        strong: true,
+        ..ReadReq::default()
+    };
+    assert!(matches!(old.read(strong).await, Err(Error::Lost(_))));
+    assert_eq!(get(&new, "k").await, Some((2, "new".into())));
+}
+
+#[tokio::test]
+async fn a_stale_owner_serves_a_consistent_snapshot_until_asked_for_newer() {
+    let store = Arc::new(MemoryStore::new());
+    let (first, second) = (ctx(store.clone()), ctx(store.clone()));
+    let old = create(&first, "app").await;
+    commit(&old, put("k", "old")).await.unwrap();
+    let new = open(&second, "app").await;
+    commit(&new, put("k", "new")).await.unwrap();
+
+    let session = |min_revision| ReadReq {
+        keys: vec![b("k")],
+        min_revision,
+        ..ReadReq::default()
+    };
+    let stale = old.read(session(1)).await.unwrap();
+    assert_eq!(
+        (stale.revision, stale.values[0].clone().unwrap().1),
+        (1, b("old"))
+    );
+    // A client that has seen revision 2 is never shown revision 1.
+    assert!(matches!(old.read(session(2)).await, Err(Error::Lost(_))));
+}
+
+#[tokio::test]
+async fn flushes_merges_and_collects() {
+    let store = Arc::new(MemoryStore::new());
+    let opts = Options {
+        flush_bytes: 4 << 10,
+        flush_frames: 8,
+        idle_flush: Duration::from_millis(20),
+        block_bytes: 512,
+        ..Options::default()
+    };
+    let ctx = ctx_with(store.clone(), opts);
+    let db = create(&ctx, "app").await;
+    let value = "x".repeat(100);
+    for round in 0..6 {
+        for i in 0..200 {
+            commit(&db, put(&format!("k{i:04}"), &format!("{round}-{value}")))
                 .await
                 .unwrap();
-            let scan = &result.scans[0];
-            keys.extend(scan.items.iter().map(|p| p.key.clone()));
-            after = scan.next.clone();
-            if after.is_none() {
-                break;
-            }
         }
-        let mut expected: Vec<_> = (10..80).map(|n| format!("entries/{n:04}")).collect();
-        if reverse {
-            expected.reverse();
-        }
-        assert_eq!(keys, expected);
     }
-    engine
-        .commit("test", &request(1, "earliest", "a", Some(b"new")))
+    for i in (0..200).step_by(2) {
+        commit(
+            &db,
+            Txn {
+                writes: vec![(b(&format!("k{i:04}")), None)],
+                ..Txn::default()
+            },
+        )
         .await
         .unwrap();
-    assert_eq!(value(&engine, "a").await.unwrap(), b"new");
-    assert!(matches!(
-        engine
-            .read(
-                "test",
-                &ReadRequest {
-                    expected_revision: Some(1),
-                    ..Default::default()
-                }
-            )
-            .await,
-        Err(Error::Conflict)
-    ));
-}
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (keys, more) = scan(&db, "", "", false, 1000).await;
+    assert_eq!((keys.len(), more), (100, false));
+    assert_eq!(get(&db, "k0001").await.unwrap().1, format!("5-{value}"));
+    assert_eq!(get(&db, "k0000").await, None);
+    let (reversed, _) = scan(&db, "k0100", "k0110", true, 3).await;
+    assert_eq!(reversed, ["k0109", "k0107", "k0105"]);
+    let info = db.info();
+    assert!(info.tables >= 1 && info.tables <= 4, "{info:?}");
 
-struct Faults {
-    inner: Arc<dyn Storage>,
-    pause: AtomicBool,
-    pause_list: AtomicBool,
-    ambiguous: AtomicBool,
-    reached: Notify,
-    resume: Notify,
-}
-impl Faults {
-    fn new(inner: Arc<dyn Storage>) -> Self {
-        Self {
-            inner,
-            pause: AtomicBool::new(false),
-            pause_list: AtomicBool::new(false),
-            ambiguous: AtomicBool::new(false),
-            reached: Notify::new(),
-            resume: Notify::new(),
-        }
-    }
-}
-#[async_trait]
-impl Storage for Faults {
-    async fn get(&self, k: &str, m: usize) -> anyhow::Result<Option<Object>> {
-        self.inner.get(k, m).await
-    }
-    async fn cas(&self, k: &str, v: Option<&Version>, b: Bytes) -> anyhow::Result<bool> {
-        if self.pause.swap(false, Ordering::SeqCst) {
-            self.reached.notify_one();
-            self.resume.notified().await;
-        }
-        let result = self.inner.cas(k, v, b).await?;
-        if self.ambiguous.swap(false, Ordering::SeqCst) {
-            anyhow::bail!("connection lost after committed CAS")
-        }
-        Ok(result)
-    }
-    async fn put(&self, k: &str, b: Bytes) -> anyhow::Result<()> {
-        self.inner.put(k, b).await
-    }
-    async fn list(&self, p: &str, a: Option<&str>, l: usize) -> anyhow::Result<Vec<String>> {
-        let result = self.inner.list(p, a, l).await;
-        if self.pause_list.swap(false, Ordering::SeqCst) {
-            self.reached.notify_one();
-            self.resume.notified().await;
-        }
-        result
-    }
-    async fn delete(&self, k: &str) -> anyhow::Result<()> {
-        self.inner.delete(k).await
-    }
-}
-
-#[tokio::test]
-async fn idle_maintenance_may_defer_new_garbage_but_never_deletes_from_an_old_snapshot() {
-    let store = Arc::new(Faults::new(remote()));
-    let writer = Arc::new(Engine::new(store.clone(), cache()));
-    writer.create("test", Limits::default()).await.unwrap();
-    writer
-        .commit("test", &request(0, "old", "a", Some(b"old")))
-        .await
-        .unwrap();
-    store.pause_list.store(true, Ordering::SeqCst);
-    let maintenance = tokio::spawn({
-        let writer = writer.clone();
-        async move { writer.maintain_database("test").await.unwrap() }
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), store.reached.notified())
-        .await
-        .unwrap();
-    writer
-        .commit("test", &request(1, "new", "a", Some(b"new")))
-        .await
-        .unwrap();
-    store.resume.notify_one();
-    // The listed object was live in the pre-list snapshot. It became garbage
-    // while this collector paused; skipping it now is safe and does no CAS.
-    assert_eq!(maintenance.await.unwrap().deleted, 0);
-    assert_eq!(
-        store.list("blocks/test.", None, 100).await.unwrap().len(),
-        2
-    );
-    assert_eq!(value(&writer, "a").await.unwrap(), b"new");
-    assert_eq!(writer.maintain_database("test").await.unwrap().deleted, 1);
-    assert_eq!(
-        store.list("blocks/test.", None, 100).await.unwrap().len(),
-        1
-    );
-    assert_eq!(value(&writer, "a").await.unwrap(), b"new");
-}
-
-#[tokio::test]
-async fn collector_fences_a_paused_writer_before_deleting_its_upload() {
-    let store = Arc::new(Faults::new(remote()));
-    let a = Arc::new(Engine::new(store.clone(), cache()));
-    let b = Engine::new(store.clone(), cache());
-    a.create("test", Limits::default()).await.unwrap();
-    store.pause.store(true, Ordering::SeqCst);
-    let writer = tokio::spawn({
-        let a = a.clone();
-        async move {
-            a.commit("test", &request(0, "paused", "x", Some(b"value")))
-                .await
-        }
-    });
-    store.reached.notified().await;
-    assert_eq!(b.gc("test").await.unwrap().deleted, 1);
-    store.resume.notify_one();
-    assert!(matches!(writer.await.unwrap(), Err(Error::Conflict)));
-    assert_eq!(b.info("test").await.unwrap().revision, 0);
-    a.commit("test", &request(0, "retry", "x", Some(b"value")))
-        .await
-        .unwrap();
-    assert_eq!(value(&b, "x").await.unwrap(), b"value");
-}
-
-#[tokio::test]
-async fn lost_acknowledgement_is_resolved_without_reapplying_or_deleting_live_data() {
-    let store = Arc::new(Faults::new(remote()));
-    let a = Engine::new(store.clone(), cache());
-    a.create("test", Limits::default()).await.unwrap();
-    store.ambiguous.store(true, Ordering::SeqCst);
-    let req = request(0, "lost", "x", Some(b"value"));
-    assert!(matches!(
-        a.commit("test", &req).await,
-        Err(Error::Storage(_))
-    ));
-    let b = Engine::new(store.clone(), cache());
-    b.gc("test").await.unwrap();
-    assert!(b.commit("test", &req).await.unwrap().replayed);
-    assert_eq!(b.info("test").await.unwrap().revision, 1);
-    assert_eq!(value(&b, "x").await.unwrap(), b"value");
-}
-
-#[tokio::test]
-async fn replicas_compete_with_collection_and_survive_complete_cache_loss() {
-    let storage = remote();
-    let bootstrap = Engine::new(storage.clone(), cache());
-    bootstrap.create("test", Limits::default()).await.unwrap();
-    let mut tasks = Vec::new();
-    for node in 0..3 {
-        let storage = storage.clone();
-        tasks.push(tokio::spawn(async move {
-            let engine = Engine::new(storage, cache());
-            for operation in 0..20 {
-                loop {
-                    let revision = engine.info("test").await.unwrap().revision;
-                    let req = request(
-                        revision,
-                        &format!("{node}-{operation}-{revision}"),
-                        &format!("{node}/{operation}"),
-                        Some(b"v"),
-                    );
-                    match engine.commit("test", &req).await {
-                        Ok(_) => break,
-                        Err(Error::Conflict) => tokio::task::yield_now().await,
-                        Err(e) => panic!("unexpected {e:?}"),
-                    }
-                }
-            }
-        }));
-    }
-    for _ in 0..30 {
-        let _ = bootstrap.gc("test").await;
-        tokio::task::yield_now().await;
-    }
-    for task in tasks {
-        task.await.unwrap();
-    }
-    bootstrap.gc("test").await.unwrap();
-    let recovered = Engine::new(storage, Arc::new(Cache::new(0, None).unwrap()));
-    let info = recovered.info("test").await.unwrap();
-    assert_eq!(info.revision, 60);
-    assert_eq!(info.keys, 60);
-    for node in 0..3 {
-        for op in 0..20 {
-            assert_eq!(
-                value(&recovered, &format!("{node}/{op}")).await.unwrap(),
-                b"v"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn local_reopen_and_exclusive_owner() {
-    let dir = tempfile::tempdir().unwrap();
-    {
-        let storage = Arc::new(Local::open(dir.path().into()).unwrap());
-        assert!(Local::open(dir.path().into()).is_err());
-        let engine = Engine::new(storage, cache());
-        engine.create("test", Limits::default()).await.unwrap();
-        engine
-            .commit("test", &request(0, "local", "key", Some(b"durable")))
-            .await
-            .unwrap();
-    }
-    let storage = Arc::new(Local::open(dir.path().into()).unwrap());
-    let engine = Engine::new(storage, cache());
-    assert_eq!(value(&engine, "key").await.unwrap(), b"durable");
-    engine.gc("test").await.unwrap();
-}
-
-#[tokio::test]
-async fn cache_budgets_and_corrupt_disk_cache_are_not_authority() {
-    let dir = tempfile::tempdir().unwrap();
-    let cache = Cache::new(1024, Some((dir.path().into(), 2048))).unwrap();
-    use sha2::{Digest, Sha256};
-    for i in 0..100 {
-        cache
-            .insert(&format!("k{i}"), Bytes::from(vec![7; 512]))
-            .await;
-    }
-    assert!(cache.memory_bytes().await <= 1024);
-    let bytes = Bytes::from(vec![9; 512]);
-    cache.insert("target", bytes.clone()).await;
-    drop(cache);
-    let name = hex::encode(Sha256::digest(b"target"));
-    std::fs::write(dir.path().join(name), b"corrupted").unwrap();
-    let cache = Cache::new(0, Some((dir.path().into(), 2048))).unwrap();
+    // A sealed database is one claimless manifest plus the tables it names.
+    db.close().await;
+    let keys = store.keys();
     assert!(
-        cache
-            .get("target", &hex::encode(Sha256::digest(&bytes)))
-            .await
-            .is_none()
+        keys.iter()
+            .all(|key| !key.contains("/c/") && !key.contains("/l/")),
+        "{keys:#?}"
     );
+    assert_eq!(
+        keys.iter().filter(|key| key.contains("/m/")).count(),
+        1,
+        "{keys:#?}"
+    );
+    assert_eq!(
+        keys.iter().filter(|key| key.contains("/t/")).count(),
+        info_tables(&ctx).await
+    );
+
+    let db = open(&ctx, "app").await;
+    assert_eq!(scan(&db, "", "", false, 1000).await.0.len(), 100);
+    assert_eq!(db.info().revision, 1300);
 }
 
-proptest::proptest! {
-    #![proptest_config(proptest::test_runner::Config::with_cases(24))]
-    #[test]
-    fn random_updates_match_a_reference_map(ops in proptest::collection::vec(("[a-z]{1,5}",proptest::option::of(proptest::collection::vec(proptest::num::u8::ANY,0..100))),1..80)) {
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let engine=Engine::new(remote(),cache());
-            engine.create("test",Limits::default()).await.unwrap();
-            let mut expected=BTreeMap::new();
-            for (i,(key,val)) in ops.iter().enumerate() {
-                engine.commit("test",&request(i as u64,&format!("op{i}"),key,val.as_deref())).await.unwrap();
-                if let Some(v)=val { expected.insert(key.clone(),v.clone()); } else { expected.remove(key); }
-                if i%7==0 { engine.gc("test").await.unwrap(); }
-            }
-            let result=engine.read("test",&ReadRequest { scans:vec![Scan { prefix:"".into(),start:None,end:None,after:None,reverse:false,limit:1000 }], ..Default::default() }).await.unwrap();
-            let actual:BTreeMap<_,_>=result.scans[0].items.iter().map(|p|(p.key.clone(),STANDARD.decode(&p.value).unwrap())).collect();
-            assert_eq!(actual,expected);
-        });
-    }
+async fn info_tables(ctx: &Arc<Ctx>) -> usize {
+    let db = open(ctx, "app").await;
+    let tables = db.info().tables;
+    db.close().await;
+    tables
 }
 
 #[tokio::test]
-async fn compaction_preserves_logical_revision_and_snapshot_contents() {
-    let storage = remote();
-    let engine = Engine::new(storage.clone(), cache());
-    engine.create("test", Limits::default()).await.unwrap();
-    let writes = (0..80)
-        .map(|n| Write {
-            key: format!("k{n:03}"),
-            value: Some(STANDARD.encode(vec![7; 4096])),
-        })
-        .collect();
-    engine
-        .commit(
-            "test",
-            &CommitRequest {
-                expected_revision: 0,
-                request_id: "seed".into(),
-                checks: vec![],
-                writes,
-            },
-        )
-        .await
-        .unwrap();
-    let writes = (0..80)
-        .filter(|n| n % 12 != 0)
-        .map(|n| Write {
-            key: format!("k{n:03}"),
-            value: None,
-        })
-        .collect();
-    engine
-        .commit(
-            "test",
-            &CommitRequest {
-                expected_revision: 1,
-                request_id: "shrink".into(),
-                checks: vec![],
-                writes,
-            },
-        )
-        .await
-        .unwrap();
-    let before = engine.info("test").await.unwrap();
-    assert!(page_count(storage.as_ref(), "test").await > 1);
-    let req = ReadRequest {
-        scans: vec![Scan {
-            limit: 100,
-            prefix: String::new(),
-            start: None,
-            end: None,
-            after: None,
-            reverse: false,
-        }],
-        ..Default::default()
+async fn the_quota_refuses_growth_but_not_deletes() {
+    let ctx = ctx(Arc::new(MemoryStore::new()));
+    let config = DbConfig {
+        max_bytes: 2_000,
+        ..DbConfig::default()
     };
-    let snapshot = serde_json::to_value(engine.read("test", &req).await.unwrap()).unwrap();
-    for _ in 0..8 {
-        engine.compact("test").await.unwrap();
-    }
-    engine.gc("test").await.unwrap();
-    let after = engine.info("test").await.unwrap();
-    assert_eq!(before.revision, after.revision);
-    assert_eq!(before.bytes, after.bytes);
-    assert_eq!(page_count(storage.as_ref(), "test").await, 1);
-    assert_eq!(
-        snapshot,
-        serde_json::to_value(engine.read("test", &req).await.unwrap()).unwrap()
-    );
+    let (db, created) = Db::open(ctx.clone(), "app", Some(config)).await.unwrap();
+    assert!(created);
+    commit(&db, put("a", &"x".repeat(1_000))).await.unwrap();
+    assert!(matches!(
+        commit(&db, put("b", &"x".repeat(1_500))).await,
+        Err(Error::Quota)
+    ));
+    commit(
+        &db,
+        Txn {
+            writes: vec![(b("a"), None)],
+            ..Txn::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Raising the limit is an ordinary logged change.
+    db.set_config(DbConfig {
+        max_bytes: 1 << 20,
+        ..DbConfig::default()
+    })
+    .await
+    .unwrap();
+    commit(&db, put("b", &"x".repeat(1_500))).await.unwrap();
+    db.close().await;
+    assert_eq!(open(&ctx, "app").await.config().max_bytes, 1 << 20);
 }
 
 #[tokio::test]
-async fn response_budget_includes_json_key_escaping() {
-    let engine = Engine::new(remote(), cache());
-    engine.create("test", Limits::default()).await.unwrap();
-    for batch in 0..2 {
-        let writes = (0..50)
-            .map(|n| Write {
-                key: format!("{:03}{}", batch * 50 + n, "\u{0001}".repeat(900)),
-                value: Some(STANDARD.encode(vec![1; 5000])),
-            })
-            .collect();
-        engine
-            .commit(
-                "test",
-                &CommitRequest {
-                    expected_revision: batch,
-                    request_id: format!("batch{batch}"),
-                    checks: vec![],
-                    writes,
-                },
-            )
-            .await
-            .unwrap();
-    }
-    let result = engine
-        .read(
-            "test",
-            &ReadRequest {
-                scans: vec![Scan {
-                    prefix: String::new(),
-                    start: None,
-                    end: None,
-                    after: None,
-                    reverse: false,
-                    limit: 100,
-                }],
-                ..Default::default()
-            },
-        )
-        .await;
-    assert!(matches!(result, Err(Error::Limit(_))));
+async fn a_deleted_database_stays_deleted() {
+    let store = Arc::new(MemoryStore::new());
+    let ctx = ctx(store.clone());
+    let db = create(&ctx, "app").await;
+    commit(&db, put("k", "v")).await.unwrap();
+    db.destroy().await.unwrap();
+    assert_eq!(store.keys(), ["root/db/app/m/~"]);
+    assert!(matches!(
+        Db::open(ctx.clone(), "app", None).await,
+        Err(Error::Gone)
+    ));
+    assert!(matches!(
+        Db::open(ctx.clone(), "app", Some(DbConfig::default())).await,
+        Err(Error::Gone)
+    ));
 }
 
 #[tokio::test]
-async fn malformed_manifests_fail_closed_before_reads_writes_or_collection() {
-    let storage = remote();
-    let e = Engine::new(storage.clone(), cache());
-    e.create("test", Limits::default()).await.unwrap();
-    e.commit("test", &request(0, "initial", "a", Some(b"hello")))
-        .await
-        .unwrap();
-    let initial = storage
-        .get("heads/test.json", 512 * 1024)
-        .await
-        .unwrap()
-        .unwrap();
-    let good: serde_json::Value = serde_json::from_slice(&initial.bytes).unwrap();
-    let original_files = storage.list("blocks/", None, 128).await.unwrap();
-    let mut cases = Vec::new();
-    let mut bad = good.clone();
-    bad["bytes"] = 0.into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["limits"]["max_bytes"] = 0.into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["pages"][0]["object"] = format!("blocks/other.{}", uuid::Uuid::new_v4()).into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["pages"][0]["encoded"] = 0.into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["pages"][0]["digest"] = "bad".into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["gc_after"] = "blocks/other.cursor".into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["receipts"][0]["revision"] = 500.into();
-    cases.push(bad);
-    let mut bad = good.clone();
-    bad["pages"]
-        .as_array_mut()
-        .unwrap()
-        .push(good["pages"][0].clone());
-    cases.push(bad);
-    for bad in cases {
-        let old = storage
-            .get("heads/test.json", 512 * 1024)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            storage
-                .cas(
-                    "heads/test.json",
-                    Some(&old.version),
-                    serde_json::to_vec(&bad).unwrap().into()
-                )
-                .await
-                .unwrap()
-        );
-        assert!(matches!(e.info("test").await, Err(Error::Storage(_))));
-        assert!(matches!(
-            e.read("test", &ReadRequest::default()).await,
-            Err(Error::Storage(_))
-        ));
-        assert!(matches!(
-            e.commit("test", &request(1, "write", "a", Some(b"new")))
-                .await,
-            Err(Error::Storage(_))
-        ));
-        assert!(matches!(e.gc("test").await, Err(Error::Storage(_))));
-        assert!(matches!(e.compact("test").await, Err(Error::Storage(_))));
-        assert_eq!(
-            storage.list("blocks/", None, 128).await.unwrap(),
-            original_files
-        );
+async fn a_directory_behaves_like_a_bucket() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = Options {
+        flush_frames: 4,
+        idle_flush: Duration::from_millis(20),
+        ..Options::default()
+    };
+    let store = || Arc::new(FsStore::open(dir.path(), true).unwrap());
+    let first = ctx_with(store(), opts.clone());
+    let db = create(&first, "app").await;
+    for i in 0..20 {
+        commit(&db, put(&format!("k{i:02}"), "v")).await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn page_metadata_and_canonical_encoding_are_checked_even_with_valid_hashes() {
-    use sha2::{Digest, Sha256};
-    let storage = remote();
-    let e = Engine::new(storage.clone(), cache());
-    e.create("test", Limits::default()).await.unwrap();
-    e.commit("test", &request(0, "initial", "a", Some(b"hello")))
-        .await
-        .unwrap();
-    let obj = storage
-        .get("heads/test.json", 512 * 1024)
-        .await
-        .unwrap()
-        .unwrap();
-    let good: serde_json::Value = serde_json::from_slice(&obj.bytes).unwrap();
-    let page = storage
-        .get(good["pages"][0]["object"].as_str().unwrap(), 256 * 1024)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut cases = Vec::new();
-    let mut bad = good.clone();
-    bad["pages"][0]["encoded"] = 1.into();
-    cases.push((bad, page.bytes.to_vec()));
-    let mut bad = good.clone();
-    bad["pages"][0]["first"] = "b".into();
-    bad["pages"][0]["last"] = "b".into();
-    cases.push((bad, page.bytes.to_vec()));
-    let mut bad = good.clone();
-    let mut trailing = page.bytes.to_vec();
-    trailing.push(0);
-    bad["pages"][0]["encoded"] = trailing.len().into();
-    cases.push((bad, trailing));
-    let duplicates = postcard::to_stdvec(&vec![("a", vec![1u8]), ("a", vec![2u8])]).unwrap();
-    let mut bad = good.clone();
-    bad["pages"][0]["encoded"] = duplicates.len().into();
-    bad["pages"][0]["bytes"] = 2.into();
-    bad["bytes"] = 2.into();
-    cases.push((bad, duplicates));
-    for (mut bad, bytes) in cases {
-        let name = format!("blocks/test.{}", uuid::Uuid::new_v4());
-        bad["pages"][0]["object"] = name.clone().into();
-        bad["pages"][0]["digest"] = hex::encode(Sha256::digest(&bytes)).into();
-        storage.put(&name, bytes.into()).await.unwrap();
-        let old = storage
-            .get("heads/test.json", 512 * 1024)
-            .await
-            .unwrap()
-            .unwrap();
-        storage
-            .cas(
-                "heads/test.json",
-                Some(&old.version),
-                serde_json::to_vec(&bad).unwrap().into(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            e.read(
-                "test",
-                &ReadRequest {
-                    keys: vec!["a".into()],
-                    ..Default::default()
-                }
-            )
-            .await,
-            Err(Error::Storage(_))
-        ));
-    }
-}
-
-#[tokio::test]
-async fn memory_cache_does_not_ignore_the_requested_digest() {
-    use sha2::{Digest, Sha256};
-    let c = cache();
-    c.insert("immutable", Bytes::from_static(b"verified")).await;
-    assert!(c.get("immutable", &"0".repeat(64)).await.is_none());
-    assert_eq!(
-        c.get("immutable", &hex::encode(Sha256::digest(b"verified")))
-            .await
-            .unwrap(),
-        b"verified"[..]
-    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(db);
+    // A second process on the same directory takes over like any other node.
+    let second = ctx_with(store(), opts);
+    let db = open(&second, "app").await;
+    assert_eq!(scan(&db, "", "", false, 100).await.0.len(), 20);
+    assert_eq!(commit(&db, put("k20", "v")).await.unwrap(), 21);
+    db.close().await;
 }

@@ -1,6 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe AuthorizationLifecycle.cfg authorization 1g -
-unsafe UnsafeStaleAuthorization.cfg authorization-StaleAuthorization 1g AuthorizationAtLinearization
-unsafe UnsafeGeneration.cfg authorization-Generation 1g AuthorizationAtLinearization
-unsafe UnsafeUserRevision.cfg authorization-UserRevision 1g PolicyPreserved
-unsafe UnsafeAuthorizationRead.cfg authorization-AuthorizationRead 1g ReadWithinInvocation

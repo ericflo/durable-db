@@ -1,7 +1,0 @@
-# kind config log-tag heap expected-counterexample
-safe UploadCredits.cfg upload-credits 1g -
-unsafe UnsafeUploadRefund.cfg upload-refund 1g DurableCoverage
-unsafe UnsafeUploadRestore.cfg upload-restore 1g DurableCoverage
-unsafe UnsafeUploadBeforeCharge.cfg upload-before-charge 1g DeliveryCovered
-unsafe UnsafeUploadRefillReset.cfg upload-refill-reset 1g DurableCoverage
-unsafe UnsafeUploadInitializeReset.cfg upload-initialize-reset 1g DurableCoverage

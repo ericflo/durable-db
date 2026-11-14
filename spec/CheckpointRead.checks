@@ -1,3 +1,0 @@
-safe CheckpointRead.cfg checkpoint-read 512m -
-unsafe CheckpointReadUnsafeBoundary.cfg checkpoint-read-unsafeboundary 512m Correct
-unsafe CheckpointReadUnsafeMissing.cfg checkpoint-read-unsafemissing 512m Correct

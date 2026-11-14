@@ -1,9 +1,0 @@
-safe PlacementRequests.cfg placement-requests 2g -
-unsafe PlacementRequestsUnsafeCompare.cfg placement-requests-compare 2g GenerationOrder
-unsafe PlacementRequestsUnsafeTimeout.cfg placement-requests-timeout 2g ViewSafe
-unsafe PlacementRequestsUnsafeReply.cfg placement-requests-reply 2g ViewSafe
-unsafe PlacementRequestsUnsafeDrain.cfg placement-requests-drain 2g Exclusive
-unsafe PlacementRequestsLateFreeze.cfg placement-requests-latefreeze 2g NotLateFreeze
-unsafe PlacementRequestsLateReply.cfg placement-requests-latereply 2g NotLateReply
-unsafe PlacementRequestsStaleCompare.cfg placement-requests-stalecompare 2g NotStaleCompare
-unsafe PlacementRequestsResumed.cfg placement-requests-resumed 2g NotResumed

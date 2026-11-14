@@ -1,5 +1,0 @@
-safe ExternalFiles.cfg external-files 512m -
-unsafe ExternalFilesUnsafeEarly.cfg external-files-early 512m PublishedBytes
-unsafe ExternalFilesUnsafeReuse.cfg external-files-reuse 512m PublishedBytes
-unsafe ExternalFilesLate.cfg external-files-late 512m NotLateUnreferenced
-unsafe ExternalFilesPair.cfg external-files-pair 512m NotPublishedPair

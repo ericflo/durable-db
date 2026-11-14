@@ -1,8 +1,0 @@
-tag|partition-journal
-dependency|PartitionControl
-negative|partition-journal-permission|AcknowledgePreservesHistory|Acknowledge(j, p)|s!(UnsafeJournalPermission !(TRUE !
-negative|partition-journal-gap|ConsumePreservesHistory|Consume(j, n)|s!(UnsafeJournalGap !(TRUE !
-negative|partition-journal-early|BeginScanPreservesHistory|BeginScan(j, g)|s!(UnsafeJournalEarly !(TRUE !
-negative|partition-journal-missing|ReadMissingPreservesHistory|ReadMissing(j)|s!(UnsafeJournalMissing !(TRUE !
-negative|partition-journal-reseal|SelectPreservesHistory|Select(j, p)|s!UnsafeJournalReseal)!TRUE)!g
-negative|partition-journal-ready|ReadyPreservesHistory|Ready(j)|s!(UnsafeJournalReady !(TRUE !

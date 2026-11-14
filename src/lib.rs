@@ -1,83 +1,75 @@
-pub mod api;
+//! durable-db: a transactional ordered database whose source of truth is an
+//! object-storage bucket.
+//!
+//! The protocol is specified in `spec/DurableDb.tla` and explained in
+//! `docs/architecture.md`. In short: every database is a chain of immutable
+//! objects, one writer at a time holds a revocable claim, and every
+//! acknowledgement is preceded by a check that the claim still stands.
 pub mod auth;
-pub mod backup;
-pub mod cache;
-mod directory;
-pub mod engine;
-pub mod index;
-pub mod journal;
-mod measured;
+pub mod bench;
+pub mod cluster;
+pub mod db;
+pub mod http;
+pub mod io;
+pub mod layout;
+pub mod mem;
 pub mod metrics;
-mod observation;
-pub mod ownership;
-pub mod providers;
-pub mod publication;
-pub mod storage;
-pub mod transactions;
-pub mod upload_budget;
+pub mod node;
+pub mod store;
+pub mod table;
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde::Serialize;
+use store::StoreError;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
-    #[error("{0}")]
-    Invalid(String),
-    #[error("revision conflict; read a fresh snapshot before retrying")]
-    Conflict,
-    #[error("request outcome is no longer retained; do not retry with a new request ID")]
-    ReceiptExpired,
     #[error("database not found")]
     NotFound,
-    #[error("authentication or permission denied")]
+    #[error("database was deleted")]
+    Gone,
+    #[error("database already exists with a different configuration")]
+    Exists,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("database storage quota exceeded")]
+    Quota,
+    #[error("too many requests")]
+    RateLimited,
+    #[error("unauthorized")]
     Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
+    /// Nothing happened; try again shortly.
     #[error("{0}")]
-    Limit(String),
-    #[error("server is at capacity; retry with backoff")]
-    Busy,
-    #[error("{0}")]
-    Unsupported(&'static str),
-    #[error("{0}")]
-    Storage(#[from] anyhow::Error),
+    Busy(String),
+    /// This node stopped owning the database. A commit in flight may or may
+    /// not have been applied; retry it with the same idempotency key.
+    #[error("ownership moved: {0}")]
+    Lost(String),
+    #[error("storage unavailable: {0}")]
+    Unavailable(String),
+    #[error("corrupt data: {0}")]
+    Corrupt(String),
 }
-pub type Result<T> = std::result::Result<T, Error>;
 
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        #[derive(Serialize)]
-        struct Body {
-            error: &'static str,
-            message: String,
-        }
-        let (status, code) = match &self {
-            Self::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
-            Self::Conflict => (StatusCode::CONFLICT, "conflict"),
-            Self::ReceiptExpired => (StatusCode::CONFLICT, "receipt_expired"),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Self::Limit(_) => (StatusCode::PAYLOAD_TOO_LARGE, "limit_exceeded"),
-            Self::Busy => (StatusCode::TOO_MANY_REQUESTS, "busy"),
-            Self::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported_operation"),
-            Self::Storage(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
-        };
-        let message = if matches!(self, Self::Storage(_)) {
-            // Upstream errors may include URLs, object names, or credentials. Do not expose them.
-            "storage operation failed; a write outcome may be unknown; retry the identical request"
-                .into()
-        } else {
-            self.to_string()
-        };
-        (
-            status,
-            Json(Body {
-                error: code,
-                message,
-            }),
+impl Error {
+    /// Whether repeating the identical request can succeed.
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Busy(_) | Self::Lost(_) | Self::Unavailable(_) | Self::RateLimited
         )
-            .into_response()
     }
 }
+
+impl From<StoreError> for Error {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Unavailable(reason) => Self::Unavailable(reason),
+            StoreError::Fatal(reason) => Self::Unavailable(format!("fatal: {reason}")),
+        }
+    }
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;

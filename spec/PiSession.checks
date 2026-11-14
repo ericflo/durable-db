@@ -1,4 +1,0 @@
-safe PiSession.cfg pi-session 1g -
-unsafe UnsafePiOwner.cfg pi-owner 1g FencedOwner
-unsafe UnsafePiReceipt.cfg pi-receipt 1g ReceiptsAreDurable
-unsafe UnsafePiPrefix.cfg pi-prefix 1g ValidPrefixOnly
