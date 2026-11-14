@@ -129,8 +129,8 @@ Every option is a flag and an environment variable.
 | `--result-bytes` | `DURABLE_DB_RESULT_BYTES` | 512 MiB | Memory for read results being put together or waiting to be sent. One database may use a quarter; one read returns at most an eighth, up to 64 MiB. |
 | `--max-connections` | `DURABLE_DB_MAX_CONNECTIONS` | 8192 | Connections open at once. Further ones wait to be accepted. |
 | `--drain-seconds` | `DURABLE_DB_DRAIN_SECONDS` | 5 | Time to relay requests after a termination signal. |
-| `--upload-attempts` | `DURABLE_DB_UPLOAD_ATTEMPTS` | 2 | Identical uploads that may race for one small object. |
-| `--hedge-ms` | `DURABLE_DB_HEDGE_MS` | 0 on B2, else 150 | Delay before each further racing upload. |
+| `--upload-attempts` | `DURABLE_DB_UPLOAD_ATTEMPTS` | 4 on B2, else 2 | Identical uploads that may race for one small object. On B2 two start at once; elsewhere one. |
+| `--hedge-ms` | `DURABLE_DB_HEDGE_MS` | 150 | How long the uploads of an object may take before one more is started beside them. |
 | `--s3-uploads-only` | `DURABLE_DB_S3_UPLOADS_ONLY` | off | Use PutObject on Backblaze too. |
 | `--no-fsync` | `DURABLE_DB_NO_FSYNC` | off | Directory storage only: do not flush before acknowledging. |
 
