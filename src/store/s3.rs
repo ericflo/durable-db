@@ -455,10 +455,10 @@ impl B2Uploader {
     }
 
     /// The next URL to use, topping up the untried ones in the background.
-    async fn target(self: &Arc<Self>) -> StoreResult<B2Target> {
+    async fn target(self: &Arc<Self>, proven: bool) -> StoreResult<B2Target> {
         let (taken, fetch) = {
             let mut pool = self.pool.lock();
-            pool.explore = !pool.explore;
+            pool.explore = !pool.explore && !proven;
             let taken = if pool.explore && !pool.untried.is_empty() {
                 pool.untried.pop()
             } else if !pool.proven.is_empty() {
@@ -510,9 +510,9 @@ impl B2Uploader {
         pool.proven.truncate(B2_PROVEN);
     }
 
-    async fn upload(self: &Arc<Self>, key: &str, body: Bytes) -> StoreResult<()> {
+    async fn upload(self: &Arc<Self>, key: &str, body: Bytes, proven: bool) -> StoreResult<()> {
         use sha1::Digest as _;
-        let target = self.target().await?;
+        let target = self.target(proven).await?;
         let sampled = body.len() <= B2_SAMPLE_BYTES;
         let timeout = Duration::from_secs(20 + body.len() as u64 / (256 << 10));
         let started = std::time::Instant::now();
@@ -546,13 +546,21 @@ impl B2Uploader {
 impl ObjectStore for S3Store {
     async fn put(&self, key: &str, body: Bytes) -> StoreResult<()> {
         if let Some(b2) = &self.b2 {
-            return b2.upload(key, body).await;
+            return b2.upload(key, body, false).await;
         }
         let reply = self.send(Method::PUT, key, &[], None, body).await?;
         if reply.status.is_success() {
             Ok(())
         } else {
             Err(self.refused("PUT", &reply))
+        }
+    }
+
+    async fn put_once(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        match &self.b2 {
+            // The fastest storage pod known, never an untried one.
+            Some(b2) => b2.upload(key, body, true).await,
+            None => self.put(key, body).await,
         }
     }
 

@@ -165,6 +165,12 @@ impl ObjectStore for Metered {
             .fetch_add(body.len() as u64, Ordering::Relaxed);
         self.timed(0, self.inner.put(key, body)).await
     }
+    async fn put_once(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        self.metrics
+            .store_bytes_out
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
+        self.timed(0, self.inner.put_once(key, body)).await
+    }
     async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
         let found = self.timed(1, self.inner.get(key)).await?;
         let bytes = found.as_ref().map_or(0, Bytes::len) as u64;

@@ -38,8 +38,16 @@ pub struct Listed {
 
 #[async_trait]
 pub trait ObjectStore: Send + Sync + 'static {
-    /// Store an object under `key`. One attempt; the caller owns retries.
+    /// Store an object under `key`. One attempt; the caller owns retries,
+    /// and may run several attempts for the same immutable bytes at once.
     async fn put(&self, key: &str, body: Bytes) -> StoreResult<()>;
+
+    /// Store an object that is uploaded exactly once and never retried: a
+    /// claim. Same contract as `put`; an implementation may choose its most
+    /// dependable path, since no second attempt will cover for a slow one.
+    async fn put_once(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        self.put(key, body).await
+    }
 
     async fn get(&self, key: &str) -> StoreResult<Option<Bytes>>;
 

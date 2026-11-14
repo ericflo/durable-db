@@ -6,7 +6,7 @@ use durable_db::{
     cluster::Cluster,
     db::{Ctx, Options},
     http::{ApiLimits, App, router},
-    io::{DiskCache, Io},
+    io::{DiskCache, Io, retry},
     metrics::{Metered, Metrics},
     node::{Limits, Node},
     store::{
@@ -105,13 +105,14 @@ struct Serve {
     /// Use S3 PutObject even on Backblaze, instead of B2's faster upload call.
     #[arg(long, env = "DURABLE_DB_S3_UPLOADS_ONLY")]
     s3_uploads_only: bool,
-    /// Identical uploads that may race for one object in a bucket; the first to finish wins.
-    #[arg(long, env = "DURABLE_DB_UPLOAD_ATTEMPTS", default_value_t = 2)]
-    upload_attempts: usize,
-    /// Milliseconds before each further racing upload starts; 0 starts them together.
-    /// Default: 0 on Backblaze, where uploads are free and long-tailed, otherwise 150.
-    #[arg(long, env = "DURABLE_DB_HEDGE_MS")]
-    hedge_ms: Option<u64>,
+    /// Identical uploads that may race for one small object in a bucket; the first to finish
+    /// wins. Default: 4 on Backblaze (two start at once), where uploads are free and slow
+    /// storage pods are common; otherwise 2 (one starts at once).
+    #[arg(long, env = "DURABLE_DB_UPLOAD_ATTEMPTS")]
+    upload_attempts: Option<usize>,
+    /// Milliseconds an upload may run before another identical one is started alongside it.
+    #[arg(long, env = "DURABLE_DB_HEDGE_MS", default_value_t = 150)]
+    hedge_ms: u64,
 }
 
 #[derive(Args)]
@@ -267,16 +268,14 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
         io: Io::new(store, args.cache_bytes, disk),
         opts: Options {
             node: args.advertise.clone().unwrap_or_default(),
-            upload_attempts: if args.bucket.is_some() {
-                args.upload_attempts
-            } else {
-                1
+            upload_attempts: match (&args.bucket, args.upload_attempts) {
+                (None, _) => 1,
+                (Some(_), Some(attempts)) => attempts,
+                (Some(_), None) if backblaze => 4,
+                (Some(_), None) => 2,
             },
-            hedge_after: Duration::from_millis(args.hedge_ms.unwrap_or(if backblaze {
-                0
-            } else {
-                150
-            })),
+            upload_eager: if backblaze { 2 } else { 1 },
+            hedge_after: Duration::from_millis(args.hedge_ms),
             ..Options::default()
         },
         root: prefix,
@@ -395,24 +394,27 @@ async fn probe(store: &dyn ObjectStore, prefix: &str) -> anyhow::Result<()> {
         rand::random::<u64>()
     );
     let body = bytes::Bytes::from_static(b"durable-db storage probe");
-    store.put(&key, body.clone()).await?;
-    if store.get(&key).await?.as_ref() != Some(&body) {
+    // Each call is retried through transient failures; only wrong answers
+    // and persistent failures stop the server.
+    retry(|| store.put(&key, body.clone())).await?;
+    if retry(|| store.get(&key)).await?.as_ref() != Some(&body) {
         bail!("an object just written could not be read back");
     }
-    if store.get_range(&key, 8, 10).await?.as_deref() != Some(&b"db"[..]) {
+    if retry(|| store.get_range(&key, 8, 10)).await?.as_deref() != Some(&b"db"[..]) {
         bail!("ranged reads return the wrong bytes");
     }
-    let listed = store.list(&key, None, 10).await?;
+    let listed = retry(|| store.list(&key, None, 10)).await?;
     if listed.len() != 1 || listed[0].key != key {
         bail!("an object just written is missing from the listing");
     }
-    store.delete(&key).await?;
-    if store.exists(&key).await? || !store.list(&key, None, 10).await?.is_empty() {
+    retry(|| store.delete(&key)).await?;
+    if retry(|| store.exists(&key)).await?
+        || !retry(|| store.list(&key, None, 10)).await?.is_empty()
+    {
         bail!("an object just deleted is still visible");
     }
-    store
-        .purge(&key, None, &|candidate| candidate == key)
-        .await?;
+    let probe_only = |candidate: &str| candidate == key;
+    retry(|| store.purge(&key, None, &probe_only)).await?;
     Ok(())
 }
 

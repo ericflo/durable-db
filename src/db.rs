@@ -47,9 +47,11 @@ pub struct Options {
     pub max_inflight_frames: usize,
     /// Claim checks that may be in flight at once.
     pub max_checks: usize,
-    /// Identical uploads that may race for one object. 1 disables racing.
+    /// Identical uploads that may race for one small object. 1 disables racing.
     pub upload_attempts: usize,
-    /// Delay before each further attempt starts; zero starts them together.
+    /// How many of them start at once.
+    pub upload_eager: usize,
+    /// Delay before each further attempt starts while none has finished.
     pub hedge_after: Duration,
     /// How long a commit may wait on storage before the writer gives up.
     pub store_deadline: Duration,
@@ -73,7 +75,8 @@ impl Default for Options {
             max_inflight_frames: 2,
             max_checks: 2,
             upload_attempts: 1,
-            hedge_after: Duration::ZERO,
+            upload_eager: 1,
+            hedge_after: Duration::from_millis(150),
             store_deadline: Duration::from_secs(30),
             resweep_after: Duration::from_secs(30),
             receipt_window: 100_000,
@@ -268,11 +271,12 @@ impl Uploader {
         }
     }
 
-    /// One upload, raced: up to `upload_attempts` identical PUTs, each started
-    /// `hedge_after` after the previous one; the first success wins. Object
-    /// stores have long upload tails, and a duplicate of immutable bytes under
-    /// our own key is harmless. Losers run to completion in the background, so
-    /// a connection or upload URL is never abandoned mid-request.
+    /// One upload, raced. `upload_eager` identical PUTs start at once; while
+    /// none has finished, another starts every `hedge_after`, up to
+    /// `upload_attempts`. The first success wins. Object stores have long
+    /// upload tails, and a duplicate of immutable bytes under our own key is
+    /// harmless. Losers run to completion in the background, so a connection
+    /// or upload URL is never abandoned mid-request.
     async fn raced(&self, key: &str, body: &Bytes) -> Result<(), StoreError> {
         let opts = &self.ctx.opts;
         let attempts = if body.len() > RACE_BYTES {
@@ -294,15 +298,11 @@ impl Uploader {
                 let _ = done.send(result);
             });
         };
-        start(done.clone());
-        let mut waiting = attempts - 1;
-        if opts.hedge_after.is_zero() {
-            while waiting > 0 {
-                waiting -= 1;
-                start(done.clone());
-            }
+        let mut running = opts.upload_eager.clamp(1, attempts);
+        let mut waiting = attempts - running;
+        for _ in 0..running {
+            start(done.clone());
         }
-        let mut running = attempts - waiting;
         let mut failure = None;
         loop {
             tokio::select! {
@@ -423,7 +423,7 @@ impl Db {
             node: ctx.opts.node.clone(),
         })
         .expect("claim encodes");
-        store.put(&claim_key, Bytes::from(claim)).await?;
+        store.put_once(&claim_key, Bytes::from(claim)).await?;
 
         let uploads = Uploader::new(&ctx);
         let recovered = match Self::recover(&ctx, &uploads, &layout, epoch, create).await {

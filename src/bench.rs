@@ -159,19 +159,28 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
     });
 
     for name in &shared.names {
-        let response = shared
-            .http
-            .put(format!("{}/v1/databases/{name}", shared.urls[0]))
-            .bearer_auth(&shared.token)
-            .send()
-            .await
-            .with_context(|| format!("cannot reach {}", shared.urls[0]))?;
-        if !response.status().is_success() {
-            bail!(
-                "creating {name}: {} {}",
-                response.status(),
-                response.text().await?
-            );
+        // Creation is idempotent; repeat it through transient failures.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let response = shared
+                .http
+                .put(format!("{}/v1/databases/{name}", shared.urls[0]))
+                .bearer_auth(&shared.token)
+                .send()
+                .await
+                .with_context(|| format!("cannot reach {}", shared.urls[0]))?;
+            if response.status().is_success() {
+                break;
+            }
+            if response.status() != 503 || attempt >= 20 {
+                bail!(
+                    "creating {name}: {} {}",
+                    response.status(),
+                    response.text().await?
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     if args.workload == Workload::Ledger {

@@ -111,9 +111,9 @@ impl Node {
         let mut attempt = 0;
         let opened = loop {
             match Db::open(self.ctx.clone(), name, create.clone()).await {
-                // Another node is claiming at this moment. Whoever holds the
-                // higher claim proceeds, so a short wait settles it.
-                Err(Error::Busy(_)) if attempt < 4 => {
+                // Another node is claiming at this moment, or a storage call
+                // failed. A claim is never retried, but a new one is free.
+                Err(Error::Busy(_) | Error::Unavailable(_)) if attempt < 4 => {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_millis(15 << attempt)).await;
                 }
