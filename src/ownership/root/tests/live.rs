@@ -167,7 +167,17 @@ async fn live_checkpoint_recovers_after_control_confirmation_is_lost() {
 async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries() {
     let provider = Provider::new();
 
-    let mut owner = open(active(&provider).await, live::Limits::default()).await;
+    let mut owner = open(
+        active(&provider).await,
+        live::Limits {
+            index: crate::index::recovery::Limits {
+                versions: 6,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
     let calls = provider.calls.load(Ordering::SeqCst);
     let a = owner.snapshot(database("a")).await.unwrap();
     let b = owner.snapshot(database("b")).await.unwrap();
@@ -223,6 +233,28 @@ async fn live_group_commit_hides_pending_values_and_fences_conflicts_and_retries
     assert_eq!(
         owner.outcome(next.tickets[0]).await.unwrap(),
         Result::Committed(2)
+    );
+    assert_eq!(owner.usage().versions, 2, "obsolete version reclaimed");
+    assert!(
+        owner.get(&a, "x").await.is_err(),
+        "old value snapshot expired"
+    );
+    assert!(
+        owner.get(&b, "x").await.unwrap().is_none(),
+        "unpruned database retains its snapshot"
+    );
+    let stale = owner
+        .prepare(&[request(&a, "stale", &[Read::Key("x")], &[])])
+        .await
+        .unwrap();
+    assert!(stale.upload.is_none());
+    assert_eq!(
+        owner.outcome(stale.tickets[0]).await.unwrap(),
+        Result::Rejected(Rejection::Validation(validation::Error::Conflict))
+    );
+    assert!(
+        provider.record().checkpoint.is_none(),
+        "reclamation does not publish a collection cut"
     );
     let current = owner.snapshot(database("a")).await.unwrap();
     assert_eq!(current.revision(), 2);

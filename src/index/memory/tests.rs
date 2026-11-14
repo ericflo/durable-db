@@ -104,6 +104,59 @@ async fn recovered_versions_flush_and_merge_without_losing_deletions_or_empty_va
     assert_eq!(m.scan(b"b", Some(b"c"), 2).unwrap().count(), 1);
     assert!(m.scan(b"z", Some(b"a"), 1).is_err());
     assert!(m.get(b"", 1).is_err());
+    m.reclaim_versions();
+    assert_eq!(m.floor(), 3);
+    assert_eq!(
+        m.usage(),
+        Usage {
+            versions: 3,
+            bytes: 6
+        }
+    );
+    for revision in 0..3 {
+        assert!(m.get(b"a", revision).is_err());
+        assert!(m.scan(b"", None, revision).is_err());
+        assert!(m.scan_ordered(b"", None, revision, true).is_err());
+        assert!(
+            merge::get_with_memory(std::slice::from_ref(&old), &m, b"a", revision)
+                .await
+                .is_err()
+        );
+    }
+    // Pruning must not resurrect the table's deleted value or drop an empty
+    // value. Both scan directions and the merged view retain the same result.
+    let expected: Vec<_> = m
+        .scan(b"", None, 3)
+        .unwrap()
+        .map(|r| (r.key, r.value))
+        .collect();
+    assert_eq!(
+        expected,
+        vec![
+            (Bytes::from("a"), None),
+            (Bytes::from("b"), Some(Bytes::new())),
+            (Bytes::from("c"), Some(Bytes::from("new")))
+        ]
+    );
+    let reverse: Vec<_> = m
+        .scan_ordered(b"", None, 3, true)
+        .unwrap()
+        .map(|r| (r.key, r.value))
+        .collect();
+    assert_eq!(reverse, expected.iter().rev().cloned().collect::<Vec<_>>());
+    let mut merged =
+        merge::Cursor::with_memory(std::slice::from_ref(&old), &m, b"", None, 3).unwrap();
+    for row in &expected {
+        let actual = merged.next().await.unwrap().unwrap();
+        assert_eq!(&(actual.key, actual.value), row);
+    }
+    assert!(merged.next().await.unwrap().is_none());
+    drop(merged);
+    let usage = m.usage();
+    append(&mut m, 4, &[]).unwrap();
+    m.reclaim_versions();
+    assert_eq!(m.floor(), 3, "no removal needlessly expires a snapshot");
+    assert_eq!(m.usage(), usage);
     assert!(
         merge::Cursor::with_memory(&vec![old.clone(); merge::MAX_SOURCES], &m, b"", None, 3)
             .is_err()

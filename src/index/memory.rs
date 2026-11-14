@@ -26,6 +26,7 @@ type Key = (Bytes, Reverse<u64>);
 pub struct Memory {
     rows: BTreeMap<Key, Option<Bytes>>,
     revision: u64,
+    floor: u64,
     limits: Limits,
     usage: Usage,
 }
@@ -33,6 +34,7 @@ impl Memory {
     pub(crate) fn from_checkpoint(revision: u64, limits: Limits) -> anyhow::Result<Self> {
         let mut memory = Self::new(limits)?;
         memory.revision = revision;
+        memory.floor = revision;
         Ok(memory)
     }
     pub(crate) fn load_row(&mut self, row: Entry) -> anyhow::Result<()> {
@@ -67,12 +69,38 @@ impl Memory {
         Ok(Self {
             rows: BTreeMap::new(),
             revision: 0,
+            floor: 0,
             limits,
             usage: Usage::default(),
         })
     }
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    pub(crate) fn floor(&self) -> u64 {
+        self.floor
+    }
+
+    /// Keep the latest row per key, including tombstones hiding checkpoint
+    /// values. Exclusive access excludes live cursors; older snapshot tokens
+    /// must fail instead of reading a newer row or falling through to the base.
+    pub(crate) fn reclaim_versions(&mut self) {
+        let before = self.usage.versions;
+        let mut previous = None;
+        self.rows.retain(|(key, _), value| {
+            if previous.as_ref() == Some(key) {
+                self.usage.versions -= 1;
+                self.usage.bytes -= key.len() + value.as_ref().map_or(0, Bytes::len);
+                false
+            } else {
+                previous = Some(key.clone());
+                true
+            }
+        });
+        if self.usage.versions < before {
+            self.floor = self.revision;
+        }
     }
 
     /// Admission precedes every allocation/mutation. Failure leaves the index
@@ -111,6 +139,7 @@ impl Memory {
         Ok(())
     }
     pub fn get(&self, key: &[u8], revision: u64) -> anyhow::Result<Option<Entry>> {
+        ensure!(revision >= self.floor, "memory snapshot expired");
         super::validate_key(key)?;
         Ok(self
             .rows
@@ -138,6 +167,7 @@ impl Memory {
         revision: u64,
         reverse: bool,
     ) -> anyhow::Result<Cursor<'_>> {
+        ensure!(revision >= self.floor, "memory snapshot expired");
         super::validate_range(start, end)?;
         Ok(Cursor {
             rows: self.rows.range((

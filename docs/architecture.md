@@ -42,7 +42,7 @@ Durable upload allowances cover immutable PUT attempts, including unsuccessful o
 
 ## Index, checkpoints and memory
 
-A bounded recent projection overlays an immutable checkpoint. Shared sorted tables contain values and receipts from multiple database generations; a bounded manifest routes point lookups and ordered scans. Checkpoint publication binds the image to an exact selected journal position. Recovery opens that image lazily and replays its remaining selected suffix before exposing an owner.
+A bounded recent projection overlays an immutable checkpoint. Shared sorted tables contain values and receipts from multiple database generations; a bounded manifest routes point lookups and ordered scans. Checkpoint publication binds the image to an exact selected journal position. Recovery opens that image lazily and replays its remaining selected suffix before exposing an owner. Under memory pressure, live publication and replay drop superseded value versions at complete frame boundaries. The latest value or deletion marker remains for each key; older affected snapshots fail explicitly. Receipts and conflict history retain their existing limits. This frees disposable memory without publishing a checkpoint or allowing journal collection.
 
 Checkpoint funding and immutable uploads share the frozen projection with readers. The worker sends durable, permission-validated replies first and pauses new write admission during maintenance. Publication and projection replacement remain exclusive so collection cannot retire tables still used by an active read. No second projection is kept; control publication and provider reads can still add latency.
 

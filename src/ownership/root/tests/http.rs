@@ -248,6 +248,62 @@ async fn create(router: &axum::Router, token: &str, db: &str) {
 }
 
 #[tokio::test]
+async fn overwrite_http_progresses_while_checkpoint_uploads_are_unavailable() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let (router, provider, faults, token) = fixture_limits(
+        8,
+        live::Limits::resident(128 * 1024 * 1024)
+            .unwrap()
+            .share(16)
+            .unwrap(),
+        crate::upload_budget::UploadLimits {
+            bytes: 1024 * 1024 * 1024,
+            attempts: 100_000,
+        },
+    )
+    .await;
+    create(&router, &token, "app").await;
+    faults.fail_checkpoint.store(true, Ordering::SeqCst);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/databases/app", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let value = STANDARD.encode(vec![7; 64 * 1024]);
+    for revision in 0..100 {
+        let write = json!({"expected_revision":revision,"request_id":format!("write-{revision}"),"writes":[{"key":"value","value":value}]});
+        let response = client
+            .post(format!("{url}/commit"))
+            .bearer_auth(&token)
+            .json(&write)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "write {revision}");
+        let result: Value = response.json().await.unwrap();
+        assert_eq!(result["revision"], revision + 1);
+    }
+    let response = client
+        .post(format!("{url}/read"))
+        .bearer_auth(&token)
+        .json(&json!({"keys":["value"],"scans":[{"limit":10}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["revision"], 100);
+    assert_eq!(result["values"], json!([value]));
+    assert_eq!(result["scans"][0]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(faults.checkpoint_failures.load(Ordering::SeqCst), 0);
+    assert!(provider.record().checkpoint.is_none());
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn native_http_serves_auth_lifecycle_quotas_and_checkpoint_reads_over_tcp() {
     let (router, provider, _, token) = fixture(8, 2).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -710,6 +710,7 @@ impl Owner {
                 self.reserved.receipts -= 1;
                 self.reserved.receipt_bytes -= commit.request_id().len() + 40;
             }
+            self.projection.reclaim_versions();
         }
         let durable = self.writer.durable_prefix().position();
         self.catalog_pending

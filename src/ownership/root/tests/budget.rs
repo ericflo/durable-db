@@ -1577,34 +1577,50 @@ async fn repeated_large_overwrites_reuse_copy_prepayment_and_recover() {
                 .revision,
             revision + 1
         );
-        owner.maintain().await.unwrap();
+        assert!(
+            !owner.maintain().await.unwrap(),
+            "overwrite {revision} checkpointed"
+        );
+        assert!(owner.usage().value_bytes < limits.index.value_bytes / 2);
         last = Some(request);
     }
     let status = ledger.status().await.unwrap();
     assert!(status.allocated.bytes < status.limits.bytes);
-    assert!(status.maintenance.unwrap().allocated.bytes > 0);
+    assert_eq!(status.maintenance.unwrap().allocated.bytes, 0);
     drop(owner);
     let mut root = super::checkpoint::budgeted_active(&connection).await;
     root.select_journals().await.unwrap();
     let mut owner = live::open(root, limits).await;
     let request = last.unwrap();
-    let replay = owner
-        .prepare_authorized(&[(name, &request, &admin)])
-        .await
-        .unwrap();
-    assert!(replay.upload.is_none());
-    let result = owner
-        .authorized_result(&replay.tickets[0], &admin)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.replayed);
-    assert_eq!(result.revision, 100);
-    let read: ReadRequest = serde_json::from_value(serde_json::json!({"keys":["value"]})).unwrap();
-    let result = owner.read_authorized(name, &read, &admin).await.unwrap();
-    assert_eq!(result.revision, 100);
-    assert_eq!(
-        result.values,
-        vec![Some(STANDARD.encode(vec![99; 64 * 1024]))]
-    );
+    for round in 0..2 {
+        let replay = owner
+            .prepare_authorized(&[(name, &request, &admin)])
+            .await
+            .unwrap();
+        assert!(replay.upload.is_none());
+        let result = owner
+            .authorized_result(&replay.tickets[0], &admin)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.replayed);
+        assert_eq!(result.revision, 100);
+        let read: ReadRequest =
+            serde_json::from_value(serde_json::json!({"keys":["value"]})).unwrap();
+        let result = owner.read_authorized(name, &read, &admin).await.unwrap();
+        assert_eq!(result.revision, 100);
+        assert_eq!(
+            result.values,
+            vec![Some(STANDARD.encode(vec![99; 64 * 1024]))]
+        );
+        if round == 0 {
+            // After replay, publish a real handoff checkpoint of the pruned
+            // projection, then verify both values and receipts from that image.
+            assert!(owner.maintain().await.unwrap());
+            drop(owner);
+            let mut root = super::checkpoint::budgeted_active(&connection).await;
+            root.select_journals().await.unwrap();
+            owner = live::open(root, limits).await;
+        }
+    }
 }

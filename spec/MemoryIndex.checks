@@ -3,3 +3,5 @@ unsafe MemoryIndexUnsafePartial.cfg memory-index-unsafepartial 512m Atomic
 unsafe MemoryIndexUnsafeLatest.cfg memory-index-unsafelatest 512m Atomic
 unsafe MemoryIndexUnsafeStatistics.cfg memory-statistics 512m Statistics
 unsafe MemoryIndexUnsafeQuota.cfg memory-quota 512m Quota
+unsafe MemoryIndexUnsafeFloor.cfg memory-index-unsafefloor 512m Atomic
+unsafe MemoryIndexUnsafeDelete.cfg memory-index-unsafedelete 512m Atomic

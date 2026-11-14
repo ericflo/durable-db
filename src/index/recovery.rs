@@ -91,7 +91,6 @@ struct Resident {
     state: Option<State>,
     receipts: usize,
     receipt_bytes: usize,
-    floor: u64,
     base: Option<checkpoint::DatabaseSnapshot>,
 }
 impl Resident {
@@ -143,6 +142,24 @@ impl Projection {
     }
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+    /// Reclaim only disposable value history at complete journal-frame
+    /// boundaries. Receipts, conflict history and durable collection cuts are
+    /// unchanged. The same pressure threshold applies during live publication
+    /// and private replay, so an overwrite-heavy suffix remains recoverable.
+    pub(crate) fn reclaim_versions(&mut self) {
+        if self.usage.versions < (self.limits.versions / 2).max(1)
+            && self.usage.value_bytes < (self.limits.value_bytes / 2).max(1)
+        {
+            return;
+        }
+        for resident in self.databases.values_mut() {
+            let before = resident.memory.usage();
+            resident.memory.reclaim_versions();
+            let after = resident.memory.usage();
+            self.usage.versions -= before.versions - after.versions;
+            self.usage.value_bytes -= before.bytes - after.bytes;
+        }
     }
     /// Warm only receipt metadata, retaining a complete committed projection
     /// even if the caller is cancelled during the preceding immutable reads.
@@ -216,7 +233,6 @@ impl Projection {
                 state: None,
                 receipts,
                 receipt_bytes,
-                floor,
                 base,
             },
         );
@@ -250,7 +266,7 @@ impl Projection {
         Ok(Some(View {
             statistics: resident
                 .map_or_else(|| base.as_ref().unwrap().statistics(), |r| r.statistics),
-            floor: resident.map_or_else(|| base.as_ref().unwrap().revision(), |r| r.floor),
+            floor: resident.map_or_else(|| base.as_ref().unwrap().revision(), |r| r.memory.floor()),
             memory: resident.map(|r| &r.memory),
             state,
             base,
@@ -494,6 +510,7 @@ impl Recovering {
                     .advance(&commit)?;
                 self.projection.apply(&commit, state).await?;
             }
+            self.projection.reclaim_versions();
         }
         Ok(self)
     }

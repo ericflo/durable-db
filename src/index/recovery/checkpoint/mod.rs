@@ -687,7 +687,6 @@ fn load_row(
                 state: Some(state),
                 receipts: 0,
                 receipt_bytes: 0,
-                floor: revision,
                 base: None,
             },
         );
