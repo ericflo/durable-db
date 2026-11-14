@@ -64,7 +64,8 @@ struct Serve {
     /// File holding the token signing key. Created if missing in directory mode.
     #[arg(long, env = "DURABLE_DB_KEY_FILE")]
     key_file: Option<PathBuf>,
-    /// DNS name that resolves to every server, such as a Kubernetes headless Service.
+    /// Every server of the deployment: a DNS name that resolves to all of them (a Kubernetes
+    /// headless Service), or a comma-separated list of host:port addresses.
     #[arg(long, env = "DURABLE_DB_PEERS", requires = "advertise")]
     peers: Option<String>,
     /// This server's address as its peers reach it, such as $(POD_IP):7654.
@@ -290,16 +291,32 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
             loop {
                 tick.tick().await;
                 if let Some(peers) = &peers {
-                    cluster.resolve(peers, port).await;
+                    // A list of addresses is used as given; a single name is
+                    // resolved each tick, which is how a Kubernetes headless
+                    // Service reports the pods that are currently ready.
+                    if peers.contains(',') || peers.parse::<SocketAddr>().is_ok() {
+                        cluster.set_peers(
+                            peers
+                                .split(',')
+                                .map(|peer| peer.trim().to_owned())
+                                .collect(),
+                        );
+                    } else {
+                        cluster.resolve(peers, port).await;
+                    }
                     // Hand over databases that now belong to another member,
                     // a few at a time, so a membership change is not a stampede.
-                    for name in node
-                        .open_names()
-                        .into_iter()
-                        .filter(|name| cluster.owner(name).is_some())
-                        .take(16)
-                    {
-                        node.release(&name).await;
+                    let mut handed = 0;
+                    for name in node.open_names() {
+                        if handed == 16 {
+                            break;
+                        }
+                        if let Some(peer) = cluster.owner(&name)
+                            && cluster.alive(&peer).await
+                        {
+                            node.release(&name).await;
+                            handed += 1;
+                        }
                     }
                 }
                 node.tend().await;

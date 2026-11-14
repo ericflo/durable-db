@@ -141,6 +141,23 @@ impl Cluster {
         }
     }
 
+    /// Whether `peer` answers right now. A database is handed to a peer only
+    /// after this, so an unreachable member never causes a pointless release.
+    pub async fn alive(&self, peer: &str) -> bool {
+        let probe = self
+            .client
+            .get(format!("http://{peer}/healthz"))
+            .timeout(Duration::from_secs(1));
+        let alive = probe
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success());
+        if !alive {
+            self.suspect(peer);
+        }
+        alive
+    }
+
     /// Resolve a DNS name (a Kubernetes headless Service) to the current members.
     pub async fn resolve(&self, name: &str, port: u16) {
         match tokio::net::lookup_host((name, port)).await {
