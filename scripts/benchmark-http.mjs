@@ -48,6 +48,7 @@ const report = {
   schema:1, started_at:new Date().toISOString(), context:args.context,
   binary_sha256:args.binary ? createHash('sha256').update(await readFile(args.binary)).digest('hex') : null,
   configuration:{databases:count,workers,operations_per_worker:operations,value_bytes:valueBytes,
+    database_prefix:'bench-'+randomUUID(),
     endpoints:urls.length,max_attempts:maxAttempts,operation_deadline_seconds:120,load_model:'closed-loop',
     transport:'SDK per-database HTTP/1 pools',node:process.version,tenant_upload_budget:uploadLimits},
   limitations:['Small samples are descriptive, not an SLO guarantee.',
@@ -113,7 +114,7 @@ function payload(worker,sequence) {
 }
 const databases = [];
 try {
-  const prefix = 'bench-'+randomUUID();
+  const prefix = report.configuration.database_prefix;
   for (let n=0;n<count;n++) {
     const db={name:`${prefix}-${String(n).padStart(6,'0')}`,revision:0,value:payload(n,0)};
     if (uploadLimits) await request(urls[0],`/v1/databases/${db.name}/upload-budget`,admin,
@@ -160,7 +161,8 @@ try {
           } catch (error) {
             phase.failed++; bump(phase.failure_reasons,error.message);
           }
-          phase.samples.push({worker,ok,elapsed_ms:Number((performance.now()-start).toFixed(3))});
+          phase.samples.push({worker,sequence:n,ok,start_offset_ms:Number((start-begin).toFixed(3)),
+            elapsed_ms:Number((performance.now()-start).toFixed(3))});
           // An exhausted ambiguous write must not be followed by a fresh write ID.
           if (!ok) break;
         }

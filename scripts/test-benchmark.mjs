@@ -86,6 +86,18 @@ try {
   assert.equal(result.budgets.databases[2].allocated.bytes,67108864);
   assert.equal(result.budgets.namespace.allocated.bytes,33554432);
   assert.ok(Date.parse(p.finished_at)>=Date.parse(p.started_at));
+  const prefix=result.configuration.database_prefix;
+  assert.match(prefix,/^bench-[0-9a-f-]{36}$/);
+  for (let worker=0;worker<3;worker++) {
+    assert.ok(databases.has(`${prefix}-${String(worker).padStart(6,'0')}`));
+    const samples=p.samples.filter(sample=>sample.worker===worker);
+    assert.deepEqual(samples.map(sample=>sample.sequence),worker===0?[0,1]:[0]);
+    for (const [index,sample] of samples.entries()) {
+      assert.ok(sample.start_offset_ms>=0);
+      assert.ok(sample.start_offset_ms+sample.elapsed_ms<=p.elapsed_seconds*1000+1);
+      if (index) assert.ok(sample.start_offset_ms>=samples[index-1].start_offset_ms+samples[index-1].elapsed_ms-0.001);
+    }
+  }
   for (const fault of [null,'value','receipt']) {
     coldFault=null;
     const suffix=fault??'ok', barrier=join(root,'barrier-'+suffix), resultPath=join(root,'cold-'+suffix+'.json');

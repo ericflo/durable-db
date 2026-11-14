@@ -1,5 +1,73 @@
 # Verification results
 
+## Classify failed uploads and wake recovery (2026-11-14)
+
+**v1.0.12**, source `cc81729` from Woodpecker **429**, wakes existing placement
+when a native worker retires. The three-second poll remains a fallback.
+Notifications do not reset acquisition pacing, bypass resident reservations or
+consume pending membership changes. Durable ownership checks are unchanged.
+
+The existing provider connector now records failed PUT response status or typed
+transport-error class, elapsed time and journal owner/position. It returns the
+original response/error without replay. URLs, headers, bodies and raw errors
+are excluded. HTTP status does not establish a definitive abort or identify the
+provider's internal cause; a successful header followed by a body/decode error
+may have no boundary failure event.
+
+The lost-journal-reply TCP regression reacquires within one second, preserving
+exact receipts and excluding a late old-owner upload. It passes in **0.17s**;
+disabling only the notification reproduces the timeout. All **396 enabled Rust
+tests**, formatting and strict Clippy pass. One-attempt transport tests cover
+success, redirects, client/server errors, missing replies and timeouts, including
+sensitive-log sentinels. The unchanged `OwnerResidency` transitions check **19
+states**, 46 generated, depth 5, with both unsafe controls. Three owner identities
+and two slots check bounded/funded residency; this is not Rust refinement or a
+proof of complete protocol composition.
+
+Two B2 runs use **32 databases, 64 KiB values, 32 admission slots and three hosts**:
+
+| Run | Operations | 32-worker writes/s | Write p95 | Worst write | Reads/s | Read p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Diagnostics only (`47b08dd`, CI 428), 20 operations/worker/phase | 2,120 | 20.41 | 1.59s | 12.77s | 147.33 | 248ms |
+| Release candidate, 100 operations/worker/phase | 6,400 | 12.65 | 4.44s | 80.52s | 184.01 | 254ms |
+
+Both complete every operation and **32 final value/revision checks**. The control
+also runs 1/4/16-worker phases and has no journal upload failures. The release
+run has **four HTTP 500 journal responses and one Request transport failure**.
+Two separate uploads are provably unsent and do not retire their owners; their
+specific admission cause is not identified. Two other unscoped provider failures
+occur after measured work. The evidence preserves them separately.
+
+After each ambiguous journal failure, acquisition starts in **81–122ms**, versus
+**1.09–2.70s** in v1.0.11. Full owner recovery still takes **11.85–30.40s**. The
+longer write phase retries **65 HTTP 429 and 406 HTTP 503 responses**. It completes
+21 checkpoints, up to **19.83s**, and records preparation up to **27.71s**,
+five roughly **25s** forwarding timeouts and successful HTTP commits up to
+**21.72s**. These overlapping timers do not explain the entire **80.52s** worst
+client write. Samples from these runs lack per-operation start offsets and
+database names; the existing benchmark now records a synthetic database prefix,
+worker sequence and start offset to correlate the next campaign's stalls.
+
+This is evidence of a removed scheduling delay and classified failures, not a
+general throughput improvement. Run length, randomized placement and provider
+conditions differ. The HTTP 500s do not establish throttling, and the transport
+class does not identify a particular TCP cause. Older failures cannot be
+retroactively classified. Recovery, funding and forwarding tails remain open;
+no latency or availability SLO is claimed.
+
+Release setup takes **303.51s**, excluded from throughput. Peak sampled RSS is
+**33.04 MiB** per pod, maximum sampled CPU is **0.315 cores**, and no pod restarts
+or replacements occur. Counters record **3,276 prepared records in 3,083 frames**,
+including setup/catalog work and failed attempts; these are not billed PUTs.
+The [exact evidence](evidence/upload-recovery-2026-11-14.json) retains both
+artifacts, all samples, resource observations, failure/recovery stages and hashes.
+The release binary also passes export/restore, exact retry and kill/reopen.
+Both namespaces, buckets and scoped keys are removed, including **2,450 remaining
+physical versions**. The existing connector, controller, regression and model
+were reused. The poll delay and incorrect membership acknowledgement were
+removed; temporary negative-control changes and model scratch were cleaned up.
+The scoped 1.0 support boundary is unchanged.
+
 ## Confirm uncertain tenant funding (2026-11-14)
 
 **v1.0.11**, source `b70ff41` from Woodpecker **425**, adds one bounded readback

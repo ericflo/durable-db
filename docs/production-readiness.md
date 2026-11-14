@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.11, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.12, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -36,9 +36,9 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. [v1.0.11](verification-results.md#confirm-uncertain-tenant-funding-2026-11-14) confirms uncertain tenant-ledger publications only when the originating invocation can read its exact fresh directory root. The TCP fault regression eliminates a post-checkpoint HTTP 503 with one grant; cancellation and restart create no credit.
+These remain follow-up work, not discarded goals. [v1.0.12](verification-results.md#classify-failed-uploads-and-wake-recovery-2026-11-14) removes the normal placement poll delay after a serving worker retires and records failed provider PUT status or transport class. It preserves acquisition pacing, resident-memory reservations and durable ownership checks.
 
-All **2,120 B2 operations** and **32 final-state checks** pass, but the 32-worker phase is worse than v1.0.10: **8.66 writes/s, 7.02s write p95 and a 29.51s worst write**, with five ambiguous journal uploads requiring owner recovery. No new funding confirmations occur in this cloud sample. It therefore establishes neither a throughput improvement nor a causal explanation for the earlier preparation failure. The next investigation targets those upload failures and their recovery/checkpoint costs.
+All **6,400 B2 operations** and **32 final-state checks** pass. Five ambiguous journal uploads are classified as **four HTTP 500 responses and one Request transport failure**. Recovery starts in **81–122ms**, versus **1.09–2.70s** in the previous run, but full owner recovery still takes **11.85–30.40s**. The longer 32-worker run measures **12.65 writes/s, 4.44s write p95 and an 80.52s worst write**, with **65 HTTP 429 and 406 HTTP 503 responses** retried. The shorter diagnostic-only control has no upload failures and reaches **20.41 writes/s**; different duration, randomized placement and provider conditions prevent a causal throughput comparison. Reducing recovery, funding and forwarding stalls remains the next priority.
 
 The [B2 cold-start check](verification-results.md#long-journal-cold-recovery-on-b2-2026-11-14) recovers a **102-frame uncheckpointed suffix** after every database process is frozen and all three pods are replaced. Revision 101, the current value, ordered scan and identical retry receipt survive; a new revision 102 commits and reads back. The first correct read takes **37.67s after client retries resume**; this is one fixture, not a recovery SLO.
 
