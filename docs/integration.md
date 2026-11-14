@@ -17,12 +17,23 @@ Following NeuralColumn's own deployment rules (`DEPLOYMENT.md` there): the appli
 
 1. **Image.** This repository's Woodpecker pipeline already publishes `registry.clouderic.svc.cluster.local:5000/durable-db:main-<timestamp>-<sha12>` on every push to `main`, with provenance. The repository must be admitted to Woodpecker through Epsilon's reconciler (`platform/ci/reconcile.py`), as other repositories are.
 2. **Bucket.** A new private B2 bucket used by nothing else, for example `neuralcolumn-db`, and an application key restricted to it with `listBuckets`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles`. No lifecycle rules. Do not reuse the `neuralcolumn` bucket: durable-db deletes objects under its prefix by listing, and a shared bucket puts site files one misconfigured prefix away from that.
-3. **Manifests.** Add `apps/durable-db/` to Epsilon with the contents of [`deploy/kubernetes`](../deploy/kubernetes) in its own namespace, plus:
-   - `Secret/durable-db-keys` (SOPS): `admin.key`, from `openssl rand -hex 32`.
-   - `Secret/durable-db-storage` (SOPS): `DURABLE_DB_BUCKET`, `DURABLE_DB_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
-   - An `ImageRepository`, `ImagePolicy` (newest `main-*` tag by timestamp) and `ImageUpdateAutomation`, as for NeuralColumn.
-   - A `NetworkPolicy` that admits traffic to port 7654 only from the NeuralColumn server's pods and from durable-db's own pods. There is no Ingress: the service is not exposed outside the cluster.
-   - A scrape of `/metrics`.
+3. **Manifests.** In Epsilon, following the pattern of `apps/neuralcolumn`:
+   - `apps/durable-db/namespace.yaml`: namespace `durable-db` with the `pod-security.kubernetes.io/enforce: restricted` labels. The shipped Deployment already satisfies the restricted profile (non-root, no privilege escalation, all capabilities dropped, read-only root filesystem, `RuntimeDefault` seccomp).
+   - `apps/durable-db/`: `deployment.yaml`, `service.yaml` and `autoscaling.yaml` from [`deploy/kubernetes`](../deploy/kubernetes), with `namespace: durable-db` added.
+   - `apps/durable-db/kustomization.yaml`: those resources plus the image entry Flux rewrites:
+     ```yaml
+     images:
+       - name: durable-db
+         newName: localhost:32000/durable-db
+         newTag: main-00000000000000-000000000000 # {"$imagepolicy": "flux-system:durable-db:tag"}
+         digest: sha256:... # {"$imagepolicy": "flux-system:durable-db:digest"}
+     ```
+   - `apps/durable-db/keys.sops.yaml`: `Secret/durable-db-keys` with `admin.key` from `openssl rand -hex 32`.
+   - `apps/durable-db/storage.sops.yaml`: `Secret/durable-db-storage` with `DURABLE_DB_BUCKET`, `DURABLE_DB_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+   - `apps/durable-db/networkpolicy.yaml`: admit port 7654 only from pods in the `neuralcolumn` namespace and from durable-db's own pods (they relay to each other). There is no Ingress: the service is not exposed outside the cluster.
+   - `platform/ci-image-automation/image-policies.yaml`: an `ImageRepository` for `10.152.183.183:5000/durable-db`, an `ImagePolicy` with the same `^main-(?P<timestamp>[0-9]{14})-(?P<sha>[0-9a-f]{12})$` filter as the others, and an `ImageUpdateAutomation` for `./apps/durable-db`.
+   - `clusters/epsilon/platform.yaml`: a Flux `Kustomization` named `durable-db` for `./apps/durable-db` with SOPS decryption, and `dependsOn: [{name: durable-db}]` on NeuralColumn's once it uses the service.
+   - A scrape of `/metrics` in `platform/observability-config`.
 4. **NeuralColumn's side.** The NeuralColumn server needs the same `admin.key` (a second SOPS secret in its namespace) to mint tokens, and the Service URL `http://durable-db.durable-db.svc.cluster.local:7654`.
 
 Rolling updates of durable-db do not take databases offline: each pod hands its databases over before it exits. This is unlike the NeuralColumn server, which is a single replica.
