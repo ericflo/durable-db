@@ -97,6 +97,52 @@ Two things keep B2's slow moments from becoming yours:
 - **Known pods first, and a duplicate where one can be spared.** B2 stores each upload on one of many storage pods, and pods differ: the same 4 KiB upload measured medians from 67 ms to over 900 ms on eight pods at one moment, and of ten new pods tried one at a time four were fast. durable-db keeps the pods it has used in order of speed. The upload a commit waits for takes the fastest one that is free. An identical upload starts beside it on another pod, a slower known one or a new one, and one more every 150 ms while none has finished, up to four; the first to finish wins. At most eight new pods are on trial at a time, and when many databases commit at once and no pod can be spared, the duplicate is not sent. Uploads are free on B2. In five logged runs with one database, one upload in five finished on the duplicate and not on the upload it started beside.
 - **B2's native upload call.** PutObject through B2's S3-compatible gateway measured 150 to 260 ms at the median for the same object; B2's own upload call measured 71 ms. Uploads use the native call; everything else uses the S3 API.
 
+### When many databases collect at once
+
+Collection lists the versions it may remove and removes them. Up to release 2.1.1 every version was removed with a request of its own, 32 at a time for each database. Three things make many databases collect in the same second: databases that stop being written together flush together five seconds later, a server that is stopped seals and collects every database it holds, and databases that began together reach their 512th group of commits together. With 64 databases the server then opened about a thousand connections to B2 at once and B2 reset some of them. A purge whose request was reset failed, and what it had not removed waited for the next collection. Nothing was lost by that, and nothing was reported: the failure was a line in the debug log that did not say what had failed.
+
+Since 2.1.2 one request removes up to a thousand versions, which B2 answered in 0.25 s, and a request of a purge that is not answered is sent again twice before the purge fails ([verification](verification.md#what-these-checks-found), finding 32).
+
+**64 databases written for ten seconds, left alone, and the server stopped 25 seconds later.** Two runs of each release in turn:
+
+| | Release 2.1.1 | Release 2.1.2 |
+| --- | --- | --- |
+| Purges that failed | 26 of 158, 75 of 159 | 0 of 159, 0 of 156 |
+| Most open files after the load (and under it) | 1,136 (382), 1,486 (353) | 248 (343), 258 (358) |
+| Most memory after the load (and under it) | 154 (78), 145 (75) MiB | 97 (82), 91 (80) MiB |
+| Stopping the server, all 64 databases released | 7.2, 8.6 s | 3.6, 6.1 s |
+
+Four more runs of 2.1.1 made earlier the same day measured 35 to 67 failed purges of about 190, 1,171 to 1,297 open files and 136 to 169 MiB.
+
+**64 clients over 64 databases for 100 seconds**, so that every database flushes and collects once while it is written:
+
+| | Release 2.1.1 | Release 2.1.2 |
+| --- | --- | --- |
+| Commits/s | 631 | 669, 670 |
+| p99 of a commit | 414 ms | 290, 284 ms |
+| p99.9 of a commit | 1,954 ms | 692, 735 ms |
+| Purges that failed | 156 of 629 | 0 of 645, 0 of 643 |
+| Time spent in purges, all databases together | 931 s | 335, 286 s |
+
+The three runs are in the order 2.1.2, 2.1.1, 2.1.2. Three runs of 2.1.1 made about an hour earlier measured 644, 651 and 643 commits/s with a p99 of 282, 268 and 298 ms, and 124 of 668, 162 of 621 and 154 of 647 failed purges: its failures are in every run, and its slower commits in the run above are not.
+
+**256 databases, one client each, the same way**: ten seconds of writes on a new server, 25 seconds alone, then stopped. Two runs of each release in turn, each server held to 4,096 open files:
+
+| | Release 2.1.1 | Release 2.1.2 |
+| --- | --- | --- |
+| Purges that failed | 127 of 586, 197 of 587 | 0 of 596, 0 of 589 |
+| Most open files after the load (and under it) | 1,715 (1,352), 1,542 (1,291) | 870 (1,370), 926 (1,427) |
+| Most memory after the load (and under it) | 267 (140), 216 (133) MiB | 196 (144), 210 (149) MiB |
+| Stopping the server, all 256 databases released | 22.7, 19.1 s | 6.5, 14.5 s |
+| Commits/s in those ten seconds | 971, 336 | 1,127, 996 |
+| p99 of a commit | 2.3, 4.4 s | 2.3, 2.6 s |
+
+The last two rows are a new server's first ten seconds with more databases than it knows storage pods for, which this page had not measured before. Committing is the same code in both releases, and the row moves by a factor of three: two earlier runs measured 293 commits/s with 2.1.1 and 1,130 with a build between the two releases. The memory a server holds after the load is the flush of every database at once, which the flags bound ([deployment](deployment.md#on-kubernetes)).
+
+To repeat the first table, start a server, run `durable-db bench --workload write --clients 64 --databases 64 --keep` against it, and for the next half minute and while the server stops, sample `ls /proc/<pid>/fd | wc -l`, the resident memory of the server, and `durable_db_storage_failures_total{op="purge"}` and `durable_db_storage_seconds_count{op="purge"}` from `/metrics`. The third is the first with 256 clients and databases. The second table is the same load with `--seconds 100` and without `--keep`, and its figures are read from `/metrics` when `bench` exits, after it has deleted its databases.
+
+A store that refuses the request for many versions gets a request for each version, as before, and the server says so once in its log. Among cloud stores only B2 has been exercised.
+
 ### Opening a database
 
 A database is opened by the first request that needs it and stays open while it is used (five minutes idle by default). These times were measured with release 2.1.0.
@@ -124,6 +170,20 @@ From `scripts/test-kubernetes.sh` on a three-node kind cluster on the same deskt
 | Slowest transfer | 14.6; 16.3; 8.4; 9.7 s | 12.2; 25.4; 16.6; 6.2; 6.5 s |
 
 Every ledger verified. The load generator does not repeat a read, and a force-deleted pod breaks the connections it holds. Five pods were ready at most in every run that recorded it; the test used to report the first count it saw above two, which is all that is known of the first run of each release.
+
+Three more runs were made in the evening of the same day, when the bucket answered more slowly for both releases: one client's commit took 99 ms at the median with 2.1.1 and 107 ms with 2.1.2, against 64 to 76 ms when the one-database table of this page was measured.
+
+| In this order | Release 2.1.2 | Release 2.1.1 | Release 2.1.2 |
+| --- | --- | --- | --- |
+| Session reads/s | 147,631 | 120,014 | 120,892 |
+| Reads that failed | 110 | 0 | 99 |
+| Reads told to wait | 13 | 0 | 62 |
+| Ledger transfers/s | 50 | 56 | 63 |
+| Transfer, p50 | 200 ms | 181 ms | 166 ms |
+| Transfer, p99 | 1,240 ms | 1,097 ms | 923 ms |
+| Slowest transfer | 10.2 s | 10.0 s | 12.8 s |
+
+Every ledger verified: 12,026, 13,349 and 15,098 transfers. A transfer waits for the bucket, so the ledger's rate follows what the bucket takes at that hour; these three runs show no difference between the releases.
 
 **The read figure moves by a third from run to run, with either release.** Nine runs do not show a difference between the releases and do not rule one out. After the first five, every run of 2.1.1 lay below every run of 2.1.0, and the notes of release 2.1.1 said that the figure had gone the wrong way for a reason not established; the next four runs, two of each release, came out the other way round once and did not bear that out. What is established:
 
@@ -179,7 +239,7 @@ Uploads are free on B2; HEAD and GET are billed per call, LIST at a higher rate.
 | Commit | One HEAD per group of transactions; uploads (one to four on B2) |
 | Strong read | One HEAD per group of concurrent reads, at most two groups in flight |
 | Session read from cache | None |
-| Flush (every 8 MiB, 512 groups, or 5 s of quiet) | Two uploads, one HEAD, two version listings, deletes |
+| Flush (every 8 MiB, 512 groups, or 5 s of quiet) | Two uploads, one HEAD, two version listings, and a removal for each listing page that found something to remove |
 | Opening a database | Six or seven listings (two of them a background sweep for leftovers), one GET, one HEAD, two uploads |
 | An idle database | Nothing |
 
@@ -188,7 +248,7 @@ A database committing as fast as B2 allows from one location runs about ten grou
 ## What is not measured yet
 
 - B2 from a server in a data centre, on a wired link. Every B2 figure here was measured over Wi-Fi from one desktop, for minutes at a time, and that includes the measurements behind the choice of storage pods.
-- More databases committing at once on B2 than a server knows fast pods for.
+- More databases committing at once on B2 than a server knows fast pods for, beyond a new server's first ten seconds with 256 of them, which measured between 293 and 1,130 commits/s.
 - What sets the read figure of the Kubernetes test, which moves by a third from run to run, beyond the share of reads that are relayed.
 - Amazon S3 or any provider other than B2.
 - A server in the same region as its bucket.

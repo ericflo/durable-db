@@ -15,12 +15,16 @@
 //! that results is the same object; nothing above this file can tell.
 use super::{Listed, ObjectStore, StoreError, StoreResult};
 use async_trait::async_trait;
+use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
 use hmac::{Hmac, Mac};
 use reqwest::{Method, StatusCode};
 use sha2::{Digest, Sha256};
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -39,17 +43,35 @@ pub struct S3Store {
     host: String,
     client: reqwest::Client,
     b2: Option<Arc<B2Uploader>>,
+    /// Whether the bucket takes one request that removes many versions. A
+    /// bucket that has refused it is not asked again.
+    batches: AtomicBool,
 }
 
 /// A failed exchange. The URL names the bucket and the key, and neither
 /// belongs in a message that may reach a client.
 fn network(error: reqwest::Error) -> StoreError {
-    StoreError::Unavailable(error.without_url().to_string())
+    let error = error.without_url();
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        // What went wrong is in the causes, which a client is not told.
+        let mut causes = String::new();
+        let mut cause = std::error::Error::source(&error);
+        while let Some(inner) = cause {
+            causes = format!("{causes}: {inner}");
+            cause = inner.source();
+        }
+        tracing::debug!("a storage request failed: {error}{causes}");
+    }
+    StoreError::Unavailable(error.to_string())
 }
 
 /// How long to wait for the first byte of an answer, and for each further
 /// part of it.
 const PATIENCE: Duration = Duration::from_secs(20);
+/// How often a purge sends one of its requests again.
+const PURGE_AGAIN: u32 = 2;
+/// How many versions one request may remove, by the S3 API.
+const BATCH: usize = 1000;
 
 /// The whole body of a response. Its size is not known in advance, so the
 /// limit is on each wait for more of it rather than on the transfer.
@@ -139,6 +161,38 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// The body of a request that removes these versions, if XML can name them
+/// all: it has no way to write most control characters.
+fn removal_of(versions: &[(String, String)]) -> Option<String> {
+    let mut body = String::from("<Delete><Quiet>true</Quiet>");
+    for (key, version) in versions {
+        let unwritable = |c: char| c < ' ' || matches!(c, '\u{fffe}' | '\u{ffff}');
+        if key.chars().chain(version.chars()).any(unwritable) {
+            return None;
+        }
+        body.push_str("<Object><Key>");
+        escape_into(&mut body, key);
+        body.push_str("</Key><VersionId>");
+        escape_into(&mut body, version);
+        body.push_str("</VersionId></Object>");
+    }
+    body.push_str("</Delete>");
+    Some(body)
+}
+
+fn escape_into(out: &mut String, text: &str) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+}
+
 /// The text of the first `<tag>` element in `xml`.
 fn tag<'a>(xml: &'a str, name: &str) -> Option<&'a str> {
     let open = format!("<{name}>");
@@ -217,12 +271,19 @@ impl S3Store {
             host,
             client,
             b2: None,
+            batches: AtomicBool::new(true),
         })
     }
 
     /// Whether this endpoint is Backblaze B2.
     pub fn is_backblaze(&self) -> bool {
         self.host.ends_with(".backblazeb2.com")
+    }
+
+    /// Whether the bucket still takes one request that removes many
+    /// versions: not once it has refused one.
+    pub fn removes_many(&self) -> bool {
+        self.batches.load(Ordering::Relaxed)
     }
 
     /// Upload through `b2_upload_file` instead of PutObject.
@@ -248,6 +309,20 @@ impl S3Store {
         range: Option<(u64, u64)>,
         body: Bytes,
     ) -> StoreResult<Reply> {
+        self.exchange(method, key, query, range, body, false).await
+    }
+
+    /// `send`, and with `checked` the request also carries a checksum of
+    /// its body, which a request that removes many versions must.
+    async fn exchange(
+        &self,
+        method: Method,
+        key: &str,
+        query: &[(&str, &str)],
+        range: Option<(u64, u64)>,
+        body: Bytes,
+        checked: bool,
+    ) -> StoreResult<Reply> {
         let path = if key.is_empty() {
             format!("/{}", self.config.bucket)
         } else {
@@ -263,10 +338,20 @@ impl S3Store {
             .map(|(n, v)| format!("{n}={v}"))
             .collect::<Vec<_>>()
             .join("&");
-        let payload_hash = hex_sha256(&body);
+        let digest = Sha256::digest(&body);
+        let payload_hash = hex::encode(digest);
+        // Every x-amz header that is sent is signed, in order of its name.
+        let checksum = checked.then(|| base64::engine::general_purpose::STANDARD.encode(digest));
+        let (checksum_line, signed) = match &checksum {
+            Some(checksum) => (
+                format!("x-amz-checksum-sha256:{checksum}\n"),
+                "host;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date",
+            ),
+            None => (String::new(), "host;x-amz-content-sha256;x-amz-date"),
+        };
         let (date, time) = timestamp();
         let canonical = format!(
-            "{method}\n{path}\n{query_string}\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{time}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload_hash}",
+            "{method}\n{path}\n{query_string}\nhost:{}\n{checksum_line}x-amz-content-sha256:{payload_hash}\nx-amz-date:{time}\n\n{signed}\n{payload_hash}",
             self.host
         );
         let scope = format!("{date}/{}/s3/aws4_request", self.config.region);
@@ -283,7 +368,7 @@ impl S3Store {
         }
         let signature = hex::encode(hmac(&signing, &to_sign));
         let authorization = format!(
-            "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={signature}",
+            "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={signature}",
             self.config.access_key_id
         );
         let url = if query_string.is_empty() {
@@ -303,6 +388,9 @@ impl S3Store {
         if let Some((start, end)) = range {
             request = request.header("range", format!("bytes={start}-{}", end.saturating_sub(1)));
         }
+        if let Some(checksum) = checksum {
+            request = request.header("x-amz-checksum-sha256", checksum);
+        }
         let response = match tokio::time::timeout(patience, request.body(body).send()).await {
             Ok(response) => response.map_err(network)?,
             Err(_) => return Err(StoreError::Unavailable("a storage request stalled".into())),
@@ -312,7 +400,9 @@ impl S3Store {
         // S3 reports a connection it gave up on as a client error.
         let gave_up = status == StatusCode::BAD_REQUEST
             && tag(&String::from_utf8_lossy(&body), "Code") == Some("RequestTimeout");
-        if status.is_server_error()
+        // A request the store has not implemented is refused, not delayed:
+        // the next attempt would be answered the same.
+        if (status.is_server_error() && status != StatusCode::NOT_IMPLEMENTED)
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
             || gave_up
@@ -370,31 +460,100 @@ impl S3Store {
         ))
     }
 
-    /// Remove these exact versions, a few at a time.
-    async fn delete_versions(&self, versions: &[(String, String)]) -> StoreResult<()> {
-        for chunk in versions.chunks(32) {
-            futures::future::try_join_all(chunk.iter().map(|(key, version)| async move {
-                // A version written before the bucket kept versions is named
-                // "null". It is removed by that name; without one, a bucket
-                // that keeps versions would only add a delete marker.
-                let reply = self
-                    .send(
-                        Method::DELETE,
-                        key,
-                        &[("versionId", version)],
-                        None,
-                        Bytes::new(),
-                    )
-                    .await?;
-                if reply.status.is_success() || reply.absent() {
-                    Ok(())
-                } else {
-                    Err(self.refused("DELETE", &reply))
+    /// One request of a purge, sent again if it is not answered. Listing
+    /// versions and removing them are both safe to repeat, and a purge that
+    /// fails leaves what it has not removed to the next collection.
+    async fn purging(
+        &self,
+        method: Method,
+        key: &str,
+        query: &[(&str, &str)],
+        body: Bytes,
+    ) -> StoreResult<Reply> {
+        let checked = !body.is_empty();
+        let mut failures = 0;
+        loop {
+            let sent = self.exchange(method.clone(), key, query, None, body.clone(), checked);
+            match sent.await {
+                Err(StoreError::Unavailable(_)) if failures < PURGE_AGAIN => {
+                    failures += 1;
+                    tokio::time::sleep(Duration::from_millis(25 << failures)).await;
                 }
-            }))
-            .await?;
+                answered => return answered,
+            }
+        }
+    }
+
+    /// Remove these exact versions.
+    ///
+    /// One request removes up to a thousand of them. A bucket that refuses
+    /// it gets a request for each version, 32 at a time. That was the only
+    /// form until 64 databases collecting at once were measured on
+    /// Backblaze: the server opened 1,200 sockets, some were reset, and
+    /// about one purge in four failed.
+    async fn delete_versions(&self, versions: &[(String, String)]) -> StoreResult<()> {
+        for chunk in versions.chunks(BATCH) {
+            if self.batches.load(Ordering::Relaxed)
+                && let Some(body) = removal_of(chunk)
+            {
+                if self.delete_batch(body).await? {
+                    continue;
+                }
+                if self.batches.swap(false, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "the bucket refused a request to remove many versions; each is removed with a request of its own"
+                    );
+                }
+            }
+            for few in chunk.chunks(32) {
+                futures::future::try_join_all(few.iter().map(|(key, version)| async move {
+                    // A version written before the bucket kept versions is
+                    // named "null". It is removed by that name; without one,
+                    // a bucket that keeps versions would only add a delete
+                    // marker.
+                    let query = [("versionId", version.as_str())];
+                    let reply = self
+                        .purging(Method::DELETE, key, &query, Bytes::new())
+                        .await?;
+                    if reply.status.is_success() || reply.absent() {
+                        Ok(())
+                    } else {
+                        Err(self.refused("DELETE", &reply))
+                    }
+                }))
+                .await?;
+            }
         }
         Ok(())
+    }
+
+    /// Send one request that removes many versions. `false` says that the
+    /// bucket does not take such a request.
+    async fn delete_batch(&self, body: String) -> StoreResult<bool> {
+        let reply = self
+            .purging(Method::POST, "", &[("delete", "")], Bytes::from(body))
+            .await?;
+        let text = String::from_utf8_lossy(&reply.body);
+        if !reply.status.is_success() || !text.contains("<DeleteResult") {
+            return Ok(false);
+        }
+        // The answer names only what was not removed.
+        for error in tags(&text, "Error") {
+            match (tag(error, "Key"), tag(error, "Code")) {
+                // A version that is not there was removed before, by this
+                // request when its answer was lost.
+                (Some(_), Some("NoSuchVersion" | "NoSuchKey")) => {}
+                (Some(_), code) => {
+                    return Err(StoreError::Unavailable(format!(
+                        "a version was not removed: {}",
+                        code.unwrap_or("no reason given")
+                    )));
+                }
+                // An error that names no key is about the request.
+                (None, _) => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -959,9 +1118,7 @@ impl ObjectStore for S3Store {
                 query.push(("key-marker", key));
                 query.push(("version-id-marker", version));
             }
-            let reply = self
-                .send(Method::GET, "", &query, None, Bytes::new())
-                .await?;
+            let reply = self.purging(Method::GET, "", &query, Bytes::new()).await?;
             if !reply.status.is_success() {
                 return Err(self.refused("LIST versions", &reply));
             }

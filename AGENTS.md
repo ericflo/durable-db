@@ -4,7 +4,7 @@ durable-db is a small, auditable, transactional ordered database whose source of
 
 ## The design, in rules
 
-- **Storage is PUT, GET, LIST and DELETE with read-after-write consistency. Nothing else.** Never use conditional writes (`If-Match`, `If-None-Match`): Backblaze B2 rejects them, and B2 and S3 must run the same algorithm. One operation may have a second wire form when measurement justifies it (B2's native upload); the algorithm above it must not change.
+- **Storage is PUT, GET, LIST and DELETE with read-after-write consistency. Nothing else.** Never use conditional writes (`If-Match`, `If-None-Match`): Backblaze B2 rejects them, and B2 and S3 must run the same algorithm. One operation may have a second wire form when measurement justifies it (B2's native upload, one request that removes many versions); the algorithm above it must not change.
 - **The bucket is authoritative.** Memory and disk caches are bounded and disposable. A pod-local lock, clock, cache, Kubernetes lease or termination hook is never a correctness dependency. Membership only routes.
 - **Every object is immutable and written by one epoch.** An acknowledgement, a linearizable read, a refusal and a deletion each wait for a claim check that began after the bytes they depend on were stored.
 - **A server never deletes its own claim while one of its manifest uploads may still arrive.**

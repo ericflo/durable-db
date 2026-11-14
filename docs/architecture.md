@@ -4,7 +4,7 @@ durable-db stores each database as a set of immutable objects in a bucket. Serve
 
 ## What storage must provide
 
-Six operations: **PUT**, **GET** (whole or a byte range), **HEAD**, **LIST** by prefix, **DELETE**, and a version-aware delete used only for cleanup. Two guarantees:
+Six operations: **PUT**, **GET** (whole or a byte range), **HEAD**, **LIST** by prefix, **DELETE**, and a version-aware delete used only for cleanup: it lists the versions under a prefix and removes them by name, up to a thousand with one request where the store takes such a request and one at a time where it does not. Two guarantees:
 
 1. **Read-after-write.** Once a PUT or DELETE has returned, every GET, HEAD and LIST that starts afterwards observes it.
 2. **Whole objects.** A reader sees a complete object or none.

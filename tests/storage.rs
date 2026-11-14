@@ -13,6 +13,7 @@ use axum::{
     http::{Method, StatusCode},
     response::Response,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use bytes::Bytes;
 use durable_db::{
     Error,
@@ -52,8 +53,19 @@ struct Bucket {
     page: usize,
     /// Keys visible at the time of each version listing.
     seen: Vec<Vec<String>>,
-    /// Answer the n-th version listing (from 1) with 503.
+    /// Answer the n-th version listing (from 1) and every later one with 503.
     fail_version_listing: Option<usize>,
+    /// Answer this many version listings, and this many requests that
+    /// remove versions, with 503.
+    fail_version_listings: usize,
+    fail_version_removals: usize,
+    /// Carry out this many requests that remove versions, and answer 503.
+    lose_removal_answers: usize,
+    /// Answer a request that removes many versions with this, as a store
+    /// that does not take one.
+    refuse_batches: Option<(StatusCode, &'static str)>,
+    /// A key whose versions such a request reports as not removed.
+    stuck: Option<String>,
     /// Answer this many listings with an empty page that says there is more.
     empty_pages: usize,
     /// Whether such a page says how to continue.
@@ -265,7 +277,21 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
     };
     let mut bucket = bucket.lock();
     bucket.requests += 1;
-    if let Err(error) = verify(parts.method.as_str(), &raw_path, &raw_query, &header, &body) {
+    let authorization = header("authorization").unwrap_or_default();
+    let signed = authorization
+        .split("SignedHeaders=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .unwrap_or_default();
+    let names = parts.headers.keys().map(|name| name.as_str());
+    let stray = names
+        .filter(|name| name.starts_with("x-amz-"))
+        .find(|name| !signed.split(';').any(|signed| signed == *name));
+    let verified = match stray {
+        Some(name) => Err(format!("{name} is sent and not signed")),
+        None => verify(parts.method.as_str(), &raw_path, &raw_query, &header, &body),
+    };
+    if let Err(error) = verified {
         bucket.unsigned.push(error);
         return reply(
             StatusCode::FORBIDDEN,
@@ -300,11 +326,17 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
             header("range"),
         );
     }
+    if parts.method == Method::POST && param("delete").is_some() {
+        return remove_many(&mut bucket, &body, header("x-amz-checksum-sha256"));
+    }
     let prefix = param("prefix").unwrap_or_default();
     if param("versions").is_some() {
+        let failing = bucket.fail_version_listings > 0;
+        bucket.fail_version_listings -= usize::from(failing);
         let visible = bucket.visible();
         bucket.seen.push(visible);
-        if bucket.fail_version_listing == Some(bucket.seen.len()) {
+        let interrupted = bucket.fail_version_listing;
+        if failing || interrupted.is_some_and(|at| at <= bucket.seen.len()) {
             return reply(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "<Error><Code>SlowDown</Code></Error>",
@@ -413,6 +445,65 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
     reply(StatusCode::OK, xml + "</ListBucketResult>")
 }
 
+/// One request that removes many versions, answered as Backblaze answers
+/// it: only what was not removed is named.
+fn remove_many(bucket: &mut Bucket, body: &[u8], checksum: Option<String>) -> Response {
+    if let Some((status, text)) = bucket.refuse_batches {
+        return reply(status, text);
+    }
+    let text = std::str::from_utf8(body).unwrap();
+    let objects: Vec<&str> = text.split("<Object>").skip(1).collect();
+    if checksum != Some(B64.encode(Sha256::digest(body))) || objects.len() > 1000 {
+        return reply(
+            StatusCode::BAD_REQUEST,
+            "<Error><Code>InvalidRequest</Code></Error>",
+        );
+    }
+    if bucket.fail_version_removals > 0 {
+        bucket.fail_version_removals -= 1;
+        return reply(StatusCode::SERVICE_UNAVAILABLE, "");
+    }
+    let mut errors = String::new();
+    for object in objects {
+        let field = |name: &str| {
+            let (open, close) = (format!("<{name}>"), format!("</{name}>"));
+            let start = object.find(&open).unwrap() + open.len();
+            let end = object.find(&close).unwrap();
+            object[start..end]
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+                .replace("&amp;", "&")
+        };
+        let (key, id) = (field("Key"), field("VersionId"));
+        let before = bucket.versions.len();
+        let code = if bucket.stuck.as_deref() == Some(key.as_str()) {
+            "InternalError"
+        } else {
+            bucket.versions.retain(|v| !(v.key == key && v.id == id));
+            "NoSuchVersion"
+        };
+        if bucket.versions.len() == before {
+            errors.push_str(&format!(
+                "<Error><Code>{code}</Code><Key>{}</Key><VersionId>{}</VersionId></Error>",
+                escape(&key),
+                escape(&id)
+            ));
+        }
+    }
+    if bucket.lose_removal_answers > 0 {
+        bucket.lose_removal_answers -= 1;
+        return reply(StatusCode::SERVICE_UNAVAILABLE, "");
+    }
+    reply(
+        StatusCode::OK,
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{errors}</DeleteResult>"
+        ),
+    )
+}
+
 fn object(
     bucket: &mut Bucket,
     method: &Method,
@@ -433,9 +524,18 @@ fn object(
             reply(StatusCode::OK, "")
         }
         Method::DELETE => {
+            if version.is_some() && bucket.fail_version_removals > 0 {
+                bucket.fail_version_removals -= 1;
+                return reply(StatusCode::SERVICE_UNAVAILABLE, "");
+            }
+            let lost = version.is_some() && bucket.lose_removal_answers > 0;
+            bucket.lose_removal_answers -= usize::from(lost);
             match version {
                 Some(id) => bucket.versions.retain(|v| !(v.key == key && v.id == id)),
                 None => bucket.add(key, true, Bytes::new()),
+            }
+            if lost {
+                return reply(StatusCode::SERVICE_UNAVAILABLE, "");
             }
             reply(StatusCode::NO_CONTENT, "")
         }
@@ -712,6 +812,173 @@ async fn a_purge_never_shows_a_deleted_key() {
             }
         }
     }
+}
+
+/// A request of a purge that is not answered is sent again twice before
+/// it fails the purge, whichever way the bucket has its versions removed.
+/// A purge that does fail leaves the deleted key absent: the data under a
+/// delete marker goes before the marker.
+#[tokio::test]
+async fn a_purge_sends_a_failed_request_again() {
+    // Without the request for many, two versions are removed at once.
+    for (listings, removals, completes) in [
+        (1, 0, true),
+        (2, 0, true),
+        (3, 0, false),
+        (0, 1, true),
+        (0, 2, true),
+        (2, 2, true),
+        (0, 6, false),
+    ] {
+        for one_by_one in [false, true] {
+            let (store, bucket) = s3().await;
+            store.put("db/app/c/0001", ONE).await.unwrap();
+            store.put("db/app/c/0002", ONE).await.unwrap();
+            store.delete("db/app/c/0002").await.unwrap();
+            {
+                let mut bucket = bucket.lock();
+                bucket.fail_version_listings = listings;
+                bucket.fail_version_removals = removals;
+                bucket.refuse_batches = one_by_one.then_some(NOT_IMPLEMENTED);
+            }
+            let purged = store.purge("db/app/", None, &|_| true).await;
+            let case = format!(
+                "{listings} listings and {removals} removals fail, one by one: {one_by_one}"
+            );
+            let bucket = bucket.lock();
+            if completes {
+                assert_eq!(purged.unwrap(), 2, "{case}");
+                assert!(bucket.versions.is_empty(), "{case}: {:?}", bucket.versions);
+            } else {
+                assert!(matches!(purged, Err(StoreError::Unavailable(_))), "{case}");
+            }
+            let visible = bucket.visible();
+            assert!(!visible.iter().any(|key| key == "db/app/c/0002"), "{case}");
+            assert!(bucket.unsigned.is_empty(), "{case}: {:?}", bucket.unsigned);
+        }
+    }
+}
+
+const NOT_IMPLEMENTED: (StatusCode, &str) = (
+    StatusCode::NOT_IMPLEMENTED,
+    "<Error><Code>NotImplemented</Code></Error>",
+);
+
+/// Forty objects of one version each.
+async fn forty(store: &S3Store) {
+    for object in 0..40 {
+        let key = format!("db/app/c/{object:04}");
+        store.put(&key, ONE).await.unwrap();
+    }
+}
+
+/// One request removes the versions of a listing page. A bucket that
+/// refuses it, in any of the ways stores do, gets a request for each
+/// version, and is not asked again.
+#[tokio::test]
+async fn a_purge_removes_a_page_of_versions_with_one_request() {
+    let refusals = [
+        NOT_IMPLEMENTED,
+        (
+            StatusCode::BAD_REQUEST,
+            "<Error><Code>InvalidRequest</Code><Message>Missing required header for this request: Content-MD5</Message></Error>",
+        ),
+        (StatusCode::METHOD_NOT_ALLOWED, ""),
+        // An answer about the request, where answers about versions belong.
+        (
+            StatusCode::OK,
+            "<DeleteResult><Error><Code>MalformedXML</Code></Error></DeleteResult>",
+        ),
+        // Something between here and the bucket answered in its place.
+        (StatusCode::OK, "<html>Sign in</html>"),
+    ];
+    for refusal in refusals {
+        let (store, bucket) = s3().await;
+        // A listing and a removal; then with the removal refused and each
+        // version removed alone; then without asking.
+        for (refused, requests) in [(false, 2), (true, 42), (true, 41)] {
+            forty(&store).await;
+            let before = {
+                let mut bucket = bucket.lock();
+                bucket.refuse_batches = refused.then_some(refusal);
+                bucket.requests
+            };
+            assert_eq!(store.purge("db/app/", None, &|_| true).await.unwrap(), 40);
+            let bucket = bucket.lock();
+            assert_eq!(bucket.requests - before, requests, "{refusal:?}");
+            assert_eq!(store.removes_many(), !refused, "{refusal:?}");
+            assert!(bucket.versions.is_empty());
+            assert!(bucket.unsigned.is_empty(), "{:?}", bucket.unsigned);
+        }
+    }
+    // Three pages: a listing and a removal for each.
+    let (store, bucket) = s3().await;
+    forty(&store).await;
+    let before = {
+        let mut bucket = bucket.lock();
+        bucket.page = 16;
+        bucket.requests
+    };
+    assert_eq!(store.purge("db/app/", None, &|_| true).await.unwrap(), 40);
+    let bucket = bucket.lock();
+    assert_eq!(bucket.requests - before, 6);
+    assert!(bucket.versions.is_empty());
+}
+
+/// A removal that was carried out and not answered is sent again, and is
+/// then told that the versions are not there. That is not a failure. A
+/// version that the bucket could not remove is.
+#[tokio::test]
+async fn a_purge_reads_what_was_not_removed() {
+    for one_by_one in [false, true] {
+        let (store, bucket) = s3().await;
+        store.put("db/app/c/0001", ONE).await.unwrap();
+        store.put("db/app/c/0002", ONE).await.unwrap();
+        store.delete("db/app/c/0002").await.unwrap();
+        {
+            let mut bucket = bucket.lock();
+            bucket.lose_removal_answers = 1;
+            bucket.refuse_batches = one_by_one.then_some(NOT_IMPLEMENTED);
+        }
+        assert_eq!(store.purge("db/app/", None, &|_| true).await.unwrap(), 2);
+        assert!(bucket.lock().versions.is_empty());
+    }
+    let (store, bucket) = s3().await;
+    store.put("db/app/c/0001", ONE).await.unwrap();
+    store.put("db/app/c/0002", ONE).await.unwrap();
+    store.delete("db/app/c/0002").await.unwrap();
+    bucket.lock().stuck = Some("db/app/c/0002".into());
+    let purged = store.purge("db/app/", None, &|_| true).await;
+    assert!(
+        matches!(purged, Err(StoreError::Unavailable(_))),
+        "{purged:?}"
+    );
+    {
+        let mut bucket = bucket.lock();
+        let visible = bucket.visible();
+        assert!(!visible.iter().any(|key| key == "db/app/c/0002"));
+        assert!(bucket.versions.iter().any(|v| v.key == "db/app/c/0002"));
+        bucket.stuck = None;
+    }
+    assert_eq!(store.purge("db/app/", None, &|_| true).await.unwrap(), 1);
+    assert!(bucket.lock().versions.is_empty());
+}
+
+/// XML cannot name a key with a control character in it. The versions of
+/// a page that holds one are removed with a request each.
+#[tokio::test]
+async fn a_purge_removes_what_one_request_cannot_name() {
+    let (store, bucket) = s3().await;
+    for key in ["p/plain", "p/a\u{1}b", "p/a&b<c>"] {
+        store.put(key, ONE).await.unwrap();
+    }
+    let before = bucket.lock().requests;
+    assert_eq!(store.purge("p/", None, &|_| true).await.unwrap(), 3);
+    let bucket = bucket.lock();
+    assert!(bucket.versions.is_empty(), "{:?}", bucket.versions);
+    // A listing and three removals.
+    assert_eq!(bucket.requests - before, 4);
+    assert!(bucket.unsigned.is_empty(), "{:?}", bucket.unsigned);
 }
 
 /// A page may say there is more and hold nothing. Fewer keys than asked for

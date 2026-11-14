@@ -18,6 +18,11 @@ use durable_db::{
 use std::sync::Arc;
 
 fn bucket() -> Option<(Arc<dyn ObjectStore>, String)> {
+    let (store, root) = s3()?;
+    Some((Arc::new(store), root))
+}
+
+fn s3() -> Option<(S3Store, String)> {
     let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let (Some(endpoint), Some(bucket)) = (var("DDB_S3_ENDPOINT"), var("DDB_S3_BUCKET")) else {
         eprintln!("skipped: no bucket configured");
@@ -37,10 +42,7 @@ fn bucket() -> Option<(Arc<dyn ObjectStore>, String)> {
     } else {
         store
     };
-    Some((
-        Arc::new(store),
-        format!("test-{:016x}/", rand::random::<u64>()),
-    ))
+    Some((store, format!("test-{:016x}/", rand::random::<u64>())))
 }
 
 async fn keys(store: &dyn ObjectStore, prefix: &str) -> Vec<String> {
@@ -169,6 +171,29 @@ async fn the_bucket_honors_the_storage_contract() {
 /// a version under a delete marker, and here one such pair lies across the
 /// end of the first page. The key must stay absent throughout: if it were a
 /// revoked claim, a stale owner that saw it would resume.
+/// Backblaze takes one request that removes many versions. A store that
+/// refuses it has each version removed alone, which is also correct, so
+/// only Backblaze is held to it here.
+#[tokio::test]
+async fn a_purge_removes_many_versions_with_one_request() {
+    let Some((store, root)) = s3() else {
+        return;
+    };
+    let body = Bytes::from_static(b"{}");
+    let keys: Vec<String> = (0..30).map(|i| format!("{root}c/a&b <{i:02}>")).collect();
+    let each = keys.iter().map(|key| async {
+        retry(|| store.put(key, body.clone())).await.unwrap();
+        retry(|| store.put(key, body.clone())).await.unwrap();
+    });
+    futures::future::join_all(each).await;
+    let all = |_: &str| true;
+    assert_eq!(retry(|| store.purge(&root, None, &all)).await.unwrap(), 30);
+    assert_eq!(retry(|| store.purge(&root, None, &all)).await.unwrap(), 0);
+    if store.is_backblaze() {
+        assert!(store.removes_many(), "Backblaze refused the request");
+    }
+}
+
 #[tokio::test]
 async fn a_purge_across_pages_never_shows_a_deleted_key() {
     let Some((store, root)) = bucket() else {
@@ -213,9 +238,9 @@ async fn a_purge_across_pages_never_shows_a_deleted_key() {
             looks
         })
     };
-    // A purge is a thousand requests, and one that fails on its way fails
-    // the purge. The engine then purges again, and so does this: the key
-    // must stay absent through an interrupted purge as well.
+    // A purge whose request fails on its way three times fails. The engine
+    // then purges again, and so does this: the key must stay absent through
+    // an interrupted purge as well.
     let all = |_: &str| true;
     let removed = match store.purge(&root, None, &all).await {
         Ok(removed) => {
