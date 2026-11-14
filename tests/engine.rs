@@ -332,25 +332,36 @@ async fn flushes_merges_and_collects() {
     let ctx = ctx_with(store.clone(), opts);
     let db = create(&ctx, "app").await;
     let value = "x".repeat(100);
+    // A database this small refuses a write while it is four flushes
+    // behind, as it should: such a write is sent again.
     for round in 0..6 {
         for i in 0..200 {
-            commit(&db, put(&format!("k{i:04}"), &format!("{round}-{value}")))
-                .await
-                .unwrap();
+            committed(&db, put(&format!("k{i:04}"), &format!("{round}-{value}"))).await;
         }
     }
     for i in (0..200).step_by(2) {
-        commit(
+        committed(
             &db,
             Txn {
                 writes: vec![(b(&format!("k{i:04}")), None)],
                 ..Txn::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The last writes are flushed after a pause, and nothing adds a table
+    // after that. How many tables are then at rest depends on the sizes the
+    // flushes had, and so on the machine's speed: runs are merged from the
+    // newest while they are together at least half the next (`merge_plan`),
+    // and twelve may remain.
+    let settled = async {
+        while db.mem_bytes() > 0 || db.info().tables > 12 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), settled)
+        .await
+        .expect("the writes are flushed and merged");
     let (keys, more) = scan(&db, "", "", false, 1000).await;
     assert_eq!((keys.len(), more), (100, false));
     assert_eq!(get(&db, "k0001").await.unwrap().1, format!("5-{value}"));
@@ -358,7 +369,7 @@ async fn flushes_merges_and_collects() {
     let (reversed, _) = scan(&db, "k0100", "k0110", true, 3).await;
     assert_eq!(reversed, ["k0109", "k0107", "k0105"]);
     let info = db.info();
-    assert!(info.tables >= 1 && info.tables <= 4, "{info:?}");
+    assert!(info.tables >= 1 && info.tables <= 12, "{info:?}");
 
     // A sealed database is one claimless manifest plus the tables it names.
     db.close().await;
