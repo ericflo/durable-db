@@ -1,5 +1,80 @@
 # Verification results
 
+## HTTP commits share bounded journal frames (2026-11-14)
+
+**v1.0.8**, source `ddd9b4e` from Woodpecker **414**, connects the HTTP worker
+to the native owner's existing grouped-write API. Adjacent queued commits share
+one frame within the existing journal byte allowance and 128-request bound.
+One scheduler yield gathers concurrent callers; there is no batching timer,
+extra queue, new format or raised allowance. Creation and policy changes delimit
+groups. Each request keeps its own authorization, retry identity and durable
+result; the frame does not introduce cross-database transactions.
+
+The exact downloaded binary and Kubernetes image match. On the same **64 KiB /
+32 admission slots / 32 databases** matrix, all **2,120 measured operations**
+complete and all **32 final values/revisions** verify. Per-process counters
+bracketing setup and measurement record **1,125 prepared records in 1,065
+frames**, or **1.06 records per frame**. This confirms grouping but shows that
+opportunities are sparse in this closed-loop, 16-partition workload. The counters
+include setup/catalog work and frames whose uploads later fail; they do not
+count successful PUTs or provider billing.
+
+| Workers | Writes/s | Reads/s | Write p95 | Read p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.62 | 10.55 | 1.07s | 123ms |
+| 4 | 3.04 | 33.91 | 1.71s | 162ms |
+| 16 | 8.80 | 122.48 | 4.33s | 188ms |
+| 32 | 8.19 | 213.53 | 12.59s | 185ms |
+
+**This does not establish a general latency improvement.** The 32-worker write
+p95 is worse than [v1.0.7's](#repeated-overwrites-reuse-funded-checkpoint-copies-2026-11-14)
+**9.87s**, even though its elapsed throughput rises from **7.27 to 8.19 writes/s**.
+The largest write takes **26.69s**. New database names, placement and provider
+conditions differ, so these short samples cannot isolate batching's effect.
+The 32-worker write phase includes **50 HTTP 429 and 13 HTTP 503** responses
+before all operations finish. No operation exhausts its retry limit.
+
+Logs show **15 completed checkpoints** during that phase, reaching **12.90s**.
+Successful preparation reaches **8.13s**, and failed preparation **11.60s**;
+shared publication also reports errors and contention. These timers overlap
+and do not fully attribute client latency, but identify concrete work behind
+the remaining stalls. One ambiguous journal upload retires its owner during
+setup, before measured phases. One provably unsent attempt retains its original
+handle during the 16-worker write phase. The next work targets checkpoint/funding
+stalls under concurrent load and failed-upload recovery; batching alone does not
+make the database fast.
+
+Setup takes **337.00s**, excluded from measured throughput. Peak sampled per-pod
+RSS is **25.02 MiB** and the maximum sampled CPU interval is **0.132 cores**,
+with no restarts or replacements. Cache, resident, replica and upload limits
+match the preceding larger-value run. Ten-second sampling can miss peaks; this
+is not a sustained-resource, open-loop or p99/SLO qualification.
+
+A focused eight-database HTTP fixture needs **one physical journal PUT**; the
+released single-request worker fails the same regression with **eight**. The
+fixture holds the upload, loses its reply, disconnects callers or revokes the
+permit, then cold-recovers every value and exact retry receipt. A 512 KiB
+journal fixture splits a 16-writer burst within its byte limit and retries
+capacity refusals with unchanged identities. Invalid or unauthorized neighbors
+do not prevent valid requests from completing. The three focused checks take
+**0.37s**; all **393 enabled Rust tests**, formatting and strict Clippy pass.
+Woodpecker also passes audits, client/Pi, capacity and formal controls. The
+downloaded static archive independently passes API, export/restore and
+kill/reopen checks.
+
+The existing `LiveTransactions` model adds grouped upload transitions with
+**no new state variables**, retaining **19,220 distinct states**. Its bounded
+check, nine unsafe controls and positive staging-read control pass; the safe
+check takes **one second**. Byte bounds, transport behavior, Rust refinement and
+composed protocol correctness remain separate obligations.
+
+The [exact evidence](evidence/http-batching-2026-11-14.json) retains phase samples,
+counter deltas, resource observations, slow-work summaries, source/artifact/log
+hashes and cleanup. The old single-request-only dispatch is replaced; no second
+worker or model is kept. Local model scratch trees are removed. The namespace,
+bucket and test key are removed, with **412 remaining physical versions**
+deleted after automatic collection. The existing 1.0 support scope is unchanged.
+
 ## Repeated overwrites reuse funded checkpoint copies (2026-11-14)
 
 **v1.0.7**, source `b7f949c` from Woodpecker **410**, removes repeated
@@ -36,9 +111,9 @@ Two ambiguous uploads retire their owners; two provably unsent uploads retain
 their original handles. The 32-worker write phase includes five HTTP 429 and
 63 HTTP 503 responses before all writes complete. Readback never reports an
 incorrect value, but eventual completion is not a latency qualification.
-The HTTP worker still sends individual transaction frames despite the owner's
-existing grouped-write API. Connecting that path and reducing failed-upload
-recovery costs are the next performance work.
+That release's HTTP worker sends individual transaction frames despite the
+owner's grouped-write API. The [v1.0.8 follow-up](#http-commits-share-bounded-journal-frames-2026-11-14)
+connects that path; failed-upload recovery remains follow-up work.
 
 Peak sampled per-pod RSS is **28.23 MiB**, maximum sampled CPU interval is
 **0.135 cores**, and there are no restarts or replacements. Setup takes

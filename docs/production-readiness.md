@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.7, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.8, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -13,7 +13,7 @@
 
 Use trusted private networking for peer traffic and TLS at application ingress. Keep signing keys and provider credentials on servers. Do not configure external lifecycle expiration on database objects. Set Kubernetes CPU/memory limits, concurrency and maximum replica count together. In-process cache budgets are not an RSS ceiling. See [deployment](deployment.md), [security](security.md), [recovery](recovery.md) and [API bounds](api.md#errors-and-bounds).
 
-A logical directory has been tested at 100,005 entries; this is not a promise of 100,005 simultaneously active databases. The short cloud campaigns are four sequential writers. No p99 latency, throughput or availability SLO is declared. Capacity-test the intended workload before admitting it; published measurements retain their exact scope and failures.
+A logical directory has been tested at 100,005 entries; this is not a promise of 100,005 simultaneously active databases. The failure campaigns use four writers; the load baseline uses 1/4/16/32 workers. Each worker issues operations sequentially. No p99 latency, throughput or availability SLO is declared. Capacity-test the intended workload before admitting it; published measurements retain their exact scope and failures.
 
 ## Initial 1.0.0 release checks
 
@@ -36,7 +36,7 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) now covers 1/4/16/32 workers. The initial small-value operations complete, but write tails and conservative tenant precharging expose concrete performance limits. [v1.0.7](verification-results.md#repeated-overwrites-reuse-funded-checkpoint-copies-2026-11-14) reuses already funded copies for repeated overwrites and completes the larger-value matrix at unchanged allowances. Its 32-worker phase still achieves only 7.27 writes/s, with a 9.87-second write p95. The next work connects bounded transaction grouping to HTTP and reduces failed-upload recovery costs, then qualifies sustained load. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) covers 1/4/16/32 workers. [v1.0.7](verification-results.md#repeated-overwrites-reuse-funded-checkpoint-copies-2026-11-14) removes redundant overwrite prepayment; [v1.0.8](verification-results.md#http-commits-share-bounded-journal-frames-2026-11-14) connects bounded grouping to HTTP. Both larger-value matrices complete at unchanged allowances. The new 32-worker phase reaches 8.19 writes/s, but write p95 is 12.59s versus the previous sample's 9.87s. Grouping is sparse, and short runs with different placement/provider conditions cannot establish a general speedup. The next work targets checkpoint/funding stalls under load and failed-upload recovery costs, then sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 
@@ -62,7 +62,7 @@ node scripts/benchmark-http.mjs \
 
 Each worker owns one database so publication conflicts can retry the same request without recomputing application state. The benchmark uses the SDK's bounded per-database connection pools and a 120-second operation deadline, with at most 128 attempts (`--max-attempts` can reduce this). Ambiguous retries retain the exact ID, revision, and body. Reports include attempted/failed/not-started operations, HTTP statuses, full operation latency including backoff, successful latency separately, phase timestamps, elapsed throughput, verification, and binary hash. A failed worker stops instead of issuing a new write ID after an unresolved outcome. The harness writes partial results and exits unsuccessfully on any failed phase or verification. Fixed refusal categories distinguish tenant funding, logical quotas and validation bounds without logging response bodies; cloud runs also retain final namespace and per-worker upload allocation counters. Cloud deployments require the explicit per-database upload ceilings above; omit them for a local directory.
 
-`scripts/benchmark-kubernetes.py` runs this workload inside a fresh namespace using the maintained StatefulSet and Service manifests, three distinct Kubernetes hosts, and an image pinned by digest. It samples database-container RSS, working set and CPU counters every ten seconds and rejects unexpected pod replacements or restarts. It removes its namespace on completion or failure; **the caller must remove the dedicated bucket and revoke its test key**.
+`scripts/benchmark-kubernetes.py` runs this workload inside a fresh namespace using the maintained StatefulSet and Service manifests, three distinct Kubernetes hosts, and an image pinned by digest. It samples database-container RSS, working set and CPU counters every ten seconds and rejects unexpected pod replacements or restarts. Per-pod journal frame/record counters bracket setup and measurement; these count preparation, not successful PUTs or billed operations. It removes its namespace on completion or failure; **the caller must remove the dedicated bucket and revoke its test key**.
 
 ```sh
 python3 scripts/benchmark-kubernetes.py --disposable \
