@@ -1,6 +1,6 @@
 # Production readiness
 
-**Latest release: v1.0.9, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
+**Latest release: v1.0.10, within the scoped 1.0 release line.** The first production release is deliberately limited to one application or organization trust domain per deployment. Shared hosting of mutually untrusted tenants is a later release. This replaces the broader six-gate release plan; it does not describe those deferred capabilities as complete.
 
 ## Supported 1.0 scope
 
@@ -36,7 +36,9 @@ The checks for this supported scope passed. A data-loss, authorization or bounde
 | 5. Correctness/security | Existing model/proof controls, implementation fault tests and focused release review | Comprehensive protocol composition, full Rust refinement and independent security review |
 | 6. Operations | Checked Linux executable/installer, resource settings and recovery procedure | Additional binary platforms and broader upgrade/rollback coverage |
 
-These remain follow-up work, not discarded goals. The [native B2 load baseline](verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14) covers 1/4/16/32 workers. Recent releases remove redundant overwrite prepayment and connect bounded grouping to HTTP. [v1.0.9](verification-results.md#larger-attempt-grants-reduce-funding-contention-2026-11-14) amortizes funding across more attempts within the same ceilings; a lost process or acknowledgement can strand more credit. Its 32-worker phase reaches 13.32 writes/s and 2.15s write p95, versus the preceding 8.19 writes/s and 12.59s. All operations complete, but the matrix's largest write still takes 17.91s. Different placement/provider conditions and short samples prevent a general performance guarantee. The next work targets checkpoint pressure from retained value history and failed-upload recovery, then sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
+These remain follow-up work, not discarded goals. [v1.0.10](verification-results.md#reclaim-overwritten-values-before-checkpointing-2026-11-14) reclaims superseded resident values during both publication and replay, preserving current values, tombstones, receipts and conflict checks. The 100-overwrite fixture needs no checkpoint under the unchanged allowance; the previous path checkpointed at write 41. The 32-worker B2 phase reaches **18.24 writes/s and 1.92s write p95**, versus **13.32 writes/s and 2.15s** previously, with two completed checkpoints instead of thirteen. All 2,120 operations and 32 final-state checks pass. Reads are slower in this sample (**90.77 versus 186.54 reads/s**), and a **16.90s** write outlier remains. Placement/provider variation and short samples prevent a general performance guarantee.
+
+Longer overwrite suffixes rely on reclamation during replay; use one release across all replicas. Mixed-version rolling upgrades and rollback remain unqualified. Fewer checkpoints retain more journal objects until the existing receipt, validation or frame bounds require a durable cut. The next work targets remaining funding/publication waits and cloud cold recovery of these longer suffixes, followed by sustained-load qualification. The intended multi-tenant hosted service must not adopt the single-trust-domain 1.0 scope as evidence that its stronger isolation needs are met.
 
 ## Qualification interpretation
 

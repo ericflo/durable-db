@@ -60,6 +60,7 @@ Run the checks affected by a change while iterating. Woodpecker retains the comp
 | Durable prefix catalog | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib providers::` and `scripts/check-candidate.sh RootCatalog` |
 | Ordered catalog replay | `cargo test --locked --lib ownership::root`, `cargo test --locked --lib journal` and `scripts/check-candidate.sh CatalogReplay` |
 | Transaction records and recovery | `cargo test --locked --lib transactions::`, `cargo test --locked --lib ownership::root::tests::transactions`, `cargo test --locked --lib providers::` and `scripts/check-model.sh TransactionRecovery` |
+| Resident value reclamation | `cargo test --locked --lib index::memory`; `cargo test --locked --lib repeated_large_overwrites_reuse_copy_prepayment_and_recover`; `scripts/check-model.sh MemoryIndex` |
 | Candidate root request lifecycle | `scripts/check-candidate.sh RootRequests` and `scripts/check-proof.sh RootRequests` |
 | An implemented protocol model | `scripts/check-model.sh MODULE` |
 | Journal prefix proof | `scripts/check-model.sh Journal` and `scripts/check-proof.sh Journal` |

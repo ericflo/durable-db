@@ -1,5 +1,83 @@
 # Verification results
 
+## Reclaim overwritten values before checkpointing (2026-11-14)
+
+**v1.0.10**, source `0771128` from Woodpecker **420**, reclaims superseded
+in-memory values at complete durable journal-frame boundaries. Live publication
+and private replay use the same pressure threshold. Each database keeps its
+latest row per key, including deletion markers hiding checkpoint values.
+Affected older point/scan snapshots fail explicitly. Receipts, conflict history
+and the durable collection cut are untouched. The pass uses the existing map
+and one key reference, without a second projection.
+
+The focused **100 × 64 KiB overwrite** fixture now performs **zero checkpoints**
+and spends **zero maintenance upload bytes** under the same **5.12 MiB** value
+allowance. The previous path checkpointed at write **41**. Cold replay recovers
+the 6.25 MiB overwrite history, current value and exact receipt; a subsequent
+checkpoint of the pruned projection also recovers correctly. HTTP performs the
+same writes and point/ordered reads while checkpoint uploads are disabled.
+Removing live reclamation reproduces the write-41 checkpoint; removing replay
+reclamation instead reproduces a recovery-capacity failure. Both temporary
+mutations were restored immediately.
+
+The exact downloaded binary and matching image complete all **2,120 measured
+operations** and verify all **32 final values/revisions** in the unchanged
+**64 KiB / 32 admission slots / 32 databases** B2 matrix on three hosts:
+
+| Workers | Writes/s | Reads/s | Write p95 | Read p95 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.81 | 11.43 | 1.10s | 93ms |
+| 4 | 6.23 | 44.00 | 1.15s | 98ms |
+| 16 | 10.78 | 104.38 | 1.78s | 203ms |
+| 32 | 18.24 | 90.77 | 1.92s | 377ms |
+
+At 32 workers, writes improve from [v1.0.9's](#larger-attempt-grants-reduce-funding-contention-2026-11-14)
+**13.32/s and 2.15s p95**. Completed checkpoints in that write phase fall from
+**13 to 2**, with a maximum duration of **8.73s** instead of 10.55s. Grouping is
+still sparse: **1,124 prepared records in 1,087 frames** including setup/catalog
+work, about 1.03 records per frame. These counters are not successful PUTs or
+provider billing.
+
+This is not an across-the-board speedup. The single-worker write phase is
+slower, and 32-worker reads fall from **186.54 to 90.77/s**, with p95 rising from
+243ms to 377ms. Placement and provider conditions differ. A **16.90s** write
+outlier remains, with four HTTP 429 and four HTTP 503 responses in the busiest
+write phase. No journal-upload failure or owner retirement appears in the
+retained logs. An 8.73s checkpoint is followed by a **3.50s preparation failure**
+and **12.4s unavailable responses**; the same interval includes a failed shared
+publication. The read phase logs waits of up to **1.30s** for the owner read lock.
+These overlapping timers identify follow-up investigations, not a complete
+causal breakdown or a general latency guarantee.
+
+Peak sampled per-pod RSS is **22.31 MiB**, and the maximum sampled CPU interval
+is **0.197 cores**, with no pod restarts or replacements. Setup takes **344.07s**,
+excluded from throughput, and records twelve HTTP 503 responses. The sample
+neither qualifies sustained load/open-loop overload nor establishes p99 or
+availability SLOs.
+
+All **395 enabled Rust tests**, formatting and strict Clippy pass. The updated
+`MemoryIndex` model checks **13,998 states**, 102,479 generated, depth seven,
+in one second, with six mandatory unsafe counterexamples. Existing transaction
+recovery and live-transaction checks also pass. Tests preserve tombstones and
+empty values, reject stale snapshots, retain conflict detection and exact
+retries, and leave unrelated database snapshots readable. These bounded checks
+do not prove Rust refinement or the complete protocol.
+
+Use one release across all replicas: longer overwrite suffixes rely on the new
+replay reclamation. Mixed-version upgrades and rollback remain unqualified.
+Receipt, validation and frame bounds still require checkpoints. Until then,
+fewer checkpoints retain more journal objects; cleanup removes **1,055 remaining
+physical versions**, versus 438 previously. This run does not qualify cloud
+cold recovery of the longer suffixes or measure their billed cost. The next
+work targets that recovery and the remaining funding/publication waits.
+
+The [exact evidence](evidence/value-reclamation-2026-11-14.json) retains full
+samples, artifact/source hashes, resource and slow-operation observations,
+negative controls and cleanup. The namespace, bucket and scoped key are removed.
+Duplicate resident snapshot-floor metadata and the obsolete model counting
+helper were deleted; temporary model scratch was removed. The scoped 1.0
+support boundary is unchanged.
+
 ## Larger attempt grants reduce funding contention (2026-11-14)
 
 **v1.0.9**, source `415a70c` from Woodpecker **417**, changes one runtime
@@ -42,13 +120,11 @@ The phase also ends sooner, and the timers overlap; this is diagnostic evidence
 of reduced contention, not a complete client-time or provider-call breakdown.
 Maintenance still stalls writes for several seconds.
 
-A separate in-memory reproduction identifies the next target. With the same
+A separate in-memory reproduction identified the next target. With the same
 resident allowance and partition count, repeatedly overwriting one **64 KiB**
 value triggers checkpoints at revisions **41 and 82**: retained versions occupy
 about **2.56 MiB**, crossing half the partition's **5.12 MiB** value allowance. The
-current user value is still only 64 KiB. Safe reclamation of superseded versions,
-preserving snapshot rules and receipts, is follow-up work; this release does
-not implement it. The temporary usage instrumentation was removed immediately.
+current user value is still only 64 KiB. That v1.0.9 result motivated the [v1.0.10 reclamation change](#reclaim-overwritten-values-before-checkpointing-2026-11-14) above. The temporary usage instrumentation was removed immediately.
 
 A focused regression makes **100 uploads of 64 KiB with one funding
 publication**, versus four with the old constant. After process loss, the
