@@ -297,7 +297,11 @@ async fn database(
     };
     let forwarded = headers.contains_key(FORWARDED);
     let mut last = Error::Busy("no attempt was made".into());
-    for _attempt in 0..4 {
+    for attempt in 0..4u32 {
+        // A handover takes a moment; give it one before trying again.
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(15 << attempt)).await;
+        }
         if !forwarded
             && !app.node.serving(name)
             && let Some(peer) = app.cluster.owner(name)
