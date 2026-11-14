@@ -127,7 +127,23 @@ victim=$(k get pods -l app=durable-db -o jsonpath='{.items[0].metadata.name}')
 k delete pod "$victim" --grace-period=0 --force >/dev/null 2>&1
 echo "killed $victim"
 
-say "waiting for the load to end and the autoscaler to remove pods"
+say "waiting for the read load to end"
+k wait --for=condition=complete job/load --timeout=240s >/dev/null 2>&1 || true
+# A read that reaches a pod not holding its database is relayed to the one
+# that does, at two and a half times the cost (docs/performance.md). The
+# pod that was killed took its counts with it.
+reads=0
+relayed=0
+for pod in $(k get pods -l app=durable-db -o jsonpath='{.items[*].metadata.name}'); do
+  metrics=$(k get --raw "/api/v1/namespaces/$ns/pods/$pod:7654/proxy/metrics" 2>/dev/null || true)
+  count=$(printf '%s\n' "$metrics" | awk '/^durable_db_request_seconds_count\{kind="read"\}/ {print int($2)}')
+  passed=$(printf '%s\n' "$metrics" | awk '/^durable_db_forwarded_requests_total/ {print int($2)}')
+  reads=$((reads + ${count:-0}))
+  relayed=$((relayed + ${passed:-0}))
+done
+echo "the pods now running answered $reads reads and relayed $relayed requests"
+
+say "waiting for the autoscaler to remove pods"
 deadline=$(($(date +%s) + 240))
 while [ "$(date +%s)" -lt "$deadline" ]; do
   now=$(replicas)

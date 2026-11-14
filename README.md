@@ -123,7 +123,7 @@ kubectl -n durable-db create secret generic durable-db-storage --from-literal=DU
 kubectl -n durable-db apply -k deploy/kubernetes
 ```
 
-A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in the last recorded run the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and a ledger of 20,678 transfers balanced exactly. A read load without retries ran alongside: 110 of its 9 million reads failed, with a pod deleted under them.
+A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in each of nine recorded runs the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and the ledger balanced exactly: 23,339 transfers in the last. A read load without retries ran alongside: of its 9 to 13 million reads, between none and 110 failed, with a pod deleted under them.
 
 ## Verification
 
