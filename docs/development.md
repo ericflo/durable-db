@@ -22,6 +22,7 @@ scripts/check-model.sh                # the TLA+ model and its negative controls
 scripts/test-clients.sh               # the TypeScript SDK, pi-durable adapter and example
 scripts/soak-memory.sh                # a server under the manifest's memory limit, loaded for three minutes
 scripts/test-slow.sh                  # every test alone on 28% of a processor, as on a slow build machine
+scripts/test-stores.sh                # the bucket tests and a ledger on MinIO, RustFS and Garage in containers
 ```
 
 | Suite | What it covers |
@@ -43,6 +44,8 @@ export DDB_S3_ENDPOINT=https://s3.us-west-002.backblazeb2.com DDB_S3_BUCKET=my-t
 export DDB_S3_ACCESS_KEY_ID=... DDB_S3_SECRET_ACCESS_KEY=...
 cargo test --test bucket
 ```
+
+`scripts/test-stores.sh` does that for three S3 servers it starts in containers on this machine, each held to 1 GiB and two CPUs: a community build of MinIO and RustFS, each with a bucket that keeps versions and one that does not, and Garage, which keeps no versions and has no request that lists them. On each store it then runs a ledger through three servers while one is killed, one is stopped and one is killed again. It needs Docker and a release build, and takes about seven minutes.
 
 `scripts/check-model.sh` runs TLC with a 2 GiB heap, four workers and a time limit, in Docker when no local Java is installed. TLC sizes itself from the whole machine if left alone; do not remove the caps. All configurations take about three minutes. `scripts/check-model.sh DeepDeletion` runs the one configuration that is left out because it takes far longer.
 

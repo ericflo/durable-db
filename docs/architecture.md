@@ -4,12 +4,12 @@ durable-db stores each database as a set of immutable objects in a bucket. Serve
 
 ## What storage must provide
 
-Six operations: **PUT**, **GET** (whole or a byte range), **HEAD**, **LIST** by prefix, **DELETE**, and a version-aware delete used only for cleanup: it lists the versions under a prefix and removes them by name, up to a thousand with one request where the store takes such a request and one at a time where it does not. Two guarantees:
+Six operations: **PUT**, **GET** (whole or a byte range), **HEAD**, **LIST** by prefix, **DELETE**, and a version-aware delete used only for cleanup: it lists the versions under a prefix and removes them by name, up to a thousand with one request where the store takes such a request and one at a time where it does not. A store that has no request that lists versions keeps none, and there the keys are listed and removed. Two guarantees:
 
 1. **Read-after-write.** Once a PUT or DELETE has returned, every GET, HEAD and LIST that starts afterwards observes it.
 2. **Whole objects.** A reader sees a complete object or none.
 
-Nothing else. No conditional writes (`If-Match`, `If-None-Match`), no transactions, no locks, no leases, no synchronized clocks. Backblaze B2 rejects conditional writes outright, which is why the protocol is built without them; Amazon S3, Cloudflare R2, MinIO and a local directory satisfy the same contract, so all of them run the same code.
+Nothing else. No conditional writes (`If-Match`, `If-None-Match`), no transactions, no locks, no leases, no synchronized clocks. Backblaze B2 rejects conditional writes outright, which is why the protocol is built without them; Amazon S3, Cloudflare R2, MinIO and a local directory satisfy the same contract, so all of them run the same code. [Verification](verification.md#what-has-been-run-where) says which of them it has been run on.
 
 ## What is in the bucket
 
@@ -96,7 +96,7 @@ Objects are deleted by the owner, and only what the newest manifest no longer ne
 
 The rule that makes this safe is the same as for acknowledgements: delete only after a claim check that began after the manifest was stored. If the check passes, any later owner will read that manifest or a newer one, and never needs what was deleted. If the owner has been replaced, the check fails and it deletes nothing.
 
-On a versioned bucket such as B2, collection removes every version of a key, so no lifecycle rule is needed and nothing is billed after it is collected. A key's delete markers are removed only when none of its data versions remain, across listing pages too, so a deleted key never becomes readable again wherever the cleanup stops. This matters for one kind of object: a revoked claim that reappeared would let a stale owner resume.
+On a versioned bucket such as B2, collection removes every version of a key, so no lifecycle rule is needed and nothing is billed after it is collected. A key's delete markers are removed only when none of its data versions remain, across listing pages too, so a deleted key never becomes readable again wherever the cleanup stops. This matters for one kind of object: a revoked claim that reappeared would let a stale owner resume. On a bucket that keeps no versions a removed key is gone, and there is nothing more to collect.
 
 ## Deleting a database
 

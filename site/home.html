@@ -153,7 +153,7 @@ curl $URL/read -H <span class="s">"$AUTH"</span> \
 <a href="verification.html#the-model"><strong>3.59 million</strong><span>distinct states at 2 writers, 2 epochs and 2 transactions, and 4.11 million more with deletion and 1 transaction. TLC explores both exhaustively and finds no violation.</span></a>
 <a href="verification.html#negative-controls"><strong>11 of 11</strong><span>negative controls refuted. Each turns off one protocol rule in the model and must produce a counterexample.</span></a>
 <a href="verification.html#tests-of-the-implementation"><strong>200 seeds</strong><span>of a randomized fault-injection test pass: three nodes, dropped, half-applied and late storage requests, crashes, stale owners and deletions.</span></a>
-<a href="verification.html#tests-of-the-implementation"><strong>23,339 transfers</strong><span>in a ledger verified exactly on a three-node kind cluster backed by B2, while the autoscaler scaled <span class="nowrap">2 → 5 → 2</span> and a pod was force-killed. In twelve such runs, of 9 to 13 million reads sent alongside without retries, at most 110 failed.</span></a>
+<a href="verification.html#tests-of-the-implementation"><strong>23,339 transfers</strong><span>in a ledger verified exactly on a three-node kind cluster backed by B2, while the autoscaler scaled <span class="nowrap">2 → 5 → 2</span> and a pod was force-killed. In thirteen such runs, of 9 to 13 million reads sent alongside without retries, at most 110 failed.</span></a>
 </div>
 <p class="caveat">Bounded model checking is evidence about a model. It is not a proof of the Rust implementation or of every deployment. The <a href="verification.html">verification page</a> lists the assumptions, what the model leaves out, the defects that these tests and a review found, and the obligations that remain.</p>
 </div>
@@ -178,7 +178,7 @@ curl $URL/read -H <span class="s">"$AUTH"</span> \
 <div class="card">
 <h3>Not done yet</h3>
 <ul>
-<li><strong>Only Backblaze B2 has been exercised</strong> among cloud providers. Amazon S3 and other S3-compatible stores share the code path except for the upload call, but have not been run.</li>
+<li><strong>Only Backblaze B2 has been exercised</strong> among cloud providers. Amazon S3 and other providers share the code path except for the upload call, but have not been run. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.</li>
 <li><strong>No soak of many hours</strong> on a real multi-node cluster. The Kubernetes test ran on kind. Memory was measured under load for minutes on a local directory, not for hours and not on a bucket.</li>
 <li><strong>B2 was measured from one desktop over Wi-Fi</strong>, a link that itself stalled for a second or two about once a minute. The slowest commits in the tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.</li>
 <li><strong>No point-in-time restore.</strong> Deletions are permanent. Protect the bucket with your provider's replication.</li>

@@ -123,7 +123,7 @@ kubectl -n durable-db create secret generic durable-db-storage --from-literal=DU
 kubectl -n durable-db apply -k deploy/kubernetes
 ```
 
-A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in each of twelve recorded runs the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and the ledger balanced exactly: between 12,026 and 23,567 transfers, by how fast the bucket answered at that hour. A read load without retries ran alongside: of its 9 to 13 million reads, between none and 110 failed, with a pod deleted under them.
+A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in each of thirteen recorded runs the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and the ledger balanced exactly: between 12,026 and 23,567 transfers, by how fast the bucket answered at that hour. A read load without retries ran alongside: of its 9 to 13 million reads, between none and 110 failed, with a pod deleted under them.
 
 ## Verification
 
@@ -135,13 +135,13 @@ Bounded model checking is not a proof of the implementation. [Verification](docs
 
 ## Limits and status
 
-Release 2.0.0 was a complete rewrite; earlier releases used a different design and storage format. Release 2.1.0 keeps the format, fixes what a review of 2.0.0 found, and limits what one caller or one database can cost a server. Release 2.1.1 changes how uploads are spread over Backblaze B2's storage pods, which was what made many databases committing at once slow there. Release 2.1.2 removes what a database no longer needs with one request for up to a thousand versions instead of one for each, which was what failed when many databases cleaned up at once. The read figures published with 2.0.0 were not those of the binary it shipped: [performance](docs/performance.md) has the correction.
+Release 2.0.0 was a complete rewrite; earlier releases used a different design and storage format. Release 2.1.0 keeps the format, fixes what a review of 2.0.0 found, and limits what one caller or one database can cost a server. Release 2.1.1 changes how uploads are spread over Backblaze B2's storage pods, which was what made many databases committing at once slow there. Release 2.1.2 removes what a database no longer needs with one request for up to a thousand versions instead of one for each, which was what failed when many databases cleaned up at once. Release 2.1.3 runs on S3 stores that keep no versions, such as Garage, which earlier releases refused when they started. The read figures published with 2.0.0 were not those of the binary it shipped: [performance](docs/performance.md) has the correction.
 
 - One server writes a database at a time. Spread load over databases, not over servers per database.
 - Transactions do not span databases. There are no historical reads and no point-in-time restore.
 - A deleted database's name cannot be reused.
 - A database is rewritten in full each time it grows by half. The default quota is 1 GiB; larger databases have not been measured.
-- Among cloud stores only Backblaze B2 has been exercised. Amazon S3 and others share the code but are untested.
+- Among cloud stores only Backblaze B2 has been exercised. Amazon S3, Cloudflare R2 and others share the code but are untested. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.
 - Every B2 figure was measured from one desktop over Wi-Fi, a link that itself stalled for a second or two about once a minute; the slowest commits in those tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.
 - Memory was measured for minutes on a local directory, not for hours and not on a bucket. No soak of many hours on a real multi-node cluster yet, and no independent review.
 - The prebuilt binary is Linux x86_64.

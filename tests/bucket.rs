@@ -4,6 +4,7 @@
 //! `DDB_S3_ENDPOINT`, `DDB_S3_BUCKET`, `DDB_S3_ACCESS_KEY_ID`,
 //! `DDB_S3_SECRET_ACCESS_KEY`, and `DDB_S3_REGION` unless the endpoint names it.
 //! Every test works under its own random prefix and removes what it wrote.
+use async_trait::async_trait;
 use bytes::Bytes;
 use durable_db::{
     Error,
@@ -11,11 +12,11 @@ use durable_db::{
     io::{Io, retry},
     layout::DbConfig,
     store::{
-        ObjectStore, list_all,
+        Listed, ObjectStore, StoreError, StoreResult, list_all,
         s3::{S3Config, S3Store},
     },
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 fn bucket() -> Option<(Arc<dyn ObjectStore>, String)> {
     let (store, root) = s3()?;
@@ -45,6 +46,69 @@ fn s3() -> Option<(S3Store, String)> {
     Some((store, format!("test-{:016x}/", rand::random::<u64>())))
 }
 
+/// A store that sends again a request that failed on its way, as the engine
+/// does. A purge sends its own again, and what it returns is checked.
+struct Again(Arc<dyn ObjectStore>);
+
+async fn again<T, F>(mut ask: impl FnMut() -> F) -> StoreResult<T>
+where
+    F: Future<Output = StoreResult<T>>,
+{
+    let mut failures = 0;
+    loop {
+        match ask().await {
+            Err(StoreError::Unavailable(_)) if failures < 6 => {
+                failures += 1;
+                tokio::time::sleep(Duration::from_millis(50 * failures)).await;
+            }
+            answered => return answered,
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for Again {
+    async fn put(&self, key: &str, body: Bytes) -> StoreResult<()> {
+        again(|| self.0.put(key, body.clone())).await
+    }
+    async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
+        again(|| self.0.get(key)).await
+    }
+    async fn get_range(&self, key: &str, start: u64, end: u64) -> StoreResult<Option<Bytes>> {
+        again(|| self.0.get_range(key, start, end)).await
+    }
+    async fn exists(&self, key: &str) -> StoreResult<bool> {
+        again(|| self.0.exists(key)).await
+    }
+    async fn list(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<Listed>> {
+        again(|| self.0.list(prefix, after, limit)).await
+    }
+    async fn list_dirs(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<String>> {
+        again(|| self.0.list_dirs(prefix, after, limit)).await
+    }
+    async fn delete(&self, key: &str) -> StoreResult<()> {
+        again(|| self.0.delete(key)).await
+    }
+    async fn purge(
+        &self,
+        prefix: &str,
+        end: Option<&str>,
+        doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
+    ) -> StoreResult<usize> {
+        self.0.purge(prefix, end, doomed).await
+    }
+}
+
 async fn keys(store: &dyn ObjectStore, prefix: &str) -> Vec<String> {
     list_all(store, prefix)
         .await
@@ -59,6 +123,7 @@ async fn the_bucket_honors_the_storage_contract() {
     let Some((store, root)) = bucket() else {
         return;
     };
+    let store: Arc<dyn ObjectStore> = Arc::new(Again(store));
     let key = |name: &str| format!("{root}{name}");
     let all = |_: &str| true;
     assert_eq!(store.get(&key("a/1")).await.unwrap(), None);
@@ -191,6 +256,8 @@ async fn a_purge_removes_many_versions_with_one_request() {
     assert_eq!(retry(|| store.purge(&root, None, &all)).await.unwrap(), 0);
     if store.is_backblaze() {
         assert!(store.removes_many(), "Backblaze refused the request");
+    } else if !store.removes_many() {
+        eprintln!("the bucket refused the request: each version was removed alone");
     }
 }
 
@@ -241,10 +308,13 @@ async fn a_purge_across_pages_never_shows_a_deleted_key() {
     // A purge whose request fails on its way three times fails. The engine
     // then purges again, and so does this: the key must stay absent through
     // an interrupted purge as well.
+    // A bucket that keeps no versions has nothing left of a deleted key,
+    // and one key to remove. What a bucket that keeps them leaves behind
+    // here, the second purge below would find.
     let all = |_: &str| true;
     let removed = match store.purge(&root, None, &all).await {
         Ok(removed) => {
-            assert_eq!(removed, 521);
+            assert!(matches!(removed, 1 | 521), "removed {removed}");
             removed
         }
         Err(_) => retry(|| store.purge(&root, None, &all)).await.unwrap(),

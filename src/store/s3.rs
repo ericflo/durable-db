@@ -1,11 +1,17 @@
-//! Any S3-compatible bucket: Amazon S3, Backblaze B2, Cloudflare R2, MinIO.
+//! Any S3-compatible bucket: Amazon S3, Backblaze B2, Cloudflare R2, MinIO,
+//! and stores that keep no versions, such as Garage.
 //!
 //! One code path for all of them. It uses only what Backblaze B2 implements:
 //! PutObject, GetObject (with ranges), HeadObject, DeleteObject,
-//! ListObjectsV2 and ListObjectVersions. In particular it never sends
-//! `If-Match` or `If-None-Match`, which B2 rejects.
+//! DeleteObjects, ListObjectsV2 and ListObjectVersions. In particular it
+//! never sends `If-Match` or `If-None-Match`, which B2 rejects.
 //!
 //! Requests are signed with AWS Signature Version 4 and addressed path-style.
+//!
+//! A purge does without two of those where a store does not have them: it
+//! removes versions one at a time where DeleteObjects is refused, and
+//! removes keys where there is no ListObjectVersions, since such a store
+//! keeps no versions.
 //!
 //! One operation has a second wire form. On Backblaze, PutObject goes through
 //! a gateway that measured two to three times slower than B2's own upload
@@ -46,6 +52,10 @@ pub struct S3Store {
     /// Whether the bucket takes one request that removes many versions. A
     /// bucket that has refused it is not asked again.
     batches: AtomicBool,
+    /// Whether the bucket lists its versions. One that answers that it has
+    /// no such request is taken to keep none: what a purge removes there it
+    /// removes by key, and it is not asked again.
+    versions: AtomicBool,
 }
 
 /// A failed exchange. The URL names the bucket and the key, and neither
@@ -162,7 +172,8 @@ fn unescape(text: &str) -> String {
 }
 
 /// The body of a request that removes these versions, if XML can name them
-/// all: it has no way to write most control characters.
+/// all: it has no way to write most control characters. A version with no
+/// name is a key on a bucket that keeps no versions.
 fn removal_of(versions: &[(String, String)]) -> Option<String> {
     let mut body = String::from("<Delete><Quiet>true</Quiet>");
     for (key, version) in versions {
@@ -172,9 +183,13 @@ fn removal_of(versions: &[(String, String)]) -> Option<String> {
         }
         body.push_str("<Object><Key>");
         escape_into(&mut body, key);
-        body.push_str("</Key><VersionId>");
-        escape_into(&mut body, version);
-        body.push_str("</VersionId></Object>");
+        body.push_str("</Key>");
+        if !version.is_empty() {
+            body.push_str("<VersionId>");
+            escape_into(&mut body, version);
+            body.push_str("</VersionId>");
+        }
+        body.push_str("</Object>");
     }
     body.push_str("</Delete>");
     Some(body)
@@ -250,6 +265,25 @@ fn following(xml: &str, last: Option<String>) -> StoreResult<Option<Cursor>> {
     }
 }
 
+/// What a purge asks and is not answered, it asks again. Listing and
+/// removing are both safe to repeat, and a purge that fails leaves what it
+/// has not removed to the next collection.
+async fn again<T, F>(mut ask: impl FnMut() -> F) -> StoreResult<T>
+where
+    F: Future<Output = StoreResult<T>>,
+{
+    let mut failures = 0;
+    loop {
+        match ask().await {
+            Err(StoreError::Unavailable(_)) if failures < PURGE_AGAIN => {
+                failures += 1;
+                tokio::time::sleep(Duration::from_millis(25 << failures)).await;
+            }
+            answered => return answered,
+        }
+    }
+}
+
 impl S3Store {
     pub fn new(config: S3Config) -> StoreResult<Self> {
         let endpoint = config.endpoint.trim_end_matches('/').to_owned();
@@ -272,6 +306,7 @@ impl S3Store {
             client,
             b2: None,
             batches: AtomicBool::new(true),
+            versions: AtomicBool::new(true),
         })
     }
 
@@ -450,6 +485,41 @@ impl S3Store {
         Ok(xml)
     }
 
+    /// A purge on a bucket that keeps no versions. A key that is removed
+    /// there is gone, so the keys are listed and removed by name.
+    async fn purge_keys(
+        &self,
+        prefix: &str,
+        end: Option<&str>,
+        doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
+    ) -> StoreResult<usize> {
+        let mut removed = 0;
+        let mut cursor = Cursor::After(None);
+        loop {
+            let xml = again(|| self.page(prefix, false, &cursor, 1000)).await?;
+            let mut chosen = Vec::new();
+            let mut last = None;
+            let mut past_end = false;
+            for item in tags(&xml, "Contents") {
+                let Some(key) = tag(item, "Key").map(unescape) else {
+                    return Err(StoreError::Fatal("unreadable listing".into()));
+                };
+                if end.is_some_and(|end| key.as_str() >= end) {
+                    past_end = true;
+                } else if doomed(&key) {
+                    chosen.push((key.clone(), String::new()));
+                }
+                last = Some(key);
+            }
+            self.delete_versions(&chosen).await?;
+            removed += chosen.len();
+            match following(&xml, last)? {
+                Some(next) if !past_end => cursor = next,
+                _ => return Ok(removed),
+            }
+        }
+    }
+
     fn refused(&self, what: &str, reply: &Reply) -> StoreError {
         let text = String::from_utf8_lossy(&reply.body);
         let code = tag(&text, "Code").unwrap_or("");
@@ -460,31 +530,18 @@ impl S3Store {
         ))
     }
 
-    /// One request of a purge, sent again if it is not answered. Listing
-    /// versions and removing them are both safe to repeat, and a purge that
-    /// fails leaves what it has not removed to the next collection.
+    /// One request of a purge that has no body.
     async fn purging(
         &self,
         method: Method,
         key: &str,
         query: &[(&str, &str)],
-        body: Bytes,
     ) -> StoreResult<Reply> {
-        let checked = !body.is_empty();
-        let mut failures = 0;
-        loop {
-            let sent = self.exchange(method.clone(), key, query, None, body.clone(), checked);
-            match sent.await {
-                Err(StoreError::Unavailable(_)) if failures < PURGE_AGAIN => {
-                    failures += 1;
-                    tokio::time::sleep(Duration::from_millis(25 << failures)).await;
-                }
-                answered => return answered,
-            }
-        }
+        again(|| self.exchange(method.clone(), key, query, None, Bytes::new(), false)).await
     }
 
-    /// Remove these exact versions.
+    /// Remove these exact versions. One with no name is a key on a bucket
+    /// that keeps no versions, and is removed as that.
     ///
     /// One request removes up to a thousand of them. A bucket that refuses
     /// it gets a request for each version, 32 at a time. That was the only
@@ -512,9 +569,8 @@ impl S3Store {
                     // a bucket that keeps versions would only add a delete
                     // marker.
                     let query = [("versionId", version.as_str())];
-                    let reply = self
-                        .purging(Method::DELETE, key, &query, Bytes::new())
-                        .await?;
+                    let named = usize::from(!version.is_empty());
+                    let reply = self.purging(Method::DELETE, key, &query[..named]).await?;
                     if reply.status.is_success() || reply.absent() {
                         Ok(())
                     } else {
@@ -530,30 +586,36 @@ impl S3Store {
     /// Send one request that removes many versions. `false` says that the
     /// bucket does not take such a request.
     async fn delete_batch(&self, body: String) -> StoreResult<bool> {
-        let reply = self
-            .purging(Method::POST, "", &[("delete", "")], Bytes::from(body))
-            .await?;
-        let text = String::from_utf8_lossy(&reply.body);
-        if !reply.status.is_success() || !text.contains("<DeleteResult") {
-            return Ok(false);
-        }
-        // The answer names only what was not removed.
-        for error in tags(&text, "Error") {
-            match (tag(error, "Key"), tag(error, "Code")) {
-                // A version that is not there was removed before, by this
-                // request when its answer was lost.
-                (Some(_), Some("NoSuchVersion" | "NoSuchKey")) => {}
-                (Some(_), code) => {
-                    return Err(StoreError::Unavailable(format!(
-                        "a version was not removed: {}",
-                        code.unwrap_or("no reason given")
-                    )));
-                }
-                // An error that names no key is about the request.
-                (None, _) => return Ok(false),
+        let body = Bytes::from(body);
+        // A version that the bucket says it did not remove is asked for
+        // again with the others, like a request that was not answered.
+        again(|| async {
+            let query = [("delete", "")];
+            let sent = self.exchange(Method::POST, "", &query, None, body.clone(), true);
+            let reply = sent.await?;
+            let text = String::from_utf8_lossy(&reply.body);
+            if !reply.status.is_success() || !text.contains("<DeleteResult") {
+                return Ok(false);
             }
-        }
-        Ok(true)
+            // The answer names only what was not removed.
+            for error in tags(&text, "Error") {
+                match (tag(error, "Key"), tag(error, "Code")) {
+                    // A version that is not there was removed before, by
+                    // this request when its answer was lost.
+                    (Some(_), Some("NoSuchVersion" | "NoSuchKey")) => {}
+                    (Some(_), code) => {
+                        return Err(StoreError::Unavailable(format!(
+                            "a version was not removed: {}",
+                            code.unwrap_or("no reason given")
+                        )));
+                    }
+                    // An error that names no key is about the request.
+                    (None, _) => return Ok(false),
+                }
+            }
+            Ok(true)
+        })
+        .await
     }
 }
 
@@ -1107,6 +1169,9 @@ impl ObjectStore for S3Store {
         end: Option<&str>,
         doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
     ) -> StoreResult<usize> {
+        if !self.versions.load(Ordering::Relaxed) {
+            return self.purge_keys(prefix, end, doomed).await;
+        }
         let mut removed = 0;
         let mut counted: Option<String> = None;
         let mut marker: Option<(String, String)> = None;
@@ -1118,7 +1183,15 @@ impl ObjectStore for S3Store {
                 query.push(("key-marker", key));
                 query.push(("version-id-marker", version));
             }
-            let reply = self.purging(Method::GET, "", &query, Bytes::new()).await?;
+            let reply = self.purging(Method::GET, "", &query).await?;
+            if reply.status == StatusCode::NOT_IMPLEMENTED {
+                if self.versions.swap(false, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "the bucket does not list versions and is taken to keep none; what is collected is removed by key"
+                    );
+                }
+                return self.purge_keys(prefix, end, doomed).await;
+            }
             if !reply.status.is_success() {
                 return Err(self.refused("LIST versions", &reply));
             }
