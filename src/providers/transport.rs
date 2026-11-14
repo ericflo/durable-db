@@ -209,6 +209,11 @@ mod tests {
     }
     impl Logs {
         fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            // Avoid tracing-core's single-dispatch fast path registering shared
+            // callsites against a concurrent test thread with no subscriber.
+            static REGISTERED: std::sync::LazyLock<tracing::Dispatch> =
+                std::sync::LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::registry()));
+            std::sync::LazyLock::force(&REGISTERED);
             let logs = self.clone();
             tracing_subscriber::fmt()
                 .without_time()

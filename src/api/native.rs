@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{OwnedSemaphorePermit, RwLock, RwLockWriteGuard, Semaphore, mpsc, oneshot},
+    sync::{Notify, OwnedSemaphorePermit, RwLock, RwLockWriteGuard, Semaphore, mpsc, oneshot},
     task::{JoinHandle, JoinSet},
 };
 
@@ -84,10 +84,13 @@ struct Pending {
     ticket: Ticket,
     response: Response,
 }
-struct Running(Arc<AtomicBool>);
+struct Running(Arc<AtomicBool>, Option<Arc<Notify>>);
 impl Drop for Running {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+        if let Some(retired) = &self.1 {
+            retired.notify_one();
+        }
     }
 }
 fn unavailable() -> Error {
@@ -102,13 +105,14 @@ impl Native {
         Self::start(owner, capacity, Duration::from_secs(60))
     }
     pub(super) fn start(owner: Owner, capacity: usize, maintenance: Duration) -> Result<Self> {
-        Self::start_reserved(owner, capacity, maintenance, None)
+        Self::start_reserved(owner, capacity, maintenance, None, None)
     }
     pub(super) fn start_reserved(
         owner: Owner,
         capacity: usize,
         maintenance: Duration,
         reservation: Option<OwnedSemaphorePermit>,
+        retired: Option<Arc<Notify>>,
     ) -> Result<Self> {
         Self::validate(capacity, maintenance)?;
         owner.check()?;
@@ -124,7 +128,7 @@ impl Native {
         let worker = tokio::spawn(run(
             owner.clone(),
             receive,
-            Running(running.clone()),
+            Running(running.clone(), retired),
             collection,
             maintenance,
         ));

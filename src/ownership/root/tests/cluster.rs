@@ -2050,7 +2050,7 @@ async fn absent_uncertain_journal_reacquires_and_excludes_a_late_old_upload() {
             json!({"request_id":"create", "limits":{"max_keys":10,"max_bytes":1000}}),
         )
         .await;
-    let old = node.cluster.resolve("app").await.unwrap().unwrap();
+    let old = Arc::downgrade(&node.cluster.resolve("app").await.unwrap().unwrap());
     faults.fail_journal.store(true, Ordering::SeqCst);
     let response = tokio::time::timeout(
         Duration::from_secs(2),
@@ -2060,9 +2060,12 @@ async fn absent_uncertain_journal_reacquires_and_excludes_a_late_old_upload() {
     .await
     .unwrap();
     assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(!old.ready().await);
-    drop(old); // Release its resident reservation, like a completed HTTP request.
-    tokio::time::timeout(Duration::from_secs(8), async {
+    if let Some(old) = old.upgrade() {
+        assert!(!old.ready().await);
+    }
+    // Local retirement wakes placement without waiting for its three-second
+    // poll. Do not retain an artificial request/resident reservation here.
+    tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let backend = node.cluster.resolve("app").await.unwrap().unwrap();
             if backend.owner_incarnation().is_some() && backend.ready().await {

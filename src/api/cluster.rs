@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{RwLock, Semaphore, watch},
+    sync::{Notify, RwLock, Semaphore, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -79,7 +79,8 @@ struct Local {
     _challenges: JoinSet<()>,
 }
 /// A bounded native controller. The caller supplies membership snapshots; an
-/// update or a three-second retry tick reconciles placement. Closing membership
+/// update, local worker retirement or a three-second retry tick reconciles placement.
+/// Closing membership
 /// retires local backends. Losing the last controller handle aborts its task.
 /// This interface does not discover Kubernetes membership or migrate layouts.
 pub struct Cluster {
@@ -89,6 +90,7 @@ pub struct Cluster {
     partitions: Vec<Partition>,
     limits: Limits,
     residents: Arc<Semaphore>,
+    retired: Arc<Notify>,
     ready: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -122,6 +124,7 @@ impl Cluster {
         let cluster = Arc::new(Self {
             limits,
             residents,
+            retired: Arc::new(Notify::new()),
             directory,
             config,
             cache,
@@ -159,6 +162,7 @@ impl Cluster {
             }
         });
         let count = cluster.config.layout.partitions() as usize;
+        let retired = cluster.retired.clone();
         let weak = Arc::downgrade(&cluster);
         let worker = tokio::spawn(async move {
             let mut retry = tokio::time::interval(Duration::from_secs(3));
@@ -169,6 +173,9 @@ impl Cluster {
             let mut cursor = 0;
             loop {
                 tokio::select! {
+                    // One coalesced wake skips the idle poll after a worker
+                    // fails. Keep retry pacing and every acquisition check.
+                    _ = retired.notified() => (),
                     _ = retry.tick() => failed.fill(false),
                     update = members.changed() => {
                         if update.is_err() { break; }
@@ -180,7 +187,9 @@ impl Cluster {
                         failed[id] = result.is_err();
                     }
                 }
-                let peers = membership(&members.borrow_and_update()).unwrap_or_default();
+                // Only changed() acknowledges membership. A retirement wake
+                // must not consume an update before its retry reset runs.
+                let peers = membership(&members.borrow()).unwrap_or_default();
                 let Some(cluster) = weak.upgrade() else {
                     return;
                 };
@@ -434,6 +443,7 @@ impl Cluster {
                     self.config.capacity,
                     self.config.maintenance,
                     Some(reservation),
+                    Some(self.retired.clone()),
                 )
                 .map_err(anyhow::Error::from)?;
                 return Ok(Local {

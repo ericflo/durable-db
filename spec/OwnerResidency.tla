@@ -19,6 +19,9 @@ Init == s = [live |-> {}, reserved |-> {}, retired |-> {}]
 \* slot, leaving room for requested retries. Restricting eligible Acquire
 \* steps preserves these safety invariants; scheduling progress is tested in Rust.
 \* Placement is scheduling, never serving authority.
+\* A local worker retirement may wake placement before its periodic poll.
+\* This only schedules the same Acquire/Retire steps; retained requests and
+\* uploads still occupy their reservation until Finish. A wake grants no slot.
 Acquire(o) == /\ o \notin s.live
               /\ (Cardinality(s.reserved) < Capacity \/ Fault = "Acquire")
               /\ s' = [s EXCEPT !.live = @ \cup {o}, !.reserved = @ \cup {o}]
