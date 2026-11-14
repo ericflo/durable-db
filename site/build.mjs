@@ -143,6 +143,7 @@ for (const file of [
   'forward-pause-2026-11-13.json',
   'attempt-grants-2026-11-14.json',
   'value-reclamation-2026-11-14.json',
+  'long-journal-cold-2026-11-14.json',
   'http-batching-2026-11-14.json',
   'copy-prepayment-2026-11-14.json',
   'native-load-2026-11-14.json',

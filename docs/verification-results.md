@@ -1,5 +1,60 @@
 # Verification results
 
+## Long-journal cold recovery on B2 (2026-11-14)
+
+The released **v1.0.10** binary, source `0771128` from Woodpecker **420**,
+passes a focused cold-start campaign using harness `ee9d668`, checked by
+Woodpecker **423**. No runtime or resource limit changed. One database receives
+a seed and **100 × 64 KiB overwrites**, then 100 point/ordered reads. All 200
+measured operations pass. Before the fault, logs show **zero checkpoints** and
+the writer records **102 journal frames**, including catalog creation. The
+acknowledged value history is **6.31 MiB**, beyond the unchanged **5.12 MiB**
+per-partition resident value allowance.
+
+The harness freezes every database process with same-UID `SIGSTOP`, verifies
+all three remain stopped, scales to zero, and waits for every old pod to
+disappear. It then starts three replacements on separate hosts with distinct
+pod UIDs and no disk cache. Frozen processes cannot perform graceful shutdown
+checkpoints. Expected values and the exact last request remain in the separate
+workload process; the coordination files contain only a nonce and database
+count.
+
+Recovery selects the **102-frame journal** from B2. Point and ordered reads
+return the expected value at **revision 101**; resending the exact last commit
+returns its existing receipt. A new commit reaches **revision 102** and reads
+back correctly. Cold retries record **30 HTTP 503 responses**, then four
+successful requests.
+
+| Measurement | Result |
+| --- | ---: |
+| First correct read after client retries resume on new pods | 37.67s |
+| Client barrier to first correct read, including test orchestration | 88.16s |
+| New write and readback after receipt verification | 5.55s |
+| Journal selection, including discovery and publication | 17.43s |
+| Discovery portion of that selection | 13.62s |
+| Peak sampled database-container RSS, warm / cold | 5.97 / 10.84 MiB |
+| Unplanned container restarts | 0 |
+
+Pod readiness precedes ownership recovery. The read timer begins when the
+controller resumes client retries after the replacement pods report Ready;
+the longer barrier timer also includes polling, freezing, deletion and rollout.
+Selection time is not the entire acquisition/replay interval. Resource samples
+can miss peaks and exclude the separately limited fault-control sidecars.
+
+This qualifies one longer overwrite suffix with an entirely cold cluster,
+not an availability SLO, sustained load, mixed-version upgrade, host power
+failure or in-flight ambiguous commit. The current value and last receipt are
+checked, not every historical value or receipt. Local harness controls reject
+both an incorrect cold value and an incorrect replayed receipt. The existing
+lost-acknowledgement and funding-refusal controls also pass.
+
+The [exact evidence](evidence/long-journal-cold-2026-11-14.json) separates the
+binary and harness commits, retains timing/resource samples and log hashes,
+and records removal of the namespace, bucket, **296 physical object versions**
+and scoped key. The existing benchmark and process-control helper are reused;
+duplicate request construction and single-container log assumptions were
+removed. Remaining work targets funding/publication waits and recovery latency.
+
 ## Reclaim overwritten values before checkpointing (2026-11-14)
 
 **v1.0.10**, source `0771128` from Woodpecker **420**, reclaims superseded
@@ -67,9 +122,9 @@ Use one release across all replicas: longer overwrite suffixes rely on the new
 replay reclamation. Mixed-version upgrades and rollback remain unqualified.
 Receipt, validation and frame bounds still require checkpoints. Until then,
 fewer checkpoints retain more journal objects; cleanup removes **1,055 remaining
-physical versions**, versus 438 previously. This run does not qualify cloud
-cold recovery of the longer suffixes or measure their billed cost. The next
-work targets that recovery and the remaining funding/publication waits.
+physical versions**, versus 438 previously. This load run does not measure
+billed cost; [the separate cold-start campaign above](#long-journal-cold-recovery-on-b2-2026-11-14)
+qualifies recovery of a longer suffix on B2. Funding/publication waits remain.
 
 The [exact evidence](evidence/value-reclamation-2026-11-14.json) retains full
 samples, artifact/source hashes, resource and slow-operation observations,

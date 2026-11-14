@@ -152,8 +152,12 @@ The B2 matrix completes all **2,120 operations** and verifies all **32 final
 states**. At 32 workers it measures **18.24 writes/s** and **1.92s write p95**,
 versus **13.32 writes/s** and **2.15s** previously, with two completed checkpoints
 instead of thirteen during that phase. Reads are slower in this sample:
-**90.77 reads/s**, versus **186.54**. A **16.90s** write outlier remains; remaining
-funding/publication waits and longer-suffix cold recovery need follow-up.
+**90.77 reads/s**, versus **186.54**. A **16.90s** write outlier remains;
+funding/publication waits need follow-up. A separate B2 cold-start check recovers
+a **102-frame uncheckpointed journal** after replacing every database process,
+verifies revision 101 and its exact retry receipt, then commits revision 102.
+The first correct read takes **37.67s after client retries resume** on the new
+pods; this does not establish a recovery-time guarantee.
 The earlier scale-down campaign recovered **385/385** acknowledged writes with
 a **41.31s** largest readback gap. These are short fixtures, not SLOs.
 See the [measured results](docs/verification-results.md),
