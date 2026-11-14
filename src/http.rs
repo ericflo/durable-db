@@ -247,6 +247,22 @@ async fn database(
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(app.limits.max_body);
     if declared > app.limits.max_body {
+        // Answering while the client is still sending would close the
+        // connection under it, and it would see a broken pipe instead of
+        // this error. Discard what it sends, within bounds, then answer.
+        use futures::StreamExt;
+        let limit = app.limits.max_body.saturating_mul(2);
+        let discard = async {
+            let mut stream = body.into_data_stream();
+            let mut seen = 0usize;
+            while let Some(Ok(chunk)) = stream.next().await {
+                seen += chunk.len();
+                if seen > limit {
+                    break;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discard).await;
         return error_response(&Error::TooLarge);
     }
     let kib = (declared.div_ceil(1024)).max(1) as u32;
