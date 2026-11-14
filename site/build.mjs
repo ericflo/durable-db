@@ -13,7 +13,7 @@ const repository = 'https://github.com/ericflo/durable-db';
 const pages = [
   ['deployment', 'Deployment', 'docs/deployment.md', 'Install, run on one machine, on a bucket and on Kubernetes. Configuration, tokens and operations.'],
   ['api', 'HTTP API', 'docs/api.md', 'Reads, scans, commits, checks, idempotency keys, errors and limits.'],
-  ['clients', 'TypeScript SDK', 'clients/javascript/README.md', 'The typed client for Node.js and the pi-durable storage adapter.'],
+  ['clients', 'TypeScript SDK', 'clients/javascript/README.md', 'The typed client: reads, transactions, checks, errors and retries. The pi-durable storage adapter.'],
   ['architecture', 'Architecture', 'docs/architecture.md', 'The objects in the bucket, taking ownership, committing, reading, collection and failures.'],
   ['performance', 'Performance', 'docs/performance.md', 'Benchmark tables and the commands that reproduce them.'],
   ['verification', 'Verification', 'docs/verification.md', 'What is claimed, the assumptions, the TLA+ model, the tests and what remains unchecked.'],

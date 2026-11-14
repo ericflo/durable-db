@@ -6,7 +6,7 @@
 <h1 id="hero-title">A transactional <span class="nowrap">key-value</span> database stored in a bucket.</h1>
 <p class="lead">durable-db is one static Rust binary that serves atomic transactions and ordered scans of JSON values over HTTP. The data is immutable objects in Backblaze B2 or another S3-compatible bucket, so servers keep no state: add them, remove them or kill every one, and nothing is lost.</p>
 <div class="cta"><a class="button" href="#quickstart">Quick start</a><a class="button button-quiet" href="#how">How it works</a></div>
-<div class="install"><pre data-copy><code>curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh</code></pre></div>
+<div class="install"><pre data-copy><code>curl -fsSL <span>https://ericflo.github.io/durable-db-site/install.sh | sh</span></code></pre></div>
 <ul class="facts" aria-label="At a glance"><li>One binary, about 8 MB</li><li>B2, S3-compatible or a local directory</li><li>No conditional writes, leases or synchronized clocks</li><li>Modelled in TLA+</li><li>Apache-2.0</li></ul>
 </div>
 <div class="code-card" data-tabs>
@@ -153,7 +153,7 @@ curl $URL/read -H <span class="s">"$AUTH"</span> \
 <a href="verification.html#the-model"><strong>7.15 million</strong><span>distinct states. TLC explores the model exhaustively at 2 writers, 2 epochs and 2 transactions and finds no violation.</span></a>
 <a href="verification.html#negative-controls"><strong>8 of 8</strong><span>negative controls refuted. Each turns off one protocol rule in the model and must produce a counterexample.</span></a>
 <a href="verification.html#tests-of-the-implementation"><strong>200 seeds</strong><span>of a randomized fault-injection test pass: three nodes, dropped and half-applied storage requests, crashes and stale owners.</span></a>
-<a href="verification.html#tests-of-the-implementation"><strong>18,838 transfers</strong><span>in a ledger verified exactly on a three-node kind cluster backed by B2, while the autoscaler scaled 2 → 3 → 2 and a pod was force-killed. No request failed.</span></a>
+<a href="verification.html#tests-of-the-implementation"><strong>18,838 transfers</strong><span>in a ledger verified exactly on a three-node kind cluster backed by B2, while the autoscaler scaled <span class="nowrap">2 → 3 → 2</span> and a pod was force-killed. No request failed.</span></a>
 </div>
 <p class="caveat">Bounded model checking is evidence about a model. It is not a proof of the Rust implementation or of every deployment. The <a href="verification.html">verification page</a> lists the assumptions, what the model leaves out, three defects these tests found, and the obligations that remain.</p>
 </div>
