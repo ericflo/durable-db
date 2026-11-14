@@ -31,6 +31,10 @@ pub struct ApiLimits {
     pub max_scan_items: usize,
     /// Requests in flight on this node before new ones are refused.
     pub max_inflight: usize,
+    /// Request bodies held in memory at once, across all requests.
+    pub max_body_total: usize,
+    /// Bytes one read may return.
+    pub max_read_bytes: usize,
 }
 
 impl Default for ApiLimits {
@@ -43,6 +47,8 @@ impl Default for ApiLimits {
             max_lookups: 10_000,
             max_scan_items: 10_000,
             max_inflight: 4096,
+            max_body_total: 512 << 20,
+            max_read_bytes: 64 << 20,
         }
     }
 }
@@ -53,12 +59,15 @@ pub struct App {
     pub cluster: Arc<Cluster>,
     pub limits: ApiLimits,
     pub inflight: tokio::sync::Semaphore,
+    /// Permits of 1 KiB each for request bodies in memory.
+    pub bodies: tokio::sync::Semaphore,
 }
 
 impl App {
     pub fn new(node: Arc<Node>, keys: Keys, cluster: Arc<Cluster>, limits: ApiLimits) -> Arc<Self> {
         Arc::new(Self {
             inflight: tokio::sync::Semaphore::new(limits.max_inflight),
+            bodies: tokio::sync::Semaphore::new(limits.max_body_total >> 10),
             node,
             keys,
             cluster,
@@ -229,7 +238,27 @@ async fn database(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
-    // Read the body here so that an oversized one gets the documented error.
+    // Bodies are held in memory, so their total is budgeted before one is
+    // read: many large requests at once are refused instead of exhausting
+    // the server. A body without a declared length is charged the maximum.
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(app.limits.max_body);
+    if declared > app.limits.max_body {
+        return error_response(&Error::TooLarge);
+    }
+    let kib = (declared.div_ceil(1024)).max(1) as u32;
+    let Ok(_body_budget) = app.bodies.try_acquire_many(kib) else {
+        app.node
+            .metrics
+            .rejected
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return error_response(&Error::Busy(
+            "this node is holding too many request bodies; retry shortly".into(),
+        ));
+    };
     let Ok(body) = axum::body::to_bytes(body, app.limits.max_body).await else {
         return error_response(&Error::TooLarge);
     };
@@ -408,6 +437,25 @@ async fn serve(
                 .await
                 .inspect_err(|_| node.metrics.reads.fail())?;
             observe(&node.metrics.reads);
+            let bytes: usize = response
+                .values
+                .iter()
+                .flatten()
+                .map(|(_, value)| value.len())
+                .chain(
+                    response
+                        .scans
+                        .iter()
+                        .flat_map(|scan| scan.items.iter().map(|e| e.weight())),
+                )
+                .sum();
+            if bytes > app.limits.max_read_bytes {
+                return Err(invalid(format!(
+                    "the result is {bytes} bytes; one read returns at most {}. Ask for fewer keys or scans",
+                    app.limits.max_read_bytes
+                ))
+                .into());
+            }
             Ok(json_response(
                 StatusCode::OK,
                 read_json(&response, &request.1),

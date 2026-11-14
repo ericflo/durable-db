@@ -176,7 +176,7 @@ Percent-encode the key in the path; `/` may be left as is.
 | 410 | `deleted` | The database was deleted. | |
 | 413 | `too_large` | The request body exceeds 32 MiB. | Split the request. |
 | 429 | `rate_limited` | The database's request budget is spent. | Retry after `Retry-After` seconds. |
-| 503 | `busy`, `ownership_moved`, `storage_unavailable` | The request could not be completed now. | Repeat the identical request. |
+| 503 | `busy`, `ownership_moved`, `storage_unavailable` | The request could not be completed now: ownership is moving, storage did not answer, or the server is shedding load. | Repeat the identical request. |
 | 507 | `quota_exceeded` | The database is at `max_bytes`. | Delete data or raise the quota. |
 
 A `503` on a commit means the outcome is **unknown**: the transaction may have been applied. Repeating it with the same `idempotency_key` is always safe and returns the definite result. Servers repeat such commits themselves when a key is present, so clients see this rarely.
@@ -191,6 +191,7 @@ A `503` on a commit means the outcome is **unknown**: the transaction may have b
 | Writes plus checks per transaction | 10,000 |
 | Keys plus scans per read | 10,000 |
 | Scan page | 10,000 items or 8 MiB |
+| One read's result | 64 MiB |
 | Database size | 1 GiB (`max_bytes`, per database) |
 
 ## Health and metrics

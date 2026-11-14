@@ -1019,6 +1019,8 @@ impl Db {
         let Some(count) = merge_plan(&tables) else {
             return Ok(false);
         };
+        // A merge builds its table in memory; only a few run at once.
+        let _turn = self.ctx.io.merges.acquire().await;
         let bottom = count == tables.len();
         let io = &self.ctx.io;
         let mut scans: Vec<TableScan> = tables[..count]
@@ -1775,6 +1777,15 @@ impl Writer {
             && state.table_bytes + (state.mem.bytes() + added) as u64 > state.config.max_bytes
         {
             return Err(Error::Quota);
+        }
+        // Writes arriving faster than they can be flushed are refused rather
+        // than accumulated without bound.
+        if added > 0 && state.mem.bytes() > db.ctx.opts.flush_bytes.saturating_mul(4) {
+            drop(state);
+            db.request_flush();
+            return Err(Error::Busy(
+                "the database is flushing earlier writes; retry shortly".into(),
+            ));
         }
         self.assigned += 1;
         let revision = self.assigned;

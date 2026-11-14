@@ -301,15 +301,22 @@ async fn a_joining_node_receives_its_share() {
     assert_eq!(open(first.url.clone()).await, 12);
     // A second node joins. The first hands over the databases that hash to it.
     let second = Server::start(data.path(), ports[1], Some(&peers), &[]).await;
+    // Exactly the databases the routing function assigns to the new node.
+    let routing = durable_db::cluster::Cluster::new(Some(first.address.clone()));
+    routing.set_peers(vec![first.address.clone(), second.address.clone()]);
+    let expected = names
+        .iter()
+        .filter(|name| routing.owner(name).is_some())
+        .count();
     let mut moved = 0;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         moved = 12 - open(first.url.clone()).await;
-        if moved >= 3 {
+        if moved == expected {
             break;
         }
     }
-    assert!((3..=9).contains(&moved), "{moved} of 12 databases moved");
+    assert_eq!(moved, expected, "databases handed to the joining node");
     // Every database still answers through either node, with its data.
     for (i, name) in names.iter().enumerate() {
         let node = if i % 2 == 0 { &first } else { &second };

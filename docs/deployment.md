@@ -137,7 +137,7 @@ What keeps one tenant from harming another:
 - **Storage.** `max_bytes` per database; writes that add data beyond it are refused.
 - **Request rate.** `max_requests_per_second` per database, or `--requests-per-second` for all.
 - **Request size.** Key, value, transaction and page limits are enforced before any work is done ([limits](api.md#limits)).
-- **Memory.** Block cache and unflushed writes are bounded for the whole server, not per tenant, so one large tenant slows others before it can exhaust a server.
+- **Memory.** The block cache is bounded for the whole server. A database whose unflushed writes exceed four times the flush size gets `503` until a flush catches up. Request bodies in memory are budgeted across all requests (512 MiB), and one read returns at most 64 MiB. At most two table merges run at once.
 - **Revocation.** `{"revoke_tokens": true}` voids every token of a database at once.
 
 Tokens belong on your servers, not in browsers. To rotate the signing key, put the new key on the first line of the key file and keep the old one below it until tokens signed with it have expired; all servers must have the file before the new key is used.

@@ -169,6 +169,8 @@ pub struct Io {
     pub disk: Option<Arc<DiskCache>>,
     pub block_hits: AtomicU64,
     pub block_misses: AtomicU64,
+    /// Bounds how many table merges run at once on this server.
+    pub merges: tokio::sync::Semaphore,
 }
 
 impl Io {
@@ -188,6 +190,7 @@ impl Io {
             disk: disk.map(Arc::new),
             block_hits: AtomicU64::new(0),
             block_misses: AtomicU64::new(0),
+            merges: tokio::sync::Semaphore::new(2),
         })
     }
 

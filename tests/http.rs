@@ -583,7 +583,38 @@ async fn quotas_and_request_budgets_are_enforced() {
         200
     );
 
-    // A database token is held to the database's request budget.
+    // One read cannot return an unbounded amount.
+    let limits = |rate: u32| json!({"max_bytes": 1 << 30, "max_requests_per_second": rate});
+    call("PATCH", &f.db("small"), &f.admin, Some(limits(0))).await;
+    for i in 0..20 {
+        let body =
+            json!({"writes": [{"key": format!("big/{i:02}"), "value": "y".repeat(3_800_000)}]});
+        assert_eq!(call("POST", &commit, &f.admin, Some(body)).await.0, 200);
+    }
+    let keys: Vec<String> = (0..20).map(|i| format!("big/{i:02}")).collect();
+    let (status, body) = call(
+        "POST",
+        &format!("{}/read", f.db("small")),
+        &f.admin,
+        Some(json!({"keys": keys})),
+    )
+    .await;
+    assert_eq!((status, code(&body)), (400, "invalid"));
+    assert_eq!(
+        call(
+            "POST",
+            &format!("{}/read", f.db("small")),
+            &f.admin,
+            Some(json!({"keys": keys[..5]}))
+        )
+        .await
+        .0,
+        200
+    );
+
+    call("PATCH", &f.db("small"), &f.admin, Some(limits(5))).await;
+
+    // Every request on the database is held to its request budget.
     let (_, body) = call(
         "POST",
         &format!("{}/tokens", f.db("small")),
