@@ -8,7 +8,7 @@ use bytes::Bytes;
 use durable_db::{
     Error,
     db::{Ctx, Db, Options, ReadReq, Scan, Txn},
-    io::Io,
+    io::{Io, retry},
     layout::DbConfig,
     store::{
         ObjectStore, list_all,
@@ -142,6 +142,80 @@ async fn the_bucket_honors_the_storage_contract() {
     store.purge(&root, None, &all).await.unwrap();
     assert!(keys(&*store, &root).await.is_empty());
     assert_eq!(store.purge(&root, None, &all).await.unwrap(), 0);
+
+    // Directory names come in the order of the keys below them, and paging
+    // by the last name returned misses none.
+    let names = ["app-s", "app.v", "app", "app0"];
+    for name in names {
+        let below = key(&format!("d/{name}/m/x"));
+        store.put(&below, Bytes::from_static(b"1")).await.unwrap();
+    }
+    let dirs = key("d/");
+    assert_eq!(store.list_dirs(&dirs, None, 10).await.unwrap(), names);
+    let mut paged: Vec<String> = Vec::new();
+    loop {
+        let after = paged.last().map(String::as_str);
+        let more = store.list_dirs(&dirs, after, 1).await.unwrap();
+        if more.is_empty() {
+            break;
+        }
+        paged.extend(more);
+    }
+    assert_eq!(paged, names);
+    assert_eq!(store.purge(&root, None, &all).await.unwrap(), 4);
+}
+
+/// A purge reads the versions of a prefix a page at a time. A deleted key is
+/// a version under a delete marker, and here one such pair lies across the
+/// end of the first page. The key must stay absent throughout: if it were a
+/// revoked claim, a stale owner that saw it would resume.
+#[tokio::test]
+async fn a_purge_across_pages_never_shows_a_deleted_key() {
+    let Some((store, root)) = bucket() else {
+        return;
+    };
+    // One entry, then pairs: the 1000th entry is a marker, the 1001st the
+    // version it hides.
+    let lone = format!("{root}c/0000");
+    let hidden: Vec<String> = (1..=520).map(|i| format!("{root}c/{i:04}")).collect();
+    // A single request can fail on its way; the engine retries, and so
+    // does this.
+    let body = Bytes::from_static(b"{}");
+    retry(|| store.put(&lone, body.clone())).await.unwrap();
+    for chunk in hidden.chunks(40) {
+        let each = chunk.iter().map(|key| async {
+            retry(|| store.put(key, body.clone())).await.unwrap();
+            retry(|| store.delete(key)).await.unwrap();
+        });
+        futures::future::join_all(each).await;
+    }
+    assert_eq!(keys(&*store, &root).await, [lone]);
+
+    let watched = [
+        hidden[498].clone(),
+        hidden[499].clone(),
+        hidden[500].clone(),
+    ];
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (store, stop) = (store.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut looks = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                for key in &watched {
+                    assert!(!store.exists(key).await.unwrap(), "{key} is visible");
+                    looks += 1;
+                }
+            }
+            looks
+        })
+    };
+    let removed = store.purge(&root, None, &|_| true).await.unwrap();
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(watcher.await.unwrap() > 0);
+    assert_eq!(removed, 521);
+    assert!(keys(&*store, &root).await.is_empty());
+    assert_eq!(store.purge(&root, None, &|_| true).await.unwrap(), 0);
 }
 
 /// The one assumption the protocol makes about storage: a write or delete

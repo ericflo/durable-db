@@ -309,7 +309,9 @@ impl Table {
         let index_len = footer.get_u32_le() as u64;
         let index_crc = footer.get_u32_le();
         let _entries = footer.get_u64_le();
-        if footer != MAGIC || index_offset + index_len + FOOTER as u64 != size {
+        let index_end = index_offset.checked_add(index_len);
+        if footer != MAGIC || index_end.and_then(|end| end.checked_add(FOOTER as u64)) != Some(size)
+        {
             return Err(corrupt());
         }
         let bytes = if index_offset >= tail_start {

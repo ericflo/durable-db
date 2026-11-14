@@ -24,7 +24,9 @@ scripts/test-clients.sh               # the TypeScript SDK, pi-durable adapter a
 | --- | --- |
 | `cargo test --lib` | Table format, in-memory table, key layout, tokens, routing, request parsing. |
 | `cargo test --test engine` | The engine on in-memory and directory storage: transactions, checks, retries, recovery, takeover, flush, merge, collection, quota, deletion, the disk cache. |
-| `cargo test --test chaos` | Three nodes on storage that delays, drops and half-applies requests, with crashes and zombie owners. Checks that nothing acknowledged is lost, nothing is applied twice, and linearizable reads never go backwards. `CHAOS_SEEDS=50` runs more schedules; `CHAOS_FIRST=n` starts at seed `n`. |
+| `cargo test --test chaos` | Three nodes on storage that delays, drops, half-applies and belatedly applies requests, with crashes and zombie owners. Checks that nothing acknowledged is lost, nothing is applied twice, linearizable reads never go backwards, and a deleted database stays deleted. `CHAOS_SEEDS=50` runs more schedules; `CHAOS_FIRST=n` starts at seed `n`. |
+| `cargo test --test interleavings` | Single schedules that a random test seldom finds, built by holding or failing chosen storage requests. |
+| `cargo test --test storage` | The S3 binding against an in-process stand-in that keeps versions, pages its listings and verifies signatures; the directory store against the in-memory one. |
 | `cargo test --test http` | The documented HTTP API against a real server process. |
 | `cargo test --test cluster` | Up to three server processes on one store: routing, a killed owner, a graceful handover, a joining node, a contended counter. |
 | `cargo test --test bucket` | The storage contract, read-after-write, and the engine on a real bucket. Skipped unless configured, see below. |
@@ -37,7 +39,7 @@ export DDB_S3_ACCESS_KEY_ID=... DDB_S3_SECRET_ACCESS_KEY=...
 cargo test --test bucket
 ```
 
-`scripts/check-model.sh` runs TLC with a 2 GiB heap, four workers and a time limit, in Docker when no local Java is installed. TLC sizes itself from the whole machine if left alone; do not remove the caps. The full suite takes about four minutes.
+`scripts/check-model.sh` runs TLC with a 2 GiB heap, four workers and a time limit, in Docker when no local Java is installed. TLC sizes itself from the whole machine if left alone; do not remove the caps. All configurations take about three minutes. `scripts/check-model.sh DeepDeletion` runs the one configuration that is left out because it takes far longer.
 
 ## Layout
 

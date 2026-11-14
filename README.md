@@ -127,8 +127,8 @@ A Deployment, two Services, an autoscaler and a disruption budget. A pod that is
 
 ## Verification
 
-- **A TLA+ model** of taking ownership, committing, linearizable reads, checkpoints and deletion. TLC explores it exhaustively at two writers, two epochs and two transactions (7.15 million states). Each of the eight protocol rules has a negative control: turning the rule off must, and does, produce a counterexample.
-- **Fault injection.** Three nodes on storage that delays, drops and half-applies requests, with crashes and stale owners; 200 random schedules pass. This test found three real bugs in the first implementation, all fixed and now covered.
+- **A TLA+ model** of creating a database, taking ownership, committing, linearizable reads, checkpoints, collection and deleting the database. TLC explores it exhaustively at two writers and two epochs: 3.59 million states with two transactions, and 4.11 million with deletion and one transaction. Each of the eleven protocol rules has a negative control: turning the rule off must, and does, produce a counterexample.
+- **Fault injection.** Three nodes on storage that delays, drops, half-applies and belatedly applies requests, with crashes and stale owners; 200 random schedules pass. This test found three real bugs in the first implementation. An adversarial review of release 2.0.0 found more, in deletion, in a failed takeover and in cleanup on a versioned bucket. All are fixed, each with a model control or a test that fails on the old code.
 - **Real servers and a real bucket.** The HTTP contract, multi-node takeover and handover, the storage contract on B2, and the Kubernetes run above.
 
 Bounded model checking is not a proof of the implementation. [Verification](docs/verification.md) lists the assumptions, what is checked, and what is not.

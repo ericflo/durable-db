@@ -148,14 +148,14 @@ curl $URL/read -H <span class="s">"$AUTH"</span> \
 <!-- VERIFICATION NUMBERS. These repeat docs/verification.md; keep the two in step. -->
 <section class="band band-dark" aria-labelledby="verification-title" id="verification">
 <div class="wrap">
-<div class="section-head"><p class="eyebrow">Verification</p><h2 id="verification-title">What was checked</h2><p>The protocol is one TLA+ model of ownership, commit, checkpoint and collection. The Rust code is written to follow it step for step, and is tested with injected faults, real server processes and a real bucket.</p></div>
+<div class="section-head"><p class="eyebrow">Verification</p><h2 id="verification-title">What was checked</h2><p>The protocol is one TLA+ model of ownership, commit, checkpoint, collection and deletion. The Rust code is written to follow it step for step, and is tested with injected faults, real server processes and a real bucket.</p></div>
 <div class="stats">
-<a href="verification.html#the-model"><strong>7.15 million</strong><span>distinct states. TLC explores the model exhaustively at 2 writers, 2 epochs and 2 transactions and finds no violation.</span></a>
-<a href="verification.html#negative-controls"><strong>8 of 8</strong><span>negative controls refuted. Each turns off one protocol rule in the model and must produce a counterexample.</span></a>
-<a href="verification.html#tests-of-the-implementation"><strong>200 seeds</strong><span>of a randomized fault-injection test pass: three nodes, dropped and half-applied storage requests, crashes and stale owners.</span></a>
+<a href="verification.html#the-model"><strong>3.59 million</strong><span>distinct states at 2 writers, 2 epochs and 2 transactions, and 4.11 million more with deletion and 1 transaction. TLC explores both exhaustively and finds no violation.</span></a>
+<a href="verification.html#negative-controls"><strong>11 of 11</strong><span>negative controls refuted. Each turns off one protocol rule in the model and must produce a counterexample.</span></a>
+<a href="verification.html#tests-of-the-implementation"><strong>200 seeds</strong><span>of a randomized fault-injection test pass: three nodes, dropped, half-applied and late storage requests, crashes, stale owners and deletions.</span></a>
 <a href="verification.html#tests-of-the-implementation"><strong>18,838 transfers</strong><span>in a ledger verified exactly on a three-node kind cluster backed by B2, while the autoscaler scaled <span class="nowrap">2 → 3 → 2</span> and a pod was force-killed. No request failed.</span></a>
 </div>
-<p class="caveat">Bounded model checking is evidence about a model. It is not a proof of the Rust implementation or of every deployment. The <a href="verification.html">verification page</a> lists the assumptions, what the model leaves out, three defects these tests found, and the obligations that remain.</p>
+<p class="caveat">Bounded model checking is evidence about a model. It is not a proof of the Rust implementation or of every deployment. The <a href="verification.html">verification page</a> lists the assumptions, what the model leaves out, the defects that these tests and a review found, and the obligations that remain.</p>
 </div>
 </section>
 
@@ -183,7 +183,7 @@ curl $URL/read -H <span class="s">"$AUTH"</span> \
 <li><strong>No point-in-time restore.</strong> Deletions are permanent. Protect the bucket with your provider's replication.</li>
 <li><strong>The prebuilt binary is Linux x86_64 only.</strong> Other platforms <a href="development.html">build from source</a>.</li>
 <li><strong>The repository is private for now.</strong> The installer uses the <code>gh</code> CLI, signed in to an account with access.</li>
-<li><strong>No independent review yet.</strong> The model does not cover database deletion, conditional transactions or liveness.</li>
+<li><strong>No independent review yet.</strong> The model does not cover conditional transactions or liveness.</li>
 </ul>
 <a class="more" href="verification.html#remaining-obligations">Remaining obligations →</a>
 </div>

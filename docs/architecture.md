@@ -21,7 +21,7 @@ For a database named `app`, under `<prefix>/db/app/`:
 | `m/<epoch>/<generation>` | **Manifest.** A small JSON record: the list of tables that make up the state, the revision they contain, and how many frames they cover. | At takeover and after every flush or merge. |
 | `l/<epoch>/<number>` | **Frame.** One group of committed transactions. | Once per group commit. |
 | `t/<epoch>/<id>` | **Table.** Sorted, compressed, checksummed key-value blocks with an index. | By a flush or a merge. |
-| `m/~` | **Tombstone.** The database was deleted. | Once. |
+| `m/~` | **Tombstone.** The database was deleted. | Once, after the deletion is final. Never removed. |
 
 An **epoch** is `<number>-<random>`, written in fixed width so that sorting keys sorts epochs. A server picks a new epoch every time it takes ownership of a database. Because the random part is fresh, every key below an epoch is written by exactly one process. That is the reason no write ever needs to be conditional: two servers can never write the same key.
 
@@ -34,12 +34,16 @@ A server that wants to serve a database does this, in order:
 1. **List** claims and manifests, and choose an epoch number one higher than any it sees.
 2. **PUT its claim**, once. If the upload's outcome is unknown, the claim is abandoned and never used.
 3. **List claims.** If a higher claim exists, another server is ahead: delete the own claim and stop. Otherwise **delete every lower claim**. This is revocation.
-4. **List manifests.** If a manifest of a higher epoch exists, stop. Otherwise take the newest manifest of the highest lower epoch.
+4. **List manifests.** If the tombstone exists, the database is deleted. If a manifest of a higher epoch exists, another server is ahead: delete the own claim and stop. Otherwise take the newest manifest of the highest lower epoch.
 5. **Read** that manifest, then list and read the frames that follow it, keeping the unbroken run.
 6. If frames were replayed, write them into a new table. **PUT the first manifest** of the new epoch.
 7. **Check the claim** (HEAD). If it still exists, start serving.
 
 The order matters. Revocation (3) happens before reading (4, 5), so nothing the previous owner acknowledges afterwards can be missed. The final check (7) happens after the manifest is stored, so everything recovered, including transactions the previous owner stored but never acknowledged, is permanent before anyone sees it.
+
+A takeover gives its claim back in exactly those cases: a higher claim, a higher manifest, or the tombstone. Each leaves something in the bucket that outranks this epoch for good. A takeover that stops for any other reason after step 3, such as storage failing while it reads, leaves its claim where it is, as a crash would. It may have revoked an epoch whose first manifest is still on its way to the bucket. Its claim keeps every lower epoch from serving, and makes the next server choose a number above that manifest.
+
+**Creating** a database is a takeover that finds no manifest: the first manifest describes an empty database, and the creation is acknowledged after the claim check that follows it. A request for a database that has no manifest is answered "not found" from the listing alone, without a claim.
 
 A server that leaves gracefully flushes, writes a manifest marked `sealed`, and deletes its own claim. The next owner then has nobody to revoke and no frames to replay.
 
@@ -90,7 +94,19 @@ Objects are deleted by the owner, and only what the newest manifest no longer ne
 
 The rule that makes this safe is the same as for acknowledgements: delete only after a claim check that began after the manifest was stored. If the check passes, any later owner will read that manifest or a newer one, and never needs what was deleted. If the owner has been replaced, the check fails and it deletes nothing.
 
-On a versioned bucket such as B2, deletion removes every version of a key, data first and delete markers last, so no lifecycle rule is needed and nothing is billed after it is collected.
+On a versioned bucket such as B2, collection removes every version of a key, so no lifecycle rule is needed and nothing is billed after it is collected. A key's delete markers are removed only when none of its data versions remain, across listing pages too, so a deleted key never becomes readable again wherever the cleanup stops. This matters for one kind of object: a revoked claim that reappeared would let a stale owner resume.
+
+## Deleting a database
+
+Deleting is a change of state like any other, and is settled the same way.
+
+1. The owner stops accepting requests and **PUTs a manifest marked `deleted`**, in its own epoch.
+2. It **checks its claim**. If the claim stands, the deletion is final: every later owner will read that manifest or a newer one of the same kind.
+3. Only then does it **PUT the tombstone**, and only when the tombstone is stored does it remove everything else under the database's prefix.
+
+A server that was replaced before step 1 completed is outranked like any stale owner: its manifest belongs to a lower epoch, its check fails, and it writes no tombstone, so nothing is left behind to take effect later. A server that takes over and recovers a manifest marked `deleted` finishes the job: it writes its own first manifest, also marked, checks its claim, then writes the tombstone and removes the rest.
+
+A deletion that fails partway has an unknown outcome, like a commit that does. Repeating the request settles it: the next owner either finds the database deleted and completes the cleanup, or finds it intact and deletes it.
 
 ## Many servers
 
@@ -111,7 +127,9 @@ Membership is only a routing preference. Two servers with different views of the
 | An upload's response is lost. | The identical bytes are uploaded again. |
 | A paused server resumes after being replaced. | Its claim is gone. Its next check fails; it acknowledges nothing and deletes nothing. |
 | Two servers claim at the same moment. | Both write claims. The lower one sees the higher and withdraws. |
-| A failed takeover leaves a manifest upload in flight. | The claim is left in place, as after a crash, so no lower epoch can serve until a higher one revokes it. Deleting it would let the late manifest hide newer acknowledged writes. |
+| A takeover fails after it revoked the previous owner, or with its own manifest upload in flight. | The claim is left in place, as after a crash, so no lower epoch can serve until a higher one revokes it. Deleting it would let a manifest that arrives late hide newer acknowledged writes. |
+| A deletion is interrupted. | Before the claim check, the next owner decides: a manifest marked `deleted` that reached the bucket is adopted, otherwise the database is intact. After it, the tombstone or that manifest makes every server finish the cleanup. |
+| An upload that was given up on arrives later. | A frame, manifest or table is the same bytes under the same key, or belongs to an epoch that has been outranked. A claim that might arrive late is never used. |
 | Storage is unreachable. | Commits and strong reads fail with `503` until it returns. Nothing is acknowledged that is not in the bucket. |
 | Every server is gone. | Start one. It opens each database from the bucket on first use. |
 | A cache file is damaged. | Its checksum fails; it is deleted and fetched again. |

@@ -15,13 +15,13 @@
 //! that results is the same object; nothing above this file can tell.
 use super::{Listed, ObjectStore, StoreError, StoreResult};
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use hmac::{Hmac, Mac};
 use reqwest::{Method, StatusCode};
 use sha2::{Digest, Sha256};
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone)]
@@ -41,8 +41,34 @@ pub struct S3Store {
     b2: Option<Arc<B2Uploader>>,
 }
 
-fn unavailable(error: impl std::fmt::Display) -> StoreError {
-    StoreError::Unavailable(error.to_string())
+/// A failed exchange. The URL names the bucket and the key, and neither
+/// belongs in a message that may reach a client.
+fn network(error: reqwest::Error) -> StoreError {
+    StoreError::Unavailable(error.without_url().to_string())
+}
+
+/// How long to wait for the first byte of an answer, and for each further
+/// part of it.
+const PATIENCE: Duration = Duration::from_secs(20);
+
+/// The whole body of a response. Its size is not known in advance, so the
+/// limit is on each wait for more of it rather than on the transfer.
+async fn body_of(mut response: reqwest::Response) -> StoreResult<Bytes> {
+    let mut whole = Bytes::new();
+    let mut joined: Option<BytesMut> = None;
+    loop {
+        let part = match tokio::time::timeout(PATIENCE, response.chunk()).await {
+            Ok(part) => part.map_err(network)?,
+            Err(_) => return Err(StoreError::Unavailable("a storage answer stalled".into())),
+        };
+        match part {
+            Some(part) if whole.is_empty() && joined.is_none() => whole = part,
+            Some(part) => joined
+                .get_or_insert_with(|| BytesMut::from(&whole[..]))
+                .extend_from_slice(&part),
+            None => return Ok(joined.map_or(whole, BytesMut::freeze)),
+        }
+    }
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -140,6 +166,36 @@ struct Reply {
     body: Bytes,
 }
 
+impl Reply {
+    /// Whether this says that the object is absent, and not the bucket.
+    fn absent(&self) -> bool {
+        self.status == StatusCode::NOT_FOUND
+            && tag(&String::from_utf8_lossy(&self.body), "Code") != Some("NoSuchBucket")
+    }
+}
+
+/// Where a listing continues.
+enum Cursor {
+    After(Option<String>),
+    Token(String),
+}
+
+/// Where the page after `xml` begins, given the place its last entry puts
+/// that; `None` when the listing is complete. A page may be cut short before
+/// its first entry, and is then continued by the token it carries.
+fn following(xml: &str, last: Option<String>) -> StoreResult<Option<Cursor>> {
+    if tag(xml, "IsTruncated").map(str::trim) != Some("true") {
+        return Ok(None);
+    }
+    match (last, tag(xml, "NextContinuationToken")) {
+        (Some(last), _) => Ok(Some(Cursor::After(Some(last)))),
+        (None, Some(token)) => Ok(Some(Cursor::Token(unescape(token)))),
+        (None, None) => Err(StoreError::Unavailable(
+            "a listing was cut short with no way to continue".into(),
+        )),
+    }
+}
+
 impl S3Store {
     pub fn new(config: S3Config) -> StoreResult<Self> {
         let endpoint = config.endpoint.trim_end_matches('/').to_owned();
@@ -235,29 +291,73 @@ impl S3Store {
         } else {
             format!("{}{path}?{query_string}", self.config.endpoint)
         };
-        // Generous for large tables, short enough that a stalled request is
-        // abandoned and retried or hedged.
-        let timeout = Duration::from_secs(20 + body.len() as u64 / (256 << 10));
+        // Generous for a large upload, short enough that a stalled request
+        // is abandoned and retried or hedged.
+        let patience = PATIENCE + Duration::from_secs(body.len() as u64 / (256 << 10));
         let mut request = self
             .client
             .request(method, url)
-            .timeout(timeout)
             .header("x-amz-content-sha256", payload_hash)
             .header("x-amz-date", time)
             .header("authorization", authorization);
         if let Some((start, end)) = range {
             request = request.header("range", format!("bytes={start}-{}", end.saturating_sub(1)));
         }
-        let response = request.body(body).send().await.map_err(unavailable)?;
+        let response = match tokio::time::timeout(patience, request.body(body).send()).await {
+            Ok(response) => response.map_err(network)?,
+            Err(_) => return Err(StoreError::Unavailable("a storage request stalled".into())),
+        };
         let status = response.status();
-        let body = response.bytes().await.map_err(unavailable)?;
+        let body = body_of(response).await?;
+        // S3 reports a connection it gave up on as a client error.
+        let gave_up = status == StatusCode::BAD_REQUEST
+            && tag(&String::from_utf8_lossy(&body), "Code") == Some("RequestTimeout");
         if status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
+            || gave_up
         {
             return Err(StoreError::Unavailable(format!("{status}")));
         }
         Ok(Reply { status, body })
+    }
+
+    /// One page of ListObjectsV2, as text.
+    async fn page(
+        &self,
+        prefix: &str,
+        dirs: bool,
+        cursor: &Cursor,
+        most: usize,
+    ) -> StoreResult<String> {
+        let most = most.min(1000).to_string();
+        let mut query = vec![
+            ("list-type", "2"),
+            ("prefix", prefix),
+            ("max-keys", most.as_str()),
+        ];
+        if dirs {
+            query.push(("delimiter", "/"));
+        }
+        match cursor {
+            Cursor::After(Some(after)) => query.push(("start-after", after)),
+            Cursor::After(None) => {}
+            Cursor::Token(token) => query.push(("continuation-token", token)),
+        }
+        let reply = self
+            .send(Method::GET, "", &query, None, Bytes::new())
+            .await?;
+        if !reply.status.is_success() {
+            return Err(self.refused("LIST", &reply));
+        }
+        let xml = String::from_utf8_lossy(&reply.body).into_owned();
+        // Something between here and the bucket may answer in its place.
+        if !xml.contains("<ListBucketResult") {
+            return Err(StoreError::Unavailable(
+                "a listing was answered by something other than the bucket".into(),
+            ));
+        }
+        Ok(xml)
     }
 
     fn refused(&self, what: &str, reply: &Reply) -> StoreError {
@@ -270,21 +370,31 @@ impl S3Store {
         ))
     }
 
-    async fn delete_version(&self, key: &str, version: &str) -> StoreResult<()> {
-        // An unversioned bucket reports the version "null".
-        let query: &[(&str, &str)] = if version == "null" {
-            &[]
-        } else {
-            &[("versionId", version)]
-        };
-        let reply = self
-            .send(Method::DELETE, key, query, None, Bytes::new())
+    /// Remove these exact versions, a few at a time.
+    async fn delete_versions(&self, versions: &[(String, String)]) -> StoreResult<()> {
+        for chunk in versions.chunks(32) {
+            futures::future::try_join_all(chunk.iter().map(|(key, version)| async move {
+                // A version written before the bucket kept versions is named
+                // "null". It is removed by that name; without one, a bucket
+                // that keeps versions would only add a delete marker.
+                let reply = self
+                    .send(
+                        Method::DELETE,
+                        key,
+                        &[("versionId", version)],
+                        None,
+                        Bytes::new(),
+                    )
+                    .await?;
+                if reply.status.is_success() || reply.absent() {
+                    Ok(())
+                } else {
+                    Err(self.refused("DELETE", &reply))
+                }
+            }))
             .await?;
-        if reply.status.is_success() || reply.status == StatusCode::NOT_FOUND {
-            Ok(())
-        } else {
-            Err(self.refused("DELETE", &reply))
         }
+        Ok(())
     }
 }
 
@@ -315,8 +425,16 @@ struct B2Session {
 struct B2Target {
     url: String,
     token: String,
-    /// Smoothed latency of small uploads through this URL; 0 when untried.
+    /// Smoothed latency of small uploads through this URL; 0 when unmeasured.
     millis: f64,
+    issued: Instant,
+}
+
+impl B2Target {
+    /// Backblaze honours an upload URL for 24 hours.
+    fn usable(&self) -> bool {
+        self.issued.elapsed() < Duration::from_secs(23 * 3600)
+    }
 }
 
 #[derive(Default)]
@@ -338,9 +456,9 @@ impl B2Uploader {
         &self,
         request: reqwest::RequestBuilder,
     ) -> StoreResult<(StatusCode, serde_json::Value)> {
-        let response = request.send().await.map_err(unavailable)?;
+        let response = request.send().await.map_err(network)?;
         let status = response.status();
-        let body = response.bytes().await.map_err(unavailable)?;
+        let body = response.bytes().await.map_err(network)?;
         if status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
@@ -444,6 +562,7 @@ impl B2Uploader {
                         url: url.to_owned(),
                         token: token.to_owned(),
                         millis: 0.0,
+                        issued: Instant::now(),
                     });
                 }
                 // The account token expired; authorize again, once.
@@ -458,6 +577,8 @@ impl B2Uploader {
     async fn target(self: &Arc<Self>, proven: bool) -> StoreResult<B2Target> {
         let (taken, fetch) = {
             let mut pool = self.pool.lock();
+            pool.proven.retain(B2Target::usable);
+            pool.untried.retain(B2Target::usable);
             pool.explore = !pool.explore && !proven;
             let taken = if pool.explore && !pool.untried.is_empty() {
                 pool.untried.pop()
@@ -498,6 +619,13 @@ impl B2Uploader {
             };
         }
         let mut pool = self.pool.lock();
+        // Only large uploads have gone through it: its speed is still unknown.
+        if target.millis == 0.0 {
+            if pool.untried.len() < 2 * B2_UNTRIED {
+                pool.untried.push(target);
+            }
+            return;
+        }
         // A pod much slower than the best known is not worth another upload.
         let best = pool.proven.first().map_or(f64::MAX, |t| t.millis);
         if target.millis > 150.0 && target.millis > 2.5 * best {
@@ -568,7 +696,7 @@ impl ObjectStore for S3Store {
         let reply = self.send(Method::GET, key, &[], None, Bytes::new()).await?;
         match reply.status {
             status if status.is_success() => Ok(Some(reply.body)),
-            StatusCode::NOT_FOUND => Ok(None),
+            _ if reply.absent() => Ok(None),
             _ => Err(self.refused("GET", &reply)),
         }
     }
@@ -582,7 +710,7 @@ impl ObjectStore for S3Store {
             .await?;
         match reply.status {
             status if status.is_success() => Ok(Some(reply.body)),
-            StatusCode::NOT_FOUND => Ok(None),
+            _ if reply.absent() => Ok(None),
             // The range begins past the end of the object.
             StatusCode::RANGE_NOT_SATISFIABLE => Ok(Some(Bytes::new())),
             _ => Err(self.refused("GET", &reply)),
@@ -607,24 +735,9 @@ impl ObjectStore for S3Store {
         limit: usize,
     ) -> StoreResult<Vec<Listed>> {
         let mut out = Vec::new();
-        let mut after = after.map(str::to_owned);
+        let mut cursor = Cursor::After(after.map(str::to_owned));
         while out.len() < limit {
-            let page = (limit - out.len()).min(1000).to_string();
-            let mut query = vec![
-                ("list-type", "2"),
-                ("prefix", prefix),
-                ("max-keys", page.as_str()),
-            ];
-            if let Some(after) = &after {
-                query.push(("start-after", after));
-            }
-            let reply = self
-                .send(Method::GET, "", &query, None, Bytes::new())
-                .await?;
-            if !reply.status.is_success() {
-                return Err(self.refused("LIST", &reply));
-            }
-            let xml = String::from_utf8_lossy(&reply.body);
+            let xml = self.page(prefix, false, &cursor, limit - out.len()).await?;
             let before = out.len();
             for item in tags(&xml, "Contents") {
                 let (Some(key), Some(size)) = (tag(item, "Key"), tag(item, "Size")) else {
@@ -635,10 +748,11 @@ impl ObjectStore for S3Store {
                     size: size.trim().parse().unwrap_or(0),
                 });
             }
-            if tag(&xml, "IsTruncated").map(str::trim) != Some("true") || out.len() == before {
-                break;
+            let last = out[before..].last().map(|item| item.key.clone());
+            match following(&xml, last)? {
+                Some(next) => cursor = next,
+                None => break,
             }
-            after = out.last().map(|item| item.key.clone());
         }
         Ok(out)
     }
@@ -650,39 +764,33 @@ impl ObjectStore for S3Store {
         limit: usize,
     ) -> StoreResult<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
-        // `0` follows `/`, so this skips everything below the last directory.
-        let mut start = after.map(|after| format!("{prefix}{after}0"));
+        // `0` follows `/`, so this skips everything below a directory.
+        let past = |dir: &str| format!("{prefix}{dir}0");
+        let mut cursor = Cursor::After(after.map(past));
         while out.len() < limit {
-            let page = (limit - out.len()).min(1000).to_string();
-            let mut query = vec![
-                ("list-type", "2"),
-                ("prefix", prefix),
-                ("delimiter", "/"),
-                ("max-keys", page.as_str()),
-            ];
-            if let Some(start) = &start {
-                query.push(("start-after", start));
-            }
-            let reply = self
-                .send(Method::GET, "", &query, None, Bytes::new())
-                .await?;
-            if !reply.status.is_success() {
-                return Err(self.refused("LIST", &reply));
-            }
-            let xml = String::from_utf8_lossy(&reply.body);
+            let xml = self.page(prefix, true, &cursor, limit - out.len()).await?;
             let before = out.len();
             for group in tags(&xml, "CommonPrefixes") {
-                if let Some(dir) = tag(group, "Prefix").map(unescape).and_then(|full| {
+                let dir = tag(group, "Prefix").map(unescape).and_then(|full| {
                     full.strip_prefix(prefix)
-                        .map(|d| d.trim_end_matches('/').to_owned())
-                }) {
-                    out.push(dir);
+                        .map(|dir| dir.trim_end_matches('/').to_owned())
+                });
+                match dir {
+                    Some(dir) => out.push(dir),
+                    None => return Err(StoreError::Fatal("unreadable listing".into())),
                 }
             }
-            if tag(&xml, "IsTruncated").map(str::trim) != Some("true") || out.len() == before {
-                break;
+            // The page may also hold keys that lie directly below the prefix.
+            let last = out[before..]
+                .last()
+                .map(|dir| past(dir))
+                .into_iter()
+                .chain(tags(&xml, "Contents").filter_map(|item| tag(item, "Key").map(unescape)))
+                .max();
+            match following(&xml, last)? {
+                Some(next) => cursor = next,
+                None => break,
             }
-            start = out.last().map(|dir| format!("{prefix}{dir}0"));
         }
         Ok(out)
     }
@@ -693,7 +801,7 @@ impl ObjectStore for S3Store {
         let reply = self
             .send(Method::DELETE, key, &[], None, Bytes::new())
             .await?;
-        if reply.status.is_success() || reply.status == StatusCode::NOT_FOUND {
+        if reply.status.is_success() || reply.absent() {
             Ok(())
         } else {
             Err(self.refused("DELETE", &reply))
@@ -707,7 +815,10 @@ impl ObjectStore for S3Store {
         doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
     ) -> StoreResult<usize> {
         let mut removed = 0;
+        let mut counted: Option<String> = None;
         let mut marker: Option<(String, String)> = None;
+        // Delete markers whose key the listing has not yet moved past.
+        let mut held: Vec<(String, String)> = Vec::new();
         loop {
             let mut query = vec![("versions", ""), ("prefix", prefix), ("max-keys", "1000")];
             if let Some((key, version)) = &marker {
@@ -721,37 +832,34 @@ impl ObjectStore for S3Store {
                 return Err(self.refused("LIST versions", &reply));
             }
             let xml = String::from_utf8_lossy(&reply.body);
+            if !xml.contains("<ListVersionsResult") {
+                return Err(StoreError::Unavailable(
+                    "a listing was answered by something other than the bucket".into(),
+                ));
+            }
             let mut past_end = false;
+            let mut greatest: Option<String> = None;
             let mut select = |element: &str| {
                 let mut chosen = Vec::new();
                 for item in tags(&xml, element) {
                     let (Some(key), Some(version)) = (tag(item, "Key"), tag(item, "VersionId"))
                     else {
-                        continue;
+                        return Err(StoreError::Fatal("unreadable version listing".into()));
                     };
                     let key = unescape(key);
+                    if greatest.as_ref().is_none_or(|greatest| *greatest < key) {
+                        greatest = Some(key.clone());
+                    }
                     if end.is_some_and(|end| key.as_str() >= end) {
                         past_end = true;
                     } else if doomed(&key) {
                         chosen.push((key, unescape(version)));
                     }
                 }
-                chosen
+                Ok(chosen)
             };
-            let versions = select("Version");
-            let markers = select("DeleteMarker");
-            // Data first, markers last: removing a marker while data remains
-            // would make a deleted key readable again.
-            for batch in [&versions, &markers] {
-                for chunk in batch.chunks(32) {
-                    futures::future::try_join_all(
-                        chunk
-                            .iter()
-                            .map(|(key, version)| self.delete_version(key, version)),
-                    )
-                    .await?;
-                }
-            }
+            let versions = select("Version")?;
+            let markers = select("DeleteMarker")?;
             let mut keys: Vec<&String> = versions
                 .iter()
                 .chain(&markers)
@@ -759,15 +867,42 @@ impl ObjectStore for S3Store {
                 .collect();
             keys.sort();
             keys.dedup();
-            removed += keys.len();
+            removed += keys
+                .iter()
+                .filter(|key| Some(**key) != counted.as_ref())
+                .count();
+            if let Some(last) = keys.last() {
+                counted = Some((*last).clone());
+            }
             let truncated = tag(&xml, "IsTruncated").map(str::trim) == Some("true");
             let next = tag(&xml, "NextKeyMarker")
                 .map(unescape)
                 .zip(tag(&xml, "NextVersionIdMarker").map(unescape));
-            match next {
-                Some(next) if truncated && !past_end => marker = Some(next),
-                _ => return Ok(removed),
+            let more = truncated && !past_end;
+            if more && next.is_none() {
+                return Err(StoreError::Unavailable(
+                    "a listing was cut short with no way to continue".into(),
+                ));
             }
+            // Data first. A delete marker goes only when no data remains
+            // under its key, or the deleted key would be readable again; and
+            // the versions of the last key on a page may run on to the next.
+            self.delete_versions(&versions).await?;
+            held.extend(markers);
+            let ready: Vec<(String, String)> = match (&greatest, more) {
+                (Some(greatest), true) => {
+                    let (ready, wait) = held.into_iter().partition(|(key, _)| key < greatest);
+                    held = wait;
+                    ready
+                }
+                (None, true) => Vec::new(),
+                (_, false) => std::mem::take(&mut held),
+            };
+            self.delete_versions(&ready).await?;
+            if !more {
+                return Ok(removed);
+            }
+            marker = next;
         }
     }
 }

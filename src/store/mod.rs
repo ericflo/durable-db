@@ -65,8 +65,10 @@ pub trait ObjectStore: Send + Sync + 'static {
         limit: usize,
     ) -> StoreResult<Vec<Listed>>;
 
-    /// The distinct next path segments below `prefix`, ascending, greater than
-    /// `after`: `list_dirs("db/")` yields `"a"`, `"b"` for `db/a/x`, `db/b/y`.
+    /// The distinct next path segments below `prefix` that follow `after`:
+    /// `list_dirs("db/")` yields `"a"`, `"b"` for `db/a/x`, `db/b/y`. They
+    /// come in the order of the keys below them, which is the order of the
+    /// names with `/` appended (see `dir_order`): `a-b` precedes `a`.
     async fn list_dirs(
         &self,
         prefix: &str,
@@ -87,6 +89,12 @@ pub trait ObjectStore: Send + Sync + 'static {
         end: Option<&str>,
         doomed: &(dyn for<'a> Fn(&'a str) -> bool + Sync),
     ) -> StoreResult<usize>;
+}
+
+/// The order in which `list_dirs` yields names: that of the keys below them,
+/// so each name is compared with its `/` appended.
+pub fn dir_order(a: &str, b: &str) -> std::cmp::Ordering {
+    a.bytes().chain([b'/']).cmp(b.bytes().chain([b'/']))
 }
 
 /// Every key below `prefix`, in order.

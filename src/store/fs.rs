@@ -3,7 +3,7 @@
 //! Writes go to a temporary file, are flushed to disk, and are renamed into
 //! place, so a reader or a crash never observes a partial object. This is the
 //! laptop and single-node backend; the protocol above it is unchanged.
-use super::{Listed, ObjectStore, StoreError, StoreResult};
+use super::{Listed, ObjectStore, StoreError, StoreResult, dir_order};
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::{
@@ -26,6 +26,9 @@ struct Inner {
     tmp: PathBuf,
     /// Flush file contents and directory entries before acknowledging a write.
     sync: bool,
+    /// Sets this store's temporary files apart from those of any other on
+    /// the same directory, which may run under the same process id.
+    nonce: u64,
     counter: AtomicU64,
 }
 
@@ -58,6 +61,7 @@ impl FsStore {
                 root,
                 tmp,
                 sync,
+                nonce: rand::random(),
                 counter: AtomicU64::new(0),
             }),
         })
@@ -96,33 +100,54 @@ impl Inner {
     fn put(&self, key: &str, body: &[u8]) -> io::Result<()> {
         let path = self.path(key)?;
         let tmp = self.tmp.join(format!(
-            "{}-{}",
+            "{}-{:016x}-{}",
             std::process::id(),
+            self.nonce,
             self.counter.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut file = fs::File::create(&tmp)?;
+        let stored = self.place(&tmp, &path, body);
+        if stored.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        stored
+    }
+
+    fn place(&self, tmp: &Path, path: &Path, body: &[u8]) -> io::Result<()> {
+        // Never through a file that already exists.
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(tmp)?;
         file.write_all(body)?;
         if self.sync {
             file.sync_data()?;
         }
         drop(file);
         let parent = path.parent().expect("keys have a parent");
+        // The directories this write brings into being.
+        let made: Vec<&Path> = parent
+            .ancestors()
+            .take_while(|dir| *dir != self.root && !dir.exists())
+            .collect();
         // A concurrent delete may remove an emptied directory between the
         // create and the rename.
         let mut attempts = 0;
         loop {
             fs::create_dir_all(parent)?;
-            match fs::rename(&tmp, &path) {
+            match fs::rename(tmp, path) {
                 Ok(()) => break,
                 Err(e) if e.kind() == io::ErrorKind::NotFound && attempts < 8 => attempts += 1,
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
         if self.sync {
+            // The new name, and the name of each directory made for it.
             fs::File::open(parent)?.sync_all()?;
+            for dir in made {
+                if let Some(above) = dir.parent() {
+                    fs::File::open(above)?.sync_all()?;
+                }
+            }
         }
         Ok(())
     }
@@ -302,12 +327,14 @@ impl ObjectStore for FsStore {
                 }
                 if let Ok(name) = entry.file_name().into_string()
                     && !name.starts_with(".tmp")
-                    && after.as_deref().is_none_or(|after| name.as_str() > after)
+                    && after
+                        .as_deref()
+                        .is_none_or(|after| dir_order(&name, after).is_gt())
                 {
                     out.push(name);
                 }
             }
-            out.sort();
+            out.sort_by(|a, b| dir_order(a, b));
             out.truncate(limit);
             Ok(out)
         })
