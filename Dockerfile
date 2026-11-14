@@ -52,7 +52,8 @@ RUN --mount=type=cache,id=durable-db-cargo,target=/usr/local/cargo/registry \
 FROM tools AS site
 COPY site site
 COPY docs docs
-COPY README.md LICENSE Cargo.toml ./
+COPY clients/javascript/README.md clients/javascript/README.md
+COPY LICENSE Cargo.toml ./
 COPY scripts/install.sh scripts/install.sh
 RUN npm --prefix site ci --no-audit --no-fund && npm --prefix site run build
 

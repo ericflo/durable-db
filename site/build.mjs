@@ -1,329 +1,154 @@
-import { readFile, writeFile, mkdir, copyFile, rm } from 'node:fs/promises';
+// Builds the public website into ../.site/. Run with: npm --prefix site run build
+// Everything is rendered and checked in memory first; the output directory is only
+// replaced when every page built and every local link resolves.
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import MarkdownIt from 'markdown-it';
-const out = new URL('../.site/', import.meta.url);
-// The explicit public whitelist, in navigation order: [page, short label, summary].
-// Integration plans and other unlisted Markdown never enter the public site.
-const sections = [
-  ['Start', [
-    ['deployment', 'Deployment', 'Install, run locally, then deploy on S3, B2 or Kubernetes.'],
-    ['api', 'HTTP API', 'Endpoints, snapshots, commits, retries, errors and limits.'],
-    ['clients', 'Clients', 'The TypeScript SDK, the wire client and pi-durable adapters.'],
-    ['web-app', 'Web app example', 'A task board built on the TypeScript SDK.'],
-  ]],
-  ['Understand', [
-    ['architecture', 'Architecture', 'Authority, the commit protocol and fenced collection.'],
-    ['b2', 'B2 protocol', 'How Backblaze B2 provides conditional publication.'],
-    ['security', 'Security', 'Trust boundaries, credentials and resource isolation.'],
-  ]],
-  ['Operate', [
-    ['recovery', 'Backup and restore', 'Consistent export, resumable restore and format upgrades.'],
-    ['observability', 'Observability', 'Prometheus metrics, alerts and incident response.'],
-    ['development', 'Development', 'Building from source, focused checks and CI.'],
-  ]],
-  ['Verify', [
-    ['production-readiness', 'Production readiness', 'Supported 1.0 scope, evidence and deferred work.'],
-    ['verification', 'Verification', 'Models, assumptions, checked bounds and open obligations.'],
-    ['verification-results', 'Verification results', 'Dated experiments and release qualification.'],
-    ['proof-publication', 'Publication proof', 'An unbounded TLAPS proof of abstract page reachability.'],
-  ]],
-  ['Design notes', [
-    ['design-owned-partitions', 'Owned partitions', 'The native serving and durable-log replacement.'],
-    ['design-upload-admission', 'Upload admission', 'Durable, cumulative limits on immutable uploads.'],
-    ['design-budgetless-collection', 'Budgetless collection', 'Collecting data pages without upload credit.'],
-    ['design-signing-rotation', 'Signing key rotation', 'Overlapping signing keys and rolling rotation.'],
-  ]],
+
+const root = new URL('../', import.meta.url);
+const out = new URL('.site/', root);
+const repository = 'https://github.com/ericflo/durable-db';
+
+// The explicit public whitelist, in reading order: [page, label, source, summary].
+// Only these documents are published. docs/integration.md must never be added.
+const pages = [
+  ['deployment', 'Deployment', 'docs/deployment.md', 'Install, run on one machine, on a bucket and on Kubernetes. Configuration, tokens and operations.'],
+  ['api', 'HTTP API', 'docs/api.md', 'Reads, scans, commits, checks, idempotency keys, errors and limits.'],
+  ['clients', 'TypeScript SDK', 'clients/javascript/README.md', 'The typed client for Node.js and the pi-durable storage adapter.'],
+  ['architecture', 'Architecture', 'docs/architecture.md', 'The objects in the bucket, taking ownership, committing, reading, collection and failures.'],
+  ['performance', 'Performance', 'docs/performance.md', 'Benchmark tables and the commands that reproduce them.'],
+  ['verification', 'Verification', 'docs/verification.md', 'What is claimed, the assumptions, the TLA+ model, the tests and what remains unchecked.'],
+  ['development', 'Development', 'docs/development.md', 'Build from source, run the checks, repository layout, releases and CI.'],
+].map(([name, label, source, summary]) => ({ name, label, source, summary }));
+
+// Files published unchanged at the site root: [published name, source].
+const copies = [
+  ['style.css', 'site/style.css'],
+  ['site.js', 'site/site.js'],
+  ['icon.svg', 'site/icon.svg'],
+  ['install.sh', 'scripts/install.sh'],
+  ['LICENSE', 'LICENSE'],
 ];
-const pages = sections.flatMap(([section, entries]) => entries.map(([name, label, summary]) => ({ name, label, summary, section })));
-const docs = pages.map((page) => page.name);
-const escape = (text) => MarkdownIt().utils.escapeHtml(text);
-// The homepage advertises exactly the release the public installer installs.
-const version = (await readFile(new URL('../scripts/install.sh', import.meta.url), 'utf8')).match(/^version=\$\{1:-(v[0-9][0-9A-Za-z.-]*)\}$/m)?.[1];
-if (!version) throw new Error('Installer default release not found');
-await rm(out, { recursive: true, force: true });
-await mkdir(out, { recursive: true });
-const md = new MarkdownIt({ html: false, linkify: false, typographer: true });
-md.renderer.rules.heading_open = (tokens, index, options, env, self) => {
-  const title = tokens[index + 1].children
-    .filter((t) => t.type === 'text' || t.type === 'code_inline')
-    .map((t) => t.content)
-    .join('');
-  const base = title
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s_-]/gu, '')
-    .trim()
-    .replace(/\s/g, '-');
-  const seen = env.headingIds.get(base) || 0;
-  env.headingIds.set(base, seen + 1);
-  const id = seen ? `${base}-${seen}` : base;
-  tokens[index].attrSet('id', id);
-  if (tokens[index].tag === 'h2') env.toc.push([id, title]);
-  return self.renderToken(tokens, index, options);
-};
-md.renderer.rules.heading_close = (tokens, index, options, env, self) => {
-  const id = tokens[index - 2].attrGet('id');
-  const anchor = tokens[index].tag === 'h1' ? '' : `<a class="anchor" href="#${id}" aria-label="Link to this section">#</a>`;
-  return anchor + self.renderToken(tokens, index, options);
-};
-function render(source, env) {
-  return md.render(source, env).replace(/href="(?:docs\/)?([a-z0-9-]+)\.md(#[^"]*)?"/g, (_match, name, fragment = '') => {
-    if (!docs.includes(name)) throw new Error(`Unpublished documentation target: ${name}`);
-    return `href="${name}.html${fragment}"`;
+
+const problems = [];
+const read = (path, encoding = 'utf8') =>
+  readFile(new URL(path, root), encoding).catch(() => {
+    throw new Error(`Cannot read ${path}, which the website publishes.`);
   });
+// Replace every {{name}} of a template. An unknown name is an error, so none survives.
+const fill = (template, values) =>
+  template.replace(/\{\{(\w+)\}\}/g, (_match, name) => {
+    if (!(name in values)) throw new Error(`Unknown template placeholder {{${name}}}`);
+    return values[name];
+  });
+
+const cargo = (await read('Cargo.toml')).match(/^version = "([^"]+)"$/m);
+if (!cargo) throw new Error('Cargo.toml has no package version.');
+const version = `v${cargo[1]}`;
+
+// A relative link is resolved against the Markdown file that contains it. A published
+// document becomes its page, anything else under docs/ is an error, and the rest of
+// the repository is linked on GitHub.
+function resolve(href, page) {
+  if (/^(?:[a-z][a-z0-9+.-]*:|#)/i.test(href)) return href;
+  const target = new URL(href, new URL(page.source, 'file:///'));
+  const path = decodeURIComponent(target.pathname.slice(1)).replace(/\/$/, '');
+  const published = pages.find((other) => other.source === path);
+  if (published) return `${published.name}.html${target.hash}`;
+  if (path.startsWith('docs/')) problems.push(`${page.source} links to ${path}, which is not published.`);
+  const kind = /\.[a-z0-9]+$/i.test(path) ? 'blob' : 'tree';
+  return `${repository}/${kind}/main/${path}${target.hash}`;
 }
-const navigation = [['index.html#docs', 'Docs'], ['api.html', 'API'], ['architecture.html', 'Architecture'], ['verification.html', 'Verification'], ['production-readiness.html', 'Status']];
-function layout({ title, description, body, current = '' }) {
-  const links = navigation.map(([href, label]) => `<a href="${href}"${href === `${current}.html` ? ' aria-current="page"' : ''}>${label}</a>`).join('');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><meta name="description" content="${escape(description)}"><meta property="og:title" content="${title}"><meta property="og:description" content="${escape(description)}"><meta name="color-scheme" content="light dark"><link rel="icon" href="icon.svg" type="image/svg+xml"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400..700&family=IBM+Plex+Mono:wght@400;500&display=swap"><link rel="stylesheet" href="style.css"><script>document.documentElement.classList.add('js')</script><script src="site.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header class="site-header"><div class="wrap"><a class="wordmark" href="index.html"><img src="icon.svg" alt="" width="28" height="28">durable-db</a><a class="release" href="production-readiness.html">${version} · one trust domain</a><nav aria-label="Main">${links}</nav><a class="button button-small" href="index.html#quickstart">Get started</a></div></header>${body}<footer class="site-footer"><div class="wrap"><div><a class="wordmark" href="index.html"><img src="icon.svg" alt="" width="24" height="24">durable-db</a><p>A transactional key-value database in one Rust binary. Apache-2.0.</p></div><nav aria-label="Footer"><a href="index.html#quickstart">Quick start</a><a href="api.html">HTTP API</a><a href="clients.html">TypeScript SDK</a><a href="verification-results.html">Evidence</a><a href="production-readiness.html">Release scope</a><a href="install.sh">install.sh</a></nav></div></footer></body></html>`;
-}
-const tocs = new Map();
-for (const [index, page] of pages.entries()) {
-  const source = await readFile(new URL(`../docs/${page.name}.md`, import.meta.url), 'utf8');
-  const title = source.split('\n')[0].replace(/^# /, '');
-  const env = { headingIds: new Map(), toc: [] };
-  tocs.set(page.name, env.toc);
-  const content = render(source, env);
-  const sidebar = sections
-    .map(([section, entries]) => `<p>${section}</p><ul>${entries.map(([name, label]) => `<li><a href="${name}.html"${name === page.name ? ' aria-current="page"' : ''}>${label}</a></li>`).join('')}</ul>`)
-    .join('');
-  const toc = env.toc.length > 1
-    ? `<nav class="toc" aria-label="On this page"><p>On this page</p><ol>${env.toc.map(([id, text]) => `<li><a href="#${id}">${escape(text)}</a></li>`).join('')}</ol></nav>`
-    : '';
-  const pager = [pages[index - 1], pages[index + 1]]
-    .map((other, side) => other ? `<a class="${side ? 'next' : 'previous'}" href="${other.name}.html"><span>${side ? 'Next' : 'Previous'}</span>${other.label}</a>` : '<span></span>')
-    .join('');
-  await writeFile(
-    new URL(`${page.name}.html`, out),
-    layout({
-      title: `${escape(title)} · durable-db`,
-      description: page.summary,
-      current: page.name,
-      body: `<main id="main" class="docs wrap"><details class="docs-nav" open><summary>Documentation</summary><nav aria-label="Documentation">${sidebar}</nav></details><article><p class="eyebrow">${page.section}</p>${content}<nav class="pager" aria-label="Pagination">${pager}</nav></article>${toc}</main>`,
-    }),
-  );
-}
-// Preserve the old public URL; release work has one maintained source.
-await writeFile(new URL('roadmap.html', out), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Release plan · durable-db</title><meta http-equiv="refresh" content="0;url=production-readiness.html"><link rel="canonical" href="production-readiness.html"></head><body><a href="production-readiness.html">Production readiness and release plan</a></body></html>');
-// Recent milestones come from the dated verification record, newest first.
-const milestones = tocs.get('verification-results').slice(0, 5).map(([id, heading]) => {
-  const [, title, dated, dashed] = heading.match(/^(.*?)(?:\s+\((\d{4}-\d{2}-\d{2})\)|\s+—\s+(\d{4}-\d{2}-\d{2}))?$/);
-  const date = dated || dashed || '';
-  return `<li><a href="verification-results.html#${id}"><span>${escape(title)}</span><time>${date}</time></a></li>`;
+
+const md = new MarkdownIt({ html: false });
+const escape = md.utils.escapeHtml;
+// Give every heading an id and an anchor, collect the table of contents, rewrite links.
+md.core.ruler.push('site', (state) => {
+  const { page, toc, ids } = state.env;
+  state.tokens.forEach((token, index) => {
+    for (const child of token.children ?? [])
+      if (child.type === 'link_open') child.attrSet('href', resolve(child.attrGet('href'), page));
+    if (token.type !== 'heading_open') return;
+    const inline = state.tokens[index + 1];
+    const title = inline.children
+      .filter((child) => child.type === 'text' || child.type === 'code_inline')
+      .map((child) => child.content)
+      .join('');
+    if (token.tag === 'h1') return void (state.env.title ??= title);
+    const base = title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').trim().replace(/\s/g, '-');
+    const seen = ids.get(base) ?? 0;
+    ids.set(base, seen + 1);
+    const id = seen ? `${base}-${seen}` : base;
+    token.attrSet('id', id);
+    if (token.tag === 'h2' || token.tag === 'h3') toc.push([id, title, token.tag]);
+    const anchor = new state.Token('html_inline', '', 0);
+    anchor.content = `<a class="anchor" href="#${id}" aria-label="Link to this section">#</a>`;
+    inline.children.push(anchor);
+  });
 });
-const directory = sections
-  .map(([section, entries]) => `<section><h3>${section}</h3><ul>${entries.map(([name, label, summary]) => `<li><a href="${name}.html"><strong>${label}</strong><span>${summary}</span></a></li>`).join('')}</ul></section>`)
+
+const layout = await read('site/layout.html');
+const site = new Map(); // published name -> contents
+// Wrap a page body in the shared layout and mark links to the page itself as current.
+const publish = (name, title, description, body) =>
+  site.set(
+    `${name}.html`,
+    fill(layout, { title: escape(title), description: escape(description), version, body })
+      .replaceAll(`href="${name}.html"`, `href="${name}.html" aria-current="page"`),
+  );
+
+const sidebar = pages.map((page) => `<li><a href="${page.name}.html">${page.label}</a></li>`).join('');
+for (const [index, page] of pages.entries()) {
+  const env = { page, toc: [], ids: new Map() };
+  const content = md.render(await read(page.source), env);
+  if (!env.title) throw new Error(`${page.source} must begin with a "# Title" heading.`);
+  const toc = env.toc.length < 2 ? '' : `<nav class="toc" aria-label="On this page"><p>On this page</p><ul>${env.toc
+    .map(([id, text, tag]) => `<li class="${tag}"><a href="#${id}">${escape(text)}</a></li>`)
+    .join('')}</ul></nav>`;
+  const pager = [['previous', 'Previous', pages[index - 1]], ['next', 'Next', pages[index + 1]]]
+    .map(([side, text, other]) => other ? `<a class="${side}" href="${other.name}.html"><span>${text}</span>${other.label}</a>` : '')
+    .join('');
+  publish(page.name, `${env.title} · durable-db`, page.summary, `
+<div class="docs wrap">
+<details class="docs-nav" open><summary>Documentation</summary><nav aria-label="Documentation"><ul>${sidebar}</ul></nav></details>
+<main id="main"><article>${content}</article><nav class="pager" aria-label="Previous and next page">${pager}</nav></main>
+${toc}
+</div>`);
+}
+
+const directory = pages
+  .map((page) => `<li><a href="${page.name}.html"><strong>${page.label}</strong><span>${page.summary}</span></a></li>`)
   .join('');
-// Share current status with the README; dated evidence stays in the record.
-const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
-const status = readme.split('\n## Status\n')[1]?.split('\n## ')[0]
-  .split('\n').filter((line) => !line.startsWith('|')).join('\n').trim();
-if (!status || !readme.includes(`Latest release: ${version}.`)) throw new Error('README release must match the installer');
-const home = (await readFile(new URL('home.html', import.meta.url), 'utf8'))
-  .replaceAll('{{version}}', version)
-  .replace('{{status}}', render(status, { headingIds: new Map(), toc: [] }))
-  .replace('{{milestones}}', milestones.join(''))
-  .replace('{{directory}}', directory);
-if (home.includes('{{')) throw new Error('Unreplaced homepage placeholder');
-await writeFile(
-  new URL('index.html', out),
-  layout({
-    title: 'durable-db · Transactional key-value storage that lives in your bucket',
-    description: 'A transactional, ordered key-value database in one Rust binary. B2-backed Kubernetes and local deployments within one trust domain.',
-    current: 'index',
-    body: home,
-  }),
+publish(
+  'index',
+  'durable-db · A transactional key-value database stored in a bucket',
+  'A transactional, ordered key-value database in one static Rust binary. The data is immutable objects in Backblaze B2, an S3-compatible bucket or a local directory, so servers keep no state.',
+  fill(await read('site/home.html'), { version, directory }),
 );
-for (const file of ['style.css', 'site.js', 'icon.svg'])
-  await copyFile(new URL(file, import.meta.url), new URL(file, out));
-await mkdir(new URL('evidence/', out), { recursive: true });
-for (const file of [
-  'requested-recovery-2026-11-13.json',
-  'recovery-slots-2026-11-13.json',
-  'handoff-yield-2026-11-13.json',
-  'ledger-cache-2026-11-13.json',
-  'forward-pause-2026-11-13.json',
-  'attempt-grants-2026-11-14.json',
-  'value-reclamation-2026-11-14.json',
-  'long-journal-cold-2026-11-14.json',
-  'funding-confirmation-2026-11-14.json',
-  'upload-recovery-2026-11-14.json',
-  'http-batching-2026-11-14.json',
-  'copy-prepayment-2026-11-14.json',
-  'native-load-2026-11-14.json',
-  'catalog-cache-2026-11-13.json',
-  'release-1.0.0-2026-11-13.json',
-  'release-0.2.0-2026-11-10.json',
-  'release-0.3.0-2026-11-10.json',
-  'inline-checkpoints-2026-11-10.json',
-  'native-table-collection-2026-11-10.json',
-  'checkpoint-index-reads-2026-11-10.json',
-  'tenant-checkpoint-admission-2026-11-10.json',
-  'retained-receipt-admission-2026-11-10.json',
-  'shared-table-admission-2026-11-10.json',
-  'native-local-cli-2026-11-10.json',
-  'index-copy-admission-2026-11-10.json',
-  'row-overhead-admission-2026-11-10.json',
-  'checkpoint-retention-2026-11-10.json',
-  'retained-row-reblocking-2026-11-10.json',
-  'manifest-boundaries-2026-11-10.json',
-  'manifest-path-admission-2026-11-10.json',
-  'manifest-growth-admission-2026-11-10.json',
-  'checkpoint-retry-pacing-2026-11-10.json',
-  'retained-export-2026-11-10.json',
-  'maintenance-funding-2026-11-10.json',
-  'metadata-retry-2026-11-10.json',
-  'catalog-admission-2026-11-10.json',
-  'transaction-validation-2026-11-09.json',
-  'late-control-candidate-2026-11-09.json',
-  'placement-requests-candidate-2026-11-09.json',
-  'placement-takeover-candidate-2026-11-09.json',
-  'control-session-2026-11-09.json',
-  'root-requests-candidate-2026-11-09.json',
-  'root-requests-proof-2026-11-09.json',
-  'ownership-timing-2026-11-09.json',
-  'request-budget-2026-11-09.json',
-  'root-controller-2026-11-09.json',
-  'root-registration-2026-11-09.json',
-  'root-catalog-2026-11-09.json',
-  'catalog-replay-2026-11-09.json',
-  'transaction-recovery-2026-11-09.json',
-  'slatedb-contract-2026-11-09.json',
-  'storage-ranges-2026-11-09.json',
-  'native-tables-2026-11-09.json',
-  'table-merge-2026-11-09.json',
-  'native-recovery-2026-11-09.json',
-  'native-checkpoints-2026-11-09.json',
-  'checkpoint-reads-2026-11-09.json',
-  'checkpoint-overlay-2026-11-09.json',
-  'checkpoint-reuse-2026-11-10.json',
-  'native-http-hosts-2026-11-10.json',
-  'native-http-budgets-2026-11-10.json',
-  'native-catalog-collection-2026-11-10.json',
-  'native-journal-collection-2026-11-10.json',
-  'vm-clock-2026-11-10.json',
-  'index-read-cost-2026-11-09.json',
-  'partition-journal-candidate-2026-11-09.json',
-  'partition-control-candidate-2026-11-09.json',
-  'provider-register-2026-11-09.json',
-  'root-journal-candidate-2026-11-09.json',
-  'grant-bounds-2026-11-09.json',
-  'root-control-candidate-2026-11-09.json',
-  'journal-2026-11-09.json',
-  'delegated-grant-candidate-2026-11-09.json',
-  'owned-wal-candidate-2026-11-09.json',
-  'revocable-owner-2026-11-11.json',
-  'native-permits-2026-11-11.json',
-  'partition-directory-2026-11-11.json',
-  'owner-routing-2026-11-11.json',
-  'cluster-placement-2026-11-11.json',
-  'native-cloud-cli-2026-11-11.json',
-  'native-recovery-2026-11-11.json',
-  'native-cloud-cli-partial-2026-11-11.history.jsonl',
-  'provider-floor-2026-11-09.json',
-  'wal-handoff-candidate-2026-11-09.json',
-  'physical-memory-hour-2026-11-09.json',
-  'physical-memory-hour-2026-11-09.history.jsonl',
-  'serving-authority-candidate-2026-11-09.json',
-  'json-sdk-2026-11-09.json',
-  'client-web-app-2026-11-09.json',
-  'physical-memory-preflight-2026-11-09.json',
-  'physical-memory-preflight-2026-11-09.history.jsonl',
-  'pi-harness-2026-11-09.json',
-  'directory-capacity-2026-11-09.json',
-  'physical-b2-2026-11-09.json',
-  'physical-b2-2026-11-09.history.jsonl',
-  'publication-proof-2026-11-09.json',
-  'kubernetes-budget-b2-2026-11-09.json',
-  'kubernetes-budget-b2-2026-11-09.history.jsonl',
-  'logical-backup-2026-11-09.json',
-  'kubernetes-budget-minio-2026-11-09.json',
-  'kubernetes-budget-minio-2026-11-09.history.jsonl',
-  'global-collection-2026-11-09.json',
-  'upload-budget-2026-11-09.json',
-  'kubernetes-b2-2026-11-09.json',
-  'kubernetes-b2-2026-11-09.history.jsonl',
-  'kubernetes-b2-calibration-incomplete-2026-11-09.json',
-  'kubernetes-oom-minio-2026-11-09.json',
-  'kubernetes-oom-minio-2026-11-09.history.jsonl',
-  'kubernetes-oom-calibration-incomplete-2026-11-09.json',
-  'kubernetes-hpa-minio-2026-11-09.json',
-  'kubernetes-hpa-minio-2026-11-09.history.jsonl',
-  'kubernetes-hpa-first-incomplete-2026-11-09.json',
-  'signing-policy-minio-2026-11-09.json',
-  'pi-indexed-b2-2026-11-09.json',
-  'b2-contention-2026-11-08.json',
-  'b2-isolation-2026-11-08.json',
-  'b2-recovery-2026-11-08.json',
-  'b2-rebase-2026-11-08.json',
-  'b2-grouped-2026-11-08.json',
-  'b2-profile-isolation-2026-11-08.json',
-  'b2-profile-metrics-2026-11-08.json',
-  'mixed-combining-minio-2026-11-08.json',
-  'b2-combining-2026-11-08.json',
-  'b2-combining-metrics-2026-11-08.json',
-  'mixed-combining-b2-2026-11-08.json',
-  'mixed-combining-b2-failed-2026-11-08.json',
-  'mixed-combining-b2-admin-limit-2026-11-08.json',
-  'mixed-combining-b2-partial-recovery-2026-11-08.json',
-  'policy-upgrade-minio-2026-11-08.json',
-  'policy-upgrade-b2-2026-11-08.json',
-  'protected-creation-minio-2026-11-08.json',
-  'protected-creation-b2-2026-11-08.json',
-]) {
-  await copyFile(
-    new URL(`../docs/evidence/${file}`, import.meta.url),
-    new URL(`evidence/${file}`, out),
-  );
-}
-await copyFile(new URL('../scripts/install.sh', import.meta.url), new URL('install.sh', out));
-await mkdir(new URL('prometheus/', out), { recursive: true });
-for (const file of ['alerts.yml', 'alerts.test.yml']) {
-  await copyFile(
-    new URL(`../deploy/prometheus/${file}`, import.meta.url),
-    new URL(`prometheus/${file}`, out),
-  );
-}
-await writeFile(new URL('.nojekyll', out), '');
-// Explicit whitelist: integration plans and private source never enter the public site.
-// Validate the rendered publication, including evidence downloads and heading links.
-// Preserve published URLs while removing superseded source documents.
-const redirects = { 'architecture-reassessment': 'design-owned-partitions' };
-for (const [old, target] of Object.entries(redirects)) {
-  await writeFile(
-    new URL(`${old}.html`, out),
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Design moved · durable-db</title><meta http-equiv="refresh" content="0;url=${target}.html"><link rel="canonical" href="${target}.html"></head><body><p>The current <a href="${target}.html">storage design</a> includes the architecture decision and implementation status.</p></body></html>`,
-  );
-}
-const publishedPages = ['index', ...docs, ...Object.keys(redirects)];
-const rendered = new Map(
-  await Promise.all(
-    publishedPages.map(async (name) => [
-      `${name}.html`,
-      await readFile(new URL(`${name}.html`, out), 'utf8'),
-    ]),
-  ),
-);
-let checkedLinks = 0;
-for (const [name, html] of rendered) {
-  for (const match of html.matchAll(/(?:href|src)="([^"]+)"/g)) {
-    const href = match[1].replaceAll('&amp;', '&');
-    if (/^(?:https?:|mailto:|data:|\/\/)/.test(href)) continue;
-    const target = new URL(href, new URL(name, out));
-    if (!target.href.startsWith(out.href))
-      throw new Error(`Link escapes the public site: ${name}: ${href}`);
-    const fragment = decodeURIComponent(target.hash.slice(1));
-    target.hash = '';
-    target.search = '';
-    const body = await readFile(target, 'utf8').catch(() => {
-      throw new Error(`Missing public link: ${name}: ${href}`);
-    });
-    if (
-      fragment &&
-      target.pathname.endsWith('.html') &&
-      ![...body.matchAll(/id="([^"]+)"/g)].some((item) => item[1] === fragment)
-    )
-      throw new Error(`Missing public heading: ${name}: ${href}`);
-    checkedLinks++;
+for (const [name, source] of copies) site.set(name, await read(source, null));
+site.set('.nojekyll', '');
+
+// Every local href and src must name a published file, and every fragment an id in it.
+const idsOf = (file) => new Set([...String(site.get(file)).matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
+let links = 0;
+for (const [name, html] of site) {
+  if (!name.endsWith('.html')) continue;
+  for (const [, raw] of html.matchAll(/\s(?:href|src)="([^"]*)"/g)) {
+    const link = raw.replaceAll('&amp;', '&');
+    if (/^[a-z][a-z0-9+.-]*:/i.test(link)) continue;
+    const [path, fragment] = link.split('#');
+    const file = path || name;
+    if (!site.has(file)) problems.push(`${name} links to ${link}, which is not published.`);
+    else if (fragment && !idsOf(file).has(decodeURIComponent(fragment)))
+      problems.push(`${name} links to ${link}, but ${file} has no such heading.`);
+    links++;
   }
 }
-console.log(`Built ${docs.length + 1} public pages into .site/`);
-console.log(`Validated ${checkedLinks} local page, asset, evidence, and heading links.`);
+if (problems.length) {
+  console.error(`The website was not built:\n- ${[...new Set(problems)].join('\n- ')}`);
+  process.exit(1);
+}
+
+await rm(out, { recursive: true, force: true });
+await mkdir(out, { recursive: true });
+for (const [name, contents] of site) await writeFile(new URL(name, out), contents);
+console.log(`Built ${pages.length + 1} pages for ${version} into .site/ and checked ${links} local links.`);
