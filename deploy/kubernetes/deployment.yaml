@@ -1,0 +1,87 @@
+# durable-db on Kubernetes. Servers are interchangeable and keep nothing that
+# matters: a Deployment, not a StatefulSet, and no persistent volume.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: durable-db
+  labels: {app: durable-db}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels: {app: durable-db}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  template:
+    metadata:
+      labels: {app: durable-db}
+    spec:
+      automountServiceAccountToken: false
+      # Enough for the drain below plus releasing every open database.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: durable-db}
+      containers:
+        - name: durable-db
+          # kustomize edit set image durable-db=REGISTRY/durable-db@sha256:...
+          image: durable-db
+          args:
+            - serve
+            - --listen=0.0.0.0:7654
+            - --key-file=/run/keys/admin.key
+            - --cache-dir=/cache
+            - --cache-dir-bytes=1073741824
+            - --cache-bytes=268435456
+            - --memtable-bytes=134217728
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.podIP}
+            # Every ready server, through the headless Service below.
+            - {name: DURABLE_DB_PEERS, value: durable-db-peers}
+            - {name: DURABLE_DB_ADVERTISE, value: "$(POD_IP):7654"}
+          envFrom:
+            # DURABLE_DB_BUCKET, DURABLE_DB_ENDPOINT, AWS_ACCESS_KEY_ID,
+            # AWS_SECRET_ACCESS_KEY and optionally DURABLE_DB_PREFIX.
+            - secretRef: {name: durable-db-storage}
+          ports:
+            - {name: http, containerPort: 7654}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            failureThreshold: 30
+            periodSeconds: 2
+          # Not ready means: no traffic, and not a member for its peers.
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: keys, mountPath: /run/keys, readOnly: true}
+            - {name: cache, mountPath: /cache}
+      volumes:
+        - name: keys
+          secret: {secretName: durable-db-keys, defaultMode: 0440}
+        # Disposable. Losing it costs bucket requests, never data.
+        - name: cache
+          emptyDir: {sizeLimit: 2Gi}

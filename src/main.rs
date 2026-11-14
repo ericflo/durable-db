@@ -98,6 +98,10 @@ struct Serve {
     /// Do not flush directory writes to disk. Faster; a power loss can lose acknowledged writes.
     #[arg(long, env = "DURABLE_DB_NO_FSYNC")]
     no_fsync: bool,
+    /// Seconds to keep relaying requests to peers after a termination signal, while the load
+    /// balancer stops sending them. Applies only with --peers.
+    #[arg(long, env = "DURABLE_DB_DRAIN_SECONDS", default_value_t = 5)]
+    drain_seconds: u64,
     /// Use S3 PutObject even on Backblaze, instead of B2's faster upload call.
     #[arg(long, env = "DURABLE_DB_S3_UPLOADS_ONLY")]
     s3_uploads_only: bool,
@@ -341,8 +345,23 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("cannot listen on {}", args.listen))?;
     tracing::info!(listen = %args.listen, storage = %described, "durable-db {} is serving", env!("CARGO_PKG_VERSION"));
+    // On a termination signal: stop being a member, hand every database
+    // over sealed, keep relaying to peers while the load balancer catches up,
+    // and only then stop accepting connections.
+    let drain = {
+        let (node, cluster, seconds) = (node.clone(), cluster.clone(), args.drain_seconds);
+        async move {
+            shutdown_signal().await;
+            tracing::info!("draining");
+            cluster.drain();
+            node.shutdown().await;
+            if cluster.enabled() {
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+            }
+        }
+    };
     axum::serve(listener, router(app))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(drain)
         .await?;
 
     // Hand every database back so the next owner opens without recovery.

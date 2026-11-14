@@ -1,0 +1,8 @@
+/target/
+/.tools/
+/.dev/
+/.site/
+/.git/
+/data/
+**/node_modules/
+/clients/javascript/dist/

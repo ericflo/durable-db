@@ -24,6 +24,8 @@ pub struct Cluster {
     peers: RwLock<Vec<String>>,
     /// Peers that refused a connection recently.
     suspects: RwLock<HashMap<String, Instant>>,
+    /// Set when this node is shutting down: it then owns nothing.
+    draining: std::sync::atomic::AtomicBool,
     client: reqwest::Client,
 }
 
@@ -42,6 +44,7 @@ impl Cluster {
             me,
             peers: RwLock::default(),
             suspects: RwLock::default(),
+            draining: std::sync::atomic::AtomicBool::new(false),
             client: reqwest::Client::builder()
                 .pool_idle_timeout(Duration::from_secs(60))
                 .connect_timeout(Duration::from_secs(2))
@@ -53,6 +56,17 @@ impl Cluster {
 
     pub fn enabled(&self) -> bool {
         self.me.is_some()
+    }
+
+    /// Stop owning databases: from now on every database belongs to a peer,
+    /// if any peer is reachable.
+    pub fn drain(&self) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn set_peers(&self, mut peers: Vec<String>) {
@@ -75,7 +89,7 @@ impl Cluster {
             .iter()
             .filter(|peer| *peer != me && suspects.get(*peer).is_none_or(|until| *until <= now))
             .max_by_key(|peer| score(db, peer))?;
-        (score(db, best) > score(db, me)).then(|| best.clone())
+        (self.draining() || score(db, best) > score(db, me)).then(|| best.clone())
     }
 
     fn suspect(&self, peer: &str) {

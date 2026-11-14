@@ -1,19 +1,22 @@
+# Scale on CPU. Any replica count from 1 up is correct; adding or removing
+# servers only moves which one holds each database in memory.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: durable-db
 spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: StatefulSet, name: durable-db}
-  minReplicas: 1
-  maxReplicas: 8
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: durable-db}
+  minReplicas: 2
+  maxReplicas: 10
   metrics:
     - type: Resource
       resource:
         name: cpu
         target: {type: Utilization, averageUtilization: 70}
   behavior:
+    # Each removal hands databases to the remaining servers; do it one at a time.
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 120
       policies:
         - {type: Pods, value: 1, periodSeconds: 60}
 ---
@@ -22,6 +25,6 @@ kind: PodDisruptionBudget
 metadata:
   name: durable-db
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels: {app: durable-db}

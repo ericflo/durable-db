@@ -925,7 +925,7 @@ impl Db {
             if self.should_flush(&maint)
                 && let Err(error) = self.flush(&mut maint, false).await
             {
-                tracing::warn!(db = %self.name, %error, "flush failed");
+                report(&self.name, "flush failed", &error);
                 continue;
             }
             unflushed = self.state.read().confirmed_frame > maint.covered;
@@ -934,7 +934,7 @@ impl Db {
                     Ok(true) => continue,
                     Ok(false) => break,
                     Err(error) => {
-                        tracing::warn!(db = %self.name, %error, "compaction failed");
+                        report(&self.name, "compaction failed", &error);
                         break;
                     }
                 }
@@ -1189,9 +1189,7 @@ impl Db {
                             .await;
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(db = %self.name, %error, "release without a sealed manifest")
-                }
+                Err(error) => report(&self.name, "release without a sealed manifest", &error),
             }
         }
         self.poison(Error::Busy("database is closing".into()));
@@ -1214,6 +1212,16 @@ impl Db {
         let doomed = |key: &str| key != tombstone;
         retry(|| store.purge(self.layout.everything(), None, &doomed)).await?;
         Ok(())
+    }
+}
+
+/// Losing ownership in the middle of maintenance is routine; anything else
+/// deserves attention.
+fn report(db: &str, what: &str, error: &Error) {
+    if matches!(error, Error::Lost(_)) {
+        tracing::debug!(db, %error, "{what}");
+    } else {
+        tracing::warn!(db, %error, "{what}");
     }
 }
 

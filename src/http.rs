@@ -146,8 +146,11 @@ fn grant(app: &App, headers: &HeaderMap) -> Result<Grant> {
 }
 
 async fn ready(State(app): State<Arc<App>>) -> Response {
-    // Ready means storage answers; a node that cannot reach it should not
-    // receive traffic or count as a member.
+    // Ready means storage answers and the node is not shutting down. A node
+    // that is not ready receives no traffic and is not a cluster member.
+    if app.cluster.draining() {
+        return error_response(&Error::Busy("this node is shutting down".into()));
+    }
     match crate::io::retry(|| app.node.ctx.io.store.exists("ready-probe")).await {
         Ok(_) => "ready\n".into_response(),
         Err(error) => error_response(&error),

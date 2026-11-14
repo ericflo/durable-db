@@ -36,7 +36,14 @@ impl Server {
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         if let Some(peers) = peers {
-            command.args(["--peers", peers, "--advertise", &address]);
+            command.args([
+                "--peers",
+                peers,
+                "--advertise",
+                &address,
+                "--drain-seconds",
+                "0",
+            ]);
         }
         let child = command.spawn().expect("the server starts");
         let server = Self {

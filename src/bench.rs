@@ -29,6 +29,11 @@ pub enum Workload {
     Scan,
     /// Half writes, half linearizable reads.
     Mixed,
+    /// Transfers between accounts, each also appending a log entry, verified
+    /// afterwards: balances must sum to the starting total and the log must
+    /// hold exactly the acknowledged transfers. Run it while servers are
+    /// added, removed or killed to check that nothing is lost or applied twice.
+    Ledger,
 }
 
 #[derive(Args)]
@@ -169,6 +174,9 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
             );
         }
     }
+    if args.workload == Workload::Ledger {
+        return ledger(&args, shared).await;
+    }
     if args.workload != Workload::Write {
         // Reads need something to find. Load in batches of 500 keys.
         eprintln!(
@@ -223,6 +231,7 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
                     Workload::Mixed if coin => ("commit", shared.write_body(key, unique)),
                     Workload::Read | Workload::Mixed => ("read", read("strong")),
                     Workload::SessionRead => ("read", read("session")),
+                    Workload::Ledger => unreachable!("handled separately"),
                     Workload::Scan => (
                         "read",
                         format!("{{\"scans\":[{{\"start\":\"key/{key:08}\",\"limit\":20}}]}}"),
@@ -298,5 +307,203 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
     if let Some(path) = args.output {
         std::fs::write(&path, serde_json::to_string_pretty(&result)? + "\n")?;
     }
+    Ok(())
+}
+
+const OPENING_BALANCE: u64 = 1000;
+
+/// A request repeated until it has a definite answer.
+async fn definite(
+    shared: &Shared,
+    client: usize,
+    db: &str,
+    action: &str,
+    body: &str,
+) -> anyhow::Result<(u16, serde_json::Value)> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let url = format!(
+            "{}/v1/databases/{db}/{action}",
+            shared.urls[(client + attempts) % shared.urls.len()]
+        );
+        let sent = shared
+            .http
+            .post(url)
+            .bearer_auth(&shared.token)
+            .header("content-type", "application/json")
+            .body(body.to_owned())
+            .send()
+            .await;
+        if let Ok(response) = sent {
+            let status = response.status().as_u16();
+            if let Ok(text) = response.text().await
+                && status != 503
+                && status != 429
+            {
+                return Ok((
+                    status,
+                    serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+                ));
+            }
+        }
+        shared.errors.fetch_add(1, Ordering::Relaxed);
+        if attempts > 2400 {
+            bail!("no definite answer from {db} after two minutes");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn ledger(args: &Bench, shared: Arc<Shared>) -> anyhow::Result<()> {
+    let accounts = (args.clients * 2).max(8);
+    for name in &shared.names {
+        let writes: Vec<String> = (0..accounts)
+            .map(|a| format!("{{\"key\":\"acct/{a:06}\",\"value\":{OPENING_BALANCE}}}"))
+            .collect();
+        let (status, _) = definite(
+            &shared,
+            0,
+            name,
+            "commit",
+            &format!("{{\"writes\":[{}]}}", writes.join(",")),
+        )
+        .await?;
+        if status != 200 {
+            bail!("opening the ledger in {name}: {status}");
+        }
+    }
+    eprintln!(
+        "ledger for {}s: {} clients, {} accounts in each of {} database(s), {} server(s)",
+        args.seconds,
+        args.clients,
+        accounts,
+        shared.names.len(),
+        shared.urls.len()
+    );
+    let started = Instant::now();
+    let conflicts = Arc::new(AtomicU64::new(0));
+    let mut clients = Vec::new();
+    for client in 0..args.clients {
+        let (shared, conflicts) = (shared.clone(), conflicts.clone());
+        clients.push(tokio::spawn(async move {
+            let name = shared.names[client % shared.names.len()].clone();
+            let mut transfers = 0u64;
+            let mut latencies: Vec<u32> = Vec::new();
+            while !shared.stop.load(Ordering::Relaxed) {
+                let (from, to, amount, unique): (usize, usize, u64, u64) = {
+                    let mut rng = rand::rng();
+                    let from = rng.random_range(0..accounts);
+                    (from, (from + rng.random_range(1..accounts)) % accounts, rng.random_range(1..=10), rng.random())
+                };
+                let began = Instant::now();
+                let read = format!("{{\"keys\":[\"acct/{from:06}\",\"acct/{to:06}\"]}}");
+                let (status, seen) = definite(&shared, client, &name, "read", &read).await?;
+                let balance = |i: usize| (seen["values"][i]["value"].as_u64(), seen["values"][i]["version"].as_u64());
+                let ((Some(a), Some(a_version)), (Some(b), Some(b_version))) = (balance(0), balance(1)) else {
+                    bail!("reading accounts in {name}: {status} {seen}");
+                };
+                if a < amount {
+                    continue;
+                }
+                // Both balances and the log entry change together or not at all.
+                let commit = format!(
+                    "{{\"checks\":[{{\"key\":\"acct/{from:06}\",\"version\":{a_version}}},{{\"key\":\"acct/{to:06}\",\"version\":{b_version}}}],\
+                     \"writes\":[{{\"key\":\"acct/{from:06}\",\"value\":{}}},{{\"key\":\"acct/{to:06}\",\"value\":{}}},\
+                     {{\"key\":\"log/{client:05}/{transfers:09}\",\"value\":{{\"from\":{from},\"to\":{to},\"amount\":{amount}}}}}],\
+                     \"idempotency_key\":\"ledger-{unique:016x}\"}}",
+                    a - amount,
+                    b + amount
+                );
+                match definite(&shared, client, &name, "commit", &commit).await? {
+                    (200, _) => {
+                        transfers += 1;
+                        latencies.push(began.elapsed().as_micros().min(u128::from(u32::MAX)) as u32);
+                    }
+                    (409, _) => {
+                        conflicts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    (status, body) => bail!("transfer in {name}: {status} {body}"),
+                }
+            }
+            Ok((name, transfers, latencies))
+        }));
+    }
+    tokio::time::sleep(Duration::from_secs(args.seconds)).await;
+    shared.stop.store(true, Ordering::Relaxed);
+    let mut acknowledged = std::collections::HashMap::new();
+    let mut latencies: Vec<u32> = Vec::new();
+    for client in clients {
+        let (name, transfers, mut observed) = client.await??;
+        *acknowledged.entry(name).or_insert(0u64) += transfers;
+        latencies.append(&mut observed);
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    latencies.sort_unstable();
+
+    // Verify from scratch with linearizable scans.
+    let mut total = 0u64;
+    for name in &shared.names {
+        let (mut sum, mut logged) = (0u64, 0u64);
+        for (prefix, is_log) in [("acct/", false), ("log/", true)] {
+            let mut after: Option<String> = None;
+            loop {
+                let cursor = after
+                    .as_ref()
+                    .map(|key| format!(",\"after\":\"{key}\""))
+                    .unwrap_or_default();
+                let body =
+                    format!("{{\"scans\":[{{\"prefix\":\"{prefix}\",\"limit\":5000{cursor}}}]}}");
+                let (status, page) = definite(&shared, 0, name, "read", &body).await?;
+                let Some(items) = page["scans"][0]["items"].as_array() else {
+                    bail!("verifying {name}: {status} {page}");
+                };
+                if is_log {
+                    logged += items.len() as u64;
+                } else {
+                    sum += items
+                        .iter()
+                        .filter_map(|item| item["value"].as_u64())
+                        .sum::<u64>();
+                }
+                match page["scans"][0]["next"].as_str() {
+                    Some(next) => after = Some(next.to_owned()),
+                    None => break,
+                }
+            }
+        }
+        let expected = acknowledged.get(name).copied().unwrap_or(0);
+        if sum != accounts as u64 * OPENING_BALANCE {
+            bail!(
+                "LEDGER VIOLATION in {name}: balances sum to {sum}, not {}",
+                accounts as u64 * OPENING_BALANCE
+            );
+        }
+        if logged != expected {
+            bail!(
+                "LEDGER VIOLATION in {name}: {logged} transfers are stored but {expected} were acknowledged"
+            );
+        }
+        total += expected;
+    }
+    if !args.keep {
+        for name in &shared.names {
+            let _ = shared
+                .http
+                .delete(format!("{}/v1/databases/{name}", shared.urls[0]))
+                .bearer_auth(&shared.token)
+                .send()
+                .await;
+        }
+    }
+    println!(
+        "ledger verified: {total} transfers ({:.0}/s), every balance and log entry accounted for; {} conflicts retried, {} requests repeated; p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+        total as f64 / elapsed,
+        conflicts.load(Ordering::Relaxed),
+        shared.errors.load(Ordering::Relaxed),
+        percentile(&latencies, 0.50),
+        percentile(&latencies, 0.99),
+        percentile(&latencies, 1.0),
+    );
     Ok(())
 }
