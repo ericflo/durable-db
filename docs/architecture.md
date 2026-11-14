@@ -1,0 +1,127 @@
+# Architecture
+
+durable-db stores each database as a set of immutable objects in a bucket. Servers hold nothing that matters: any server can be killed at any moment, and any other server can rebuild every database from the bucket alone. This page describes exactly how.
+
+## What storage must provide
+
+Six operations: **PUT**, **GET** (whole or a byte range), **HEAD**, **LIST** by prefix, **DELETE**, and a version-aware delete used only for cleanup. Two guarantees:
+
+1. **Read-after-write.** Once a PUT or DELETE has returned, every GET, HEAD and LIST that starts afterwards observes it.
+2. **Whole objects.** A reader sees a complete object or none.
+
+Nothing else. No conditional writes (`If-Match`, `If-None-Match`), no transactions, no locks, no leases, no synchronized clocks. Backblaze B2 rejects conditional writes outright, which is why the protocol is built without them; Amazon S3, Cloudflare R2, MinIO and a local directory satisfy the same contract, so all of them run the same code.
+
+## What is in the bucket
+
+For a database named `app`, under `<prefix>/db/app/`:
+
+| Key | Object | Written |
+| --- | --- | --- |
+| `c/<epoch>` | **Claim.** The permit of the server currently allowed to write. | Once, when a server takes ownership. Deleted to revoke it. |
+| `m/<epoch>/<generation>` | **Manifest.** A small JSON record: the list of tables that make up the state, the revision they contain, and how many frames they cover. | At takeover and after every flush or merge. |
+| `l/<epoch>/<number>` | **Frame.** One group of committed transactions. | Once per group commit. |
+| `t/<epoch>/<id>` | **Table.** Sorted, compressed, checksummed key-value blocks with an index. | By a flush or a merge. |
+| `m/~` | **Tombstone.** The database was deleted. | Once. |
+
+An **epoch** is `<number>-<random>`, written in fixed width so that sorting keys sorts epochs. A server picks a new epoch every time it takes ownership of a database. Because the random part is fresh, every key below an epoch is written by exactly one process. That is the reason no write ever needs to be conditional: two servers can never write the same key.
+
+Every object is immutable. An upload may be repeated, but always with identical bytes.
+
+## Taking ownership
+
+A server that wants to serve a database does this, in order:
+
+1. **List** claims and manifests, and choose an epoch number one higher than any it sees.
+2. **PUT its claim**, once. If the upload's outcome is unknown, the claim is abandoned and never used.
+3. **List claims.** If a higher claim exists, another server is ahead: delete the own claim and stop. Otherwise **delete every lower claim**. This is revocation.
+4. **List manifests.** If a manifest of a higher epoch exists, stop. Otherwise take the newest manifest of the highest lower epoch.
+5. **Read** that manifest, then list and read the frames that follow it, keeping the unbroken run.
+6. If frames were replayed, write them into a new table. **PUT the first manifest** of the new epoch.
+7. **Check the claim** (HEAD). If it still exists, start serving.
+
+The order matters. Revocation (3) happens before reading (4, 5), so nothing the previous owner acknowledges afterwards can be missed. The final check (7) happens after the manifest is stored, so everything recovered, including transactions the previous owner stored but never acknowledged, is permanent before anyone sees it.
+
+A server that leaves gracefully flushes, writes a manifest marked `sealed`, and deletes its own claim. The next owner then has nobody to revoke and no frames to replay.
+
+## Committing
+
+One task per open database orders its transactions.
+
+1. Transactions that arrive together are validated in order against the newest state: version checks, range checks, quota, and whether the idempotency key was already used.
+2. The survivors are appended to an in-memory table as not-yet-visible versions and encoded as one **frame**.
+3. The frame is **PUT** to `l/<epoch>/<n>`. On Backblaze, two identical uploads race to different storage pods and the first to finish wins; elsewhere a second upload starts only if the first is slow.
+4. When the frame and all earlier frames are stored, the server **checks its claim** with one HEAD.
+5. If the claim exists, the transactions become visible and are acknowledged.
+
+Why this is safe: suppose server A acknowledges a transaction and server B takes over. A's claim check found the claim present, so the check began before B's revocation finished. A's frame was stored before that check began, so before B's revocation finished, so before B listed A's frames. B therefore read the frame. Conversely, if B revoked A first, A's check finds no claim and A acknowledges nothing; the client is told the outcome is unknown and retries with its idempotency key.
+
+A refusal is held to the same standard. "Conflict" is a statement about the current state, so a server reports it only after a claim check of its own. A stale server answers "ownership moved", never "conflict".
+
+Throughput comes from grouping: every transaction that arrives while an upload is in flight joins the next frame. Two frames may upload at once. More would not help, because acknowledgement is in order and every commit would wait for the slowest of many uploads.
+
+## Reading
+
+Readers never block writers. A read takes, under one short lock, the acknowledged revision, the current list of tables and the matching entries of the in-memory table. It then looks through tables from newest to oldest.
+
+- A **strong** read also waits for a claim check that began after the read arrived. If the claim still stands, no other server can have acknowledged anything this server has not seen, so the answer is linearizable. All reads waiting at the same moment share one HEAD.
+- A **session** read skips the check. It returns a consistent snapshot at the revision the client asked for or newer. If the server has not reached that revision, it checks its claim, discovers it was replaced, and the request is routed to the new owner.
+
+## Tables, flush and merge
+
+Writes accumulate in memory and in frames. A **flush** writes the acknowledged in-memory entries as a new table, stores a manifest that lists it, checks the claim, switches readers to the new table list, and deletes the frames the manifest covers. It runs when unflushed data reaches 8 MiB or 512 frames, after 5 seconds without a commit, and at release.
+
+Tables are merged so that the newest tables stay small and the count stays logarithmic: the newest tables are merged whenever together they are at least half the size of the next one. Deleted keys are dropped when a merge includes the oldest table.
+
+A table is blocks of about 32 KiB, compressed with LZ4, each with a CRC, followed by an index of the last key of each block. A lookup reads the index once, then one block. Small tables arrive whole in a single request.
+
+Two caches hold table data, both bounded and both disposable:
+
+- **Memory** (`--cache-bytes`): decoded blocks, shared by all databases.
+- **Disk** (`--cache-dir`, optional): whole table files. A damaged file fails its checksum, is deleted and is fetched again.
+
+## Collection
+
+Objects are deleted by the owner, and only what the newest manifest no longer needs:
+
+- frames covered by the manifest,
+- older manifests of the same epoch,
+- tables replaced by a merge,
+- everything left by lower epochs that the current manifest does not reference.
+
+The rule that makes this safe is the same as for acknowledgements: delete only after a claim check that began after the manifest was stored. If the check passes, any later owner will read that manifest or a newer one, and never needs what was deleted. If the owner has been replaced, the check fails and it deletes nothing.
+
+On a versioned bucket such as B2, deletion removes every version of a key, data first and delete markers last, so no lifecycle rule is needed and nothing is billed after it is collected.
+
+## Many servers
+
+Servers are identical. Each knows the others through one DNS name that resolves to every ready server (a Kubernetes headless Service), refreshed every second.
+
+- A request for a database that this server has open is served here.
+- Otherwise the server computes which member should hold the database (rendezvous hashing over the member list) and relays the request to it. If that member cannot be reached, the server takes ownership itself.
+- When membership changes, a server hands the databases that now belong to another member over to it: flush, sealed manifest, claim deleted. At most 16 per second, so a new member is not flooded.
+- On a termination signal, a server reports not-ready, hands over every database, relays requests to its peers for a few seconds while the load balancer stops sending them, and exits.
+
+Membership is only a routing preference. Two servers with different views of the membership may both try to serve a database; the claim protocol lets exactly one of them acknowledge anything, and the other relays or retries. No Kubernetes lease, pod-local lock, clock or cache is ever relied on for correctness.
+
+## What happens when things fail
+
+| Event | Outcome |
+| --- | --- |
+| A server is killed mid-commit. | Its unacknowledged clients see a connection error and retry. Another server revokes the dead server's claim and replays its frames. A transaction whose frame was stored is applied exactly once: the retry finds its idempotency key. |
+| An upload's response is lost. | The identical bytes are uploaded again. |
+| A paused server resumes after being replaced. | Its claim is gone. Its next check fails; it acknowledges nothing and deletes nothing. |
+| Two servers claim at the same moment. | Both write claims. The lower one sees the higher and withdraws. |
+| A failed takeover leaves a manifest upload in flight. | The claim is left in place, as after a crash, so no lower epoch can serve until a higher one revokes it. Deleting it would let the late manifest hide newer acknowledged writes. |
+| Storage is unreachable. | Commits and strong reads fail with `503` until it returns. Nothing is acknowledged that is not in the bucket. |
+| Every server is gone. | Start one. It opens each database from the bucket on first use. |
+| A cache file is damaged. | Its checksum fails; it is deleted and fetched again. |
+
+## Limits of this design
+
+- **One writer per database at a time.** A database's write throughput comes from grouping transactions into frames, not from spreading it over servers. Spread load by using more databases.
+- **A commit costs one upload and one HEAD.** That is the floor: about 80 ms on B2 from a distance, a few milliseconds on a local disk.
+- **A strong read costs one HEAD**, shared among concurrent reads. Session reads cost none.
+- **Transactions do not span databases.**
+- **A deleted database's name cannot be reused.** The tombstone is permanent, so that a late upload from a server that owned the old database can never be mistaken for the new one.
+- **Merges build a table in memory**, so a database should fit comfortably in a server's memory when merged. The default quota is 1 GiB.
+- **No historical reads.** Only the current state is kept.

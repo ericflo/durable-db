@@ -1,3 +1,5 @@
+# Woodpecker builds everything through the Dockerfile: the model check, the
+# Rust and client tests, the static binary, the website and the runtime image.
 when:
   - event: [push, manual, tag]
 
@@ -19,6 +21,7 @@ steps:
           allowPrivilegeEscalation: false
           capabilities: {drop: [ALL]}
           seccompProfile: {type: RuntimeDefault}
+
   - name: javascript-audit
     image: docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4
     commands:
@@ -38,16 +41,29 @@ steps:
           allowPrivilegeEscalation: false
           capabilities: {drop: [ALL]}
           seccompProfile: {type: RuntimeDefault}
+
   - name: verify-and-build
     depends_on: [dependency-audit, javascript-audit]
     image: docker.io/moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1
     commands:
+      # A clean copy of the commit with stable permissions, so the build
+      # cache does not depend on how the checkout volume was mounted. It is
+      # in the step's own temporary directory and goes away with the step.
       - DURABLE_DB_BUILD_CONTEXT=$$(scripts/prepare-build-context.sh)
       - export DURABLE_DB_BUILD_CONTEXT
-      - trap 'rm -rf "$${DURABLE_DB_BUILD_CONTEXT}"' EXIT
       - |
-        run_buildctl() {
-          buildctl "$$@" &
+        registry=registry.clouderic.svc.cluster.local:5000
+        cache="$${registry}/durable-db-build-cache:main"
+        build() {
+          target=$$1; shift
+          buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build \
+            --frontend dockerfile.v0 \
+            --local "context=$${DURABLE_DB_BUILD_CONTEXT}/tree" \
+            --local "dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree" \
+            --opt "target=$${target}" --opt platform=linux/amd64 \
+            --opt "label:org.opencontainers.image.source=$${CI_REPO_URL}" \
+            --opt "label:org.opencontainers.image.revision=$${CI_COMMIT_SHA}" \
+            --import-cache "type=registry,ref=$${cache},registry.insecure=true" "$$@" &
           build_pid=$$!
           trap 'kill -TERM "$${build_pid}" 2>/dev/null || :; wait "$${build_pid}" || :; exit 143' TERM INT
           build_status=0
@@ -55,25 +71,22 @@ steps:
           trap - TERM INT
           return "$${build_status}"
         }
-      - >-
-        run_buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
-        --frontend dockerfile.v0 --local context=$${DURABLE_DB_BUILD_CONTEXT}/tree --local dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree
-        --opt target=artifacts --opt platform=linux/amd64
-        --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
-        --export-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,mode=max,registry.insecure=true
-        --output type=local,dest=.artifacts
-      - >-
-        run_buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
-        --frontend dockerfile.v0 --local context=$${DURABLE_DB_BUILD_CONTEXT}/tree --local dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree
-        --opt target=runtime --opt platform=linux/amd64
-        --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
-        --output type=image,name=registry.clouderic.svc.cluster.local:5000/durable-db:$${CI_COMMIT_SHA},push=true,registry.insecure=true
-      - >-
-        run_buildctl --addr tcp://buildkit.ci-build.svc.cluster.local:1234 build
-        --frontend dockerfile.v0 --local context=$${DURABLE_DB_BUILD_CONTEXT}/tree --local dockerfile=$${DURABLE_DB_BUILD_CONTEXT}/tree
-        --opt target=artifacts --opt platform=linux/amd64
-        --import-cache type=registry,ref=registry.clouderic.svc.cluster.local:5000/durable-db-build-cache:main,registry.insecure=true
-        --output type=image,name=registry.clouderic.svc.cluster.local:5000/durable-db-artifacts:$${CI_COMMIT_SHA},push=true,registry.insecure=true
+        # Verify everything; keep the binary, its checksum and the website.
+        build artifacts \
+          --export-cache "type=registry,ref=$${cache},mode=max,registry.insecure=true" \
+          --output type=local,dest=.artifacts
+        # The runtime image: under the commit, and on main also under an
+        # immutable tag that sorts by build time, for image automation.
+        names="$${registry}/durable-db:$${CI_COMMIT_SHA}"
+        if [ "$${CI_COMMIT_BRANCH:-}" = "$${CI_REPO_DEFAULT_BRANCH}" ] && [ "$${CI_PIPELINE_EVENT}" != tag ]; then
+          stamp="$$(date -u -d "@$${CI_PIPELINE_CREATED}" +%Y%m%d%H%M%S)"
+          short="$$(printf '%s' "$${CI_COMMIT_SHA}" | cut -c1-12)"
+          names="$${names},$${registry}/durable-db:main-$${stamp}-$${short}"
+        fi
+        build runtime --opt attest:provenance=mode=max \
+          --output "type=image,\"name=$${names}\",push=true,registry.insecure=true"
+        build artifacts \
+          --output "type=image,name=$${registry}/durable-db-artifacts:$${CI_COMMIT_SHA},push=true,registry.insecure=true"
     backend_options:
       kubernetes:
         resources:
@@ -87,6 +100,7 @@ steps:
           allowPrivilegeEscalation: false
           capabilities: {drop: [ALL]}
           seccompProfile: {type: RuntimeDefault}
+
   - name: publish-docs
     image: docker.io/library/rust:1.90-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207
     depends_on: [verify-and-build]
