@@ -53,7 +53,7 @@ One task per open database orders its transactions.
 
 1. Transactions that arrive together are validated in order against the newest state: version checks, range checks, quota, and whether the idempotency key was already used.
 2. The survivors are appended to an in-memory table as not-yet-visible versions and encoded as one **frame**.
-3. The frame is **PUT** to `l/<epoch>/<n>`. On Backblaze, two identical uploads race to different storage pods and the first to finish wins; elsewhere a second upload starts only if the first is slow.
+3. The frame is **PUT** to `l/<epoch>/<n>`. On Backblaze a second, identical upload goes to another storage pod at the same moment when the server has an upload URL to spare, and the first to finish wins; elsewhere a second upload starts only if the first is slow.
 4. When the frame and all earlier frames are stored, the server **checks its claim** with one HEAD.
 5. If the claim exists, the transactions become visible and are acknowledged.
 

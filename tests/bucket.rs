@@ -203,19 +203,32 @@ async fn a_purge_across_pages_never_shows_a_deleted_key() {
             let mut looks = 0;
             while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                 for key in &watched {
-                    assert!(!store.exists(key).await.unwrap(), "{key} is visible");
-                    looks += 1;
+                    // A look that fails on its way has seen nothing.
+                    if let Ok(visible) = store.exists(key).await {
+                        assert!(!visible, "{key} is visible");
+                        looks += 1;
+                    }
                 }
             }
             looks
         })
     };
-    let removed = store.purge(&root, None, &|_| true).await.unwrap();
+    // A purge is a thousand requests, and one that fails on its way fails
+    // the purge. The engine then purges again, and so does this: the key
+    // must stay absent through an interrupted purge as well.
+    let all = |_: &str| true;
+    let removed = match store.purge(&root, None, &all).await {
+        Ok(removed) => {
+            assert_eq!(removed, 521);
+            removed
+        }
+        Err(_) => retry(|| store.purge(&root, None, &all)).await.unwrap(),
+    };
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(watcher.await.unwrap() > 0);
-    assert_eq!(removed, 521);
+    assert!(removed <= 521);
     assert!(keys(&*store, &root).await.is_empty());
-    assert_eq!(store.purge(&root, None, &|_| true).await.unwrap(), 0);
+    assert_eq!(retry(|| store.purge(&root, None, &all)).await.unwrap(), 0);
 }
 
 /// The one assumption the protocol makes about storage: a write or delete
@@ -236,22 +249,16 @@ async fn reads_observe_completed_writes_and_deletes() {
             for round in 0..rounds {
                 let prefix = format!("{root}w{worker}/r{round}/");
                 let key = format!("{prefix}claim");
-                // A single upload to a Backblaze pod can fail; the engine
-                // retries, and so does this.
+                // A request can fail, at the bucket or on the way to it. The
+                // engine sends it again and so does this: a read sent again
+                // still starts after the write returned.
                 let body = Bytes::from(format!("{worker}-{round}"));
-                let mut stored = store.put(&key, body.clone()).await;
-                for _ in 0..5 {
-                    if stored.is_ok() {
-                        break;
-                    }
-                    stored = store.put(&key, body.clone()).await;
-                }
-                stored.unwrap();
+                retry(|| store.put(&key, body.clone())).await.unwrap();
                 // Checked the way the protocol uses them: HEAD, GET and LIST.
                 let (exists, body, listed) = tokio::join!(
-                    store.exists(&key),
-                    store.get(&key),
-                    store.list(&prefix, None, 10)
+                    retry(|| store.exists(&key)),
+                    retry(|| store.get(&key)),
+                    retry(|| store.list(&prefix, None, 10))
                 );
                 assert!(exists.unwrap(), "{key}: HEAD missed a completed PUT");
                 assert_eq!(
@@ -264,11 +271,11 @@ async fn reads_observe_completed_writes_and_deletes() {
                     1,
                     "{key}: LIST missed a completed PUT"
                 );
-                store.delete(&key).await.unwrap();
+                retry(|| store.delete(&key)).await.unwrap();
                 let (exists, body, listed) = tokio::join!(
-                    store.exists(&key),
-                    store.get(&key),
-                    store.list(&prefix, None, 10)
+                    retry(|| store.exists(&key)),
+                    retry(|| store.get(&key)),
+                    retry(|| store.list(&prefix, None, 10))
                 );
                 assert!(!exists.unwrap(), "{key}: HEAD saw a deleted object");
                 assert_eq!(body.unwrap(), None, "{key}: GET saw a deleted object");
@@ -282,7 +289,7 @@ async fn reads_observe_completed_writes_and_deletes() {
     for worker in workers {
         worker.await.unwrap();
     }
-    store.purge(&root, None, &|_| true).await.unwrap();
+    retry(|| store.purge(&root, None, &|_| true)).await.unwrap();
     assert!(keys(&*store, &root).await.is_empty());
 }
 

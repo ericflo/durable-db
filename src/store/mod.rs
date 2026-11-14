@@ -49,6 +49,15 @@ pub trait ObjectStore: Send + Sync + 'static {
         self.put(key, body).await
     }
 
+    /// Store an object that a `put` of the same bytes is already storing: a
+    /// spare, there to win if that one is slow. `true` means stored, as with
+    /// `put`. An implementation may answer `false` without sending anything
+    /// when it has no capacity that first uploads are not using; the caller
+    /// may ask again.
+    async fn put_spare(&self, key: &str, body: Bytes) -> StoreResult<bool> {
+        self.put(key, body).await.map(|()| true)
+    }
+
     async fn get(&self, key: &str) -> StoreResult<Option<Bytes>>;
 
     /// Bytes `start..end` of the object, clamped to its length.

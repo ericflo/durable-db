@@ -120,7 +120,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 5
 done
 [ "$peak" -ge 3 ] || { k describe hpa durable-db | tail -15; echo 'the autoscaler did not add a pod' >&2; exit 1; }
-echo "the autoscaler scaled out to $peak ready pods"
+echo "the autoscaler added pods: $peak are ready"
 
 say "killing one pod outright"
 victim=$(k get pods -l app=durable-db -o jsonpath='{.items[0].metadata.name}')
@@ -130,11 +130,13 @@ echo "killed $victim"
 say "waiting for the load to end and the autoscaler to remove pods"
 deadline=$(($(date +%s) + 240))
 while [ "$(date +%s)" -lt "$deadline" ]; do
+  now=$(replicas)
+  [ "${now:-0}" -gt "$peak" ] && peak=$now
   want=$(k get deployment durable-db -o jsonpath='{.spec.replicas}')
   [ "$want" -le 2 ] && break
   sleep 5
 done
-echo "the autoscaler scaled in to $(k get deployment durable-db -o jsonpath='{.spec.replicas}') pods"
+echo "the autoscaler scaled in to $(k get deployment durable-db -o jsonpath='{.spec.replicas}') pods; $peak were ready at most"
 
 say "waiting for the ledger to finish and verify"
 k wait --for=condition=complete job/ledger --timeout=$((ledger_seconds + 180))s >/dev/null 2>&1 || true

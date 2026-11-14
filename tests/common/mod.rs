@@ -6,15 +6,28 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU16, Ordering},
     time::{Duration, Instant},
 };
 
+/// A port for a server process to listen on. Not one the system picks
+/// (`bind` to port 0): between this function's return and the server's own
+/// `bind` the system may give the same port to the next caller or to a
+/// client's connection, and then one server fails to start and its test
+/// talks to another test's server. These are below the range the system
+/// picks from, no two calls in one process return the same, and each was
+/// free when it was returned.
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    loop {
+        // Processes start at different places, so that two test runs on one
+        // machine seldom try the same port.
+        let nth = NEXT.fetch_add(1, Ordering::Relaxed) as u32;
+        let port = 20_000 + (std::process::id() * 64 + nth) % 12_000;
+        if TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+            return port as u16;
+        }
+    }
 }
 
 pub struct Server {
@@ -46,13 +59,16 @@ impl Server {
             ]);
         }
         let child = command.spawn().expect("the server starts");
-        let server = Self {
+        let mut server = Self {
             url: format!("http://{address}"),
             address,
             child,
         };
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!("the server on {} stopped: {status}", server.address);
+            }
             if reqwest::get(format!("{}/readyz", server.url))
                 .await
                 .is_ok_and(|r| r.status().is_success())

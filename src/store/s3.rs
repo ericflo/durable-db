@@ -402,10 +402,18 @@ impl S3Store {
 /// to it. A URL names one storage pod and serves one upload at a time.
 ///
 /// Pods differ: measured medians for the same 4 KiB upload ranged from 67 ms
-/// to over 900 ms at one moment. So this keeps the URLs that prove fast,
-/// drops the slow ones, and keeps trying new ones. Each upload takes either
-/// the fastest known URL or an untried one, alternately, so that two racing
-/// attempts are one of each.
+/// to over 900 ms at one moment, and of ten new pods four were fast. So
+/// this keeps the URLs that prove fast, drops the slow ones, and keeps
+/// trying new ones.
+///
+/// A new pod costs a call for its URL, a name lookup and a connection. A
+/// first upload takes the fastest URL known and a new one only when none is
+/// free. Spares, alternately, try a new pod or take a known one that first
+/// uploads are not expected to need. Few new pods are tried at a time
+/// however many uploads are under way: one new pod for every commit of 64
+/// busy databases was 160 pods a second, and from a desktop one such upload
+/// in fourteen then failed after five seconds without a connection and the
+/// others took 0.8 s at the median.
 struct B2Uploader {
     client: reqwest::Client,
     key_id: String,
@@ -437,6 +445,25 @@ impl B2Target {
     }
 }
 
+/// What an upload is to the one who asked for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Want {
+    /// It must be sent: the only upload of its object, or the first of several.
+    First,
+    /// A claim, which is sent once: the fastest pod known.
+    Once,
+    /// A duplicate beside a first upload, sent only with a URL to spare.
+    Spare,
+}
+
+enum Taken {
+    Url(B2Target),
+    /// None is free: a new one has to be fetched.
+    Fetch,
+    /// Nothing to spare.
+    Nothing,
+}
+
 #[derive(Default)]
 struct B2Pool {
     /// Fastest first.
@@ -444,12 +471,105 @@ struct B2Pool {
     untried: Vec<B2Target>,
     explore: bool,
     fetching: usize,
+    /// Uploads under way through URLs of unknown speed.
+    exploring: usize,
+    /// First uploads under way, and the most there were at once in the
+    /// stretch of time before this one and in this one.
+    firsts: usize,
+    peak: [usize; 2],
+    peak_from: Option<Instant>,
 }
 
 /// Uploads up to this size measure a pod; larger ones mostly measure bandwidth.
 const B2_SAMPLE_BYTES: usize = 256 << 10;
 const B2_PROVEN: usize = 256;
 const B2_UNTRIED: usize = 4;
+/// New pods on trial at once.
+const B2_EXPLORING: usize = 8;
+/// What a first upload to a new pod took at the median, its connection
+/// included, when few were tried at a time.
+const B2_SLOW_MS: f64 = 400.0;
+/// How long the number of first uploads at once is remembered, at least.
+const B2_PEAK: Duration = Duration::from_secs(5);
+
+impl B2Pool {
+    /// The URL for an upload, and whether its speed is unknown.
+    fn take(&mut self, want: Want, now: Instant) -> (Taken, bool) {
+        self.proven.retain(B2Target::usable);
+        self.untried.retain(B2Target::usable);
+        let taken = match want {
+            Want::First | Want::Once => {
+                if want == Want::First {
+                    self.first_begins(now);
+                }
+                if self.proven.is_empty() {
+                    self.untried.pop()
+                } else {
+                    Some(self.proven.remove(0))
+                }
+            }
+            Want::Spare => {
+                self.explore = !self.explore;
+                let new = self.exploring < B2_EXPLORING && !self.untried.is_empty();
+                // The fastest stay for the first uploads that are not under
+                // way now and were a moment ago.
+                let kept = self.peak[0].max(self.peak[1]).saturating_sub(self.firsts);
+                if self.explore && new {
+                    self.untried.pop()
+                } else if self.proven.len() > kept {
+                    Some(self.proven.remove(kept))
+                } else if new {
+                    self.untried.pop()
+                } else {
+                    return (Taken::Nothing, false);
+                }
+            }
+        };
+        let unknown = taken.as_ref().is_none_or(|target| target.millis == 0.0);
+        if unknown {
+            self.exploring += 1;
+        }
+        (taken.map_or(Taken::Fetch, Taken::Url), unknown)
+    }
+
+    fn first_begins(&mut self, now: Instant) {
+        let age = self.peak_from.map(|from| now.duration_since(from));
+        if age.is_none_or(|age| age >= B2_PEAK) {
+            let before = if age.is_some_and(|age| age < 2 * B2_PEAK) {
+                self.peak[1]
+            } else {
+                0
+            };
+            self.peak = [before, 0];
+            self.peak_from = Some(now);
+        }
+        self.firsts += 1;
+        self.peak[1] = self.peak[1].max(self.firsts);
+    }
+
+    /// An upload that `take` gave a URL to, or told to fetch one, has ended.
+    fn ended(&mut self, want: Want, unknown: bool) {
+        if want == Want::First {
+            self.firsts -= 1;
+        }
+        if unknown {
+            self.exploring -= 1;
+        }
+    }
+}
+
+/// Tells the pool that an upload has ended, however it ended.
+struct Lease {
+    uploader: Arc<B2Uploader>,
+    want: Want,
+    unknown: bool,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.uploader.pool.lock().ended(self.want, self.unknown);
+    }
+}
 
 impl B2Uploader {
     async fn json(
@@ -573,23 +693,15 @@ impl B2Uploader {
         unreachable!("the second pass returns")
     }
 
-    /// The next URL to use, topping up the untried ones in the background.
-    async fn target(self: &Arc<Self>, proven: bool) -> StoreResult<B2Target> {
-        let (taken, fetch) = {
+    /// The URL for an upload, or none for a spare that cannot have one.
+    /// Tops up the untried ones in the background.
+    async fn target(self: &Arc<Self>, want: Want) -> StoreResult<Option<(B2Target, Lease)>> {
+        let (taken, unknown, fetch) = {
             let mut pool = self.pool.lock();
-            pool.proven.retain(B2Target::usable);
-            pool.untried.retain(B2Target::usable);
-            pool.explore = !pool.explore && !proven;
-            let taken = if pool.explore && !pool.untried.is_empty() {
-                pool.untried.pop()
-            } else if !pool.proven.is_empty() {
-                Some(pool.proven.remove(0))
-            } else {
-                pool.untried.pop()
-            };
+            let (taken, unknown) = pool.take(want, Instant::now());
             let fetch = B2_UNTRIED.saturating_sub(pool.untried.len() + pool.fetching);
             pool.fetching += fetch;
-            (taken, fetch)
+            (taken, unknown, fetch)
         };
         for _ in 0..fetch {
             let uploader = self.clone();
@@ -602,9 +714,18 @@ impl B2Uploader {
                 }
             });
         }
+        let lease = |uploader: &Arc<Self>| Lease {
+            uploader: uploader.clone(),
+            want,
+            unknown,
+        };
         match taken {
-            Some(target) => Ok(target),
-            None => self.new_target().await,
+            Taken::Url(target) => Ok(Some((target, lease(self)))),
+            Taken::Fetch => {
+                let lease = lease(self);
+                Ok(Some((self.new_target().await?, lease)))
+            }
+            Taken::Nothing => Ok(None),
         }
     }
 
@@ -626,9 +747,12 @@ impl B2Uploader {
             }
             return;
         }
-        // A pod much slower than the best known is not worth another upload.
+        // A pod that is slow even for a new one is not worth another upload.
+        // The others stay, in order: the slower of them are used only when
+        // that many uploads are under way, where the alternative is a pod
+        // nothing is known of.
         let best = pool.proven.first().map_or(f64::MAX, |t| t.millis);
-        if target.millis > 150.0 && target.millis > 2.5 * best {
+        if target.millis > B2_SLOW_MS && target.millis > 2.5 * best {
             return;
         }
         let at = pool
@@ -638,9 +762,12 @@ impl B2Uploader {
         pool.proven.truncate(B2_PROVEN);
     }
 
-    async fn upload(self: &Arc<Self>, key: &str, body: Bytes, proven: bool) -> StoreResult<()> {
+    /// `false`: a spare that was not sent.
+    async fn upload(self: &Arc<Self>, key: &str, body: Bytes, want: Want) -> StoreResult<bool> {
         use sha1::Digest as _;
-        let target = self.target(proven).await?;
+        let Some((target, _lease)) = self.target(want).await? else {
+            return Ok(false);
+        };
         let sampled = body.len() <= B2_SAMPLE_BYTES;
         let timeout = Duration::from_secs(20 + body.len() as u64 / (256 << 10));
         let started = std::time::Instant::now();
@@ -658,7 +785,7 @@ impl B2Uploader {
             .await?;
         if status.is_success() {
             self.keep(target, started.elapsed(), sampled);
-            return Ok(());
+            return Ok(true);
         }
         // An expired upload token is routine: the next attempt gets a new URL.
         if status == StatusCode::UNAUTHORIZED {
@@ -674,7 +801,7 @@ impl B2Uploader {
 impl ObjectStore for S3Store {
     async fn put(&self, key: &str, body: Bytes) -> StoreResult<()> {
         if let Some(b2) = &self.b2 {
-            return b2.upload(key, body, false).await;
+            return b2.upload(key, body, Want::First).await.map(|_| ());
         }
         let reply = self.send(Method::PUT, key, &[], None, body).await?;
         if reply.status.is_success() {
@@ -686,9 +813,16 @@ impl ObjectStore for S3Store {
 
     async fn put_once(&self, key: &str, body: Bytes) -> StoreResult<()> {
         match &self.b2 {
-            // The fastest storage pod known, never an untried one.
-            Some(b2) => b2.upload(key, body, true).await,
+            // The fastest storage pod known; an untried one only if none is.
+            Some(b2) => b2.upload(key, body, Want::Once).await.map(|_| ()),
             None => self.put(key, body).await,
+        }
+    }
+
+    async fn put_spare(&self, key: &str, body: Bytes) -> StoreResult<bool> {
+        match &self.b2 {
+            Some(b2) => b2.upload(key, body, Want::Spare).await,
+            None => self.put(key, body).await.map(|()| true),
         }
     }
 
@@ -934,6 +1068,121 @@ mod tests {
                 && time.starts_with(&date)
                 && date.as_str() > "20260101"
         );
+    }
+
+    fn url(millis: f64) -> B2Target {
+        B2Target {
+            url: String::new(),
+            token: String::new(),
+            millis,
+            issued: Instant::now(),
+        }
+    }
+
+    fn speed(taken: Taken) -> Option<f64> {
+        match taken {
+            Taken::Url(target) => Some(target.millis),
+            Taken::Fetch | Taken::Nothing => None,
+        }
+    }
+
+    /// However many objects are uploaded at once, few uploads go to pods
+    /// that have not been tried. A first upload is never refused for that;
+    /// the spares are.
+    #[test]
+    fn few_new_pods_are_on_trial_at_once() {
+        let now = Instant::now();
+        let mut pool = B2Pool {
+            proven: (1..=64).map(|i| url(i as f64)).collect(),
+            untried: (0..64).map(|_| url(0.0)).collect(),
+            ..B2Pool::default()
+        };
+        // 64 objects were uploaded at once a moment ago.
+        for _ in 0..64 {
+            pool.take(Want::First, now);
+        }
+        for i in 1..=64 {
+            pool.ended(Want::First, false);
+            pool.proven.push(url(i as f64));
+        }
+        // Now each begins again, with a spare.
+        let (mut known, mut new) = (0, 0);
+        for _ in 0..64 {
+            assert!(speed(pool.take(Want::First, now).0).is_some_and(|ms| ms > 0.0));
+            match pool.take(Want::Spare, now) {
+                (Taken::Url(_), false) => known += 1,
+                (Taken::Url(_), true) => new += 1,
+                (Taken::Nothing, false) => {}
+                _ => panic!("a spare never waits for a URL to be fetched"),
+            }
+        }
+        // Every known URL went to a first upload or was kept for one.
+        assert_eq!(
+            (known, new, pool.exploring),
+            (0, B2_EXPLORING, B2_EXPLORING)
+        );
+        // With no URL known, every first upload is on a new pod, and no
+        // spare adds to them.
+        let mut cold = B2Pool {
+            untried: (0..2).map(|_| url(0.0)).collect(),
+            ..B2Pool::default()
+        };
+        for i in 0..2 * B2_EXPLORING {
+            let (taken, unknown) = cold.take(Want::First, now);
+            assert!(unknown && matches!(taken, Taken::Fetch) == (i >= 2));
+        }
+        cold.untried.push(url(0.0));
+        let refused =
+            |pool: &mut B2Pool| matches!(pool.take(Want::Spare, now), (Taken::Nothing, false));
+        assert!(refused(&mut cold));
+        // As many as may be on trial still are: the spare waits for one more
+        // to end, and then tries the next new pod.
+        for _ in 0..B2_EXPLORING {
+            cold.ended(Want::First, true);
+        }
+        assert!(refused(&mut cold));
+        cold.ended(Want::First, true);
+        assert!(matches!(cold.take(Want::Spare, now), (Taken::Url(_), true)));
+        assert_eq!(
+            (cold.firsts, cold.exploring),
+            (B2_EXPLORING - 1, B2_EXPLORING)
+        );
+    }
+
+    /// A spare takes a known URL only beyond those that first uploads were
+    /// using a moment ago, and that memory fades.
+    #[test]
+    fn a_spare_leaves_the_fastest_urls_to_first_uploads() {
+        let now = Instant::now();
+        let mut pool = B2Pool {
+            proven: (1..=6).map(|i| url(10.0 * i as f64)).collect(),
+            ..B2Pool::default()
+        };
+        // Four objects at once: their first uploads take the four fastest.
+        for fastest in [10.0, 20.0, 30.0, 40.0] {
+            assert_eq!(speed(pool.take(Want::First, now).0), Some(fastest));
+        }
+        // All four are under way: a spare takes the next.
+        pool.explore = true;
+        assert_eq!(speed(pool.take(Want::Spare, now).0), Some(50.0));
+        // They end and their URLs come back. Four first uploads may begin
+        // again at any moment, so one spare can be served and no second.
+        for fastest in [40.0, 30.0, 20.0, 10.0] {
+            pool.ended(Want::First, false);
+            pool.proven.insert(0, url(fastest));
+        }
+        assert_eq!(speed(pool.take(Want::Spare, now).0), Some(60.0));
+        assert!(matches!(pool.take(Want::Spare, now), (Taken::Nothing, _)));
+        // One begins: the fastest is its own, and three stay for the others.
+        assert_eq!(speed(pool.take(Want::First, now).0), Some(10.0));
+        assert!(matches!(pool.take(Want::Spare, now), (Taken::Nothing, _)));
+        pool.ended(Want::First, false);
+        pool.proven.insert(0, url(10.0));
+        // Later, with one object at a time, its spare takes the second fastest.
+        let later = now + 2 * B2_PEAK;
+        assert_eq!(speed(pool.take(Want::First, later).0), Some(10.0));
+        assert_eq!(speed(pool.take(Want::Spare, later).0), Some(20.0));
+        assert_eq!((pool.firsts, pool.exploring), (1, 0));
     }
 
     /// The published AWS Signature Version 4 key-derivation example.

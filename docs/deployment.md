@@ -50,7 +50,7 @@ durable-db serve \
 
 The endpoint is shown on the bucket's page. `B2_APPLICATION_KEY_ID` and `B2_APPLICATION_KEY` are accepted in place of the AWS variable names.
 
-Reads, lists and deletes use B2's S3-compatible API. Uploads use B2's own upload call with the same key, because it measured two to three times faster than PutObject through B2's S3 gateway; `--s3-uploads-only` turns that off. Two identical uploads race for each small object, since B2 uploads are free and their latency varies widely between storage pods.
+Reads, lists and deletes use B2's S3-compatible API. Uploads use B2's own upload call with the same key, because it measured two to three times faster than PutObject through B2's S3 gateway; `--s3-uploads-only` turns that off. Each small object is uploaded to the fastest storage pod the server knows, and a second, identical upload races it on another pod when one can be spared, since B2 uploads are free and their latency varies widely between pods. [Performance](performance.md#backblaze-b2) says how pods are chosen.
 
 ### Amazon S3 and other S3-compatible storage
 
@@ -85,7 +85,7 @@ Applications connect to `http://durable-db.durable-db.svc:7654`. Put TLS and any
 
 **Scaling.** Any number of replicas from one up is correct. When a pod becomes ready, the others hand it the databases that hash to it. When a pod is told to stop, it reports not-ready, hands every database over, relays stray requests to its peers for `--drain-seconds`, and exits. A pod that is killed outright loses nothing: the next request for one of its databases makes another pod take it over. Scaling to zero stops service and loses nothing; starting one pod restores it.
 
-**Upgrades** are ordinary rolling updates. Servers of different versions can run side by side as long as they share a storage format; a release that changes the format will say so. 2.0.0 and 2.1.0 share one, and `scripts/test-upgrade.sh` checks the upgrade between two binaries under a ledger ([verification](verification.md#tests-of-the-implementation)). While both of these versions serve, a 2.1.0 server does not take a 2.0.0 server's word that a request was relayed and may relay it once more, and a 2.0.0 server does not know the mark that a 2.1.0 server puts on a database it is deleting, so it could take that database over and serve it until the deletion completes. Delete databases before or after the upgrade, not during it.
+**Upgrades** are ordinary rolling updates. Servers of different versions can run side by side as long as they share a storage format; a release that changes the format will say so. 2.0.0, 2.1.0 and 2.1.1 share one, and `scripts/test-upgrade.sh` checks the upgrade between two binaries under a ledger ([verification](verification.md#tests-of-the-implementation)). While 2.0.0 serves beside a later version, the later server does not take the 2.0.0 server's word that a request was relayed and may relay it once more, and the 2.0.0 server does not know the mark that a later server puts on a database it is deleting, so it could take that database over and serve it until the deletion completes. Delete databases before or after an upgrade from 2.0.0, not during it. Between 2.1.0 and 2.1.1 neither applies.
 
 **Resources.** What a server holds in memory is limited by its flags, not by the size or the number of its databases:
 
@@ -100,7 +100,7 @@ Applications connect to `http://durable-db.durable-db.svc:7654`. Put TLS and any
 | Tables being fetched for the disk cache | two at a time, 64 MiB each |
 | Connections | about 40 KiB each until a request is admitted, `--max-connections` of them |
 
-The manifest sets 192 MiB of cache, 96 MiB of unflushed writes, 128 MiB each for bodies and results, and 1,024 connections. With every line at its limit at once that is about 900 MiB, under a memory limit of 1 GiB. Change the limit and the flags together. These are the limits the code enforces; a budget can be passed by one request's worth before it is enforced, and a few kilobytes for each open database are not counted. Measured: a server with these flags, held to 1 GiB and four CPUs and loaded for three minutes on a local directory, used 618 MiB at most, and 659 MiB in another run ([performance](performance.md#memory-under-load)). When flushes fall behind, a database answers `503` to writes until they have caught up, instead of holding more. Longer loads, and the same loads on a bucket, have not been measured. The cache volume is an `emptyDir`; losing it costs bucket requests, not data.
+The manifest sets 192 MiB of cache, 96 MiB of unflushed writes, 128 MiB each for bodies and results, and 1,024 connections. With every line at its limit at once that is about 900 MiB, under a memory limit of 1 GiB. Change the limit and the flags together. These are the limits the code enforces; a budget can be passed by one request's worth before it is enforced, and a few kilobytes for each open database are not counted. Measured: a server with these flags, held to 1 GiB and four CPUs and loaded for three minutes on a local directory, used 621 MiB at most, and between 618 and 659 MiB in runs of the release before ([performance](performance.md#memory-under-load)). When flushes fall behind, a database answers `503` to writes until they have caught up, instead of holding more. Longer loads, and the same loads on a bucket, have not been measured. The cache volume is an `emptyDir`; losing it costs bucket requests, not data.
 
 ## Configuration
 
@@ -129,7 +129,7 @@ Every option is a flag and an environment variable.
 | `--result-bytes` | `DURABLE_DB_RESULT_BYTES` | 512 MiB | Memory for read results being put together or waiting to be sent. One database may use a quarter; one read returns at most an eighth, up to 64 MiB. |
 | `--max-connections` | `DURABLE_DB_MAX_CONNECTIONS` | 8192 | Connections open at once. Further ones wait to be accepted. |
 | `--drain-seconds` | `DURABLE_DB_DRAIN_SECONDS` | 5 | Time to relay requests after a termination signal. |
-| `--upload-attempts` | `DURABLE_DB_UPLOAD_ATTEMPTS` | 4 on B2, else 2 | Identical uploads that may race for one small object. On B2 two start at once; elsewhere one. |
+| `--upload-attempts` | `DURABLE_DB_UPLOAD_ATTEMPTS` | 4 on B2, else 2 | Identical uploads that may race for one small object. On B2 a second starts with the first when the server has an upload URL to spare; elsewhere one starts. |
 | `--hedge-ms` | `DURABLE_DB_HEDGE_MS` | 150 | How long the uploads of an object may take before one more is started beside them. |
 | `--s3-uploads-only` | `DURABLE_DB_S3_UPLOADS_ONLY` | off | Use PutObject on Backblaze too. |
 | `--no-fsync` | `DURABLE_DB_NO_FSYNC` | off | Directory storage only: do not flush before acknowledging. |

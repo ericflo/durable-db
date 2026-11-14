@@ -14,7 +14,10 @@ use durable_db::{
     store::{Listed, ObjectStore, StoreError, StoreResult, memory::MemoryStore},
 };
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::Semaphore;
@@ -56,6 +59,10 @@ struct Gate {
     inner: Arc<MemoryStore>,
     rules: Mutex<Vec<Rule>>,
     held: Mutex<Vec<(Op, String, Arc<Semaphore>)>>,
+    /// Send no spare uploads, as a store with nothing to spare does, and
+    /// count those that were asked for.
+    no_spares: AtomicBool,
+    spares_refused: AtomicUsize,
 }
 
 impl Gate {
@@ -64,6 +71,8 @@ impl Gate {
             inner: inner.clone(),
             rules: Mutex::default(),
             held: Mutex::default(),
+            no_spares: AtomicBool::new(false),
+            spares_refused: AtomicUsize::new(0),
         })
     }
 
@@ -148,6 +157,13 @@ impl ObjectStore for Gate {
     async fn put_once(&self, key: &str, body: Bytes) -> StoreResult<()> {
         self.pass(Op::PutOnce, key, 0).await?;
         self.inner.put_once(key, body).await
+    }
+    async fn put_spare(&self, key: &str, body: Bytes) -> StoreResult<bool> {
+        if self.no_spares.load(Ordering::SeqCst) {
+            self.spares_refused.fetch_add(1, Ordering::SeqCst);
+            return Ok(false);
+        }
+        self.put(key, body).await.map(|()| true)
     }
     async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
         self.pass(Op::Get, key, 0).await?;
@@ -848,6 +864,73 @@ async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
         disk.misses.load(std::sync::atomic::Ordering::Relaxed),
         misses
     );
+}
+
+/// A store may decline a spare upload. That stores nothing: the commit waits
+/// for an upload that was sent. It uses none of the attempts either, so the
+/// spares are sent once the store has room, and an upload that failed is
+/// sent again whatever the store spares.
+#[tokio::test]
+async fn a_spare_that_is_not_sent_is_not_an_upload() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let server = ctx_with(
+        gate.clone(),
+        Options {
+            upload_attempts: 4,
+            upload_eager: 2,
+            hedge_after: Duration::from_millis(5),
+            ..Options::default()
+        },
+    );
+    let (db, _) = Db::open(server, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    let frame = |key: &str, _| key.contains("/l/");
+    let frames_held = || gate.held().iter().filter(|(_, key)| frame(key, 0)).count();
+    let refused = || gate.spares_refused.load(Ordering::SeqCst);
+
+    // The first upload is slow and the store spares nothing.
+    gate.no_spares.store(true, Ordering::SeqCst);
+    gate.rule(Op::Put, Action::Hold, usize::MAX, frame);
+    let slow = {
+        let db = db.clone();
+        tokio::spawn(async move { commit(&db, put("k", "v")).await })
+    };
+    // A spare is asked for again and again, and none of that is an upload.
+    let patience = Duration::from_secs(60);
+    tokio::time::timeout(patience, async {
+        while refused() < 5 && !slow.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("a spare is asked for again");
+    assert!(!slow.is_finished(), "nothing was stored");
+    assert_eq!(frames_held(), 1);
+    // The store has room again: all three spares are sent, and no fifth upload.
+    gate.no_spares.store(false, Ordering::SeqCst);
+    tokio::time::timeout(patience, async {
+        while frames_held() < 4 && !slow.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the spares are sent");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!slow.is_finished());
+    assert_eq!(frames_held(), 4);
+    gate.clear();
+    gate.release(Op::Put);
+    assert_eq!(slow.await.unwrap().unwrap(), 1);
+
+    // The first upload fails, twice, and the store spares nothing.
+    gate.no_spares.store(true, Ordering::SeqCst);
+    gate.rule(Op::Put, Action::Fail, 2, frame);
+    let retried = tokio::time::timeout(Duration::from_secs(5), commit(&db, put("k", "w")));
+    assert_eq!(retried.await.expect("it is sent again").unwrap(), 2);
+    assert_eq!(get(&db, b"k").await.unwrap(), Some((2, "w".into())));
+    db.close().await;
 }
 
 /// Options under which two flushes of `round` make a merge of several tables.

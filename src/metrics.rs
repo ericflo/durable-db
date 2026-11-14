@@ -171,6 +171,21 @@ impl ObjectStore for Metered {
             .fetch_add(body.len() as u64, Ordering::Relaxed);
         self.timed(0, self.inner.put_once(key, body)).await
     }
+    async fn put_spare(&self, key: &str, body: Bytes) -> StoreResult<bool> {
+        let (bytes, started) = (body.len() as u64, Instant::now());
+        let result = self.inner.put_spare(key, body).await;
+        // One that was not sent is not an upload.
+        if !matches!(result, Ok(false)) {
+            self.metrics
+                .store_bytes_out
+                .fetch_add(bytes, Ordering::Relaxed);
+            self.metrics.store[0].observe(started.elapsed());
+            if result.is_err() {
+                self.metrics.store[0].fail();
+            }
+        }
+        result
+    }
     async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
         let found = self.timed(1, self.inner.get(key)).await?;
         let bytes = found.as_ref().map_or(0, Bytes::len) as u64;

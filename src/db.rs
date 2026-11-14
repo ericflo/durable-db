@@ -314,12 +314,17 @@ impl Uploader {
         }
     }
 
-    /// One upload, raced. `upload_eager` identical PUTs start at once; while
-    /// none has finished, another starts every `hedge_after`, up to
-    /// `upload_attempts`. The first success wins. Object stores have long
-    /// upload tails, and a duplicate of immutable bytes under our own key is
-    /// harmless. Losers run to completion in the background, so a connection
-    /// or upload URL is never abandoned mid-request.
+    /// One upload, raced. The first PUT starts at once with `upload_eager - 1`
+    /// spares beside it; while none has finished, another spare starts every
+    /// `hedge_after`, up to `upload_attempts` in all. The first success wins.
+    /// Object stores have long upload tails, and a duplicate of immutable
+    /// bytes under our own key is harmless. Losers run to completion in the
+    /// background, so a connection or upload URL is never abandoned
+    /// mid-request.
+    ///
+    /// A spare is the store's to refuse (`put_spare`). One that was not sent
+    /// has stored nothing and has used no attempt: it is asked for again
+    /// after the same wait.
     async fn raced(&self, key: &str, body: &Bytes) -> Result<(), StoreError> {
         let opts = &self.ctx.opts;
         let attempts = if body.len() > RACE_BYTES {
@@ -331,44 +336,66 @@ impl Uploader {
             return self.ctx.io.store.put(key, body.clone()).await;
         }
         let (done, mut results) = mpsc::unbounded_channel();
-        let start = |done: mpsc::UnboundedSender<Result<(), StoreError>>| {
+        let start = |spare: bool| {
             let (store, key, body) = (self.ctx.io.store.clone(), key.to_owned(), body.clone());
-            let running = self.running.clone();
+            let (running, done) = (self.running.clone(), done.clone());
             running.fetch_add(1, Ordering::AcqRel);
             tokio::spawn(async move {
-                let result = store.put(&key, body).await;
+                let result = if spare {
+                    store.put_spare(&key, body).await
+                } else {
+                    store.put(&key, body).await.map(|()| true)
+                };
                 running.fetch_sub(1, Ordering::AcqRel);
-                let _ = done.send(result);
+                let _ = done.send((spare, result));
             });
         };
-        let mut running = opts.upload_eager.clamp(1, attempts);
-        let mut waiting = attempts - running;
-        for _ in 0..running {
-            start(done.clone());
+        // `first`: the upload that must be sent is under way. `left`:
+        // attempts not yet used by an upload that was sent.
+        let (mut first, mut spares, mut left) = (true, 0, attempts - 1);
+        start(false);
+        for _ in 1..opts.upload_eager.clamp(1, attempts) {
+            left -= 1;
+            spares += 1;
+            start(true);
         }
         let mut failure = None;
         loop {
-            tokio::select! {
-                result = results.recv() => match result {
-                    Some(Ok(())) => return Ok(()),
-                    Some(Err(error)) => {
-                        running -= 1;
-                        failure = Some(error);
-                        if waiting > 0 {
-                            waiting -= 1;
-                            running += 1;
-                            start(done.clone());
-                        } else if running == 0 {
-                            return Err(failure.expect("a failure was recorded"));
-                        }
-                    }
-                    None => return Err(failure.unwrap_or_else(|| StoreError::Unavailable("no upload attempt".into()))),
-                },
-                _ = tokio::time::sleep(opts.hedge_after), if waiting > 0 => {
-                    waiting -= 1;
-                    running += 1;
-                    start(done.clone());
+            let event = tokio::select! {
+                result = results.recv() => Some(result.expect("this function holds a sender")),
+                _ = tokio::time::sleep(opts.hedge_after), if left > 0 => None,
+            };
+            let another = match event {
+                Some((_, Ok(true))) => return Ok(()),
+                Some((_, Ok(false))) => {
+                    spares -= 1;
+                    left += 1;
+                    false
                 }
+                // In place of the one that failed: no more load than before.
+                Some((spare, Err(error))) => {
+                    failure = Some(error);
+                    if spare {
+                        spares -= 1;
+                    } else {
+                        first = false;
+                    }
+                    true
+                }
+                None => true,
+            };
+            // The upload that must be sent is never left to the spares.
+            if left > 0 && (another || !first) {
+                left -= 1;
+                let spare = first;
+                if spare {
+                    spares += 1;
+                } else {
+                    first = true;
+                }
+                start(spare);
+            } else if !first && spares == 0 {
+                return Err(failure.expect("the first upload failed"));
             }
         }
     }
