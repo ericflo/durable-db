@@ -16,6 +16,7 @@ const {values: args} = parseArgs({options: {
   binary: {type:'string'}, context: {type:'string', default:'Unspecified deployment'},
   'upload-budget-bytes': {type:'string'}, 'upload-budget-attempts': {type:'string'},
   'max-attempts': {type:'string', default:'128'},
+  'recovery-barrier': {type:'string'},
 }});
 function integer(value, min, max) {
   const n = Number(value);
@@ -121,8 +122,8 @@ try {
       {request_id:randomUUID(),limits:{max_bytes:1048576,max_keys:1000}},report.setup.attempt_statuses,'PUT');
     const {token}=await request(urls[0],'/v1/tokens',admin,{database:db.name,write:true,ttl_seconds:86400},report.setup.attempt_statuses);
     db.token=token;
-    const seed=await request(urls[0],`/v1/databases/${db.name}/commit`,token,
-      {expected_revision:0,request_id:randomUUID(),writes:[{key:'value',value:db.value}]},report.setup.attempt_statuses);
+    db.lastCommit={expected_revision:0,request_id:randomUUID(),writes:[{key:'value',value:db.value}]};
+    const seed=await request(urls[0],`/v1/databases/${db.name}/commit`,token,db.lastCommit,report.setup.attempt_statuses);
     db.revision=seed.revision;
     databases.push(db);
     report.setup.databases_created++;
@@ -146,10 +147,10 @@ try {
             if (mode==='write') {
               const value=payload(worker,db.revision);
               db.pending={revision:db.revision+1,value};
-              const r=await request(url,`/v1/databases/${db.name}/commit`,db.token,
-                {expected_revision:db.revision,request_id:randomUUID(),writes:[{key:'value',value}]},phase.attempt_statuses);
+              const body={expected_revision:db.revision,request_id:randomUUID(),writes:[{key:'value',value}]};
+              const r=await request(url,`/v1/databases/${db.name}/commit`,db.token,body,phase.attempt_statuses);
               if (r.revision!==db.revision+1) throw Error('incorrect_write_revision');
-              db.revision=r.revision; db.value=value;
+              db.revision=r.revision; db.value=value; db.lastCommit=body;
               delete db.pending;
             } else {
               const r=await request(url,`/v1/databases/${db.name}/read`,db.token,{keys:['value']},phase.attempt_statuses);
@@ -186,6 +187,54 @@ try {
     } else if (db.pending && r.revision===db.pending.revision && r.values[0]===db.pending.value) {
       report.verification.uncertain_write_observed++;
     } else report.verification.failed++;
+  }
+  if (args['recovery-barrier'] && !phaseFailed && !report.verification.failed) {
+    // The independent workload process keeps expected values and exact requests
+    // in memory. Only a nonce/count barrier crosses the controller boundary.
+    const barrier=args['recovery-barrier'], nonce=randomUUID();
+    const began=performance.now();
+    const recovery=report.cold_recovery={started_at:new Date().toISOString(),
+      acknowledged_commits:databases.reduce((sum,db)=>sum+db.revision,0),
+      attempt_statuses:{},samples:[],complete:false};
+    await save();
+    await writeFile(barrier+'.ready.tmp',JSON.stringify({nonce,databases:databases.length}),{flag:'wx',mode:0o600});
+    await rename(barrier+'.ready.tmp',barrier+'.ready');
+    for (;;) {
+      let resumed;
+      try { resumed=JSON.parse(await readFile(barrier+'.resume','utf8')); }
+      catch (error) { if (error.code!=='ENOENT') throw error; }
+      if (resumed) {
+        if (resumed.nonce!==nonce) throw Error('incorrect_recovery_barrier');
+        break;
+      }
+      if (performance.now()-began>300_000) throw Error('recovery_barrier_timeout');
+      await sleep(100);
+    }
+    const resumed=performance.now();
+    recovery.resumed_at=new Date().toISOString();
+    for (let worker=0;worker<databases.length;worker++) {
+      const db=databases[worker], url=urls[worker%urls.length];
+      const path=`/v1/databases/${db.name}`, counts=recovery.attempt_statuses;
+      const r=await request(url,path+'/read',db.token,{keys:['value'],scans:[{limit:2}]},counts);
+      if (r.revision!==db.revision || r.values[0]!==db.value ||
+          r.scans[0].items.length!==1 || r.scans[0].items[0].key!=='value' || r.scans[0].items[0].value!==db.value)
+        throw Error('incorrect_cold_read');
+      const sample={worker,revision:db.revision,read_after_resume_ms:performance.now()-resumed,
+        read_after_barrier_ms:performance.now()-began};
+      const retry=await request(url,path+'/commit',db.token,db.lastCommit,counts);
+      if (!retry.replayed || retry.revision!==db.revision) throw Error('incorrect_cold_receipt');
+      const value=payload(worker,db.revision), start=performance.now();
+      const next=await request(url,path+'/commit',db.token,
+        {expected_revision:db.revision,request_id:randomUUID(),writes:[{key:'value',value}]},counts);
+      if (next.revision!==db.revision+1) throw Error('incorrect_cold_write');
+      const check=await request(url,path+'/read',db.token,{keys:['value']},counts);
+      if (check.revision!==next.revision || check.values[0]!==value) throw Error('incorrect_cold_readback');
+      sample.write_and_readback_ms=performance.now()-start;
+      recovery.samples.push(sample); db.revision=next.revision; db.value=value;
+      await save();
+    }
+    recovery.complete=true; recovery.finished_at=new Date().toISOString();
+    await save();
   }
   if (uploadLimits) {
     const counts={};

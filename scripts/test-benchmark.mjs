@@ -3,14 +3,16 @@
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
-import {mkdtemp, writeFile, readFile, rm} from 'node:fs/promises';
+import {mkdtemp, writeFile, readFile, rename, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {once} from 'node:events';
+import {setTimeout as sleep} from 'node:timers/promises';
 
 const root=await mkdtemp(join(tmpdir(),'durable-db-benchmark-test-'));
 const databases=new Map();
 let retries=0, changedRetry=false, firstBody;
+let coldFault=null;
 const funded=new Set();
 const server=createServer(async (req,res)=>{
   const chunks=[]; for await (const chunk of req) chunks.push(chunk);
@@ -31,10 +33,18 @@ const server=createServer(async (req,res)=>{
     if (req.method!=='PUT' || !body.request_id || !body.limits) {
       res.statusCode=400; return res.end('{}');
     }
-    databases.set(name,{revision:0,value:null}); return res.end('{}');
+    databases.set(name,{revision:0,value:null,receipts:new Map()}); return res.end('{}');
   }
   const db=databases.get(name);
-  if (action==='read') return res.end(JSON.stringify({revision:db.revision,values:[db.value]}));
+  if (action==='read') {
+    const value=coldFault==='value' ? 'Y29ycnVwdA==' : db.value;
+    return res.end(JSON.stringify({revision:db.revision,values:[value],scans:[{items:[{key:'value',value}]}]}));
+  }
+  const receipt=db.receipts.get(body.request_id);
+  if (receipt) {
+    assert.equal(text,receipt.body,'cold retry must preserve the exact request');
+    return res.end(JSON.stringify({revision:receipt.revision,replayed:coldFault!=='receipt'}));
+  }
   if (name.endsWith('000002') && body.expected_revision===1) {
     res.statusCode=413;
     return res.end(JSON.stringify({error:'limit',message:'database write admission budget exhausted'}));
@@ -47,6 +57,7 @@ const server=createServer(async (req,res)=>{
     res.statusCode=503; return res.end('{}');
   }
   db.revision++; db.value=body.writes[0].value;
+  db.receipts.set(body.request_id,{revision:db.revision,body:text});
   res.end(JSON.stringify({revision:db.revision,replayed:false}));
 });
 try {
@@ -75,7 +86,41 @@ try {
   assert.equal(result.budgets.databases[2].allocated.bytes,67108864);
   assert.equal(result.budgets.namespace.allocated.bytes,33554432);
   assert.ok(Date.parse(p.finished_at)>=Date.parse(p.started_at));
-  console.log('Benchmark funding, SDK retries, failure accounting and recovery verification passed');
+  for (const fault of [null,'value','receipt']) {
+    coldFault=null;
+    const suffix=fault??'ok', barrier=join(root,'barrier-'+suffix), resultPath=join(root,'cold-'+suffix+'.json');
+    const cold=spawn(process.execPath,[new URL('./benchmark-http.mjs',import.meta.url).pathname,
+      '--urls',`http://127.0.0.1:${server.address().port}`,'--token-file',token,'--output',resultPath,
+      '--databases','1','--workers','1','--operations','3','--value-bytes','65536',
+      '--recovery-barrier',barrier,'--upload-budget-bytes','67108864','--upload-budget-attempts','10000'],
+      {stdio:'ignore',timeout:15_000});
+    const finished=once(cold,'exit');
+    let ready;
+    const deadline=Date.now()+10_000;
+    while (!ready) {
+      try { ready=JSON.parse(await readFile(barrier+'.ready','utf8')); }
+      catch (error) { if (error.code!=='ENOENT') throw error; }
+      assert.ok(Date.now()<deadline && cold.exitCode===null,'cold barrier was not reached');
+      if (!ready) await sleep(25);
+    }
+    assert.equal(ready.databases,1);
+    coldFault=fault;
+    await writeFile(barrier+'.resume.tmp',JSON.stringify(ready));
+    await rename(barrier+'.resume.tmp',barrier+'.resume');
+    const [exit]=await finished;
+    const result=JSON.parse(await readFile(resultPath,'utf8'));
+    assert.equal(exit,fault?1:0);
+    assert.equal(result.complete,!fault);
+    assert.equal(result.cold_recovery.complete,!fault);
+    assert.equal(result.cold_recovery.acknowledged_commits,4);
+    if (fault) assert.equal(result.failure,fault==='value'?'incorrect_cold_read':'incorrect_cold_receipt');
+    else {
+      assert.equal(result.cold_recovery.samples.length,1);
+      assert.equal(result.cold_recovery.samples[0].revision,4);
+      assert.ok(result.cold_recovery.samples[0].read_after_barrier_ms>=result.cold_recovery.samples[0].read_after_resume_ms);
+    }
+  }
+  console.log('Benchmark retries, failure accounting, cold values/receipts and corrupt-recovery controls passed');
 } finally {
   server.closeAllConnections(); server.close();
   await rm(root,{recursive:true,force:true});
