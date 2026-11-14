@@ -100,7 +100,7 @@ A scan selects keys by any combination of:
 
 `next` is the last key returned when more keys remain, otherwise `null`. A page also ends early at 8 MiB.
 
-For `"consistency": "session"`, add `"min_revision": N` with the highest revision you have seen from this database.
+For `"consistency": "session"`, add `"min_revision": N` with the highest revision you have seen from this database. If that revision is still being stored, the read waits for it. A `min_revision` the database has never reached is a `400`.
 
 ## Commit
 
@@ -131,7 +131,9 @@ All writes apply together or not at all. A transaction needs at least one write 
 | `{"range": {...}, "revision": R}` | No key in the range was written after revision `R`. The range takes `prefix`, `start` and `end` as in a scan. Use the `revision` of the read that scanned it. |
 | top-level `"if_revision": R` | The whole database is still at revision `R`. |
 
-Read, compute, and commit with a check for each key and range you read: the transaction then behaves as if it ran alone. On `409`, read again and recompute. Range checks are verified against recent writes only; a range read too long ago fails with `409` and is simply read again.
+Read, compute, and commit with a check for each key and range you read: the transaction then behaves as if it ran alone. On `409`, read again and recompute. The conflict carries `"revision"`: pass it as `min_revision` and the read is guaranteed to include whatever caused the conflict. Range checks are verified against recent writes only; a range read too long ago fails with `409` and is simply read again.
+
+There is no read at an exact past revision. Two separate reads may see different revisions; the checks catch it at commit.
 
 **Idempotency.** With an `idempotency_key` (1 to 255 bytes), repeating the same transaction returns the original result instead of applying it again, for the next 100,000 revisions. Reusing a key with different writes is a `400`. Always send one when a retry is possible.
 
@@ -145,7 +147,7 @@ Read, compute, and commit with a check for each key and range you read: the tran
 {"results": [{"revision": 1209}, {"error": {"code": "conflict", "message": "...", "retryable": false}}]}
 ```
 
-The first failure stops the request; later transactions report `conflict` with the message "not attempted". The status is `200` whenever the request itself was understood.
+Each transaction takes the same fields as a single one, including its own `idempotency_key`; nothing but `transactions` may appear at the top level. The first failure stops the request; later transactions report `conflict` with the message "not attempted". The status is `200` whenever the request itself was understood. If any transaction is malformed the whole request is a `400` and none is applied.
 
 ## Single keys
 
@@ -169,9 +171,10 @@ Percent-encode the key in the path; `/` may be left as is.
 | 401 | `unauthorized` | Missing, forged, expired or revoked token. | Obtain a token. |
 | 403 | `forbidden` | The token does not cover this database or action. | |
 | 404 | `not_found` | No such database, or no such key on a single-key `GET`. | |
-| 409 | `conflict` | A check failed. | Read again and recompute. |
+| 409 | `conflict` | A check failed. The error carries `revision`. | Read at that revision or later, and recompute. |
 | 409 | `exists` | The database exists with different settings. | |
 | 410 | `deleted` | The database was deleted. | |
+| 413 | `too_large` | The request body exceeds 32 MiB. | Split the request. |
 | 429 | `rate_limited` | The database's request budget is spent. | Retry after `Retry-After` seconds. |
 | 503 | `busy`, `ownership_moved`, `storage_unavailable` | The request could not be completed now. | Repeat the identical request. |
 | 507 | `quota_exceeded` | The database is at `max_bytes`. | Delete data or raise the quota. |

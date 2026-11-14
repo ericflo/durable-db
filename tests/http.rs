@@ -373,6 +373,8 @@ async fn reads_scans_and_transactions() {
         json!({"checks": [{"key": "doc", "version": 0}], "writes": [{"key": "doc", "value": 1}]});
     let (status, body) = call("POST", &commit, &token, Some(stale)).await;
     assert_eq!((status, code(&body)), (409, "conflict"));
+    // A conflict says which revision to read at before trying again.
+    assert_eq!(body["error"]["revision"], 2);
     let current = json!({"checks": [{"key": "doc", "version": 1}, {"range": {"prefix": "item/"}, "revision": 2}], "writes": [{"key": "doc", "delete": true}]});
     assert_eq!(
         call("POST", &commit, &token, Some(current)).await.1["revision"],
@@ -494,6 +496,8 @@ async fn malformed_requests_are_refused_before_anything_is_written() {
         json!({"writes": [{"key": "k", "value": 1}], "unknown": true}),
         json!({"writes": [{"key": "k", "value": 1}], "transactions": [{"writes": [{"key": "j", "value": 1}]}]}),
         json!({"writes": [{"key": "k", "value": 1}], "idempotency_key": ""}),
+        json!({"transactions": [{"writes": [{"key": "j", "value": 1}]}], "idempotency_key": "top"}),
+        json!({"transactions": [{"writes": [{"key": "j", "value": 1}]}, {"writes": []}]}),
     ];
     for body in bad {
         let (status, response) = call("POST", &commit, &token, Some(body.clone())).await;
@@ -512,6 +516,21 @@ async fn malformed_requests_are_refused_before_anything_is_written() {
             "{body}"
         );
     }
+    // An oversized body gets the documented error shape, not a bare status.
+    let huge = format!(
+        "{{\"writes\":[{{\"key\":\"k\",\"value\":\"{}\"}}]}}",
+        "x".repeat(33 << 20)
+    );
+    let response = reqwest::Client::new()
+        .post(&commit)
+        .bearer_auth(&token)
+        .body(huge)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 413);
+    let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(code(&body), "too_large");
     assert_eq!(
         call("GET", &f.db("app"), &token, None).await.1["revision"],
         0

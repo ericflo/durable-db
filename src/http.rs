@@ -87,6 +87,7 @@ pub fn error_response(error: &Error) -> Response {
         Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
         Error::Invalid(_) => (StatusCode::BAD_REQUEST, "invalid"),
         Error::Quota => (StatusCode::INSUFFICIENT_STORAGE, "quota_exceeded"),
+        Error::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "too_large"),
         Error::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
         Error::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
         Error::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
@@ -113,6 +114,7 @@ fn error_code(error: &Error) -> &'static str {
         Error::Conflict(_) => "conflict",
         Error::Invalid(_) => "invalid",
         Error::Quota => "quota_exceeded",
+        Error::TooLarge => "too_large",
         Error::RateLimited => "rate_limited",
         Error::Unauthorized => "unauthorized",
         Error::Forbidden => "forbidden",
@@ -225,8 +227,12 @@ async fn database(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Response {
+    // Read the body here so that an oversized one gets the documented error.
+    let Ok(body) = axum::body::to_bytes(body, app.limits.max_body).await else {
+        return error_response(&Error::TooLarge);
+    };
     let Ok(_permit) = app.inflight.try_acquire() else {
         app.node
             .metrics
@@ -413,7 +419,11 @@ async fn serve(
             let single = request.transactions.is_none();
             let txns = match request.transactions {
                 Some(transactions) => {
-                    if !request.writes.is_empty() || !request.checks.is_empty() {
+                    if !request.writes.is_empty()
+                        || !request.checks.is_empty()
+                        || request.if_revision.is_some()
+                        || request.idempotency_key.is_some()
+                    {
                         return Err(invalid(
                             "send either one transaction or \"transactions\", not both",
                         )
@@ -442,7 +452,7 @@ async fn serve(
                 Served { error, repeatable }
             })?;
             observe(&node.metrics.commits);
-            Ok(commit_response(results, single))
+            Ok(commit_response(results, single, db.newest_revision()))
         }
         (verb @ ("GET" | "PUT" | "DELETE"), path) if path.starts_with("keys/") => {
             let key = percent_decode(&path["keys/".len()..])?;
@@ -490,7 +500,8 @@ async fn serve(
                 writes: vec![(key_bytes, value)],
                 ..Txn::default()
             };
-            let results = db.await?.commit(vec![txn]).await.map_err(|error| {
+            let db = db.await?;
+            let results = db.commit(vec![txn]).await.map_err(|error| {
                 node.metrics.commits.fail();
                 Served {
                     error,
@@ -498,7 +509,7 @@ async fn serve(
                 }
             })?;
             observe(&node.metrics.commits);
-            Ok(commit_response(results, true))
+            Ok(commit_response(results, true, db.newest_revision()))
         }
         _ => Err(Error::Invalid(format!(
             "no such endpoint: {method} /v1/databases/{name}/{rest}"
@@ -815,13 +826,30 @@ fn transaction(app: &App, body: &Bytes, txn: &TxnBody) -> Result<Txn> {
     })
 }
 
-fn commit_response(results: Vec<Result<crate::db::Committed>>, single: bool) -> Response {
+/// A refusal, with the revision a retry should read at when it is a conflict.
+fn refusal_json(error: &Error, newest: u64) -> String {
+    let mut body = serde_json::from_str::<serde_json::Value>(&error_json(error, error_code(error)))
+        .expect("error bodies are JSON");
+    if matches!(error, Error::Conflict(_)) {
+        body["error"]["revision"] = newest.into();
+    }
+    body.to_string()
+}
+
+fn commit_response(
+    results: Vec<Result<crate::db::Committed>>,
+    single: bool,
+    newest: u64,
+) -> Response {
     if single {
         return match results.into_iter().next() {
             Some(Ok(committed)) => json_response(
                 StatusCode::OK,
                 format!("{{\"revision\":{}}}", committed.revision),
             ),
+            Some(Err(error @ Error::Conflict(_))) => {
+                json_response(StatusCode::CONFLICT, refusal_json(&error, newest))
+            }
             Some(Err(error)) => error_response(&error),
             None => error_response(&Error::Busy("no result".into())),
         };
@@ -833,7 +861,7 @@ fn commit_response(results: Vec<Result<crate::db::Committed>>, single: bool) -> 
         }
         match result {
             Ok(committed) => out.push_str(&format!("{{\"revision\":{}}}", committed.revision)),
-            Err(error) => out.push_str(&error_json(error, error_code(error))),
+            Err(error) => out.push_str(&refusal_json(error, newest)),
         }
     }
     out.push_str("]}");

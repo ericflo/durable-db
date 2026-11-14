@@ -34,6 +34,8 @@ pub enum Error {
     Invalid(String),
     #[error("database storage quota exceeded")]
     Quota,
+    #[error("the request body is larger than this server accepts")]
+    TooLarge,
     #[error("too many requests")]
     RateLimited,
     #[error("unauthorized")]

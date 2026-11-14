@@ -1,74 +1,88 @@
-# A task board in 50 lines of storage code
+# Task board
 
-Settings, a paginated task list, and an atomic completion counter. Start with [storage.ts](storage.ts); [server.ts](server.ts) connects it to Hono routes with Zod validation.
+A small HTTP API built with [Hono](https://hono.dev) that keeps its data in durable-db through the [TypeScript client](../../clients/javascript/README.md).
 
-```ts
-import { Database } from '@durable-db/client';
+| File | Contents |
+| --- | --- |
+| [storage.ts](storage.ts) | The storage module: 44 lines, the part to copy |
+| [server.ts](server.ts) | Four routes and the server |
+| [server.test.ts](server.test.ts) | Tests against a throwaway durable-db server |
 
-const db = new Database({ url, database: 'my-app', token });
+## The storage module
 
-await db.set('settings', { theme: 'dark' });
-const settings = await db.get<{ theme: string }>('settings');
-const tasks = await db.list<Task>({ prefix: 'tasks/', limit: 20 });
-```
-
-Related changes belong in a transaction:
+Tasks live under `tasks/<id>` and two counters under `stats`. Creating a task numbers it and counts it in one transaction:
 
 ```ts
-await db.transaction(async (tx) => {
-  const task = await tx.get<Task>(`tasks/${id}`);
-  if (!task || task.completed) return;
-
-  const count = (await tx.get<number>('stats/completed')) ?? 0;
-  tx.set(`tasks/${id}`, { ...task, completed: true });
-  tx.set('stats/completed', count + 1);
-});
+create(title: string) {
+  return db.transaction(async (tx) => {
+    const stats = (await tx.get<Stats>('stats')) ?? { created: 0, done: 0 };
+    const task: Task = { id: String(stats.created + 1).padStart(8, '0'), title, done: false };
+    tx.set(taskKey(task.id), task);
+    tx.set('stats', { ...stats, created: stats.created + 1 });
+    return task;
+  });
+},
 ```
 
-Completing a task twice increments the counter once. Concurrent completions of different tasks preserve both increments. The SDK handles encoding, snapshot revisions, conflicts and retries. The callback can rerun after a conflict, so keep emails, payments and other external effects outside it.
+The transaction read `stats`, so its commit succeeds only if `stats` is unchanged. When two requests create a task at the same moment, one commits; the other's callback runs again, reads the new count, and takes the next number. No number is used twice and the count matches the tasks.
+
+Completing a task updates the task and the `done` counter together. A task that is already done is returned unchanged, so a repeated or concurrent request counts once.
+
+Listing is one page of the `tasks/` prefix. Keys sort by task number, so pages are in creation order, and the page's `cursor` fetches the next one:
+
+```ts
+async list(cursor?: string) {
+  const page = await db.list<Task>({ prefix: 'tasks/', limit: 20, cursor });
+  return { tasks: page.items.map((item) => item.value), cursor: page.cursor };
+},
+```
+
+## Test it
+
+From the repository root, with Node.js 24:
+
+```sh
+cargo build --release                  # builds target/release/durable-db
+npm ci --prefix clients/javascript     # builds the client, which this example uses by path
+npm ci --prefix examples/web-app
+npm test --prefix examples/web-app
+```
+
+The tests start a server on a free port with a temporary data directory and stop it afterwards. They run the executable named by `DURABLE_DB_BINARY`, else `target/release/durable-db`, else `durable-db` on the `PATH`.
 
 ## Run it
 
-Requires Node.js 24 and durable-db v0.5.1 or later; see the [installation instructions](../../README.md#start-locally).
-
-From the repository root:
+Start a server:
 
 ```sh
-npm ci --prefix clients/javascript
-npm ci --prefix examples/web-app
-target/debug/durable-db serve --data .tools/web-app-data
+target/release/durable-db serve --data /tmp/task-board
 ```
 
-In a second terminal, still at the repository root:
+In a second terminal, create a database, keep its token in the environment, and start the API:
 
 ```sh
-umask 077
-mkdir -p .tools/web-app
-target/debug/durable-db token --key-file .tools/web-app-data/admin.key --admin \
-  > .tools/web-app/admin.token
-export DURABLE_DB_ADMIN_TOKEN_FILE="$PWD/.tools/web-app/admin.token"
-node examples/web-app/setup.ts
-node examples/web-app/server.ts
+export DURABLE_DB_TOKEN=$(target/release/durable-db create tasks --key-file /tmp/task-board/admin.key)
+npm start --prefix examples/web-app
 ```
 
-Setup creates a protected database and saves a scoped application token. It can be rerun safely; the token expires after an hour, so rerun setup and restart the API when needed. Credentials stay on the application server. This localhost example has no user login; add your application's authentication and authorization when deploying it.
-
-## Try it
+In a third:
 
 ```sh
-curl http://127.0.0.1:3000/tasks \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"2408c6f4-2c37-477a-b0c1-071cd9a8979a","title":"Publish the first post"}'
-
+curl http://127.0.0.1:3000/tasks -H 'content-type: application/json' -d '{"title":"Publish the first post"}'
 curl http://127.0.0.1:3000/tasks
-
-curl -X POST http://127.0.0.1:3000/tasks/2408c6f4-2c37-477a-b0c1-071cd9a8979a/complete
-
+curl -X POST http://127.0.0.1:3000/tasks/00000001/complete
 curl http://127.0.0.1:3000/stats
 ```
 
-Generate a task ID once and reuse it when retrying creation. An existing ID returns its original task. GET `/settings` reads preferences; PUT `/settings` with `{"theme":"dark"}` replaces them. Settings intentionally use last-write-wins semantics.
+They print:
 
-A task page contains `items` and a `cursor`; pass the cursor back as `?cursor=...` using URL encoding. Keys sort by UTF-8 byte order. A write between pages invalidates the cursor and returns 409; restart the listing. For SDK bounds and unresolved network outcomes, see the [client guide](../../clients/javascript/README.md).
+```json
+{"id":"00000001","title":"Publish the first post","done":false}
+{"tasks":[{"id":"00000001","title":"Publish the first post","done":false}]}
+{"id":"00000001","title":"Publish the first post","done":true}
+{"created":1,"done":1}
+```
 
-Run `scripts/test-client.sh` to check the SDK, Pi adapters and example against a disposable local database.
+`GET /tasks` returns twenty tasks. When more remain, the response has a `cursor`; pass it as `GET /tasks?cursor=...`.
+
+The API reads `DURABLE_DB_URL` (default `http://127.0.0.1:7654`), `DURABLE_DB_DATABASE` (default `tasks`), `DURABLE_DB_TOKEN` and `PORT` (default 3000). It listens on 127.0.0.1 and has no login; add authentication before exposing it. The database token stays in the API process and never reaches a browser.

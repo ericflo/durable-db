@@ -33,7 +33,7 @@ Rolling updates of durable-db do not take databases offline: each pod hands its 
 
 **Minting tokens** needs no call to durable-db. A token is `ddb_<payload>.<signature>` where `payload` is base64url (no padding) of the JSON `{"db":"*","access":"admin","exp":0,"generation":0}` and `signature` is base64url of HMAC-SHA256 over the payload text with the 32-byte key decoded from the hex in `admin.key`. In Go this is about fifteen lines with the standard library.
 
-**Relaying.** Expose, under the existing site API, something like `POST /v1/sites/{id}/databases/{label}/read` and `/commit`. For each request the server authenticates the caller as it does today, checks that the site owns the database, applies any per-site rule (read-only visitors, for example), and forwards the body unchanged to durable-db with a token. Responses and status codes pass through; `503` responses carry `Retry-After`.
+**Relaying.** Give each site a base URL, for example `https://api.neuralcolumn.com/v1/sites/{id}/db`, and serve durable-db's own paths beneath it: `POST <base>/v1/databases/{label}/read` and `/commit`. The SDK appends exactly those paths to its `url`, so site code is `new Database({ url: '<base>', database: '<label>', token: <NeuralColumn credential> })` with no other change. For each request the server authenticates the caller as it does today, maps `{label}` to the site's database name, applies any per-site rule (read-only visitors, for example), and forwards the body unchanged to durable-db with a token it mints. Responses and status codes pass through; `503` responses carry `Retry-After`.
 
 **Limits per site**, set at creation and changeable with `PATCH`:
 

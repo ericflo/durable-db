@@ -180,9 +180,6 @@ pub struct Info {
 
 type Reply = oneshot::Sender<Result<Vec<Result<Committed>>>>;
 
-/// Chooses the keys a purge removes.
-type Doomed<'a> = &'a (dyn for<'k> Fn(&'k str) -> bool + Sync);
-
 enum Cmd {
     Commit { txns: Vec<Txn>, reply: Reply },
     Config { config: DbConfig, reply: Reply },
@@ -250,6 +247,10 @@ pub struct Db {
     started: Instant,
     last_used_ms: AtomicU64,
     last_commit_ms: AtomicU64,
+    /// The newest revision handed out, acknowledged or not.
+    newest: AtomicU64,
+    /// The newest acknowledged revision, for readers waiting on one.
+    confirmed_tx: tokio::sync::watch::Sender<u64>,
 }
 
 /// Objects above this size are uploaded once at a time: racing them would
@@ -634,6 +635,8 @@ impl Db {
             started: Instant::now(),
             last_used_ms: AtomicU64::new(0),
             last_commit_ms: AtomicU64::new(0),
+            newest: AtomicU64::new(revision),
+            confirmed_tx: tokio::sync::watch::channel(revision).0,
         });
         tokio::spawn(Writer::run(db.clone(), rx, revision));
         tokio::spawn(db.clone().maintain());
@@ -663,6 +666,8 @@ impl Db {
         }
         self.wake_writer.notify_one();
         self.wake_maint.notify_one();
+        // Wake readers waiting for a revision that will now never arrive.
+        self.confirmed_tx.send_modify(|_| {});
     }
 
     /// Resolves once a claim check that began after this call has finished.
@@ -738,6 +743,12 @@ impl Db {
         self.state.read().config.clone()
     }
 
+    /// The newest revision this owner has handed out. It is at least the
+    /// revision any conflict it reported was caused by.
+    pub fn newest_revision(&self) -> u64 {
+        self.newest.load(Ordering::Acquire)
+    }
+
     /// Bytes held in memory that no table contains yet.
     pub fn mem_bytes(&self) -> usize {
         self.state.read().mem.bytes()
@@ -772,13 +783,23 @@ impl Db {
             return Err(error.clone());
         }
         if !request.strong && request.min_revision > self.state.read().confirmed {
-            // The caller has seen a newer revision than this node has. Either
-            // ownership moved, or the token is not from this database.
-            self.check().await?;
-            if request.min_revision > self.state.read().confirmed {
+            if request.min_revision > self.newest.load(Ordering::Acquire) {
+                // The caller has seen a newer revision than this node has
+                // ever produced. Either ownership moved, or the revision is
+                // not from this database.
+                self.check().await?;
                 return Err(Error::Invalid(
                     "min_revision is ahead of the database".into(),
                 ));
+            }
+            // The revision exists here but is not acknowledged yet, as after
+            // a conflict with a transaction still being stored. Wait for it.
+            let mut confirmed = self.confirmed_tx.subscribe();
+            let reached = confirmed
+                .wait_for(|revision| *revision >= request.min_revision || self.is_closed());
+            match tokio::time::timeout(self.ctx.opts.store_deadline, reached).await {
+                Ok(Ok(_)) if !self.is_closed() => {}
+                _ => return Err(self.closed_error()),
             }
         }
         // A strong read may use any snapshot taken after it arrived, provided
@@ -1135,30 +1156,15 @@ impl Db {
             .iter()
             .map(|t| t.meta.key.clone())
             .collect();
-        let all = |_: &str| true;
-        let unreferenced = |key: &str| !referenced.contains(key);
-        let jobs: [(String, String, Doomed<'_>); 4] = [
-            (self.layout.claims(), self.layout.claim(self.epoch), &all),
-            (
-                self.layout.manifests(),
-                self.layout.epoch_manifests(self.epoch),
-                &all,
-            ),
-            (
-                self.layout.frames(),
-                self.layout.epoch_frames(self.epoch),
-                &all,
-            ),
-            (
-                self.layout.tables(),
-                self.layout.epoch_tables(self.epoch),
-                &unreferenced,
-            ),
-        ];
-        for (prefix, end, doomed) in jobs {
-            if let Err(error) = store.purge(&prefix, Some(&end), doomed).await {
-                tracing::debug!(db = %self.name, %error, "sweep incomplete");
-            }
+        // One listing of the whole database: anything of a lower epoch goes,
+        // except the tables this epoch's manifest still names.
+        let doomed = |key: &str| {
+            self.layout
+                .epoch_of(key)
+                .is_some_and(|epoch| epoch < self.epoch && !referenced.contains(key))
+        };
+        if let Err(error) = store.purge(self.layout.everything(), None, &doomed).await {
+            tracing::debug!(db = %self.name, %error, "sweep incomplete");
         }
     }
 
@@ -1534,6 +1540,7 @@ impl Writer {
                 state.config = self.configs.remove(0).1;
             }
         }
+        db.confirmed_tx.send_replace(revision);
         db.last_commit_ms
             .store(db.started.elapsed().as_millis() as u64, Ordering::Relaxed);
         self.release(revision);
@@ -1670,6 +1677,7 @@ impl Writer {
         if !txns.is_empty() {
             self.upload(first_revision, txns, stored_tx);
         }
+        self.db.newest.store(self.assigned, Ordering::Release);
         // Requests that changed nothing are answered at once.
         let confirmed = self.db.state.read().confirmed;
         self.release(confirmed);

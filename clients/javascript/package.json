@@ -1,41 +1,61 @@
 {
   "name": "@durable-db/client",
-  "version": "1.0.9",
+  "version": "2.0.0",
   "private": true,
+  "description": "TypeScript client for durable-db, with a pi-durable storage adapter",
   "type": "module",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./pi-reference": {
-      "types": "./pi-reference.d.mts",
-      "import": "./pi-reference.mjs"
+    "./pi": {
+      "types": "./dist/pi/index.d.ts",
+      "import": "./dist/pi/index.js"
     },
-    "./pi-indexed": {
-      "types": "./pi-indexed.d.mts",
-      "import": "./pi-indexed.mjs"
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "NOTICE",
+    "licenses"
+  ],
   "scripts": {
-    "test": "vitest run --testTimeout=30000 --hookTimeout=30000",
-    "format": "prettier --config .prettierrc.json --write \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\" \"src/*.ts\"",
-    "format:check": "prettier --config .prettierrc.json --check \"*.mjs\" \"*.d.mts\" \"indexed/*.mjs\" \"../../examples/web-app/*.ts\" \"src/*.ts\"",
-    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project ../../examples/web-app/tsconfig.json",
-    "build": "tsc --project tsconfig.json",
-    "prepare": "npm run build"
+    "build": "tsc --project tsconfig.build.json",
+    "prepare": "npm run build",
+    "test": "vitest run",
+    "bench": "node bench/pi.ts",
+    "typecheck": "tsc --project tsconfig.json && tsc --project ../../examples/web-app/tsconfig.json",
+    "format": "prettier --config .prettierrc.json --write \"*.ts\" \"{src,test,bench}/**/*.ts\" \"../../examples/web-app/*.ts\"",
+    "format:check": "prettier --config .prettierrc.json --check \"*.ts\" \"{src,test,bench}/**/*.ts\" \"../../examples/web-app/*.ts\""
   },
-  "dependencies": {
-    "@earendil-works/pi-durable": "1.5.0"
+  "peerDependencies": {
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/chord": {
+      "optional": true
+    },
+    "@earendil-works/pi-durable": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@earendil-works/chord": "1.5.0",
-    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
     "@types/node": "24.19.2",
     "prettier": "3.9.10",
     "typescript": "7.0.2",
     "vitest": "4.1.12"
-  },
-  "types": "./dist/index.d.ts"
+  }
 }

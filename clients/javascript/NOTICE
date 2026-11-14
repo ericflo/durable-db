@@ -1,5 +1,5 @@
-The indexed adapter follows and adapts storage behavior from
-@earendil-works/pi-durable 1.5.0, especially its memory, SQLite, and scan
+The pi-durable storage adapter in src/pi follows and adapts storage behavior
+from @earendil-works/pi-durable 1.5.2, especially its memory, SQLite, and scan
 implementations, distributed under the MIT license. The original notice is
 in licenses/pi-MIT.txt. Upstream source: https://github.com/earendil-works/pi
 (packages/durable). durable-db's original code is Apache-2.0 licensed.

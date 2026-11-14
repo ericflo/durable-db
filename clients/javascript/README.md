@@ -1,94 +1,246 @@
-# JavaScript and TypeScript
+# JavaScript and TypeScript client
 
-Typed JSON storage for server-side applications. The package is linked from source while the repository is private; the [runnable task board](../../examples/web-app/README.md) links it locally. Node.js 24 is the tested runtime.
+`@durable-db/client` is the TypeScript client for durable-db's [HTTP API](../../docs/api.md). It has no runtime dependencies and uses the global `fetch`, so it runs on Node.js 22 or later and other runtimes with `fetch` and Web Crypto. It also contains a storage adapter for [pi-durable](#pi-durable-storage).
+
+The package is not on npm. Build it in this repository and add it to an application by path:
+
+```sh
+npm ci --prefix clients/javascript     # installs and builds dist/
+npm install ./clients/javascript       # run in your application, with the path to this directory
+```
+
+## Quick start
+
+Start a server and create a database. `create` prints a token that can read and write it.
+
+```sh
+durable-db serve --data ./data
+export DURABLE_DB_TOKEN=$(durable-db create demo)
+```
 
 ```ts
 import { Database } from '@durable-db/client';
 
-const db = new Database({ url, database: 'my-app', token });
+const db = new Database({
+  url: 'http://127.0.0.1:7654',
+  database: 'demo',
+  token: process.env.DURABLE_DB_TOKEN!,
+});
 
-await db.set('settings', { theme: 'dark' });
-const settings = await db.get<{ theme: string }>('settings');
-await db.delete('draft');
-
-const page = await db.list<Task>({ prefix: 'tasks/', limit: 20 });
-const next = page.cursor
-  ? await db.list<Task>({ prefix: 'tasks/', cursor: page.cursor })
-  : undefined;
+await db.set('users/ada', { name: 'Ada', logins: 1 });
+const ada = await db.get<{ name: string; logins: number }>('users/ada');
+await db.delete('users/ada');
 ```
 
-`get<T>` returns `T | undefined`; stored `null` remains `null`. Values must be plain, finite JSON. Types describe your application's schema; they do not perform runtime schema validation. Credentials belong on the application server, never in a browser bundle.
+A key is a string of 1 to 1,024 bytes. A value is any JSON except `null`, up to 4 MiB. `get` returns `undefined` for a key that does not exist. The type argument describes what your application stored; the client does not validate it. Keep tokens on the server, never in a browser bundle.
+
+| Method | Result |
+| --- | --- |
+| `get(key)` | The value, or `undefined`. |
+| `getEntry(key)` | `{ key, value, version }`, or `undefined`. The version is the revision of the transaction that last wrote the key. |
+| `getMany(keys)` | The values in order, all read at one revision. |
+| `set(key, value)`, `delete(key)` | `{ revision }`: the database revision the write created. |
+| `list(options)` | One page: `{ items, cursor, revision }`. |
+| `scan(options)` | An async iterator over every matching entry. |
+| `transaction(callback)` | The callback's result, after its writes are committed. |
+| `commit(commit)`, `commitAll(commits)` | Atomic writes with checks you choose. |
+| `read({ keys, scans })` | Any number of keys and scans in one round trip, at one revision. |
+
+## Listing
+
+Keys are ordered by their UTF-8 bytes. A range is selected by `prefix`, `start` (inclusive) and `end` (exclusive), in any combination.
+
+```ts
+const page = await db.list<{ title: string }>({ prefix: 'tasks/', limit: 20 });
+for (const { key, value, version } of page.items) console.log(key, value.title, version);
+
+if (page.cursor !== undefined) {
+  const next = await db.list({ prefix: 'tasks/', limit: 20, cursor: page.cursor });
+}
+
+for await (const entry of db.scan({ prefix: 'tasks/', reverse: true })) {
+  console.log(entry.key);
+}
+```
+
+`limit` defaults to 100 and is at most 10,000. `cursor` is the last key of the page, present only when more keys remain. Pages are read independently, so a key written between two pages can appear in the later one. `scan` fetches pages of 1,000 as the loop consumes them; its `limit` bounds the total.
 
 ## Transactions
 
 ```ts
 await db.transaction(async (tx) => {
-  const count = (await tx.get<number>('page-views')) ?? 0;
-  tx.set('page-views', count + 1);
-  tx.set('last-view', { at: new Date().toISOString() });
+  const from = (await tx.get<number>('accounts/a')) ?? 0;
+  const to = (await tx.get<number>('accounts/b')) ?? 0;
+  if (from < 30) throw new Error('insufficient funds');
+  tx.set('accounts/a', from - 30);
+  tx.set('accounts/b', to + 30);
 });
 ```
 
-All reads use one database revision. Writes become visible together after the callback completes. Reads see earlier staged writes. The transaction returns the callback's result after confirmation, and a thrown callback publishes nothing.
+The callback reads with `tx.get`, `tx.getMany` and `tx.list`, and buffers writes with `tx.set` and `tx.delete`. Reads see the callback's own buffered writes. When the callback returns, the client commits the writes with a version check for every key the callback read and a range check for every range it listed. The commit succeeds only if none of them changed, so the result is the one the callback would have produced running alone.
 
-A definite conflict can rerun the callback, up to five attempts. Keep external side effects outside it and await every transaction read. Commit retries after a lost response reuse the identical request, without rerunning application logic. If the SDK cannot establish the outcome, `UncertainCommitError` carries that original request for reconciliation. Do not blindly rerun a non-idempotent operation after this error. `RetryLimitError` means the retry budget was exhausted without an uncertain publication. The SDK stores no extra application receipts.
+If something the callback read did change, nothing is written, and the callback runs again after a short random delay, up to `maxAttempts` times (default 10), after which `transaction` throws `ConflictError`. The server's conflict names a revision that includes the change, and the rerun reads at that revision or later, so it sees what caused the conflict. Because the callback can run more than once, send emails and charge cards outside it. If the callback throws, nothing is written and the error is passed on. A callback that buffers no write commits nothing.
 
-For application-level replay across separate HTTP requests, use a stable business identity. The task board creates by task ID and completes only unfinished tasks, making those actions safe to repeat. More complex operations may need their own durable idempotency record.
+Two reads in one callback are separate requests, so while another client is writing they can return values from different revisions. Such a transaction never commits: its checks fail and the callback runs again. Do not treat a mismatch between two values read in a callback as corrupt data.
 
-## Bounds and pagination
+## Commit with your own checks
 
-| Operation | Limit |
-| --- | --- |
-| Key | 1–1,024 UTF-8 bytes, no NUL or unpaired surrogate |
-| JSON value | 64 KiB encoded JSON; at most 64 nesting levels |
-| Transaction | 128 distinct read keys, 128 write keys, 1 MiB encoded commit request |
-| List | 1–1,000 records per page; default 20 |
-| Retries | Five callback attempts; up to five identical commit attempts per callback; 35-second timeout per HTTP attempt |
-
-Server admission limits and database quotas also apply. These are work bounds, not a wall-clock deadline for an arbitrary callback. A read can retry transient transport/service failures up to five times.
-
-`list` returns `{ items: [{ key, value }], cursor }` in UTF-8 byte order. Cursors are opaque and bound to the prefix and revision. If any write changes the database between pages, the next page returns `DbError` with status 409. Restart the listing; cursors are not retained historical snapshots. Prefix scans and explicit indexes are the query model.
-
-## Provisioning and binary values
-
-`DurableDb` remains the lower-level wire client for provisioning, binary storage, adapters and explicit recovery:
+`commit` applies one atomic transaction: every write, or none.
 
 ```ts
-import { DurableDb, encode } from '@durable-db/client';
+const entry = await db.getEntry<{ stock: number }>('items/42');
+if (entry === undefined) throw new Error('no such item');
 
-const wire = new DurableDb({ url, database: 'my-app', token });
-const snapshot = await wire.read({ keys: ['message'] });
-const request = {
-  expected_revision: snapshot.revision,
-  request_id: crypto.randomUUID(),
-  writes: [{ key: 'message', value: encode('Hello') }],
-};
-await wire.commit(request);
+await db.commit({
+  checks: [
+    { key: 'items/42', version: entry.version }, // unchanged since it was read
+    { key: 'orders/1001', version: 0 }, // does not exist yet
+  ],
+  writes: [
+    { key: 'items/42', value: { stock: entry.value.stock - 1 } },
+    { key: 'orders/1001', value: { item: 42 } },
+    { key: 'carts/7', delete: true },
+  ],
+});
 ```
 
-Retain the same request across uncertain retries. This layer makes one HTTP attempt per call and exposes base64 values. `createProtected`, `issueToken` and `changeAccess` need administrator credentials. Redirects are refused; connect to the final HTTPS origin. See the [HTTP contract](../../docs/api.md) and [Pi integration guide](../../docs/clients.md).
+When a check fails, `commit` throws `ConflictError` and nothing is written. The checks are:
 
-The Node.js client pools HTTP/1 connections by origin and database. A connection
-that works for one database is not shared with another database that may need a
-different Service endpoint during peer isolation. Across client instances in one
-loaded SDK module, it keeps at most 64 pools, 16 outstanding requests per pool,
-128 outstanding requests total, and one idle socket per pool. Idle pools are
-evicted on demand; active requests are never evicted. Capacity refusal raises
-`DbError` with status 429 before sending. These are client bounds, independent of
-the server's admission limits, and are not an RSS bound across Node workers.
+| Check | Passes while |
+| --- | --- |
+| `{ key, version }` | The key is at this version. Version 0 means it does not exist. |
+| `{ range: { prefix, start, end }, revision }` | No key in the range was written after this revision. Use the `revision` of the `list` or `read` that scanned it. |
+| `ifRevision` on the commit | The whole database is at this revision. |
 
-Requests retain the 35-second deadline, including response body reads. Request
-and response bodies are bounded to 1 MiB. HTTPS verifies certificates and host
-identity using Node's trust configuration. The client uses Node's built-in HTTP
-transport, not a global fetch dispatcher. On HTTP 429 or 503 it discards that
-request's connection, without cancelling other active requests; an explicit
-retry may obtain a different Service endpoint. No owner
-address is trusted or cached by the client, and transport errors never trigger
-an automatic replay. Pooling is a routing optimization, not an availability
-guarantee under permanent isolation or an arbitrary external proxy.
+A transaction holds at most 10,000 writes and checks. `commitAll([...])` sends several transactions in one round trip. They apply in order, each atomic and with its own revision, and it returns one `{ revision }` or `{ error }` per transaction. The first failure stops the rest.
+
+Every commit carries an idempotency key, by default a random one. Pass `idempotencyKey` to make your own retries safe: a commit repeated with the same key and the same contents returns the first result instead of applying again.
+
+## Consistency
+
+Reads are `strong` by default: they reflect every transaction acknowledged before the read was sent, at the cost of one storage round trip on the server. A `session` read is served from the server's memory.
+
+```ts
+const fast = new Database({ url, database, token, consistency: 'session' });
+await fast.get('settings'); // session
+await fast.get('settings', { consistency: 'strong' }); // one strong read
+```
+
+The client remembers the highest revision it has seen, in `db.revision`, and sends it with every session read. A session read therefore always includes this client's own writes and never goes back in time. It can miss a write another client made a moment ago. Reads inside `transaction` are session reads; the checks at commit make that safe.
+
+## Errors and retries
+
+Every failed request throws a `DatabaseError` with `status`, `code` (the server's error code), `retryable` and `message`.
+
+| Class | Status | Meaning |
+| --- | --- | --- |
+| `InvalidError` | 400 | The request is malformed or exceeds a limit. |
+| `UnauthorizedError` | 401 | The token is missing, forged, expired or revoked. |
+| `ForbiddenError` | 403 | The token does not cover this database or action. |
+| `NotFoundError` | 404, 410 | No such database, or it was deleted. |
+| `ConflictError` | 409 | A check failed. Read again and recompute. |
+| `RateLimitError` | 429 | The database's request budget is spent. |
+| `UnavailableError` | 503 | The server could not complete the request now. |
+| `QuotaError` | 507 | The database is at its storage quota. Deletes still succeed. |
+| `NetworkError` | none | No response arrived: the connection failed or timed out. |
+
+```ts
+import { ConflictError, QuotaError } from '@durable-db/client';
+
+try {
+  await db.commit({ checks: [{ key: 'slug/hello', version: 0 }], writes: [{ key: 'slug/hello', value: 1 }] });
+} catch (error) {
+  if (error instanceof ConflictError) console.log('the slug is taken');
+  else if (error instanceof QuotaError) console.log('the database is full');
+  else throw error;
+}
+```
+
+The client repeats the identical request after a network error, a `503`, or a `429` (after the server's `Retry-After`), up to `maxRetries` times (default 5) with exponential backoff and jitter. This is safe for commits because of the idempotency key. Each attempt is abandoned after `timeoutMs` (default 30,000). A `Retry-After` longer than 10 seconds is not waited for; the `RateLimitError` carries it as `retryAfterMs`.
+
+If a commit still fails with `NetworkError` or `UnavailableError`, the server may or may not have applied it. The error then has `outcomeUnknown: true` and `commit`, the commit that was sent with its idempotency key. This applies to `set`, `delete` and `transaction` too. `await db.commit(error.commit)` settles it: it returns the revision if the commit was or now is applied, and throws `ConflictError` if a check no longer holds.
+
+`new Database({ ..., fetch })` takes a custom `fetch`, for example to add tracing.
+
+## Administration
+
+`Admin` manages databases with an administrator token (`durable-db token --admin`).
+
+```ts
+import { Admin } from '@durable-db/client';
+
+const admin = new Admin({ url: 'http://127.0.0.1:7654', token: process.env.DURABLE_DB_ADMIN_TOKEN! });
+await admin.createDatabase('reports', { maxBytes: 64 * 1024 * 1024 });
+const token = await admin.createToken('reports', { access: 'read', ttlSeconds: 3600 });
+const { revision, bytes } = await admin.getDatabase('reports');
+await admin.deleteDatabase('reports');
+```
+
+`createDatabase` succeeds if the database already exists with the same limits. A deleted database's name cannot be used again.
+
+## Testing your application
+
+`@durable-db/client/testing` starts a throwaway server for tests. It runs the `durable-db` executable passed as `binary`, else the one named by `DURABLE_DB_BINARY`, else the one on the `PATH`.
+
+```ts
+import { startServer } from '@durable-db/client/testing';
+
+const server = await startServer(); // durable-db serve on a free local port, in a temporary directory
+const db = await server.createDatabase(); // a new database and a client with a write token
+await db.set('greeting', 'hello');
+await server.stop(); // stops the server and deletes its data
+```
+
+The [task board example](../../examples/web-app/README.md) uses it.
+
+## pi-durable storage
+
+`@durable-db/client/pi` implements the `Storage` interface of [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.5.2 on one database, so a pi-durable Session or Harness keeps its conversations, tasks and documents in durable-db. Install pi-durable 1.5.2 in the application; this package lists it as an optional peer dependency.
+
+```ts
+import { Database } from '@durable-db/client';
+import { openPiStorage } from '@durable-db/client/pi';
+import { Harness } from '@earendil-works/pi-durable';
+
+const db = new Database({ url, database: 'agent-1', token });
+const storage = await openPiStorage(db);
+const harness = await Harness.open(storage, { models, registry }, context);
+```
+
+`models`, `registry` and `context` are pi-durable's own; [test/pi-harness.test.ts](test/pi-harness.test.ts) is a complete setup with a scripted model.
+
+**One owner.** A pi-durable Session is the only writer of its storage. `openPiStorage` records an owner under the storage's prefix and fails if another owner is recorded. `storage.close()`, which `Harness.close()` calls, clears it. After a process dies without closing, open with `openPiStorage(db, { takeover: true })`. A takeover is safe while the old process is still running: every transaction the adapter sends checks the owner, so the old process's next commit fails, and its next read reports the takeover. Decide in your host when to take over; the adapter never does it by itself.
+
+**Prefix.** All keys begin with `prefix` (default `pi/`), so one database can hold several storages, or a storage beside your own keys.
+
+**Round trips.** Reads are session reads. One request serves each of these: a task, a conversation, a submission by ID or by request ID, the current document at an address, a document without history, the newest head marker, and a page of a conversation's history, including what it inherits from the conversations it was forked from. An entry looked up by ID alone is one request when the adapter stored or read that entry since it was opened, otherwise two. Scans of conversations, tasks, submissions and documents take two requests per pass, and so does a document with history. The first read through a conversation the adapter has not seen costs one more request per unseen ancestor.
+
+A commit is one request when it only adds conversations, entries, tasks and submissions with newly minted IDs. Otherwise it is two: one read for everything its checks need, then one request that stores every batch of `Storage.commit(batches)` as its own transaction. Opening takes three requests, one of them a strong read.
+
+**Limits.** A record or document value is stored as one JSON value, so it is limited by the server's value size (4 MiB by default). One batch is one transaction, limited to 10,000 writes; an entry takes two or three, a new task five. A commit the server refuses for such a limit rejects, which ends the Session, but leaves the storage consistent and closable.
+
+**Reads beside commits.** Reads do not wait for a commit that is being written. A read that needed more than one request while a commit of the same storage was written runs again, so its result never mixes the states before and after that commit.
+
+The header of [src/pi/index.ts](src/pi/index.ts) lists the keys the adapter writes.
 
 ## Development
 
-`src/` contains the JSON API, transaction scope, encoding and retry handling. `client.mjs` and `client.d.mts` define the wire API. `pi-indexed.mjs` and `indexed/` implement Pi storage; `pi-reference.mjs` is its reference adapter.
+```sh
+npm ci                  # install and build
+npm test                # SDK, retry, adapter, upstream conformance and Harness tests
+npm run typecheck       # this package and examples/web-app
+npm run format:check    # prettier; npm run format rewrites
+npm run bench           # pi-durable's storage benchmarks against the adapter
+```
 
-`npm ci` builds the SDK. `npm run format:check` and `npm run typecheck` check the public API and executable examples. From the repository root, `scripts/test-client.sh` runs HTTP, lost-response, concurrent-update, Pi and application tests. For focused SDK/example work, use `scripts/test-client.sh sdk.test.mjs`; the full suite remains the default and the Woodpecker gate.
+`npm test` and `npm run bench` start a server on a free port with a temporary data directory and stop it afterwards. They run the executable named by `DURABLE_DB_BINARY`, else `target/release/durable-db` in this repository (`cargo build --release`), else `durable-db` on the `PATH`.
+
+| Path | Contents |
+| --- | --- |
+| `src/database.ts` | `Database` and transactions |
+| `src/http.ts`, `src/errors.ts` | Requests, retries and typed errors |
+| `src/admin.ts` | `Admin` |
+| `src/testing.ts` | `startServer` |
+| `src/pi/` | The pi-durable storage adapter |
+| `test/` | Tests; `test/pi-conformance.test.ts` runs pi-durable's complete storage conformance suite |
+| `bench/pi.ts` | The adapter benchmark |

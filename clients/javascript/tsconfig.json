@@ -3,10 +3,13 @@
     "target": "ES2024",
     "module": "NodeNext",
     "strict": true,
-    "declaration": true,
-    "outDir": "dist",
-    "rootDir": "src",
-    "skipLibCheck": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "types": ["node"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src", "test", "bench", "vitest.config.ts"]
 }
