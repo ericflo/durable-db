@@ -789,7 +789,7 @@ async fn database_budget_cache_reuses_bytes_not_credit_or_authority() {
                     .unwrap()
                     .allocated
                     .attempts,
-                grant * 32
+                grant * 256
             );
         }
         // A new process starts cold: fetch the page and ledger once, then reuse
@@ -818,7 +818,7 @@ async fn database_budget_cache_reuses_bytes_not_credit_or_authority() {
         }
         faults.metadata_reads.store(0, Ordering::SeqCst);
         let ledger = root.database_budget("app").unwrap().unwrap();
-        assert_eq!(ledger.status().await.unwrap().allocated.attempts, 96);
+        assert_eq!(ledger.status().await.unwrap().allocated.attempts, 768);
         assert!(faults.metadata_reads.load(Ordering::SeqCst) > 0);
         provider.fail_replacements.store(8, Ordering::SeqCst);
         assert!(
@@ -888,7 +888,7 @@ async fn database_budget_metadata_reuses_staging_and_bounds_stale_comparisons() 
     let status = ledger.status().await.unwrap();
     assert_eq!(status.configuration_revision, 1);
     assert_eq!(status.allocated.bytes, 16 * 1024 * 1024);
-    assert_eq!(status.allocated.attempts, 32);
+    assert_eq!(status.allocated.attempts, 256);
 
     let mut refill = refill;
     refill.request_id = "next".into();
@@ -968,7 +968,7 @@ async fn database_budget_collection_fences_paused_publishers_and_unknown_deletes
             .unwrap()
             .allocated
             .attempts,
-        32,
+        256,
         "a fenced publisher rebuilt its immutable paths before granting rights"
     );
     let orphan = format!("manifests/orphan.{}", Uuid::new_v4());

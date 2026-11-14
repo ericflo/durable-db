@@ -1921,7 +1921,7 @@ async fn native_http_automatically_collects_only_obsolete_budget_metadata() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(budget["allocated"]["attempts"], 32);
+    assert_eq!(budget["allocated"]["attempts"], 256);
     assert_eq!(
         call(
             &router,

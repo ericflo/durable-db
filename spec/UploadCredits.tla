@@ -29,6 +29,11 @@ Initialize == /\ (~initialized \/ UnsafeInitializeReset)
 \* Reserve may precede a root observation: pre-funding avoids invalidating the
 \* claim's comparison with its own grant. Charge still precedes every upload;
 \* unused prefunded rights remain volatile and disappear on Crash/Restart.
+\* Runtime grants amortize funding across up to 256 attempts (formerly 32),
+\* clamped to the unchanged ceiling. Reserve already explores every grant size
+\* within the small capacity: a larger grant changes publication frequency and
+\* stranded credit, not the charging, lost-reply or crash rules. Concrete chunk
+\* sizing and metadata-call counts are Rust regression obligations.
 Reserve(n,g,units,ack) ==
     /\ initialized /\ n \in running /\ g \notin issued
     /\ units \in 1..Capacity /\ allocated + units <= ceiling

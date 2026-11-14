@@ -19,7 +19,7 @@ pub(crate) use database::{FIELD as DATABASE_FIELD, root as database_root};
 pub(crate) const FIELD: &str = "durable-db-upload-budget";
 const MAX_UNITS: u64 = (1 << 53) - 1;
 const GRANT_BYTES: u64 = 8 * 1024 * 1024;
-const GRANT_ATTEMPTS: u64 = 32;
+const GRANT_ATTEMPTS: u64 = 256;
 const RECEIPTS: usize = 8;
 
 #[derive(Debug, thiserror::Error)]

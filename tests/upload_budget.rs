@@ -761,6 +761,48 @@ async fn format5_writers_and_both_collectors_race_then_reopen_without_caches() {
 }
 
 #[tokio::test]
+async fn a_burst_shares_one_attempt_grant_and_restart_never_restores_its_tail() {
+    let metadata = fixture();
+    let limits = UploadLimits {
+        bytes: 16 * 1024 * 1024,
+        attempts: 300,
+    };
+    let storage = open(&metadata, Some(limits)).await;
+    let before = metadata.state.lock().await.revision;
+    let payload = Bytes::from(vec![7; 64 * 1024]);
+    for n in 0..100 {
+        storage
+            .put(&format!("blocks/burst-{n}"), payload.clone())
+            .await
+            .unwrap();
+    }
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 100);
+    assert_eq!(
+        metadata.state.lock().await.revision - before,
+        1,
+        "attempt-only refills must not repeatedly publish during this burst"
+    );
+    let allocated = storage.upload_budget().await.unwrap().unwrap().allocated;
+    assert_eq!(allocated.bytes, 8 * 1024 * 1024);
+    assert_eq!(allocated.attempts, 256);
+    drop(storage);
+
+    // The first process's unused 156 attempts remain charged but unusable.
+    let restarted = open(&metadata, None).await;
+    for n in 0..limits.attempts - allocated.attempts {
+        restarted
+            .put(&format!("blocks/restarted-{n}"), payload.clone())
+            .await
+            .unwrap();
+    }
+    assert!(restarted.put("blocks/exhausted", payload).await.is_err());
+    assert_eq!(metadata.files.calls.load(Ordering::SeqCst), 144);
+    let status = restarted.upload_budget().await.unwrap().unwrap();
+    assert_eq!(status.limits, limits);
+    assert_eq!(status.allocated, limits);
+}
+
+#[tokio::test]
 async fn concurrent_replicas_cannot_reallocate_grants_after_complete_process_loss() {
     let metadata = fixture();
     let limits = UploadLimits {
@@ -1186,7 +1228,7 @@ async fn replenishing_one_dimension_retains_previously_confirmed_credit_in_the_o
         storage.upload_budget().await.unwrap().unwrap().allocated,
         UploadLimits {
             bytes: 300,
-            attempts: 32
+            attempts: 64
         }
     );
 }
