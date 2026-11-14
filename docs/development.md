@@ -151,6 +151,39 @@ The disposable-provider controller fixture is
 use the provider environment and cleanup rules below. It accepts supplied local
 membership snapshots and does not qualify Kubernetes discovery.
 
+## Kubernetes load measurements
+
+`scripts/benchmark-kubernetes.py` runs the SDK benchmark through the shared
+Service on three distinct hosts, using the maintained deployment manifests and
+an image pinned by digest. Supply a fresh dedicated bucket, its scoped provider
+environment as a private JSON file, a signing key and its administrator token:
+
+```sh
+python3 scripts/benchmark-kubernetes.py \
+  --context YOUR_CONTEXT --image REGISTRY/durable-db@sha256:IMAGE_DIGEST \
+  --storage-env-file /private/storage.json \
+  --signing-key-file /private/admin.key --admin-token-file /private/admin.token \
+  --output ./load-result --disposable \
+  --concurrency 32 --value-bytes 65536
+```
+
+The default matrix uses 32 databases, 1/4/16/32 workers and 20 operations per
+worker, with separate closed-loop write/read phases. Override `--databases`,
+`--workers` and `--operations` for a focused regression. Each database gets a
+64 MiB cumulative upload allowance; the namespace gets 1 GiB. A failed worker
+stops, remaining unstarted operations stay visible, and final verification
+checks the last value/revision and upload counters. Resource reports retain
+kubelet RSS, working set, CPU counters and restart counts; ten-second sampling
+can miss peaks. Setup is excluded from phase throughput, but retries and backoff
+are included. These runs do not establish sustained-load or latency SLOs.
+
+The runner removes its namespace and retains workload results and bounded server
+logs even on failure. The caller must remove all bucket versions, delete the
+dedicated bucket and revoke its scoped key afterward. Never reuse a result
+directory or omit failed runs from a comparison. The [native load evidence](
+verification-results.md#native-b2-load-exposes-funding-and-write-tail-costs-2026-11-14)
+records the release baseline and its failures.
+
 ## CI and publication
 
 The [release verification record](verification-results.md) links source commits, Woodpecker builds, artifact hashes, standalone checks and actual public-installer downloads.

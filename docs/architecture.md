@@ -38,7 +38,7 @@ unavailability and requires reopening its directory after this failure.
 
 Receipts bind the original request body and return its original result on an identical retry. A conflicting body reusing the ID is refused. The cloud CLI retains a 128-commit retry window; callers must resolve uncertainty within that window. Transactions spanning databases are not supported.
 
-Durable upload allowances cover immutable PUT attempts, including unsuccessful or uncertain attempts. The namespace ceiling covers data and metadata; tenant admission and maintenance reserves supply additional isolation. Volatile unused rights are stranded on process loss rather than recreated from observations. The namespace administrator can inspect and refill its ceiling before partition owners become ready. Full administrative/egress accounting remains a production gate.
+Durable upload allowances cover immutable PUT attempts, including unsuccessful or uncertain attempts. The namespace ceiling covers data and metadata; tenant admission and maintenance reserves supply additional isolation. Volatile unused rights are stranded on process loss rather than recreated from observations. The namespace administrator can inspect and refill its ceiling before partition owners become ready. Full administrative/egress accounting remains deferred beyond the single-trust-domain 1.0 scope.
 
 ## Index, checkpoints and memory
 

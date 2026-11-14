@@ -107,7 +107,7 @@ Assign each batch a fresh identity from its partition, unique writer epoch and n
 
 Uploads may be pipelined, but acknowledgement advances only through a contiguous durable prefix. A completed upload at position three cannot justify acknowledging it while position two is unresolved. Before acknowledgement, the writer must also verify its serving permission. Merely having started the upload while permission was valid is insufficient. If validation fails after a PUT might have landed, the response is uncertain, not a definite conflict or rollback: recovery may still retain that batch.
 
-The native serving path uses one immutable PUT plus a permit GET per acknowledged batch, with no shared authority update per ordinary transaction. The live owner integrates journal publication, hash-chain recovery, request receipts and transaction evaluation. Admission funding and checkpoint/control work still require separate publications; the composed correctness and performance gates remain open.
+The live owner can put multiple transactions in one immutable journal frame, but the HTTP worker currently prepares one transaction per frame. It can seal several completed responses before one permit GET; ordinary transactions do not update shared authority. Connecting the existing transaction grouping to queued HTTP writes remains a throughput improvement to qualify. Admission funding and checkpoint/control work still require separate publications; the composed correctness and performance gates remain open.
 
 ### Journal implementation boundary
 
@@ -193,7 +193,7 @@ Each record also fixes the receipt-retention floor. Recovery follows this durabl
 
 `transactions::recovery::restore` consumes a fresh complete-history cursor and an unpublished target. It validates contiguous per-database revisions and receipt identities before passing evaluated mutations and the next metadata state to the target. Missing or invalid history, target errors and cancellation discard the private target; an already advanced cursor cannot be used to omit an earlier part of history. Only completed replay returns the target. A target implementation must keep partial state private and install all supplied values and metadata; the trait cannot establish those obligations for an arbitrary implementation.
 
-Records are at most 1 MiB, with 128 mutations, 1,024-byte keys and 64 KiB values. Decoding borrows keys and values from the journal frame and allocates at most 128 views. Per-database receipt state has bounded cardinality; whole-process admission, database residency and index memory remain target/serving obligations. Tests use a disposable in-memory projection, including two databases across owner replacement, late uploads, interrupted projection and real S3 HTTP object operations. No production index, checkpoint starting position, database lifecycle, live group-commit driver or serving API is implemented by this component. [Verification](verification.md#transaction-records-and-private-recovery).
+Records are at most 1 MiB, with 128 mutations, 1,024-byte keys and 64 KiB values. Decoding borrows keys and values from the journal frame and allocates at most 128 views. The native index and owner below supply bounded residency, checkpoint recovery, lifecycle and serving. Component tests cover owner replacement, late uploads, interrupted projection and real S3 HTTP object operations. [Verification](verification.md#transaction-records-and-private-recovery).
 
 ### Native value index
 
