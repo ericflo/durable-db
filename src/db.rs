@@ -53,6 +53,8 @@ pub struct Options {
     pub hedge_after: Duration,
     /// How long a commit may wait on storage before the writer gives up.
     pub store_deadline: Duration,
+    /// Sweep lower epochs' leftovers again this long after taking ownership.
+    pub resweep_after: Duration,
     /// Retries are recognized for this many revisions.
     pub receipt_window: u64,
     pub block_bytes: usize,
@@ -73,6 +75,7 @@ impl Default for Options {
             upload_attempts: 1,
             hedge_after: Duration::ZERO,
             store_deadline: Duration::from_secs(30),
+            resweep_after: Duration::from_secs(30),
             receipt_window: 100_000,
             block_bytes: 32 << 10,
             recent_keys: 100_000,
@@ -228,6 +231,7 @@ struct Recovered {
 pub struct Db {
     pub name: String,
     ctx: Arc<Ctx>,
+    uploads: Uploader,
     layout: Layout,
     epoch: Epoch,
     claim_key: String,
@@ -249,77 +253,106 @@ pub struct Db {
 /// spend real bandwidth, and they are never on the path of a commit.
 const RACE_BYTES: usize = 256 << 10;
 
-/// One upload, raced: up to `upload_attempts` identical PUTs, each started
-/// `hedge_after` after the previous one; the first success wins. Object
-/// stores have long upload tails, and a duplicate of immutable bytes under
-/// our own key is harmless. Losers run to completion in the background, so
-/// a connection or upload URL is never abandoned mid-request.
-async fn put_raced(ctx: &Ctx, key: &str, body: &Bytes) -> Result<(), StoreError> {
-    let attempts = if body.len() > RACE_BYTES {
-        1
-    } else {
-        ctx.opts.upload_attempts.max(1)
-    };
-    if attempts == 1 {
-        return ctx.io.store.put(key, body.clone()).await;
-    }
-    let (done, mut results) = mpsc::unbounded_channel();
-    let start = |done: mpsc::UnboundedSender<Result<(), StoreError>>| {
-        let (store, key, body) = (ctx.io.store.clone(), key.to_owned(), body.clone());
-        tokio::spawn(async move {
-            let _ = done.send(store.put(&key, body).await);
-        });
-    };
-    start(done.clone());
-    let mut waiting = attempts - 1;
-    if ctx.opts.hedge_after.is_zero() {
-        while waiting > 0 {
-            waiting -= 1;
-            start(done.clone());
+/// Uploads for one database, counting those still running in the background.
+#[derive(Clone)]
+struct Uploader {
+    ctx: Arc<Ctx>,
+    running: Arc<AtomicU64>,
+}
+
+impl Uploader {
+    fn new(ctx: &Arc<Ctx>) -> Self {
+        Self {
+            ctx: ctx.clone(),
+            running: Arc::new(AtomicU64::new(0)),
         }
     }
-    let mut running = attempts - waiting;
-    let mut failure = None;
-    loop {
-        tokio::select! {
-            result = results.recv() => match result {
-                Some(Ok(())) => return Ok(()),
-                Some(Err(error)) => {
-                    running -= 1;
-                    failure = Some(error);
-                    if waiting > 0 {
-                        waiting -= 1;
-                        running += 1;
-                        start(done.clone());
-                    } else if running == 0 {
-                        return Err(failure.expect("a failure was recorded"));
-                    }
-                }
-                None => return Err(failure.unwrap_or_else(|| StoreError::Unavailable("no upload attempt".into()))),
-            },
-            _ = tokio::time::sleep(ctx.opts.hedge_after), if waiting > 0 => {
+
+    /// One upload, raced: up to `upload_attempts` identical PUTs, each started
+    /// `hedge_after` after the previous one; the first success wins. Object
+    /// stores have long upload tails, and a duplicate of immutable bytes under
+    /// our own key is harmless. Losers run to completion in the background, so
+    /// a connection or upload URL is never abandoned mid-request.
+    async fn raced(&self, key: &str, body: &Bytes) -> Result<(), StoreError> {
+        let opts = &self.ctx.opts;
+        let attempts = if body.len() > RACE_BYTES {
+            1
+        } else {
+            opts.upload_attempts.max(1)
+        };
+        if attempts == 1 {
+            return self.ctx.io.store.put(key, body.clone()).await;
+        }
+        let (done, mut results) = mpsc::unbounded_channel();
+        let start = |done: mpsc::UnboundedSender<Result<(), StoreError>>| {
+            let (store, key, body) = (self.ctx.io.store.clone(), key.to_owned(), body.clone());
+            let running = self.running.clone();
+            running.fetch_add(1, Ordering::AcqRel);
+            tokio::spawn(async move {
+                let result = store.put(&key, body).await;
+                running.fetch_sub(1, Ordering::AcqRel);
+                let _ = done.send(result);
+            });
+        };
+        start(done.clone());
+        let mut waiting = attempts - 1;
+        if opts.hedge_after.is_zero() {
+            while waiting > 0 {
                 waiting -= 1;
-                running += 1;
                 start(done.clone());
             }
         }
-    }
-}
-
-/// Upload immutable bytes until they are stored. Repeats are harmless: the
-/// key is ours alone and the content never changes.
-async fn put_retry(ctx: &Ctx, key: &str, body: Bytes) -> Result<()> {
-    let deadline = Instant::now() + ctx.opts.store_deadline;
-    let mut delay = Duration::from_millis(10);
-    loop {
-        match put_raced(ctx, key, &body).await {
-            Ok(()) => return Ok(()),
-            Err(StoreError::Unavailable(reason)) if Instant::now() + delay < deadline => {
-                tracing::debug!(%reason, key, "upload failed; retrying");
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(1));
+        let mut running = attempts - waiting;
+        let mut failure = None;
+        loop {
+            tokio::select! {
+                result = results.recv() => match result {
+                    Some(Ok(())) => return Ok(()),
+                    Some(Err(error)) => {
+                        running -= 1;
+                        failure = Some(error);
+                        if waiting > 0 {
+                            waiting -= 1;
+                            running += 1;
+                            start(done.clone());
+                        } else if running == 0 {
+                            return Err(failure.expect("a failure was recorded"));
+                        }
+                    }
+                    None => return Err(failure.unwrap_or_else(|| StoreError::Unavailable("no upload attempt".into()))),
+                },
+                _ = tokio::time::sleep(opts.hedge_after), if waiting > 0 => {
+                    waiting -= 1;
+                    running += 1;
+                    start(done.clone());
+                }
             }
-            Err(error) => return Err(error.into()),
+        }
+    }
+
+    /// Upload immutable bytes until they are stored. Repeats are harmless:
+    /// the key is ours alone and the content never changes.
+    async fn put(&self, key: &str, body: Bytes) -> Result<()> {
+        let deadline = Instant::now() + self.ctx.opts.store_deadline;
+        let mut delay = Duration::from_millis(10);
+        loop {
+            match self.raced(key, &body).await {
+                Ok(()) => return Ok(()),
+                Err(StoreError::Unavailable(reason)) if Instant::now() + delay < deadline => {
+                    tracing::debug!(%reason, key, "upload failed; retrying");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(1));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Wait, briefly, until no duplicate upload is still on its way.
+    async fn settle(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.running.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 }
@@ -392,7 +425,8 @@ impl Db {
         .expect("claim encodes");
         store.put(&claim_key, Bytes::from(claim)).await?;
 
-        let recovered = match Self::recover(&ctx, &layout, epoch, create).await {
+        let uploads = Uploader::new(&ctx);
+        let recovered = match Self::recover(&ctx, &uploads, &layout, epoch, create).await {
             Ok(recovered) => recovered,
             Err(error) => {
                 // Nothing of this epoch but its claim exists, so giving the
@@ -404,12 +438,13 @@ impl Db {
         // From here the first manifest may be in flight. If this fails the
         // claim stays, exactly as after a crash: deleting it would let a
         // lower epoch serve and then be shadowed when the manifest arrives.
-        Self::start(&ctx, name, &layout, epoch, recovered).await
+        Self::start(&ctx, uploads, name, &layout, epoch, recovered).await
     }
 
     /// Revoke lower epochs and rebuild the newest state from the bucket.
     async fn recover(
         ctx: &Arc<Ctx>,
+        uploads: &Uploader,
         layout: &Layout,
         epoch: Epoch,
         create: Option<DbConfig>,
@@ -512,7 +547,7 @@ impl Db {
             if !builder.is_empty() {
                 let (body, meta) = builder.finish(layout.table(epoch, next_table));
                 next_table += 1;
-                put_retry(ctx, &meta.key, body).await?;
+                uploads.put(&meta.key, body).await?;
                 tables.insert(0, Table::new(meta));
             }
             mem.drain(revision);
@@ -530,6 +565,7 @@ impl Db {
     /// Publish this epoch's first manifest and begin serving.
     async fn start(
         ctx: &Arc<Ctx>,
+        uploads: Uploader,
         name: &str,
         layout: &Layout,
         epoch: Epoch,
@@ -551,7 +587,9 @@ impl Db {
             tables: tables.iter().map(|t| t.meta.clone()).collect(),
             config: config.clone(),
         };
-        put_retry(ctx, &layout.manifest(epoch, 0), manifest.encode()).await?;
+        uploads
+            .put(&layout.manifest(epoch, 0), manifest.encode())
+            .await?;
         // The recovered state may end in transactions the previous owner
         // never acknowledged. They become permanent only now: this manifest
         // is stored, and if the claim still stands, every later owner starts
@@ -565,6 +603,7 @@ impl Db {
         let db = Arc::new(Db {
             name: name.to_owned(),
             ctx: ctx.clone(),
+            uploads,
             claim_key: layout.claim(epoch),
             layout: layout.clone(),
             epoch,
@@ -842,23 +881,46 @@ impl Db {
 
     async fn maintain(self: Arc<Self>) {
         // Activation ended with a claim check after this epoch's manifest
-        // was stored, so what earlier epochs left behind can go.
-        self.sweep().await;
+        // was stored, so what earlier epochs left behind can go. Holding the
+        // lock makes a release wait for the sweep.
+        {
+            let _maint = self.maint.lock().await;
+            self.sweep().await;
+        }
+        // A revoked owner can still store an object or two before it
+        // notices. Sweep once more after it has had time to.
+        let mut resweep = Some(tokio::time::Instant::now() + self.ctx.opts.resweep_after);
         let mut unflushed = false;
         loop {
             // An idle database with nothing to flush sleeps until it is used.
-            if unflushed {
-                tokio::select! {
-                    _ = self.wake_maint.notified() => {}
-                    _ = tokio::time::sleep(self.ctx.opts.idle_flush) => {}
+            let idle = async {
+                if unflushed {
+                    tokio::time::sleep(self.ctx.opts.idle_flush).await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
-            } else {
-                self.wake_maint.notified().await;
-            }
+            };
+            let straggler = async {
+                match resweep {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            let sweep_now = tokio::select! {
+                _ = self.wake_maint.notified() => false,
+                _ = idle => false,
+                _ = straggler => true,
+            };
             if self.is_closed() || self.closing.load(Ordering::Acquire) {
                 return;
             }
             let mut maint = self.maint.lock().await;
+            if sweep_now {
+                resweep = None;
+                if self.check().await.is_ok() {
+                    self.sweep().await;
+                }
+            }
             unflushed = self.state.read().confirmed_frame > maint.covered;
             if self.should_flush(&maint)
                 && let Err(error) = self.flush(&mut maint, false).await
@@ -921,7 +983,7 @@ impl Db {
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
                 maint.next_table += 1;
-                put_retry(&self.ctx, &meta.key, body.clone()).await?;
+                self.uploads.put(&meta.key, body.clone()).await?;
                 self.ctx.io.remember(&meta.key, body);
                 tables.insert(0, Table::new(meta));
             }
@@ -966,7 +1028,7 @@ impl Db {
         if !builder.is_empty() {
             let (body, meta) = builder.finish(self.layout.table(self.epoch, maint.next_table));
             maint.next_table += 1;
-            put_retry(&self.ctx, &meta.key, body.clone()).await?;
+            self.uploads.put(&meta.key, body.clone()).await?;
             self.ctx.io.remember(&meta.key, body);
             merged.push(Table::new(meta));
         }
@@ -998,12 +1060,12 @@ impl Db {
             tables: tables.iter().map(|t| t.meta.clone()).collect(),
             config: self.state.read().config.clone(),
         };
-        put_retry(
-            &self.ctx,
-            &self.layout.manifest(self.epoch, generation),
-            manifest.encode(),
-        )
-        .await?;
+        self.uploads
+            .put(
+                &self.layout.manifest(self.epoch, generation),
+                manifest.encode(),
+            )
+            .await?;
         self.check().await?;
         let kept: HashSet<&str> = tables.iter().map(|t| t.meta.key.as_str()).collect();
         let replaced: Vec<String> = {
@@ -1115,6 +1177,11 @@ impl Db {
         if !self.is_closed() {
             match self.flush(&mut maint, true).await {
                 Ok(()) => {
+                    // Duplicates of raced uploads may still be arriving.
+                    // Let them land, then collect once more, so that what
+                    // is left is exactly the sealed manifest and its tables.
+                    self.uploads.settle().await;
+                    self.collect(&mut maint).await;
                     let store = &*self.ctx.io.store;
                     if retry(|| store.delete(&self.claim_key)).await.is_ok() {
                         let _ = store
@@ -1622,7 +1689,7 @@ impl Writer {
         let (db, stored_tx) = (self.db.clone(), stored_tx.clone());
         tokio::spawn(async move {
             let key = db.layout.frame(db.epoch, frame);
-            let result = put_retry(&db.ctx, &key, body).await;
+            let result = db.uploads.put(&key, body).await;
             let _ = stored_tx.send((frame, result));
         });
     }
