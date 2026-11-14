@@ -22,10 +22,17 @@ def main():
         parser.add_argument('--'+name, required=True)
     parser.add_argument('--concurrency', type=int, default=8)
     parser.add_argument('--value-bytes', type=int, default=1024)
+    parser.add_argument('--databases', type=int, default=32)
+    parser.add_argument('--workers', default='1,4,16,32')
+    parser.add_argument('--operations', type=int, default=20)
     parser.add_argument('--disposable', action='store_true', required=True)
     args = parser.parse_args()
     if not 1<=args.concurrency<=128 or not 32<=args.value_bytes<=65536:
         parser.error('Concurrency must be 1..128 and values 32..65536 bytes')
+    if not 1<=args.databases<=100000 or not 1<=args.operations<=10000:
+        parser.error('Invalid database or operation count')
+    if not all(w.isdecimal() and 1<=int(w)<=min(args.databases,128) for w in args.workers.split(',')):
+        parser.error('Invalid worker counts')
     import re
     if not re.search(r'@sha256:[0-9a-f]{64}$', args.image):
         parser.error('Pin the database image by digest')
@@ -127,8 +134,8 @@ def main():
         kube('wait','--for=condition=Ready','pod/benchmark','--timeout=120s',timeout=150)
         sample()
         command=['node','/work/scripts/benchmark-http.mjs','--urls','http://durable-db:7654',
-            '--token-file','/run/credentials/admin.token','--databases','32','--workers','1,4,16,32',
-            '--operations','20','--value-bytes',str(args.value_bytes),'--upload-budget-bytes','67108864',
+            '--token-file','/run/credentials/admin.token','--databases',str(args.databases),'--workers',args.workers,
+            '--operations',str(args.operations),'--value-bytes',str(args.value_bytes),'--upload-budget-bytes','67108864',
             '--upload-budget-attempts','10000','--output','/output/benchmark.json',
             '--context','Three stock Kubernetes hosts; B2; native release image '+args.image+'; see resources.json for limits and counters.']
         report['command']=command;save()

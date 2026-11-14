@@ -73,7 +73,7 @@ async function request(url, path, token, body, counts, method='POST') {
   for (let attempt=0; attempt<maxAttempts; attempt++) {
     const remaining = 120_000-(performance.now()-started);
     if (remaining<=0) break;
-    let status;
+    let status, refusal;
     try {
       const result = await requestJson(url+path,database,{method,
         headers:{authorization:'Bearer '+token,'content-type':'application/json'},
@@ -83,12 +83,21 @@ async function request(url, path, token, body, counts, method='POST') {
       bump(counts,'200');
       return result;
     } catch (error) {
-      if (error instanceof DbError) status=error.status;
+      if (error instanceof DbError) {
+        status=error.status;
+        if (status===413) refusal=new Map([
+          ['database write admission budget exhausted','tenant_funding'],
+          ['database quota exceeded','logical_quota'],
+          ['transaction exceeds validation limits','validation_size'],
+          ['validation work budget exceeded; obtain a fresh snapshot','validation_work'],
+          ['database revision exhausted','revision_exhausted'],
+        ]).get(error.message)??'resource_limit';
+      }
       bump(counts,status ? String(status) : 'transport_or_decode_error');
     }
     // A single worker owns each database; 409 is publication contention here.
     // Ambiguous writes retry the EXACT same revision, ID, and body.
-    if (status && ![409,429,503].includes(status)) throw Error('nonretryable_http_'+status);
+    if (status && ![409,429,503].includes(status)) throw Error('nonretryable_http_'+status+(refusal?'_'+refusal:''));
     const delay=Math.min(1000,50*2**attempt)*(0.5+Math.random()/2);
     const left=120_000-(performance.now()-started);
     if (left<=0) break;
@@ -177,6 +186,15 @@ try {
     } else if (db.pending && r.revision===db.pending.revision && r.values[0]===db.pending.value) {
       report.verification.uncertain_write_observed++;
     } else report.verification.failed++;
+  }
+  if (uploadLimits) {
+    const counts={};
+    report.budgets={attempt_statuses:counts,databases:[]};
+    report.budgets.namespace=await request(urls[0],'/v1/storage/upload-budget',admin,undefined,counts,'GET');
+    for (let worker=0;worker<databases.length;worker++) {
+      const status=await request(urls[0],`/v1/databases/${databases[worker].name}/upload-budget`,admin,undefined,counts,'GET');
+      report.budgets.databases.push({worker,...status});
+    }
   }
   if (report.verification.failed) throw Error('final_verification_failed');
   if (phaseFailed) throw Error('phase_failed');
