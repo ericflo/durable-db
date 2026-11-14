@@ -1,6 +1,6 @@
 # Working on durable-db
 
-durable-db is a small, auditable, transactional ordered database whose source of truth is an object-storage bucket. Apache-2.0. Commit directly to main; no pull requests unless the owner changes that policy. Keep the repository private until explicitly instructed otherwise. The documentation website may be public.
+durable-db is a small, auditable, transactional ordered database whose source of truth is an object-storage bucket. Apache-2.0. Commit directly to main; no pull requests unless the owner changes that policy. The repository and the documentation website are public: no credential, no bucket or key name, and nothing about the owner's own infrastructure or services belongs in a commit, an issue, a release or a build log.
 
 ## The design, in rules
 

@@ -144,7 +144,7 @@ Release 2.0.0 was a complete rewrite; earlier releases used a different design a
 - Among cloud stores only Backblaze B2 has been exercised. Amazon S3 and others share the code but are untested.
 - Every B2 figure was measured from one desktop over Wi-Fi, a link that itself stalled for a second or two about once a minute; the slowest commits in those tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.
 - Memory was measured for minutes on a local directory, not for hours and not on a bucket. No soak of many hours on a real multi-node cluster yet, and no independent review.
-- The prebuilt binary is Linux x86_64. The repository is private for now, so the installer uses the `gh` CLI.
+- The prebuilt binary is Linux x86_64.
 
 ## Documentation
 
@@ -161,4 +161,4 @@ Release 2.0.0 was a complete rewrite; earlier releases used a different design a
 
 The same pages are published at [ericflo.github.io/durable-db-site](https://ericflo.github.io/durable-db-site/).
 
-Apache-2.0.
+Apache-2.0. To report a vulnerability privately, see [SECURITY.md](SECURITY.md).

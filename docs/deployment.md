@@ -8,7 +8,7 @@ durable-db is one static binary. The same binary serves a laptop from a director
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
 ```
 
-This downloads the release for Linux x86_64, verifies its checksum and puts `durable-db` in `~/.local/bin` (set `DURABLE_DB_INSTALL_DIR` to change that). While the repository is private the script uses the `gh` CLI, which must be signed in to an account with access. On other platforms, [build from source](development.md).
+This downloads the release for Linux x86_64, verifies its checksum and puts `durable-db` in `~/.local/bin` (set `DURABLE_DB_INSTALL_DIR` to change that). On other platforms, [build from source](development.md).
 
 ## On one machine
 
