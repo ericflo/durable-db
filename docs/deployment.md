@@ -148,7 +148,7 @@ Every option is a flag and an environment variable.
 | `--s3-uploads-only` | `DURABLE_DB_S3_UPLOADS_ONLY` | off | Use PutObject on Backblaze too. |
 | `--no-fsync` | `DURABLE_DB_NO_FSYNC` | off | Directory storage only: do not flush before acknowledging. |
 
-Credentials come from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. `RUST_LOG` sets the log level (`info` by default). A line that contains `panicked` is a defect in durable-db, whatever else the server goes on doing: please report it. A warning that begins `the store refuses` says that the server has stopped sending one kind of request because the store refused eight in a row, and carries the store's status, its error code and the wait it asked for; `the store takes` that kind `again` ends it.
+Credentials come from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. `RUST_LOG` sets the log level (`info` by default). A line that contains `panicked` is a defect in durable-db, whatever else the server goes on doing: please report it. So is one that says a round of housekeeping `has not ended`. A warning that begins `the store refuses` says that the server has stopped sending one kind of request because the store refused eight in a row, and carries the store's status, its error code and the wait it asked for; `the store takes` that kind `again` ends it.
 
 ## Tokens and tenants
 

@@ -28,20 +28,43 @@ use tokio::{
     time::Sleep,
 };
 
+/// How long a round of housekeeping runs before it is reported, and how
+/// often it is reported after that.
+const LATE: Duration = Duration::from_secs(30);
+
 /// Do `round` again and again, `period` apart, for as long as the server
 /// runs. A round that panics is one round lost. Nothing else follows the
 /// peers, hands databases over or tends them, so a task that ended with its
 /// first panic left a server that went on answering without all three.
+///
+/// A round that does not end would leave the same server, with nothing to
+/// show for it. It is not ended here, since what it holds is not known; it
+/// is reported for as long as it runs.
 pub async fn every<F, R>(period: Duration, mut round: F)
 where
     F: FnMut() -> R,
     R: Future<Output = ()>,
 {
     let mut tick = tokio::time::interval(period);
+    // After a round that ran long the next one follows, not one for every
+    // period that passed meanwhile.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
+        let began = tokio::time::Instant::now();
         let done = AssertUnwindSafe(async { round().await }).catch_unwind();
-        if done.await.is_err() {
+        tokio::pin!(done);
+        let mut late = tokio::time::interval_at(began + LATE, LATE);
+        let ended = loop {
+            tokio::select! {
+                ended = &mut done => break ended,
+                _ = late.tick() => tracing::error!(
+                    "a round of housekeeping has run for {} s and has not ended",
+                    began.elapsed().as_secs()
+                ),
+            }
+        };
+        if ended.is_err() {
             tracing::error!("a round of housekeeping panicked; the next follows");
         }
     }

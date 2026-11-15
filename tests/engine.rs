@@ -1047,6 +1047,77 @@ async fn databases_in_use_are_tended() {
     assert_eq!(node.open_names().len(), names.len());
 }
 
+/// What is logged on this thread, for a test that runs on one.
+#[derive(Clone, Default)]
+struct Logged(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logged {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for Logged {
+    type Writer = Logged;
+
+    fn make_writer(&self) -> Logged {
+        self.clone()
+    }
+}
+
+/// A round that does not end leaves a server without its housekeeping as
+/// one that panicked did, and a log must say so for as long as it lasts.
+#[tokio::test(start_paused = true)]
+async fn a_round_of_housekeeping_that_does_not_end_is_reported() {
+    let logged = Logged::default();
+    let to_logged = tracing_subscriber::fmt().with_writer(logged.clone());
+    let _logging = tracing::subscriber::set_default(to_logged.with_ansi(false).finish());
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = rounds.clone();
+    let round = move || {
+        let round = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        async move {
+            // The third round takes 45 s, and the thirteenth does not end.
+            match round {
+                2 => tokio::time::sleep(Duration::from_secs(45)).await,
+                12 => std::future::pending().await,
+                _ => {}
+            }
+        }
+    };
+    let task = tokio::spawn(durable_db::server::every(Duration::from_secs(1), round));
+    let rounds = || rounds.load(std::sync::atomic::Ordering::Relaxed);
+    // The third began after 2 s and ended after 47. Since then there has
+    // been a round a second, and not one for each second the third took.
+    tokio::time::sleep(Duration::from_millis(52_500)).await;
+    assert_eq!(rounds(), 9);
+    // The thirteenth began after 56 s.
+    tokio::time::sleep(Duration::from_millis(97_500)).await;
+    assert_eq!(rounds(), 13);
+    assert!(!task.is_finished());
+    task.abort();
+    let logged = String::from_utf8(logged.0.lock().clone()).unwrap();
+    let said: Vec<&str> = logged
+        .lines()
+        .filter_map(|line| line.split("a round of housekeeping ").nth(1))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "has run for 30 s and has not ended",
+            "has run for 30 s and has not ended",
+            "has run for 60 s and has not ended",
+            "has run for 90 s and has not ended",
+        ],
+        "{logged}"
+    );
+}
+
 /// What a server does every second is one task for as long as it runs:
 /// following its peers, handing databases over, tending them. A round of it
 /// that panics must not be the last.

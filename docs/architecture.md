@@ -137,6 +137,7 @@ Membership is only a routing preference. Two servers with different views of the
 | Every server is gone. | Start one. It opens each database from the bucket on first use. |
 | A cache file is damaged. | Its checksum fails; it is deleted and fetched again. |
 | A task inside a server panics. | That is a defect, and it is kept to what the task was for. A database's task closes that database, which is opened again from the bucket by the next request. A round of the server's housekeeping is lost and the next one runs a second later. A request is not answered. Each is in the log as an error or a panic. |
+| A round of a server's housekeeping does not end. | None is known to. It is not ended, since what it holds is not known, and the log says every thirty seconds how long it has run. Until it ends the server follows no change of its peers, hands no database over and tends none. |
 
 ## Limits of this design
 
