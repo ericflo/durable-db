@@ -55,6 +55,8 @@ pub struct Node {
     open: RwLock<HashMap<String, Arc<Db>>>,
     opening: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     buckets: Mutex<HashMap<String, Bucket>>,
+    /// Databases being released, each in a task of its own.
+    releasing: Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl Node {
@@ -66,6 +68,7 @@ impl Node {
             open: RwLock::default(),
             opening: Mutex::default(),
             buckets: Mutex::default(),
+            releasing: Mutex::default(),
         })
     }
 
@@ -293,14 +296,12 @@ impl Node {
         // sort may refuse with a panic.
         open.sort_by_cached_key(|db| std::cmp::Reverse(db.idle_for()));
         let surplus = open.len().saturating_sub(self.limits.max_open);
-        let mut released = Vec::new();
         for (i, db) in open.iter().enumerate() {
             if i < surplus || db.idle_for() >= self.limits.idle_close {
                 self.open.write().remove(&db.name);
-                released.push(db.clone());
+                self.retire(db.clone());
             }
         }
-        futures::future::join_all(released.iter().map(|db| db.close())).await;
         let mut sizes: Vec<(usize, &Arc<Db>)> =
             open.iter().map(|db| (db.mem_bytes(), db)).collect();
         let mut total: usize = sizes.iter().map(|(bytes, _)| bytes).sum();
@@ -329,15 +330,39 @@ impl Node {
     /// Hand every database back so successors open without recovery.
     pub async fn shutdown(&self) {
         let open: Vec<Arc<Db>> = self.open.write().drain().map(|(_, db)| db).collect();
-        futures::future::join_all(open.iter().map(|db| db.close())).await;
+        let closed = futures::future::join_all(open.iter().map(|db| db.close()));
+        futures::future::join(closed, self.released()).await;
     }
 
     /// Release one database, for a planned move to another node.
-    pub async fn release(&self, name: &str) {
+    pub fn release(&self, name: &str) {
         let db = self.open.write().remove(name);
         if let Some(db) = db {
-            db.close().await;
+            self.retire(db);
         }
+    }
+
+    /// Release a database that is no longer among the open ones, in a task
+    /// of its own. A release waits for storage, which may be slow, and a
+    /// round of housekeeping that waited for a release would follow no
+    /// peer and tend no database until the store had answered.
+    fn retire(&self, db: Arc<Db>) {
+        let mut releasing = self.releasing.lock();
+        while releasing.try_join_next().is_some() {}
+        releasing.spawn(async move { db.close().await });
+    }
+
+    /// How many databases are being released.
+    pub fn releasing(&self) -> usize {
+        let mut releasing = self.releasing.lock();
+        while releasing.try_join_next().is_some() {}
+        releasing.len()
+    }
+
+    /// Wait for the releases that are under way.
+    pub async fn released(&self) {
+        let mut releasing = std::mem::take(&mut *self.releasing.lock());
+        while releasing.join_next().await.is_some() {}
     }
 
     pub fn open_names(&self) -> Vec<String> {

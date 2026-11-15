@@ -339,17 +339,19 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
                         cluster.resolve(peers, port).await;
                     }
                     // Hand over databases that now belong to another member,
-                    // a few at a time, so a membership change is not a stampede.
-                    let mut handed = 0;
+                    // a few at a time, so a membership change is not a
+                    // stampede. A release is not waited for: the store may
+                    // be slow, and the next round is due in a second.
+                    let mut room = 16usize.saturating_sub(node.releasing());
                     for name in node.open_names() {
-                        if handed == 16 {
+                        if room == 0 {
                             break;
                         }
                         if let Some(peer) = cluster.owner(&name)
                             && cluster.alive(&peer).await
                         {
-                            node.release(&name).await;
-                            handed += 1;
+                            node.release(&name);
+                            room -= 1;
                         }
                     }
                 }

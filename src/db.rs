@@ -279,6 +279,8 @@ pub struct Db {
     flush_requested: AtomicBool,
     wake_writer: Notify,
     wake_maint: Notify,
+    /// Woken when a release or a deletion begins, or the database closes.
+    leave: Notify,
     maint: tokio::sync::Mutex<Maint>,
     started: Instant,
     last_used_ms: AtomicU64,
@@ -727,6 +729,7 @@ impl Db {
             flush_requested: AtomicBool::new(false),
             wake_writer: Notify::new(),
             wake_maint: Notify::new(),
+            leave: Notify::new(),
             maint: tokio::sync::Mutex::new(Maint {
                 generation: 0,
                 checked: 0,
@@ -777,6 +780,7 @@ impl Db {
         }
         self.wake_writer.notify_one();
         self.wake_maint.notify_one();
+        self.leave.notify_waiters();
         // Wake readers waiting for a revision that will now never arrive.
         self.confirmed_tx.send_modify(|_| {});
     }
@@ -1188,6 +1192,22 @@ impl Db {
         self.is_closed() || self.closing.load(Ordering::Acquire)
     }
 
+    /// Resolves when a release or a deletion has begun, or the database
+    /// has closed.
+    async fn leaving(&self) {
+        let mut leave = std::pin::pin!(self.leave.notified());
+        loop {
+            // Listening before looking: one that begins between the two
+            // is not missed.
+            leave.as_mut().enable();
+            if self.closing() {
+                return;
+            }
+            leave.as_mut().await;
+            leave.set(self.leave.notified());
+        }
+    }
+
     fn should_flush(&self, maint: &Maint) -> bool {
         let state = self.state.read();
         let pending = state.confirmed_frame.saturating_sub(maint.covered);
@@ -1391,15 +1411,43 @@ impl Db {
         maint.sealed = sealed;
         maint.garbage.extend(replaced);
         maint.garbage.extend(orphaned);
-        self.collect(maint).await;
+        self.collect(maint, false).await;
         Ok(())
     }
 
     /// Delete this epoch's covered frames, older manifests and replaced
-    /// tables. Failures are retried by the next collection.
-    async fn collect(&self, maint: &mut Maint) {
+    /// tables. What fails is collected after the next flush, or by the next
+    /// owner's sweep.
+    ///
+    /// A store can take long over a purge: one that was slow to list held
+    /// a deletion up for seven minutes behind a collection. So a collection
+    /// gives way to a release or a deletion at once, in the middle of a
+    /// purge if it is in one. `last` is the collection a release makes of
+    /// what it leaves, which is the one made while the database is closing.
+    async fn collect(&self, maint: &mut Maint, last: bool) {
+        let purges = self.purge_garbage(maint);
+        let failed = if last {
+            purges.await
+        } else {
+            tokio::select! {
+                biased;
+                () = self.leaving() => return,
+                failed = purges => failed,
+            }
+        };
+        if let Some(error) = failed {
+            tracing::debug!(db = %self.tag, %error, "collection incomplete; will retry");
+        }
+    }
+
+    /// The purges of a collection, until the store does not answer one:
+    /// it is not asked for the rest, which wait with that one. A purge that
+    /// fails in another way has failed for its own keys, and the others are
+    /// still made. A key leaves `garbage` when it is gone.
+    async fn purge_garbage(&self, maint: &mut Maint) -> Option<StoreError> {
         let store = &*self.ctx.io.store;
         let all = |_: &str| true;
+        let down = |error: &StoreError| matches!(error, StoreError::Unavailable(_));
         let frames = self.layout.epoch_frames(self.epoch);
         let frames_end = self.layout.frame(self.epoch, maint.covered + 1);
         let manifests = self.layout.epoch_manifests(self.epoch);
@@ -1408,22 +1456,28 @@ impl Db {
         if maint.covered > 0
             && let Err(error) = store.purge(&frames, Some(&frames_end), &all).await
         {
+            if down(&error) {
+                return Some(error);
+            }
             failed = Some(error);
         }
         if let Err(error) = store.purge(&manifests, Some(&manifests_end), &all).await {
+            if down(&error) {
+                return Some(error);
+            }
             failed = Some(error);
         }
-        let mut remaining = Vec::new();
-        for key in maint.garbage.drain(..) {
-            if let Err(error) = store.purge(&key, None, &|candidate| candidate == key).await {
-                failed = Some(error);
-                remaining.push(key);
+        let mut at = maint.garbage.len();
+        while at > 0 {
+            at -= 1;
+            let key = maint.garbage[at].clone();
+            match store.purge(&key, None, &|candidate| candidate == key).await {
+                Ok(_) => drop(maint.garbage.swap_remove(at)),
+                Err(error) if down(&error) => return Some(error),
+                Err(error) => failed = Some(error),
             }
         }
-        maint.garbage = remaining;
-        if let Some(error) = failed {
-            tracing::debug!(db = %self.tag, %error, "collection incomplete; will retry");
-        }
+        failed
     }
 
     /// Delete everything lower epochs left that this epoch does not reference.
@@ -1455,6 +1509,7 @@ impl Db {
         if self.closing.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.leave.notify_waiters();
         let (done, stopped) = oneshot::channel();
         if self.tx.send(Cmd::Close(done)).await.is_ok() {
             let _ = stopped.await;
@@ -1467,7 +1522,7 @@ impl Db {
                     // Let them land, then collect once more, so that what
                     // is left is exactly the sealed manifest and its tables.
                     self.uploads.settle().await;
-                    self.collect(&mut maint).await;
+                    self.collect(&mut maint, true).await;
                     let store = &*self.ctx.io.store;
                     if retry(|| store.delete(&self.claim_key)).await.is_ok() {
                         let _ = store
@@ -1490,6 +1545,7 @@ impl Db {
     /// the next owner reads the bucket; repeating the request settles it.
     pub async fn destroy(self: &Arc<Self>) -> Result<()> {
         self.closing.store(true, Ordering::Release);
+        self.leave.notify_waiters();
         let (done, stopped) = oneshot::channel();
         if self.tx.send(Cmd::Close(done)).await.is_ok() {
             let _ = stopped.await;

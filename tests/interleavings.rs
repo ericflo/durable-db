@@ -11,6 +11,8 @@ use durable_db::{
     db::{Check, Ctx, Db, Options, ReadReq, Scan, Txn},
     io::{DiskCache, Io},
     layout::{DbConfig, Layout},
+    metrics::Metrics,
+    node::{Limits, Node},
     store::{Listed, ObjectStore, StoreError, StoreResult, memory::MemoryStore},
 };
 use std::{
@@ -1158,6 +1160,168 @@ async fn a_release_does_not_wait_for_a_merge() {
     assert_eq!(tables_stored(&bucket, "app"), 2);
     let (db, _) = Db::open(ctx, "app", None).await.unwrap();
     every_key_is_of(&db, 2).await;
+}
+
+/// A database with one write flushed, and the purge of the frames that
+/// flush covered held back, as by a store that is slow to list them.
+async fn collecting(gate: &Arc<Gate>) -> Arc<Db> {
+    let (db, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("key", "1")).await.unwrap();
+    gate.rule(Op::Purge, Action::Hold, 1, |prefix, _| {
+        prefix.contains("/db/app/l/")
+    });
+    db.request_flush();
+    gate.wait_held(Op::Purge).await;
+    db
+}
+
+/// A MinIO took longer than twenty seconds over each listing, and a
+/// deletion waited seven minutes for a collection that waited for them.
+#[tokio::test]
+async fn a_deletion_does_not_wait_for_a_collection() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let db = collecting(&gate).await;
+    tokio::time::timeout(Duration::from_secs(5), db.destroy())
+        .await
+        .expect("the deletion does not wait for the collection")
+        .unwrap();
+    assert_eq!(gate.held().len(), 1);
+    assert_eq!(bucket.keys(), [TOMBSTONE]);
+}
+
+#[tokio::test]
+async fn a_release_does_not_wait_for_a_collection() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let db = collecting(&gate).await;
+    tokio::time::timeout(Duration::from_secs(5), db.close())
+        .await
+        .expect("the release does not wait for the collection");
+    assert_eq!(gate.held().len(), 1);
+    // It collected what it left all the same: a sealed manifest and a
+    // table, and no claim for the next owner to revoke.
+    let left = |part: &str| bucket.keys().iter().filter(|k| k.contains(part)).count();
+    assert_eq!(
+        (left("/c/"), left("/l/"), left("/m/"), left("/t/")),
+        (0, 0, 1, 1),
+        "{:?}",
+        bucket.keys()
+    );
+    let (db, _) = Db::open(ctx(gate.clone()), "app", None).await.unwrap();
+    let found = get(&db, b"key").await.unwrap();
+    assert_eq!(found.map(|(_, value)| value).as_deref(), Some("1"));
+}
+
+/// A store that does not answer one purge of a collection is not asked for
+/// the rest of them. What is left is collected after the next flush, or by
+/// the next owner.
+#[tokio::test]
+async fn a_collection_ends_at_a_purge_the_store_does_not_answer() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    let count = |part: &str| bucket.keys().iter().filter(|k| k.contains(part)).count();
+    gate.rule(Op::Purge, Action::Fail, usize::MAX, |prefix, _| {
+        prefix.contains("/db/app/l/")
+    });
+    for value in ["1", "2"] {
+        commit(&db, put("key", value)).await.unwrap();
+        db.request_flush();
+        flushed(&db).await;
+    }
+    // A release waits for the collection of the last flush, and makes one
+    // of its own. None of them purged the manifests before its last: the
+    // first of all is still there.
+    db.close().await;
+    assert!(count("/l/") >= 2, "{:?}", bucket.keys());
+    assert!(count("/m/") >= 4, "{:?}", bucket.keys());
+    let first = |key: &String| key.contains("/m/") && key.ends_with("/00000000");
+    assert!(bucket.keys().iter().any(first), "{:?}", bucket.keys());
+    gate.clear();
+    let (db, _) = Db::open(ctx(gate.clone()), "app", None).await.unwrap();
+    let swept = async {
+        while count("/l/") > 0 || count("/m/") > 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), swept)
+        .await
+        .expect("the next owner removes what was left");
+    let found = get(&db, b"key").await.unwrap();
+    assert_eq!(found.map(|(_, value)| value).as_deref(), Some("2"));
+
+    // A table that a merge replaced, and whose purge was not answered, is
+    // purged after a later flush.
+    gate.rule(Op::Purge, Action::Fail, usize::MAX, |prefix, _| {
+        prefix.contains("/db/app/t/")
+    });
+    for value in ["3", "4", "5", "6"] {
+        commit(&db, put("key", value)).await.unwrap();
+        db.request_flush();
+        flushed(&db).await;
+    }
+    let replaced = async {
+        while count("/t/") <= db.info().tables {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), replaced)
+        .await
+        .expect("a merge replaces tables");
+    gate.clear();
+    let collected = async {
+        while count("/t/") > db.info().tables {
+            commit(&db, put("key", "7")).await.unwrap();
+            db.request_flush();
+            flushed(&db).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), collected)
+        .await
+        .expect("what was not purged is purged later");
+}
+
+/// A round of a server's housekeeping releases what has been idle. It
+/// does not wait for the release, which waits for the store.
+#[tokio::test]
+async fn housekeeping_does_not_wait_for_a_release() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let limits = Limits {
+        idle_close: Duration::ZERO,
+        ..Limits::default()
+    };
+    let node = Node::new(ctx(gate.clone()), limits, Arc::new(Metrics::default()));
+    node.create("app", DbConfig::default()).await.unwrap();
+    // The manifest that a release seals the database with is slow.
+    gate.rule(Op::Put, Action::Hold, 1, |key, _| key.contains("/m/"));
+    tokio::time::timeout(Duration::from_secs(5), node.tend())
+        .await
+        .expect("the round does not wait for the release");
+    gate.wait_held(Op::Put).await;
+    assert_eq!((node.open_count(), node.releasing()), (0, 1));
+    // The next round does not release it a second time.
+    node.tend().await;
+    assert_eq!(node.releasing(), 1);
+    // A server that stops does wait for it.
+    let stopped = tokio::spawn({
+        let node = node.clone();
+        async move { node.shutdown().await }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!stopped.is_finished());
+    gate.release(Op::Put);
+    tokio::time::timeout(Duration::from_secs(5), stopped)
+        .await
+        .expect("the release ends when the store answers")
+        .unwrap();
+    assert_eq!(node.releasing(), 0);
+    assert!(claims(&bucket).is_empty());
 }
 
 /// A merge that fails is tried again when the database is next written

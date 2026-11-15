@@ -9,7 +9,8 @@
 # another. Printed: the load's result; the most memory the server used and
 # what it used from the third minute on; how many purges failed; how the
 # deletions went; and what the server logged of a store that refuses, with
-# how many requests it failed without sending them. No server may panic.
+# how many requests it failed without sending them. The server may not
+# panic, and no round of its housekeeping may run for thirty seconds.
 #
 # The store is one process on the machine that loads it. What it does when
 # it has much to list is its own, and is why this is run: it is not what
@@ -121,5 +122,10 @@ server=''
 if grep -q 'panicked at' "$dir/server.log"; then
     grep -A1 'panicked at' "$dir/server.log" | head -6
     echo 'THE SERVER PANICKED' >&2
+    exit 1
+fi
+if grep -q 'has not ended' "$dir/server.log"; then
+    grep 'has not ended' "$dir/server.log" | tail -1
+    echo 'A ROUND OF HOUSEKEEPING DID NOT END IN TIME' >&2
     exit 1
 fi
