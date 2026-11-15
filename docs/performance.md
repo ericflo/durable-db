@@ -211,6 +211,8 @@ Two runs at half past five that afternoon, 2.1.4 and then 2.1.1: 121,813 and 161
 
 One run of 2.1.5 at half past seven that evening, Pacific time: 157,202 session reads a second, of which 105 failed and none were told to wait; a ledger of 22,528 transfers verified at 94 a second, with a transfer taking 118 ms at the median, 612 ms at the 99th percentile and 7.1 s at most.
 
+One run of 2.1.6 the night after, at a quarter past one: 121,858 session reads a second, of which none failed and none were told to wait; a ledger of 22,360 transfers verified at 93 a second, with a transfer taking 122 ms at the median, 608 ms at the 99th percentile and 6.6 s at most.
+
 **The read figure moves by a third from run to run, with either release.** Nine runs do not show a difference between the releases and do not rule one out. After the first five, every run of 2.1.1 lay below every run of 2.1.0, and the notes of release 2.1.1 said that the figure had gone the wrong way for a reason not established; the next four runs, two of each release, came out the other way round once and did not bear that out. What is established:
 
 - A single server reads the same with both. One server held to two CPUs and 1 GiB with the manifest's flags, on the same bucket, was given the same reads with the same ledger beside them, the two releases in turn: 166,199 and 166,497 reads a second with 2.1.0 while the ledger made 100 and 101 transfers a second, 168,024 and 167,313 with 2.1.1 while the ledger made 121 and 118.
@@ -246,20 +248,28 @@ One server with the flags of the Kubernetes manifest (192 MiB of cache, 96 MiB o
 
 | Load | Requests/s | p50 | p99 | Told to wait | Most memory so far |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 4,375 | 2.8 ms | 117 ms | 1,731 | 545 MiB |
-| Commits of 1 KiB values, 256 clients over 256 databases | 6,627 | 21 ms | 134 ms | 0 | 575 MiB |
-| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 71,410 | 5.9 ms | 30 ms | 0 | 575 MiB |
-| The second load again, the server killed halfway and started again | 6,571 | 22 ms | 133 ms | 0 | 541 MiB, the second server |
+| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 3,954 | 2.0 ms | 120 ms | 5,518 | 516 MiB |
+| Commits of 1 KiB values, 256 clients over 256 databases | 6,842 | 22 ms | 104 ms | 0 | 584 MiB |
+| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 56,983 | 6.7 ms | 36 ms | 0 | 584 MiB |
+| The second load again, the server killed halfway and started again | 6,626 | 22 ms | 155 ms | 0 | 563 MiB, the second server |
 
-The server, of release 2.1.5, used 575 MiB at most in this run, and the one that took its place 541 MiB. In three runs made before the last load was added it used 584, 589 and 591 MiB. No request failed in any of the first three loads. In the last, 5,665 requests failed in the moment between the kill and the next server's start: the benchmark does not send a request again, as a client would.
+The server, of release 2.1.6, used 584 MiB at most in this run, and the one that took its place 563 MiB. In two more runs of 2.1.6 they used 582 and 544 MiB, and 596 and 540 MiB; in two runs of 2.1.5 made between them, 583 and 530 MiB, and 578 and 575 MiB. No request failed in any of the first three loads. In the last, 6,459 requests failed in the moment between the kill and the next server's start, and 5,214 and 28,072 in the two other runs: the benchmark does not send a request again, as a client would.
 
-Ten minutes of each of the first three loads (`SECONDS_EACH=600`), with the server's memory read every ten seconds: 3,169, 6,491 and 78,586 requests a second, no request failed, 825 of the first load's 1.9 million were told to wait, and 599 MiB at most. Memory was level within each load: 365 to 436 MiB through the first, 468 to 515 MiB through the second with no rise from its second minute to its tenth, and 373 MiB through the third. Release 2.1.4 used 582 and 590 MiB, 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script; in those of 2.1.1 and 2.1.0 the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
+Ten minutes of each of the first three loads (`SECONDS_EACH=600`) with release 2.1.5, the server's memory read every ten seconds: 3,169, 6,491 and 78,586 requests a second, no request failed, 825 of the first load's 1.9 million were told to wait, and 599 MiB at most. Memory was level within each load: 365 to 436 MiB through the first, 468 to 515 MiB through the second with no rise from its second minute to its tenth, and 373 MiB through the third. Release 2.1.4 used 582 and 590 MiB, 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script; in those of 2.1.1 and 2.1.0 the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
 
-The first load is not the same from one run to the next: 3,480 to 5,846 requests a second in four runs of 2.1.5, and 4,116 and 6,417 in two of 2.1.4, within two hours on the same desktop. The other two loads moved by a few percent.
+The first load is not the same from one run to the next: 3,480 to 5,846 requests a second in four runs of 2.1.5, and 4,116 and 6,417 in two of 2.1.4, within two hours on the same desktop. On the night 2.1.6 was measured, six runs of 2.1.5 gave 2,763 to 4,306 and seven of 2.1.6, made between them, 2,633 to 3,954. The second load moved by a few percent, and the third between 56,983 and 77,398.
 
-"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was 1,731 of the requests of that load in this run, which is 0.7%, between 2 and 1,616 in three others of 2.1.5, none in either run of 2.1.4, 0.4% in the run published with 2.1.1, and 1.7% in the one published with 2.1.0. A client waits and sends the request again, as the SDK does.
+"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was 5,518 of the requests of that load in this run, which is 2%. It is not the same from one run to the next either: between none and 16,021, which is 8%, in ten runs of 2.1.5, and between none and 10,270, which is 6%, in seven of 2.1.6, three of which had none. In every run with more than 3,000 the median request took under 2 ms, and in every run with fewer than 1,300 it took over 3 ms. Neither run of 2.1.4 had any, the run published with 2.1.1 had 0.4%, and the one published with 2.1.0 had 1.7%. A client waits and sends the request again, as the SDK does.
 
-This is minutes, thirty at the most, on a local directory. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
+The same server on a store, MinIO in a container on the same desktop held to 4 GiB and four CPUs, with 256 databases written for twenty minutes by one client each and then deleted one after another:
+
+```sh
+DURABLE_DB=./durable-db scripts/soak-bucket.sh
+```
+
+With 2.1.6: 2,110 commits a second, of which none failed; 582 MiB at most, and between 416 and 581 MiB from the third minute to the twentieth; the 256 deletions took 257 s. MinIO took longer than twenty seconds over some of its listings: 1,148 of 17,593 purges failed and were made again later, and the slowest deletion took 143 s. The commit rate is that of one MinIO process on the desktop's disk, and says nothing of a provider's bucket.
+
+This is minutes, thirty at the most, on a local directory and on a store on the same desktop. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a provider's bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
 
 ## What it costs in requests
 

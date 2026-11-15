@@ -123,7 +123,7 @@ kubectl -n durable-db create secret generic durable-db-storage --from-literal=DU
 kubectl -n durable-db apply -k deploy/kubernetes
 ```
 
-A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in each of sixteen recorded runs the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and the ledger balanced exactly: between 12,026 and 23,679 transfers, by how fast the bucket answered at that hour. A read load without retries ran alongside: of its 9 to 13 million reads, between none and 110 failed, with a pod deleted under them.
+A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in each of seventeen recorded runs the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and the ledger balanced exactly: between 12,026 and 23,679 transfers, by how fast the bucket answered at that hour. A read load without retries ran alongside: of its 9 to 13 million reads, between none and 110 failed, with a pod deleted under them.
 
 ## Verification
 
@@ -144,7 +144,7 @@ Release 2.0.0 was a complete rewrite; earlier releases used a different design a
 - Among cloud stores only Backblaze B2 has been exercised. Amazon S3, Google Cloud Storage, Cloudflare R2 and others share the code but have not been run; what the first two answer without an account has been read, and two requests were changed to suit it. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.
 - Backblaze limits an account's requests, by its documentation to 500 a second unless you ask for more, and a server keeps itself under no rate. The figures for many databases on B2 are above that limit, and the same load run for twenty minutes had every upload refused for five and a half of them. A server that is refused holds back until the store takes a request again; that has been seen on stand-ins and behind a proxy, not on Backblaze.
 - Every B2 figure was measured from one desktop over Wi-Fi, a link that itself stalled for a second or two about once a minute; the slowest commits in those tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.
-- Memory was measured for minutes: under a limit on a local directory, where it was level through ten minutes of each load, and for five minutes on a bucket, where it was still rising within what the flags allow. Not for hours. No soak of many hours on a real multi-node cluster yet, and no independent review.
+- Memory was measured for minutes: under a limit on a local directory, where it was level through ten minutes of each load, for twenty minutes of 256 databases on MinIO on the same desktop, where it was level as well, and for five minutes on Backblaze B2, where it was still rising within what the flags allow. Not for hours. No soak of many hours on a real multi-node cluster yet, and no independent review.
 - The prebuilt binary is Linux x86_64.
 
 ## Documentation
