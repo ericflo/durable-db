@@ -55,4 +55,9 @@ load 'commits of 1 KiB, 256 databases' \
 # Reads of more data than the cache holds, from many connections.
 load 'strong reads of 4 KiB, 512 clients' \
     --workload read --clients 512 --databases 8 --value-bytes 4096 --keys 20000 --random-values
+if grep -q 'panicked at' "$dir/server.log"; then
+    grep -A1 'panicked at' "$dir/server.log" | head -4
+    echo 'THE SERVER PANICKED' >&2
+    exit 1
+fi
 echo "most memory used: $(peak), under a limit of 1024 MiB"

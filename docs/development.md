@@ -78,6 +78,6 @@ site/           the website generator
 
 ## Releases and CI
 
-Woodpecker builds every push with the repository's `Dockerfile`: the model check, the Rust and client tests, a static `x86_64-unknown-linux-musl` binary, the website, and a `scratch` runtime image. A release is that binary and its checksum, built from the tagged commit and attached to the tag. There are no GitHub Actions workflows.
+Woodpecker builds every push with the repository's `Dockerfile`: the model check, the Rust and client tests, a static `x86_64-unknown-linux-musl` binary, the website, and a `scratch` runtime image. A release is that binary and its checksum, built from the tagged commit and attached to the tag. There are no GitHub Actions workflows. The build server's pages ask for a login, so the log of a build is not public; `docker build .` runs the same checks and makes the same binary on any machine with Docker.
 
 Benchmarks quoted anywhere in this repository are reproduced by the commands in [performance](performance.md).

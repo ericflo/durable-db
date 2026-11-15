@@ -150,6 +150,11 @@ ledger() { # bucket
     sleep 8
     echo "purges by the servers running at the end: $(count 'durable_db_storage_seconds_count{op="purge"}'), failed: $(count 'durable_db_storage_failures_total{op="purge"}')"
     for n in 0 1 2; do stop "$n" TERM; done
+    if grep -q 'panicked at' "$dir"/server-*.log; then
+        grep -h -A1 'panicked at' "$dir"/server-*.log | head -6
+        echo 'A SERVER PANICKED' >&2
+        exit 1
+    fi
     rm -f "$dir"/server-*.log
 }
 

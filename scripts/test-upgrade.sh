@@ -59,3 +59,8 @@ sleep "$pause"; replace "$new" 1
 wait "$ledger" || true
 tail -1 "$dir/ledger.out"
 grep -q '^ledger verified' "$dir/ledger.out" || { echo 'THE LEDGER DID NOT VERIFY' >&2; exit 1; }
+if grep -q 'panicked at' "$dir"/server-*.log; then
+    grep -h -A1 'panicked at' "$dir"/server-*.log | head -6
+    echo 'A SERVER PANICKED' >&2
+    exit 1
+fi

@@ -159,5 +159,13 @@ k wait --for=condition=complete job/ledger --timeout=$((ledger_seconds + 180))s 
 k logs job/load | tail -1
 k logs job/ledger | tail -2
 k logs job/ledger | grep -q '^ledger verified' || { echo 'THE LEDGER DID NOT VERIFY' >&2; exit 1; }
+# Of the pods still running; one that was removed took its log with it.
+for pod in $(k get pods -l app=durable-db -o jsonpath='{.items[*].metadata.name}'); do
+  if k logs "$pod" 2>/dev/null | grep -q 'panicked at'; then
+    k logs "$pod" | grep -A1 'panicked at' | head -4
+    echo 'A SERVER PANICKED' >&2
+    exit 1
+  fi
+done
 echo
 echo "passed: the ledger verified through scale-out to $peak pods, a killed pod, and scale-in"

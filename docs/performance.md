@@ -57,7 +57,7 @@ One server on the same desktop, which reaches the internet over Wi-Fi and a resi
 | Strong scan of 20 keys, 32 clients | 845 | 37 ms | 91 ms |
 | Half reads, half commits, 64 clients over 8 databases | 781 | 74 ms | 257 ms |
 
-**B2's own latency sets these numbers, and it varies.** The table is one run. Earlier the same day the run published with release 2.0.0 measured 118 ms for a single-client commit where this one measured 77 ms. Expect a factor of two between good and bad hours, and less latency from a server closer to the bucket. Where this page compares two releases, they were run in turn within the same half hour.
+**B2's own latency sets these numbers, and it varies.** The table is one run. Earlier the same day the run published with release 2.0.0 measured 118 ms for a single-client commit where this one measured 77 ms. Expect a factor of two between good and bad hours, and less latency from a server closer to the bucket. One client's commit, at the median, on 14 November: 64 to 76 ms in the morning, Pacific time, 99 and 107 ms at about two in the afternoon, and 86 to 91 ms at four, when releases 2.1.1 and 2.1.3 were run twice each in turn for 30 seconds and measured alike, while one ping in ten to the desktop's router took longer than half a second. Where this page compares two releases, they were run in turn within the same half hour.
 
 **Many databases committing at once was where B2 was slowest, and the cause was in durable-db.** Clients of one database share an upload; 64 databases need 64 uploads at a time. A B2 upload URL names one storage pod and serves one upload at a time, so each of them needs a pod of its own. Up to release 2.1.0 every commit also sent one of its two racing uploads to a pod the server had never used. A new pod costs a call for its URL, a name lookup and a TLS connection, and 64 busy databases asked for about 160 new pods a second. From this desktop, one such upload in fourteen failed after waiting five seconds for a connection and the others took 0.8 s at the median, while uploads to pods already in use took 76 ms. Since 2.1.1 the upload a commit waits for goes to the fastest pod the server knows, and a duplicate is sent only where a pod can be spared ([verification](verification.md#what-these-checks-found), finding 27).
 
@@ -139,6 +139,24 @@ The three runs are in the order 2.1.2, 2.1.1, 2.1.2. Three runs of 2.1.1 made ab
 
 The last two rows are a new server's first ten seconds with more databases than it knows storage pods for, which this page had not measured before. Committing is the same code in both releases, and the row moves by a factor of three: two earlier runs measured 293 commits/s with 2.1.1 and 1,130 with a build between the two releases. The memory a server holds after the load is the flush of every database at once, which the flags bound ([deployment](deployment.md#on-kubernetes)).
 
+**256 databases for five minutes** is what a server does once it knows its storage pods. One server of release 2.1.4, held to 4 GiB and 4,096 open files, with one client writing to each of 256 databases for 300 seconds, at five in the afternoon, Pacific time; of 1,988 pings to the router meanwhile, none took longer than 0.25 s.
+
+| | Release 2.1.4 |
+| --- | --- |
+| Commits/s over the five minutes | 1,665 |
+| Commits/s in each minute | 1,783, 1,665, 1,414, 1,683, 1,756 |
+| A commit: median, p99, p99.9, slowest | 115 ms, 610 ms, 1.8 s, 8.1 s |
+| Requests that failed, or were told to wait | 0, 0 |
+| Uploads, and those that failed and were sent again | 695,092 and 1,092 |
+| Most memory | 566 MiB |
+| Most open files | 1,751 |
+
+That is six or seven commits a second for each database, where one client alone had seven to nine an hour earlier. A run of release 2.1.3 half an hour earlier measured 1,592 commits/s, between 1,319 and 1,738 in each minute, with a p99 of 666 ms and 515 MiB; that server stopped its housekeeping during the run ([verification](verification.md#what-these-checks-found), finding 36), which a commit does not wait for.
+
+Two things in it are not good. Memory rose all through the load, from 139 MiB in its first seconds to 404 MiB as it ended, and the most, 566 MiB, was while the databases were being deleted. When it was over the cache of table blocks held 143 MiB of the 256 MiB it may hold (`--cache-bytes`), and unflushed writes may take as much again (`--memtable-bytes`), so the rise is within what the flags allow; five minutes do not show it stop. And when the benchmark ended it deleted its 256 databases at once, each of about 2,000 commits: 68 purges of those deletions failed and were made again, and every deletion was answered as done. During the load itself one purge in 2,953 failed.
+
+To repeat it, start a server under `prlimit --nofile=4096:4096`, run `durable-db bench --workload write --clients 256 --databases 256 --seconds 300` against it, and read `durable_db_request_seconds_count{kind="commit"}`, the counts and failures of `durable_db_storage_seconds` for `put` and `purge`, the server's resident memory and `ls /proc/<pid>/fd | wc -l` every five seconds.
+
 To repeat the first table, start a server, run `durable-db bench --workload write --clients 64 --databases 64 --keep` against it, and for the next half minute and while the server stops, sample `ls /proc/<pid>/fd | wc -l`, the resident memory of the server, and `durable_db_storage_failures_total{op="purge"}` and `durable_db_storage_seconds_count{op="purge"}` from `/metrics`. The third is the first with 256 clients and databases. The second table is the same load with `--seconds 100` and without `--keep`, and its figures are read from `/metrics` when `bench` exits, after it has deleted its databases.
 
 A store that refuses the request for many versions gets a request for each version, as before, and the server says so once in its log. Among cloud stores only B2 has been exercised.
@@ -171,7 +189,7 @@ From `scripts/test-kubernetes.sh` on a three-node kind cluster on the same deskt
 
 Every ledger verified. The load generator does not repeat a read, and a force-deleted pod breaks the connections it holds. Five pods were ready at most in every run that recorded it; the test used to report the first count it saw above two, which is all that is known of the first run of each release.
 
-Three more runs were made in the evening of the same day, when the bucket answered more slowly for both releases: one client's commit took 99 ms at the median with 2.1.1 and 107 ms with 2.1.2, against 64 to 76 ms when the one-database table of this page was measured.
+Three more runs were made at about two in the afternoon of the same day, Pacific time, when the bucket answered more slowly for both releases: one client's commit took 99 ms at the median with 2.1.1 and 107 ms with 2.1.2, against 64 to 76 ms when the one-database table of this page was measured.
 
 | In this order | Release 2.1.2 | Release 2.1.1 | Release 2.1.2 |
 | --- | --- | --- | --- |
@@ -185,7 +203,9 @@ Three more runs were made in the evening of the same day, when the bucket answer
 
 Every ledger verified: 12,026, 13,349 and 15,098 transfers. A transfer waits for the bucket, so the ledger's rate follows what the bucket takes at that hour; these three runs show no difference between the releases.
 
-One run of 2.1.3, later the same evening: 117,949 session reads a second, none failed and 48 told to wait; a ledger of 20,017 transfers verified at 83 a second, with a transfer taking 133 ms at the median, 650 ms at the 99th percentile and 9.8 s at most.
+One run of 2.1.3, later that afternoon: 117,949 session reads a second, none failed and 48 told to wait; a ledger of 20,017 transfers verified at 83 a second, with a transfer taking 133 ms at the median, 650 ms at the 99th percentile and 9.8 s at most.
+
+Two runs at half past five that afternoon, 2.1.4 and then 2.1.1: 121,813 and 161,925 session reads a second, of which none and 109 failed and 48 and 124 were told to wait; ledgers of 23,679 and 22,496 transfers verified, at 99 and 93 a second, with a transfer taking 115 ms at the median in both, 585 and 611 ms at the 99th percentile, and 12.0 and 13.0 s at most. The bucket was as fast again as in the morning, for both releases. The slower hour was about two in the afternoon, Pacific time. Earlier versions of this page called it the evening, which it was by UTC.
 
 **The read figure moves by a third from run to run, with either release.** Nine runs do not show a difference between the releases and do not rule one out. After the first five, every run of 2.1.1 lay below every run of 2.1.0, and the notes of release 2.1.1 said that the figure had gone the wrong way for a reason not established; the next four runs, two of each release, came out the other way round once and did not bear that out. What is established:
 
@@ -222,13 +242,13 @@ One server with the flags of the Kubernetes manifest (192 MiB of cache, 96 MiB o
 
 | Load | Requests/s | p50 | p99 | Told to wait | Most memory so far |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 5,903 | 3.3 ms | 55 ms | 1,264 | 568 MiB |
-| Commits of 1 KiB values, 256 clients over 256 databases | 6,778 | 21 ms | 148 ms | 0 | 621 MiB |
-| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 74,686 | 5.7 ms | 28 ms | 0 | 621 MiB |
+| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 6,417 | 4.4 ms | 49 ms | 0 | 527 MiB |
+| Commits of 1 KiB values, 256 clients over 256 databases | 6,675 | 21 ms | 127 ms | 0 | 590 MiB |
+| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 71,460 | 5.8 ms | 31 ms | 0 | 590 MiB |
 
-The server used 621 MiB at most. Release 2.1.0 used 618 MiB in one run of the same script and 659 MiB in another. No request failed.
+The server, of release 2.1.4, used 590 MiB at most. No request failed. Release 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script, in which the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
 
-"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was 0.4% of the requests of that load in this run, and 1.7% in the run published with 2.1.0. A client waits and sends the request again, as the SDK does.
+"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was none of the requests of that load in this run, 0.4% in the run published with 2.1.1, and 1.7% in the one published with 2.1.0. A client waits and sends the request again, as the SDK does.
 
 This is three minutes on a local directory. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
 
@@ -250,7 +270,7 @@ A database committing as fast as B2 allows from one location runs about ten grou
 ## What is not measured yet
 
 - B2 from a server in a data centre, on a wired link. Every B2 figure here was measured over Wi-Fi from one desktop, for minutes at a time, and that includes the measurements behind the choice of storage pods.
-- More databases committing at once on B2 than a server knows fast pods for, beyond a new server's first ten seconds with 256 of them, which measured between 293 and 1,130 commits/s.
+- More than 256 databases committing at once on B2, or 256 for longer than five minutes. Memory rose throughout those five minutes, and where it stops has not been measured.
 - What sets the read figure of the Kubernetes test, which moves by a third from run to run, beyond the share of reads that are relayed.
 - Amazon S3 or any provider other than B2.
 - A server in the same region as its bucket.
