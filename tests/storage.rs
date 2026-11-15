@@ -79,8 +79,11 @@ struct Bucket {
     versionless: bool,
     /// Answer everything with this.
     canned: Option<(StatusCode, &'static str)>,
-    /// Answer requests of these methods as a store that is asked too much.
+    /// Answer requests of these methods for an object as a store that is
+    /// asked too much.
     slow_down: Vec<Method>,
+    /// Answer listings so.
+    slow_lists: bool,
     unsigned: Vec<String>,
     requests: usize,
 }
@@ -320,7 +323,12 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
     if let Some((status, text)) = bucket.canned {
         return reply(status, text);
     }
-    if bucket.slow_down.contains(&parts.method) {
+    let slow = if parts.method == Method::GET && raw_path == "/bucket" {
+        bucket.slow_lists
+    } else {
+        bucket.slow_down.contains(&parts.method)
+    };
+    if slow {
         let mut slow_down = reply(
             StatusCode::SERVICE_UNAVAILABLE,
             "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>",
@@ -968,34 +976,67 @@ async fn a_store_that_refuses_is_not_pressed() {
     for _ in 0..20 {
         assert_eq!(said(store.get("k").await.unwrap_err()), unsent);
         assert_eq!(said(store.exists("k").await.unwrap_err()), unsent);
-        assert_eq!(said(store.list("", None, 10).await.unwrap_err()), unsent);
     }
     assert_eq!(sent() - before, 8);
-    // The store takes changes, and they are sent.
+    // The store takes listings and changes, and they are sent.
+    assert_eq!(store.list("", None, 10).await.unwrap().len(), 1);
     store.put("k2", ONE).await.unwrap();
     store.delete("k2").await.unwrap();
-    assert_eq!(sent() - before, 10);
+    assert_eq!(sent() - before, 11);
     // It asked for two seconds, where one would have been waited. Then one
     // read is sent, of however many there are.
     let pause = |millis| tokio::time::sleep(std::time::Duration::from_millis(millis));
     pause(1050).await;
     assert_eq!(said(store.get("k").await.unwrap_err()), unsent);
-    assert_eq!(sent() - before, 10);
+    assert_eq!(sent() - before, 11);
     pause(1000).await;
     let reads = futures::future::join_all((0..20).map(|_| store.get("k"))).await;
     assert!(reads.iter().all(Result::is_err));
-    assert_eq!(sent() - before, 11);
+    assert_eq!(sent() - before, 12);
     // It was refused. The store takes reads again, and for two seconds is
     // not sent one; then one, and then all.
     bucket.lock().slow_down.clear();
     pause(1050).await;
     assert_eq!(said(store.get("k").await.unwrap_err()), unsent);
-    assert_eq!(sent() - before, 11);
+    assert_eq!(sent() - before, 12);
     pause(1000).await;
     assert_eq!(store.get("k").await.unwrap(), Some(ONE));
     let reads = futures::future::join_all((0..20).map(|_| store.get("k"))).await;
     assert!(reads.iter().all(|read| matches!(read, Ok(Some(_)))));
-    assert_eq!(sent() - before, 32);
+    assert_eq!(sent() - before, 33);
+    assert!(bucket.lock().unsigned.is_empty());
+}
+
+/// A listing costs a store what no other read does, and a store may refuse
+/// listings while it takes the rest. The reads that every commit waits for
+/// are sent to it all the same.
+#[tokio::test]
+async fn a_store_that_refuses_listings_is_still_read() {
+    let (store, bucket) = s3().await;
+    let sent = || bucket.lock().requests;
+    let said = |error: StoreError| error.to_string();
+    let unsent = "storage unavailable: the store has refused listings, and this one was not sent";
+    store.put("k", ONE).await.unwrap();
+    bucket.lock().slow_lists = true;
+    let before = sent();
+    for _ in 0..8 {
+        assert_eq!(
+            said(store.list("", None, 10).await.unwrap_err()),
+            "storage unavailable: 503 Service Unavailable SlowDown, retry after 2 s"
+        );
+    }
+    for _ in 0..20 {
+        assert_eq!(said(store.list("", None, 10).await.unwrap_err()), unsent);
+        assert_eq!(store.get("k").await.unwrap(), Some(ONE));
+        assert!(store.exists("k").await.unwrap());
+    }
+    // What a purge lists is a listing.
+    let purged = store.purge("", None, &|_| true).await;
+    assert_eq!(said(purged.unwrap_err()), unsent);
+    assert_eq!(sent() - before, 8 + 40);
+    store.put("k2", ONE).await.unwrap();
+    store.delete("k2").await.unwrap();
+    assert_eq!(sent() - before, 8 + 40 + 2);
     assert!(bucket.lock().unsigned.is_empty());
 }
 

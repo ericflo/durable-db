@@ -51,6 +51,7 @@ pub struct S3Store {
     client: reqwest::Client,
     b2: Option<Arc<B2Uploader>>,
     reads: Arc<Gate>,
+    lists: Arc<Gate>,
     changes: Arc<Gate>,
     /// Whether the bucket takes one request that removes many versions. A
     /// bucket that has refused it is not asked again.
@@ -70,14 +71,24 @@ pub struct S3Store {
 /// with none taken, requests fail here without being sent. When the wait is
 /// over one request is sent to try the store, and the others go on failing
 /// until it is answered: taken, and all are sent again; refused, and the wait
-/// is doubled, to four seconds at most or to what the store asks for. A
-/// request that fails unsent has stored nothing, which a caller must already
-/// allow for in every failure.
+/// is doubled, to four seconds at most or to what the store asks for. One
+/// that has had that long and no answer is not waited for: another is tried.
+/// A request that fails unsent has stored nothing, which a caller must
+/// already allow for in every failure.
+///
+/// A request that is not answered in time is not a refusal. The store is
+/// slow with it, and whoever sent it waited out its patience to learn that,
+/// so nothing is sent in its place any faster. 2.1.5 counted it as one. A
+/// MinIO that took more than twenty seconds over each listing of what a
+/// database had to collect, and answered every other read at once, was
+/// taken to refuse reads: the reads it would have answered were not sent,
+/// one time for 23 seconds, while the request that tried it went unanswered.
 ///
 /// A store limits one kind of request apart from another, and a read that
-/// is taken says nothing of uploads that are all refused. So reads, changes,
-/// calls of Backblaze's API and uploads to its pods each have a gate of
-/// their own.
+/// is taken says nothing of uploads that are all refused. A listing costs a
+/// store what no other read does, and Amazon S3 and Backblaze B2 price it
+/// apart. So reads, listings, changes, calls of Backblaze's API and uploads
+/// to its pods each have a gate of their own.
 ///
 /// The waits are short. What spares the store is that one request is sent
 /// where hundreds were, and a wait of four seconds does that as well as one
@@ -93,26 +104,62 @@ struct Gate {
 struct Refusing {
     /// Refusals since a request was last taken.
     run: u32,
-    /// Nothing is sent before this, and one request at a time after it.
+    /// Nothing is sent before this, and after it what tries the store.
     until: Option<Instant>,
     /// Requests tried and refused since `until` was first set.
     tried: u32,
-    /// One is being tried now.
-    trying: bool,
+    /// When the one being tried now was sent.
+    trying: Option<Instant>,
     /// How long the store last asked to be left alone.
     asked: Option<Duration>,
 }
 
-/// Leave to send one request. `trial` is set on the one that tries a store
-/// that has been refusing; dropping it lets another be tried.
+impl Refusing {
+    /// How long nothing is sent after a refusal, and how long a request
+    /// that tries the store may go unanswered before another is tried.
+    fn wait(&self) -> Duration {
+        (HOLD * (1 << self.tried)).max(self.asked.unwrap_or_default())
+    }
+}
+
+/// Leave to send one request.
 struct Pass {
-    trial: Option<Arc<Gate>>,
+    gate: Arc<Gate>,
+    /// When it was sent, on the one that tries a store that has been
+    /// refusing. Dropping it lets another be tried.
+    trial: Option<Instant>,
+    /// It was not answered in time.
+    unanswered: AtomicBool,
+}
+
+impl Pass {
+    /// The store asked to be left alone for this long.
+    fn asked(&self, wait: Duration) {
+        self.gate.state.lock().asked = Some(wait.min(HOLD_ASKED));
+    }
+
+    /// `what` was not answered in time.
+    fn stalled(&self, what: &str) -> StoreError {
+        self.unanswered.store(true, Ordering::Relaxed);
+        StoreError::Unavailable(format!("a storage {what} stalled"))
+    }
+
+    /// A failed exchange. One that ran out of time was not answered.
+    fn failed(&self, error: reqwest::Error) -> StoreError {
+        if error.is_timeout() {
+            self.unanswered.store(true, Ordering::Relaxed);
+        }
+        network(error)
+    }
 }
 
 impl Drop for Pass {
     fn drop(&mut self) {
-        if let Some(gate) = &self.trial {
-            gate.state.lock().trying = false;
+        if self.trial.is_some() {
+            let mut state = self.gate.state.lock();
+            if state.trying == self.trial {
+                state.trying = None;
+            }
         }
     }
 }
@@ -137,53 +184,53 @@ impl Gate {
 
     fn enter(self: &Arc<Self>, now: Instant) -> StoreResult<Pass> {
         let mut state = self.state.lock();
-        match state.until {
-            None => Ok(Pass { trial: None }),
-            Some(until) if until <= now && !state.trying => {
-                state.trying = true;
-                Ok(Pass {
-                    trial: Some(self.clone()),
-                })
+        let trial = match state.until {
+            None => None,
+            Some(until)
+                if until <= now && state.trying.is_none_or(|sent| sent + state.wait() <= now) =>
+            {
+                state.trying = Some(now);
+                Some(now)
             }
-            Some(_) => Err(StoreError::Unavailable(format!(
-                "the store has refused {}, and this one was not sent",
-                self.what
-            ))),
-        }
+            Some(_) => {
+                return Err(StoreError::Unavailable(format!(
+                    "the store has refused {}, and this one was not sent",
+                    self.what
+                )));
+            }
+        };
+        Ok(Pass {
+            gate: self.clone(),
+            trial,
+            unanswered: AtomicBool::new(false),
+        })
     }
 
-    /// The store asked to be left alone for this long.
-    fn asked(&self, wait: Duration) {
-        self.state.lock().asked = Some(wait.min(HOLD_ASKED));
-    }
-
-    /// The request that `pass` was given for has been answered: `refused`,
-    /// or with anything else, which a store that answers at all has taken.
+    /// The request that `pass` was given for has ended: `refused`, or
+    /// answered with anything else, which a store that answers at all has
+    /// taken.
     fn settle(&self, pass: &Pass, refused: bool, now: Instant) -> Turn {
         let mut state = self.state.lock();
         if !refused {
             let held = state.until.is_some();
-            // A request on trial clears `trying` itself, when it ends.
-            *state = Refusing {
-                trying: state.trying,
-                ..Refusing::default()
-            };
+            *state = Refusing::default();
             return if held { Turn::Freed } else { Turn::Nothing };
         }
-        let wait = if state.until.is_none() {
+        if pass.unanswered.load(Ordering::Relaxed) {
+            return Turn::Nothing;
+        }
+        if state.until.is_none() {
             state.run += 1;
             if state.run < REFUSALS {
                 return Turn::Nothing;
             }
-            HOLD
         } else if pass.trial.is_some() {
             state.tried = (state.tried + 1).min(2);
-            HOLD * (1 << state.tried)
         } else {
             // Sent before the store began to refuse, and refused after.
             return Turn::Nothing;
-        };
-        let wait = wait.max(state.asked.unwrap_or_default());
+        }
+        let wait = state.wait();
         state.until = Some(now + wait);
         Turn::Held(wait)
     }
@@ -204,17 +251,6 @@ impl Gate {
             (Turn::Freed, _) => tracing::info!("the store takes {} again", self.what),
             _ => {}
         }
-    }
-
-    /// `sent`, unless the store is refusing what goes through this gate.
-    async fn through<T>(
-        self: &Arc<Self>,
-        sent: impl Future<Output = StoreResult<T>>,
-    ) -> StoreResult<T> {
-        let pass = self.enter(Instant::now())?;
-        let answer = sent.await;
-        self.answered(pass, &answer, Instant::now());
-        answer
     }
 }
 
@@ -263,8 +299,8 @@ fn network(error: reqwest::Error) -> StoreError {
 }
 
 /// How long to wait for the first byte of an answer, and for each further
-/// part of it.
-const PATIENCE: Duration = Duration::from_secs(20);
+/// part of it. A second in this file's tests, one of which waits it out.
+const PATIENCE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 20 });
 /// How often a purge sends one of its requests again.
 const PURGE_AGAIN: u32 = 2;
 /// How many versions one request may remove, by the S3 API.
@@ -283,13 +319,13 @@ const AS_AMAZON: (&str, &str) = ("x-goog-interop-list-objects-format", "enabled"
 
 /// The whole body of a response. Its size is not known in advance, so the
 /// limit is on each wait for more of it rather than on the transfer.
-async fn body_of(mut response: reqwest::Response) -> StoreResult<Bytes> {
+async fn body_of(pass: &Pass, mut response: reqwest::Response) -> StoreResult<Bytes> {
     let mut whole = Bytes::new();
     let mut joined: Option<BytesMut> = None;
     loop {
         let part = match tokio::time::timeout(PATIENCE, response.chunk()).await {
-            Ok(part) => part.map_err(network)?,
-            Err(_) => return Err(StoreError::Unavailable("a storage answer stalled".into())),
+            Ok(part) => part.map_err(|error| pass.failed(error))?,
+            Err(_) => return Err(pass.stalled("answer")),
         };
         match part {
             Some(part) if whole.is_empty() && joined.is_none() => whole = part,
@@ -504,6 +540,7 @@ impl S3Store {
             client,
             b2: None,
             reads: Gate::new("reads"),
+            lists: Gate::new("listings"),
             changes: Gate::new("changes"),
             batches: AtomicBool::new(true),
             versions: AtomicBool::new(true),
@@ -560,19 +597,26 @@ impl S3Store {
         body: Bytes,
         also: Option<(&'static str, &str)>,
     ) -> StoreResult<Reply> {
-        let gate = if method == Method::GET || method == Method::HEAD {
+        // The bucket itself is read only to list it.
+        let gate = if method == Method::GET && key.is_empty() {
+            &self.lists
+        } else if method == Method::GET || method == Method::HEAD {
             &self.reads
         } else {
             &self.changes
         };
-        let sent = self.request(gate, method, key, query, range, body, also);
-        gate.through(sent).await
+        let pass = gate.enter(Instant::now())?;
+        let answer = self
+            .request(&pass, method, key, query, range, body, also)
+            .await;
+        gate.answered(pass, &answer, Instant::now());
+        answer
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn request(
         &self,
-        gate: &Gate,
+        pass: &Pass,
         method: Method,
         key: &str,
         query: &[(&str, &str)],
@@ -651,12 +695,12 @@ impl S3Store {
             request = request.header(name, value);
         }
         let response = match tokio::time::timeout(patience, request.body(body).send()).await {
-            Ok(response) => response.map_err(network)?,
-            Err(_) => return Err(StoreError::Unavailable("a storage request stalled".into())),
+            Ok(response) => response.map_err(|error| pass.failed(error))?,
+            Err(_) => return Err(pass.stalled("request")),
         };
         let status = response.status();
         let wait = retry_after(response.headers());
-        let body = body_of(response).await?;
+        let body = body_of(pass, response).await?;
         // What an answer that is an error says it is. Read from no other:
         // that may be megabytes of a table.
         let code = || tag(&String::from_utf8_lossy(&body), "Code").map(str::to_owned);
@@ -671,7 +715,7 @@ impl S3Store {
             || gave_up
         {
             if let Some(wait) = wait {
-                gate.asked(wait);
+                pass.asked(wait);
             }
             let said = said(code().as_deref(), wait);
             return Err(StoreError::Unavailable(format!("{status}{said}")));
@@ -1040,23 +1084,26 @@ impl B2Uploader {
         &self,
         request: reqwest::RequestBuilder,
     ) -> StoreResult<(StatusCode, serde_json::Value)> {
-        self.calls.through(Self::call(&self.calls, request)).await
+        let pass = self.calls.enter(Instant::now())?;
+        let answer = Self::call(&pass, request).await;
+        self.calls.answered(pass, &answer, Instant::now());
+        answer
     }
 
     async fn call(
-        gate: &Gate,
+        pass: &Pass,
         request: reqwest::RequestBuilder,
     ) -> StoreResult<(StatusCode, serde_json::Value)> {
-        let response = request.send().await.map_err(network)?;
+        let response = request.send().await.map_err(|error| pass.failed(error))?;
         let status = response.status();
         let wait = retry_after(response.headers());
-        let body = response.bytes().await.map_err(network)?;
+        let body = response.bytes().await.map_err(|error| pass.failed(error))?;
         if status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
         {
             if let Some(wait) = wait {
-                gate.asked(wait);
+                pass.asked(wait);
             }
             let reply: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             let said = said(reply["code"].as_str(), wait);
@@ -1260,7 +1307,7 @@ impl B2Uploader {
             .header("content-type", "application/octet-stream")
             .header("x-bz-content-sha1", hex::encode(sha1::Sha1::digest(&body)))
             .body(body);
-        let answer = Self::call(&self.uploads, request).await;
+        let answer = Self::call(&pass, request).await;
         self.uploads.answered(pass, &answer, Instant::now());
         let (status, reply) = answer?;
         if status.is_success() {
@@ -1723,6 +1770,69 @@ mod tests {
         }
     }
 
+    /// One request that was not answered in time.
+    fn stall(gate: &Arc<Gate>, pass: Pass, now: Instant) {
+        let answer: StoreResult<()> = Err(pass.stalled("request"));
+        gate.answered(pass, &answer, now);
+    }
+
+    #[test]
+    fn a_request_that_is_not_answered_is_not_a_refusal() {
+        let start = Instant::now();
+        let gate = Gate::new("listings");
+        // However many there are: the store is slow, and all are sent.
+        for _ in 0..10 * REFUSALS {
+            stall(&gate, gate.enter(start).unwrap(), start);
+        }
+        // Nor is it a request that was taken: these are eight refusals
+        // in a row.
+        for _ in 0..REFUSALS - 1 {
+            assert!(send(&gate, start, false));
+        }
+        stall(&gate, gate.enter(start).unwrap(), start);
+        assert!(send(&gate, start, false));
+        assert!(!send(&gate, start, true));
+        // One that tries the store and is not answered leaves the wait as
+        // it was: the next is tried at once.
+        let late = start + HOLD + PATIENCE;
+        stall(&gate, gate.enter(start + HOLD).unwrap(), late);
+        assert!(send(&gate, late, false));
+        assert!(!send(
+            &gate,
+            late + 2 * HOLD - Duration::from_millis(1),
+            true
+        ));
+        assert!(send(&gate, late + 2 * HOLD, true));
+    }
+
+    #[test]
+    fn a_request_that_tries_a_store_is_waited_for_no_longer_than_a_refusal() {
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        let gate = held(start);
+        let first = gate.enter(at(1000)).unwrap();
+        assert!(gate.enter(at(1999)).is_err());
+        // It has had a second, which is the wait: another is tried, and
+        // that one has a second.
+        let second = gate.enter(at(2000)).unwrap();
+        assert!(second.trial.is_some());
+        assert!(gate.enter(at(2999)).is_err());
+        // The first ends unanswered. The second is still the one on trial.
+        stall(&gate, first, at(2500));
+        assert!(gate.enter(at(2999)).is_err());
+        // It is refused. The wait is two seconds now, and that is how long
+        // the next has.
+        gate.answered(second, &no(), at(2999));
+        assert!(gate.enter(at(4998)).is_err());
+        let third = gate.enter(at(4999)).unwrap();
+        assert!(gate.enter(at(6998)).is_err());
+        let fourth = gate.enter(at(6999)).unwrap();
+        // That one is taken, and all are sent.
+        gate.answered(fourth, &Ok(()), at(7000));
+        assert!(send(&gate, at(7000), true));
+        drop(third);
+    }
+
     #[test]
     fn a_store_that_refuses_is_tried_with_one_request_at_a_time() {
         let start = Instant::now();
@@ -1733,7 +1843,7 @@ mod tests {
         // Then one request, and no other while it is unanswered.
         let trial = gate.enter(at(1000)).unwrap();
         assert!(gate.enter(at(1000)).is_err());
-        assert!(gate.enter(at(9000)).is_err());
+        assert!(gate.enter(at(1199)).is_err());
         // It is refused: the wait doubles, from the answer, up to four
         // seconds.
         gate.answered(trial, &no(), at(1200));
@@ -1804,7 +1914,16 @@ mod tests {
         let start = Instant::now();
         let at = |millis: u64| start + Duration::from_millis(millis);
         let gate = Gate::new("reads");
-        gate.asked(Duration::from_secs(5));
+        // As an answer that is under way says it.
+        let asked = |seconds| {
+            let pass = Pass {
+                gate: gate.clone(),
+                trial: None,
+                unanswered: AtomicBool::new(false),
+            };
+            pass.asked(Duration::from_secs(seconds));
+        };
+        asked(5);
         for _ in 0..REFUSALS {
             assert!(send(&gate, start, false));
         }
@@ -1814,7 +1933,7 @@ mod tests {
             assert!(send(&gate, at(now), false), "{now}");
         }
         // A store that asks for an hour is tried after a minute.
-        gate.asked(Duration::from_secs(3600));
+        asked(3600);
         assert!(send(&gate, at(20_000), false));
         assert!(!send(&gate, at(79_999), true));
         assert!(send(&gate, at(80_000), true));
@@ -1848,11 +1967,78 @@ mod tests {
         );
     }
 
+    /// What a MinIO with much to list did: no listing was answered in time,
+    /// and every other read was answered at once. And a table whose bytes
+    /// stop coming.
+    #[tokio::test]
+    async fn a_store_that_is_slow_to_list_is_not_taken_to_refuse() {
+        use axum::{Router, body::Body, routing::get};
+        use futures::StreamExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let listings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listed = listings.clone();
+        let list = move || async move {
+            listed.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(3 * PATIENCE).await;
+        };
+        let begun = || async {
+            let part = Ok::<_, std::io::Error>(Bytes::from_static(b"begun"));
+            let parts = futures::stream::once(async { part });
+            Body::from_stream(parts.chain(futures::stream::pending()))
+        };
+        let router = Router::new()
+            .route("/bucket", get(list))
+            .route("/bucket/table", get(begun))
+            .route("/bucket/{*key}", get(|| async { "value" }));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let store = S3Store::new(S3Config {
+            endpoint: format!("http://{address}"),
+            region: "us-east-1".into(),
+            bucket: "bucket".into(),
+            access_key_id: "id".into(),
+            secret_access_key: "secret".into(),
+        })
+        .unwrap();
+        let many = 2 * REFUSALS as usize;
+        let lists = futures::future::join_all((0..many).map(|_| store.list("db/", None, 10)));
+        let tables = futures::future::join_all((0..many).map(|_| store.get("table")));
+        // A call of Backblaze's API has a time of its own to be answered in.
+        let calls = Gate::new("calls of Backblaze's API");
+        let call = async {
+            let pass = calls.enter(Instant::now()).unwrap();
+            let listing = reqwest::Client::new().get(format!("http://{address}/bucket"));
+            let unanswered = listing.timeout(Duration::from_millis(100));
+            assert!(B2Uploader::call(&pass, unanswered).await.is_err());
+            pass.unanswered.load(Ordering::Relaxed)
+        };
+        let (lists, tables, call) = tokio::join!(lists, tables, call);
+        for answer in lists {
+            let said = answer.unwrap_err().to_string();
+            assert!(said.ends_with("a storage request stalled"), "{said}");
+        }
+        for answer in tables {
+            let said = answer.unwrap_err().to_string();
+            assert!(said.ends_with("a storage answer stalled"), "{said}");
+        }
+        assert!(call);
+        assert_eq!(listings.load(Ordering::SeqCst), many + 1);
+        // Nothing is counted against the store: reads are sent, and so is
+        // the next listing.
+        for gate in [&store.lists, &store.reads] {
+            assert!(gate.enter(Instant::now()).unwrap().trial.is_none());
+            assert_eq!(gate.state.lock().run, 0);
+        }
+        assert_eq!(store.get("db/key").await.unwrap().unwrap(), "value");
+        assert!(store.exists("db/key").await.unwrap());
+    }
+
     /// Backblaze's API as far as an upload needs it: a call that names a
     /// pod, and pods that refuse every upload or take it.
     #[derive(Default)]
     struct Backblaze {
         refusing: AtomicBool,
+        refusing_calls: AtomicBool,
         calls: std::sync::atomic::AtomicUsize,
         uploads: std::sync::atomic::AtomicUsize,
     }
@@ -1864,10 +2050,15 @@ mod tests {
         let state: Arc<Backblaze> = Arc::default();
         let url = move |State(state): State<Arc<Backblaze>>| async move {
             let n = state.calls.fetch_add(1, Ordering::SeqCst);
+            if state.refusing_calls.load(Ordering::SeqCst) {
+                let said = serde_json::json!({"status": 503, "code": "service_unavailable"});
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(said)).into_response();
+            }
             Json(serde_json::json!({
                 "uploadUrl": format!("http://{address}/pod/{n}"),
                 "authorizationToken": "token",
             }))
+            .into_response()
         };
         let upload = |State(state): State<Arc<Backblaze>>| async move {
             state.uploads.fetch_add(1, Ordering::SeqCst);
@@ -1900,6 +2091,33 @@ mod tests {
             pool: parking_lot::Mutex::default(),
         };
         (Arc::new(uploader), state)
+    }
+
+    #[tokio::test]
+    async fn backblaze_is_not_pressed_while_it_refuses_calls() {
+        let (uploader, backblaze) = backblaze().await;
+        let said = |target: StoreResult<B2Target>| target.err().unwrap().to_string();
+        backblaze.refusing_calls.store(true, Ordering::SeqCst);
+        for _ in 0..REFUSALS {
+            let refused = said(uploader.new_target().await);
+            let code = "Backblaze answered 503 Service Unavailable service_unavailable";
+            assert!(refused.ends_with(code), "{refused}");
+        }
+        for _ in 0..20 {
+            let unsent = said(uploader.new_target().await);
+            assert!(unsent.ends_with("and this one was not sent"), "{unsent}");
+        }
+        assert_eq!(backblaze.calls.load(Ordering::SeqCst), REFUSALS as usize);
+        // It takes them again: one is sent after a second, and then all.
+        backblaze.refusing_calls.store(false, Ordering::SeqCst);
+        tokio::time::sleep(HOLD).await;
+        for _ in 0..3 {
+            assert!(uploader.new_target().await.is_ok());
+        }
+        assert_eq!(
+            backblaze.calls.load(Ordering::SeqCst),
+            REFUSALS as usize + 3
+        );
     }
 
     #[tokio::test]
