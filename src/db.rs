@@ -1294,24 +1294,29 @@ impl Db {
             .await
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
-                tables.insert(0, self.store_table(maint, body, meta).await?);
+                let table = self.store_table(maint, body, meta, (&[], &[])).await?;
+                tables.insert(0, table);
             }
         }
         self.publish(maint, tables, revision, frame, seal, Some(revision))
             .await
     }
 
-    /// Upload a table that the next manifest will list.
+    /// Upload a table that the next manifest will list. `done` and
+    /// `coming` are the tables that the merge which made it has read
+    /// through and has yet to: in the disk cache it takes the room of the
+    /// first before that of others in use, and never that of the second.
     async fn store_table(
         &self,
         maint: &mut Maint,
         body: Bytes,
         meta: TableMeta,
+        (done, coming): (&[&str], &[&str]),
     ) -> Result<Arc<Table>> {
         maint.next_table += 1;
         maint.unpublished.push(meta.key.clone());
         self.uploads.put(&meta.key, body.clone()).await?;
-        self.ctx.io.remember(&meta.key, body).await;
+        self.ctx.io.remember(&meta.key, body, done, coming).await;
         Ok(Table::new(meta))
     }
 
@@ -1372,7 +1377,15 @@ impl Db {
                 let full = std::mem::replace(&mut builder, TableBuilder::new(block_bytes));
                 let (body, mut meta) = full.finish(self.layout.table(self.epoch, maint.next_table));
                 meta.part = merged.len() as u32;
-                merged.push(self.store_table(maint, body, meta).await?);
+                // In the disk cache the table takes the room of those the
+                // merge has read through, not of those it is coming to.
+                fn keys<'a>(tables: impl Iterator<Item = &'a Arc<Table>>) -> Vec<&'a str> {
+                    tables.map(|table| table.meta.key.as_str()).collect()
+                }
+                let done = keys(scans.iter().flat_map(|scan| &scan.done));
+                let coming = keys(scans.iter().flat_map(RunScan::unread));
+                let table = self.store_table(maint, body, meta, (&done, &coming));
+                merged.push(table.await?);
                 self.touch();
                 // Between tables, a merge gives way to what must not wait
                 // for it: a release, and writes that are due to be flushed.
@@ -1804,6 +1817,9 @@ struct RunScan {
     /// Whether what is read is kept for later readers. A merge keeps none.
     keep: bool,
     current: Option<TableScan>,
+    /// The table `current` reads, and those read through before it.
+    at: Option<Arc<Table>>,
+    done: Vec<Arc<Table>>,
 }
 
 impl RunScan {
@@ -1827,7 +1843,15 @@ impl RunScan {
             reverse: scan.reverse,
             keep,
             current: None,
+            at: None,
+            done: Vec::new(),
         })
+    }
+
+    /// The tables the scan has yet to read through: the one it is in and
+    /// those after it.
+    fn unread(&self) -> impl Iterator<Item = &Arc<Table>> {
+        self.at.iter().chain(&self.rest)
     }
 
     async fn next(&mut self) -> Result<Option<Entry>> {
@@ -1837,7 +1861,9 @@ impl RunScan {
             {
                 return Ok(Some(entry));
             }
-            let Some(table) = self.rest.pop() else {
+            self.done.extend(self.at.take());
+            self.at = self.rest.pop();
+            let Some(table) = &self.at else {
                 return Ok(None);
             };
             self.current = Some(table.scan(

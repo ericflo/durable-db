@@ -210,6 +210,7 @@ echo "after that the database holds $(mib "$(echo "$held" | field bytes)") MiB i
 # told to wait while everything is merged, and taken when that has made room.
 quota=$((filled + filled / 100))
 held=$(info | field bytes)
+fetched=$(metric durable_db_storage_received_bytes_total)
 curl -fsS -m 60 -o /dev/null -X PATCH -H "authorization: Bearer $token" \
     -H 'content-type: application/json' -d "{\"max_bytes\":$quota}" "$url/v1/databases/size-0"
 from=$(date +%s%N)
@@ -226,7 +227,7 @@ took=$((($(date +%s%N) - from) / 1000000))
 alive
 [ "$code" = 200 ] || { echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was answered $code after $took ms"; exit 1; }
 after=$(info)
-echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was told to wait for $took ms while everything was merged, and then taken; the database then held $(mib "$(echo "$after" | field bytes)") MiB in $(echo "$after" | field tables) tables"
+echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was told to wait for $took ms while everything was merged, for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage, and then taken; the database then held $(mib "$(echo "$after" | field bytes)") MiB in $(echo "$after" | field tables) tables"
 echo "most memory of the second server: $(peak) MiB"
 failed=$((failed + $(failures)))
 

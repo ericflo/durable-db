@@ -782,7 +782,8 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
     let small = DiskCache::open(dir.path(), 1).unwrap();
     assert_eq!(small.used(), 0);
     let tiny = Io::new(store.clone(), 1 << 20, Some(small));
-    tiny.remember("anything", Bytes::from_static(b"x")).await;
+    tiny.remember("anything", Bytes::from_static(b"x"), &[], &[])
+        .await;
     assert_eq!(tiny.disk.as_ref().unwrap().used(), 1);
 }
 

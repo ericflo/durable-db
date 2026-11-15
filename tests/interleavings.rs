@@ -911,7 +911,7 @@ async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
     // A table that a read missed while it was being fetched is fetched
     // again, and one that is put there twice is counted once.
     let body = Bytes::from(vec![7u8; SIZE as usize]);
-    io.remember(&tables[0], body).await;
+    io.remember(&tables[0], body, &[], &[]).await;
     assert_eq!(disk.used(), tables.len() as u64 * SIZE);
 }
 
@@ -990,7 +990,7 @@ async fn a_table_in_use_is_not_put_out_of_the_disk_cache_for_another() {
     // A table this server wrote is taken, and the least recently used of
     // the three makes way for it. That one is not fetched back.
     let written = "root/db/app/t/1/000000ff".to_owned();
-    io.remember(&written, Bytes::from(vec![9u8; SIZE as usize]))
+    io.remember(&written, Bytes::from(vec![9u8; SIZE as usize]), &[], &[])
         .await;
     assert_eq!(disk.used(), 3 * SIZE);
     for _ in 0..20 {
@@ -1077,6 +1077,298 @@ async fn a_merge_does_not_keep_the_tables_it_reads() {
         .await
         .expect("the cache holds the tables of the manifest and no others");
     every_key_is_of(&db, 2).await;
+}
+
+/// A table that a merge stores is put into the disk cache, and the least
+/// recently used made way for it. Those were the tables the merge had not
+/// come to yet, which it then read from the store: a merge of a whole
+/// database, with a cache as large as that database, fetched most of it
+/// again. A table the merge is coming to does not make way: one it has
+/// read through does, and when there is none the table is not kept.
+#[tokio::test]
+async fn a_merge_puts_out_the_tables_it_has_read_and_not_those_it_is_coming_to() {
+    // How large a table a flush of each makes.
+    let flush_bytes = |txn: Txn| async move {
+        let ctx = ctx_with(Arc::new(MemoryStore::new()), small_tables());
+        let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+            .await
+            .unwrap();
+        commit(&db, txn).await.unwrap();
+        flushed(&db).await;
+        let bytes = db.info().bytes;
+        db.close().await;
+        bytes
+    };
+    let (round_bytes, wide_bytes) = (flush_bytes(round(1)).await, flush_bytes(wide(3)).await);
+    assert!(wide_bytes > 256 << 10);
+
+    // A cache of both and a table and a half of a merge: more than the
+    // first merge reads and stores.
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let dir = tempfile::tempdir().unwrap();
+    let table_bytes = small_tables().table_bytes as u64;
+    let budget = wide_bytes + round_bytes + 3 * table_bytes / 2;
+    let disk = DiskCache::open(dir.path(), budget).unwrap();
+    let ctx = Arc::new(Ctx {
+        io: Io::new(gate.clone(), 32 << 20, Some(disk)),
+        opts: small_tables(),
+        root: "root/".into(),
+    });
+    let disk = ctx.io.disk.clone().unwrap();
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    let merged = |more_than: usize| {
+        let (db, disk) = (db.clone(), disk.clone());
+        async move {
+            let merging = async {
+                while db.mem_bytes() > 0 || db.info().tables <= more_than {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), merging)
+                .await
+                .expect("the flush is followed by a merge");
+            assert!(disk.used() <= budget);
+            db.info().tables
+        }
+    };
+    // Two rounds are merged into a run of several tables, which the cache
+    // holds when the two are gone.
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    commit(&db, round(2)).await.unwrap();
+    let run = merged(2).await;
+    assert!(run >= 6);
+    let left = |most: u64| {
+        let disk = disk.clone();
+        async move {
+            let leaving = async {
+                while disk.used() > most {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            };
+            let left = tokio::time::timeout(Duration::from_secs(5), leaving).await;
+            assert!(left.is_ok(), "the cache holds {} of {most}", disk.used());
+        }
+    };
+    left(db.info().bytes).await;
+    assert_eq!(disk.used(), db.info().bytes);
+
+    // The wide flush fills the cache but for the table and a half. The
+    // merge of it and the run reads the wide table first, and has stored
+    // ten times the tables of the run before it reads more of the run
+    // than its first table. Each of those takes the room of the one
+    // before it, since the merge is coming to every other table the cache
+    // holds. The tables it stores after that take the room of the wide
+    // one.
+    commit(&db, wide(3)).await.unwrap();
+    assert!(merged(run + 1).await > 10 * run);
+    left(db.info().bytes - wide_bytes / 2).await;
+    assert!(disk.used() > 0);
+    // Each table was in the cache until the merge had read it: the store
+    // was asked for no part of a table.
+    assert_eq!(gate.ranges(), []);
+    assert!(gate.fetched().is_empty());
+    let scan = |lo: &str| {
+        let scan = Scan {
+            lo: b(lo),
+            hi: Bytes::new(),
+            reverse: false,
+            limit: 1000,
+        };
+        ReadReq {
+            scans: vec![scan],
+            strong: true,
+            ..ReadReq::default()
+        }
+    };
+    let items = &db.read(scan("")).await.unwrap().scans[0].items;
+    assert_eq!(items.len(), 1000);
+    assert_eq!(items[999].value, Some(b(&value(3, 999))));
+    let items = &db.read(scan("k0199")).await.unwrap().scans[0].items;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].value, Some(b(&value(2, 199))));
+}
+
+/// A merge of tables that are in the disk cache leaves its result there,
+/// and with it the tables of other databases. The tables it has read
+/// through make way for those it stores: they are gone when it is
+/// published. Left to the order of their use, the tables it stored made
+/// way for one another and those it had read stayed to the end, so that a
+/// merge of a whole database left half of it in the cache, and put out
+/// what else was in use.
+#[tokio::test]
+async fn a_merge_of_tables_in_the_cache_leaves_its_result_and_the_others_there() {
+    // A quarter of the keys of a round.
+    let part = |round: u64| {
+        let writes = (0..50).map(|i| (b(&format!("k{i:04}")), Some(b(&value(round, i)))));
+        Txn {
+            writes: writes.collect(),
+            ..Txn::default()
+        }
+    };
+    // How large a table a flush of each makes.
+    let flush_bytes = |txn: Txn| async move {
+        let ctx = ctx_with(Arc::new(MemoryStore::new()), small_tables());
+        let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+            .await
+            .unwrap();
+        commit(&db, txn).await.unwrap();
+        db.request_flush();
+        flushed(&db).await;
+        let bytes = db.info().bytes;
+        db.close().await;
+        bytes
+    };
+    let (round_bytes, part_bytes) = (flush_bytes(round(1)).await, flush_bytes(part(2)).await);
+
+    // A cache of two rounds, the quarter and half a table of a merge.
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let dir = tempfile::tempdir().unwrap();
+    let table_bytes = small_tables().table_bytes as u64;
+    let budget = 2 * round_bytes + part_bytes + table_bytes / 2;
+    let disk = DiskCache::open(dir.path(), budget).unwrap();
+    let ctx = Arc::new(Ctx {
+        io: Io::new(gate.clone(), 32 << 20, Some(disk)),
+        opts: Options {
+            quota_rest: Duration::ZERO,
+            ..small_tables()
+        },
+        root: "root/".into(),
+    });
+    let disk = ctx.io.disk.clone().unwrap();
+    let config = DbConfig {
+        max_bytes: 44 << 10,
+        ..DbConfig::default()
+    };
+    let (db, _) = Db::open(ctx.clone(), "app", Some(config)).await.unwrap();
+    // A write that the quota has no room for has everything merged.
+    let merged = |from: usize| {
+        let db = db.clone();
+        async move {
+            let more = put("more", &noise(7, 13_000));
+            assert!(matches!(commit(&db, more).await, Err(Error::Busy(_))));
+            let merging = async {
+                while db.info().tables == from {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), merging)
+                .await
+                .expect("the tables are merged for the quota");
+            db.info().tables
+        }
+    };
+    // What the cache holds once the tables a merge replaced have left it.
+    let holds = |bytes: u64| {
+        let disk = disk.clone();
+        async move {
+            let leaving = async {
+                while disk.used() != bytes {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            };
+            let left = tokio::time::timeout(Duration::from_secs(5), leaving).await;
+            assert!(left.is_ok(), "the cache holds {} of {bytes}", disk.used());
+        }
+    };
+    // A round and a quarter of it again are merged into a run of several
+    // tables, which the cache has room for beside the two.
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    commit(&db, part(2)).await.unwrap();
+    db.request_flush();
+    flushed(&db).await;
+    assert_eq!(db.info().tables, 2);
+    let run = merged(2).await;
+    assert!(run >= 6);
+    holds(db.info().bytes).await;
+
+    // Another database's table and a quarter of the first again fill the
+    // cache but for the half table.
+    let (other, _) = Db::open(ctx, "other", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&other, round(1)).await.unwrap();
+    flushed(&other).await;
+    commit(&db, part(3)).await.unwrap();
+    db.request_flush();
+    flushed(&db).await;
+    assert_eq!(db.info().tables, run + 1);
+    let all = |db: &Arc<Db>, other: &Arc<Db>| db.info().bytes + other.info().bytes;
+    assert_eq!(disk.used(), all(&db, &other));
+    assert!(budget - disk.used() < table_bytes);
+
+    // The run and the quarter are merged. Each table of the result takes
+    // the room of a table of the run that the merge has read through, and
+    // the other database's table stays: the cache holds all of both.
+    assert_eq!(merged(run + 1).await, run);
+    holds(all(&db, &other)).await;
+    // The store was asked for no part of a table.
+    assert_eq!(gate.ranges(), []);
+    assert!(gate.fetched().is_empty());
+    assert_eq!(get(&db, b"k0007").await.unwrap().unwrap().1, value(3, 7));
+    assert_eq!(get(&db, b"k0107").await.unwrap().unwrap().1, value(1, 107));
+    assert_eq!(
+        get(&other, b"k0107").await.unwrap().unwrap().1,
+        value(1, 107)
+    );
+}
+
+/// A table that reads missed is fetched in the background, and a merge
+/// may replace it meanwhile. It is not kept when it arrives: nothing reads
+/// it again, and it would count as in use for as long as a table that is
+/// read. After a merge of everything in a cache of the database's size,
+/// one such table kept a table of the result out for five minutes.
+#[tokio::test]
+async fn a_fetch_that_arrives_when_its_table_has_left_the_manifest_is_not_kept() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    // An earlier server flushed one table.
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, wide(1)).await.unwrap();
+    flushed(&db).await;
+    db.close().await;
+    // This one has an empty disk cache. A read has the table's end from
+    // the store, more than a sixteenth of it, and the table is asked for
+    // whole. That request is slow.
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+    let ctx = Arc::new(Ctx {
+        io: Io::new(gate.clone(), 32 << 20, Some(disk)),
+        opts: small_tables(),
+        root: "root/".into(),
+    });
+    let disk = ctx.io.disk.clone().unwrap();
+    let cached = || std::fs::read_dir(dir.path()).unwrap().count();
+    let (db, _) = Db::open(ctx, "app", None).await.unwrap();
+    gate.rule(Op::Get, Action::Hold, 1, |key, _| key.contains("/t/"));
+    assert_eq!(get(&db, b"a0007").await.unwrap().unwrap().1, value(1, 7));
+    gate.wait_held(Op::Get).await;
+    assert_eq!(cached(), 0);
+    // Every key is written again, and the flush is followed by a merge
+    // of both tables, which leave the manifest.
+    commit(&db, wide(2)).await.unwrap();
+    let merged = async {
+        while db.mem_bytes() > 0 || db.info().tables < 3 || disk.used() != db.info().bytes {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the cache holds the tables of the manifest and no others");
+    // The table arrives, and is not kept.
+    gate.release(Op::Get);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(gate.fetched().len(), 1);
+    assert_eq!((disk.used(), cached()), (db.info().bytes, db.info().tables));
+    assert_eq!(get(&db, b"a0007").await.unwrap().unwrap().1, value(2, 7));
 }
 
 /// A merge that fails has stored some of its tables, and what a server
@@ -1399,7 +1691,7 @@ async fn a_damaged_copy_that_another_reader_discarded_is_read_from_the_store() {
     let io = Io::new(gate.clone(), 1 << 20, Some(disk));
     let disk = io.disk.clone().unwrap();
     let body = store.get(&table.meta.key).await.unwrap().unwrap();
-    io.remember(&table.meta.key, body).await;
+    io.remember(&table.meta.key, body, &[], &[]).await;
     let copy = std::fs::read_dir(dir.path()).unwrap().flatten().next();
     let copy = copy.unwrap().path();
     let mut bytes = std::fs::read(&copy).unwrap();
@@ -1730,6 +2022,16 @@ fn value(round: u64, i: usize) -> String {
 /// 200 keys of 26 KiB together: more than a flush waits for.
 fn round(round: u64) -> Txn {
     let writes = (0..200).map(|i| (b(&format!("k{i:04}")), Some(b(&value(round, i)))));
+    Txn {
+        writes: writes.collect(),
+        ..Txn::default()
+    }
+}
+
+/// 2400 keys before every key of a round, 300 KiB together: a table of
+/// more than is read of one at once.
+fn wide(round: u64) -> Txn {
+    let writes = (0..2400).map(|i| (b(&format!("a{i:04}")), Some(b(&value(round, i)))));
     Txn {
         writes: writes.collect(),
         ..Txn::default()

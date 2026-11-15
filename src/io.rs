@@ -83,6 +83,10 @@ const FETCH_PART: u64 = 16;
 /// begins the count again.
 const MISSED_TABLES: usize = 1024;
 
+/// How many tables that have left their manifests are remembered, so that
+/// none of them is fetched: 2 MiB of names.
+const GONE_TABLES: usize = 65_536;
+
 /// A table's name in the cache directory.
 type Name = [u8; 16];
 
@@ -104,6 +108,8 @@ struct Held {
     /// Bytes that reads have had from the bucket of tables that are not
     /// here, since each was last here.
     missed: HashMap<Name, u64>,
+    /// Tables that no manifest lists any more.
+    gone: HashSet<Name>,
 }
 
 impl Held {
@@ -123,6 +129,20 @@ impl Held {
         true
     }
 
+    /// Note that tables are in use. Returns the bytes of those that are
+    /// here, and how many they are: after this they are the most recently
+    /// used.
+    fn keep(&mut self, names: &[Name]) -> (u64, usize) {
+        let mut kept = (0, 0);
+        for name in names {
+            if self.touch(name) {
+                kept.0 += self.tables[name].0;
+                kept.1 += 1;
+            }
+        }
+        kept
+    }
+
     /// Note that a table is in use. False when it is not here.
     fn touch(&mut self, name: &Name) -> bool {
         let Some((_, place, at)) = self.tables.get_mut(name) else {
@@ -139,8 +159,12 @@ impl Held {
 
 /// Whole tables in a directory, the least recently used put out first.
 ///
-/// A table this server wrote is always taken, since it cost nothing to
-/// have. One that reads missed is fetched once they have read a sixteenth
+/// A table this server wrote is taken, since it cost nothing to have,
+/// and the least recently used make way. For one that a merge wrote, the
+/// tables that merge has read through make way before any that is in
+/// use, since they leave with the merge's manifest, and those it has yet
+/// to read never do, since it would read them from the bucket. One that
+/// reads missed is fetched once they have read a sixteenth
 /// of it from the bucket, and only into room that is free, or that tables
 /// no read has asked for in five minutes leave: it never puts out a table
 /// that is in use. When a server reads more than its cache holds, the
@@ -204,7 +228,7 @@ impl DiskCache {
                 held.insert(name, size, None);
             }
             // The budget may be smaller than it was.
-            cache.make_room(&mut held, 0, &mut out);
+            cache.make_room(&mut held, 0, (&[], (0, 0)), &mut out);
         }
         cache.unlink(&out);
         Ok(cache)
@@ -255,6 +279,9 @@ impl DiskCache {
     /// such reads have had enough of it, and there is room.
     fn wanted(&self, name: &Name, size: u64, read: u64) -> bool {
         let mut held = self.held.lock();
+        if held.gone.contains(name) {
+            return false;
+        }
         if held.missed.len() >= MISSED_TABLES && !held.missed.contains_key(name) {
             held.missed.clear();
         }
@@ -272,17 +299,33 @@ impl DiskCache {
             && (!self.over(held, size, 1) || self.unread(held).is_some())
     }
 
-    /// Put out the least recently used tables until `size` more bytes fit,
-    /// and name them in `out` for `unlink`. False, with none put out, when
-    /// they would not fit with every table gone, for the room that fetches
-    /// under way were promised.
-    fn make_room(&self, held: &mut Held, size: u64, out: &mut Vec<Name>) -> bool {
+    /// Put out tables until `size` more bytes fit, and name them in `out`
+    /// for `unlink`: the least recently used while no read has asked for
+    /// it in five minutes, then those of `done`, then the least recently
+    /// used. `kept` are the bytes and the number of the most recently used
+    /// that stay. False, with none put out, when the bytes would not fit
+    /// with every other table gone, for those and for the room that
+    /// fetches under way were promised.
+    fn make_room(
+        &self,
+        held: &mut Held,
+        size: u64,
+        (done, kept): (&[Name], (u64, usize)),
+        out: &mut Vec<Name>,
+    ) -> bool {
         let tables = usize::from(size > 0);
-        if held.promised + size > self.budget || held.promises + tables > Self::most(self.budget) {
+        if held.promised + kept.0 + size > self.budget
+            || held.promises + kept.1 + tables > Self::most(self.budget)
+        {
             return false;
         }
+        let mut done = done.iter();
         while self.over(held, size, tables) {
-            let Some(name) = held.order.values().next().copied() else {
+            let name = self
+                .unread(held)
+                .or_else(|| done.find(|name| held.tables.contains_key(*name)).copied())
+                .or_else(|| held.order.values().next().copied());
+            let Some(name) = name else {
                 break;
             };
             held.remove(&name);
@@ -363,6 +406,26 @@ impl DiskCache {
     /// `reserve` promised it. A table never changes, so one that is here is
     /// not written again.
     fn put(&self, key: &str, body: &[u8], promised: Option<u64>) {
+        self.put_merged(key, body, promised, &[], &[]);
+    }
+
+    /// `put`, of a table that a merge wrote when it had read through
+    /// `done` and had `coming` yet to read through. Of the tables that are
+    /// in use, those of `done` make way first: they leave the cache when
+    /// the merge is published, and to put out others for its tables has a
+    /// merge of a database that was all here leave half of it here. Those
+    /// of `coming` count as just used and none makes way: the merge would
+    /// read it from the bucket, which is certain and at once, where a read
+    /// of the table it wrote is neither. When the others do not make
+    /// enough room, the table is not kept.
+    fn put_merged(
+        &self,
+        key: &str,
+        body: &[u8],
+        promised: Option<u64>,
+        done: &[Name],
+        coming: &[Name],
+    ) {
         let (name, size) = (Self::name(key), body.len() as u64);
         let tmp = self.dir.join(format!(
             "tmp-{}-{}",
@@ -378,10 +441,12 @@ impl DiskCache {
             held.promises -= 1;
             held.promised -= bytes;
         }
+        let kept = held.keep(coming);
         let mut out = Vec::new();
         let stored = written
+            && !held.gone.contains(&name)
             && !held.tables.contains_key(&name)
-            && self.make_room(&mut held, size, &mut out)
+            && self.make_room(&mut held, size, (done, kept), &mut out)
             && fs::rename(&tmp, self.path(&name)).is_ok();
         if stored {
             held.insert(name, size, Some(Instant::now()));
@@ -404,6 +469,29 @@ impl DiskCache {
             self.unlink(&[*name]);
         }
         removed
+    }
+
+    /// Take out tables that no manifest lists any more, and remember that
+    /// they are gone. A request that began before reads them still: a
+    /// fetch for it, or one that was under way, would bring back a table
+    /// that nothing reads after, and that counts as in use for as long as
+    /// one that is. After a merge of everything, one such table kept the
+    /// last table of the result out of a cache that had been its size.
+    fn discard(&self, names: &[Name]) {
+        let mut out = Vec::new();
+        let mut held = self.held.lock();
+        if held.gone.len() + names.len() > GONE_TABLES {
+            held.gone.clear();
+        }
+        for name in names {
+            held.missed.remove(name);
+            if held.remove(name) {
+                out.push(*name);
+            }
+            held.gone.insert(*name);
+        }
+        drop(held);
+        self.unlink(&out);
     }
 }
 
@@ -579,11 +667,23 @@ impl Io {
 
     /// Put a whole table that this server wrote into the disk cache.
     /// Returns when it is there, so that its bytes are not left waiting in
-    /// memory.
-    pub async fn remember(&self, key: &str, body: Bytes) {
+    /// memory. `done` and `coming` are the tables that the merge which
+    /// wrote it has read through and has yet to, and none for a flush: the
+    /// table takes the room of the first before that of any other in use,
+    /// and never that of the second. Left to the order of their use it
+    /// took just that, since those are the tables its merge used longest
+    /// ago, and the merge then read them from the bucket: a merge of a
+    /// whole database, with a cache as large as that database, fetched
+    /// most of it again.
+    pub async fn remember(&self, key: &str, body: Bytes, done: &[&str], coming: &[&str]) {
         if let Some(disk) = &self.disk {
+            let names = |keys: &[&str]| -> Vec<Name> {
+                keys.iter().map(|key| DiskCache::name(key)).collect()
+            };
+            let (done, coming) = (names(done), names(coming));
             let (disk, key) = (disk.clone(), key.to_owned());
-            let _ = tokio::task::spawn_blocking(move || disk.put(&key, &body, None)).await;
+            let put = move || disk.put_merged(&key, &body, None, &done, &coming);
+            let _ = tokio::task::spawn_blocking(put).await;
         }
     }
 
@@ -604,13 +704,9 @@ impl Io {
         if let Some(disk) = &self.disk
             && !keys.is_empty()
         {
-            let (disk, keys) = (disk.clone(), keys.to_vec());
-            let _ = tokio::task::spawn_blocking(move || {
-                for key in &keys {
-                    disk.remove(&DiskCache::name(key));
-                }
-            })
-            .await;
+            let disk = disk.clone();
+            let names: Vec<Name> = keys.iter().map(|key| DiskCache::name(key)).collect();
+            let _ = tokio::task::spawn_blocking(move || disk.discard(&names)).await;
         }
     }
 }
@@ -701,6 +797,92 @@ mod tests {
         assert_eq!((cache.used(), files(&dir)), (0, 0));
         assert!(!room(&cache, DISK_OBJECT_BYTES + 1) && !cache.reserve(DISK_OBJECT_BYTES + 1));
         assert!(room(&cache, DISK_OBJECT_BYTES) && cache.reserve(DISK_OBJECT_BYTES));
+    }
+
+    #[test]
+    fn a_table_that_a_merge_wrote_does_not_put_out_one_the_merge_is_coming_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..4);
+        // A merge has read the first and is coming to the others, one of
+        // which is not here. Its table takes the room of the first.
+        let coming = [name(1), name(2), name(9), name(3)];
+        cache.put_merged(&key(4), &[4; 1000], None, &[], &coming);
+        assert_eq!(here(&cache), [1, 2, 3, 4]);
+        // When it has read the second, a table of twice the size takes the
+        // room of the second and of the table the merge wrote before.
+        cache.put_merged(&key(5), &[5; 2000], None, &[], &[name(2), name(3)]);
+        assert_eq!(here(&cache), [2, 3, 5]);
+        // One that would need the room of a table the merge is coming to
+        // is not kept, and puts out nothing.
+        cache.put_merged(&key(6), &[6; 2001], None, &[], &[name(2), name(3)]);
+        assert_eq!(here(&cache), [2, 3, 5]);
+        assert_eq!((cache.used(), files(&dir)), (4000, 3));
+        // The tables it is coming to were used after the one it wrote.
+        cache.put(&key(7), &[7; 1000], None);
+        assert_eq!(here(&cache), [2, 3, 7]);
+        // Nor is one kept that would need the place of such a table, in a
+        // cache that holds as many tables as it may.
+        let dir = tempfile::tempdir().unwrap();
+        let full = self::cache(&dir, 100_000, 0..67);
+        let coming: Vec<Name> = (0..67).map(name).collect();
+        full.put_merged(&key(67), &[67; 1000], None, &[], &coming);
+        assert_eq!((full.used(), files(&dir)), (67_000, 67));
+        assert_eq!(here(&full), (0..67).collect::<Vec<u8>>());
+        full.put_merged(&key(67), &[67; 1000], None, &[], &coming[1..]);
+        assert_eq!(here(&full), (1..=67).collect::<Vec<u8>>());
+    }
+
+    #[test]
+    fn a_table_that_a_merge_wrote_puts_out_those_the_merge_has_read_before_others_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..4);
+        // A merge has read the third, which is gone when it is published,
+        // and one that is not here. Its table takes the room of the third,
+        // though the first was used longer ago.
+        let done = [name(9), name(2)];
+        cache.put_merged(&key(4), &[4; 1000], None, &done, &[name(3)]);
+        assert_eq!(here(&cache), [0, 1, 3, 4]);
+        // With none of those left, the least recently used makes way.
+        cache.put_merged(&key(5), &[5; 1000], None, &done, &[name(3)]);
+        assert_eq!(here(&cache), [1, 3, 4, 5]);
+        // A table that no read has asked for makes way before one the
+        // merge has read: nothing is waiting for it.
+        let dir = tempfile::tempdir().unwrap();
+        let idle = DiskCache::open_idle(dir.path(), 4000, Duration::ZERO).unwrap();
+        for n in 0..4 {
+            idle.put(&key(n), &[n; 1000], None);
+        }
+        idle.put_merged(&key(4), &[4; 1000], None, &[name(2)], &[name(3)]);
+        assert_eq!(here(&idle), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_table_that_left_its_manifest_is_not_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..3);
+        // A table is being fetched when it and another leave the manifest.
+        assert!(cache.wanted(&name(7), 1000, 1000) && cache.reserve(1000));
+        cache.discard(&[name(7), name(1)]);
+        assert_eq!((here(&cache), files(&dir)), (vec![0, 2], 2));
+        // The fetch arrives. The table is not kept, and what it was
+        // promised is room again.
+        cache.put(&key(7), &[7; 1000], Some(1000));
+        assert_eq!((here(&cache), files(&dir)), (vec![0, 2], 2));
+        assert!(room(&cache, 2000) && !room(&cache, 2001));
+        // Reads of either by requests that began before ask for no fetch.
+        assert!(!cache.wanted(&name(7), 1000, 1000));
+        assert!(!cache.wanted(&name(1), 1000, 1000));
+        assert!(cache.wanted(&name(8), 1000, 1000));
+        // What is remembered of them is bounded: with as many again gone,
+        // they are forgotten.
+        let other = |n: usize| DiskCache::name(&format!("other/{n}"));
+        let gone: Vec<Name> = (0..GONE_TABLES - 2).map(other).collect();
+        cache.discard(&gone);
+        assert!(!cache.wanted(&name(7), 1000, 1000) && !cache.wanted(&other(0), 1000, 1000));
+        cache.discard(&[other(GONE_TABLES)]);
+        assert!(
+            cache.wanted(&name(7), 1000, 1000) && !cache.wanted(&other(GONE_TABLES), 1000, 1000)
+        );
     }
 
     #[test]
