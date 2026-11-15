@@ -209,6 +209,8 @@ One run of 2.1.3, later that afternoon: 117,949 session reads a second, none fai
 
 Two runs at half past five that afternoon, 2.1.4 and then 2.1.1: 121,813 and 161,925 session reads a second, of which none and 109 failed and 48 and 124 were told to wait; ledgers of 23,679 and 22,496 transfers verified, at 99 and 93 a second, with a transfer taking 115 ms at the median in both, 585 and 611 ms at the 99th percentile, and 12.0 and 13.0 s at most. The bucket was as fast again as in the morning, for both releases. The slower hour was about two in the afternoon, Pacific time. Earlier versions of this page called it the evening, which it was by UTC.
 
+One run of 2.1.5 at half past seven that evening, Pacific time: 157,202 session reads a second, of which 105 failed and none were told to wait; a ledger of 22,528 transfers verified at 94 a second, with a transfer taking 118 ms at the median, 612 ms at the 99th percentile and 7.1 s at most.
+
 **The read figure moves by a third from run to run, with either release.** Nine runs do not show a difference between the releases and do not rule one out. After the first five, every run of 2.1.1 lay below every run of 2.1.0, and the notes of release 2.1.1 said that the figure had gone the wrong way for a reason not established; the next four runs, two of each release, came out the other way round once and did not bear that out. What is established:
 
 - A single server reads the same with both. One server held to two CPUs and 1 GiB with the manifest's flags, on the same bucket, was given the same reads with the same ledger beside them, the two releases in turn: 166,199 and 166,497 reads a second with 2.1.0 while the ledger made 100 and 101 transfers a second, 168,024 and 167,313 with 2.1.1 while the ledger made 121 and 118.
@@ -244,13 +246,15 @@ One server with the flags of the Kubernetes manifest (192 MiB of cache, 96 MiB o
 
 | Load | Requests/s | p50 | p99 | Told to wait | Most memory so far |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 6,417 | 4.4 ms | 49 ms | 0 | 527 MiB |
-| Commits of 1 KiB values, 256 clients over 256 databases | 6,675 | 21 ms | 127 ms | 0 | 590 MiB |
-| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 71,460 | 5.8 ms | 31 ms | 0 | 590 MiB |
+| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 3,480 | 11 ms | 131 ms | 2 | 507 MiB |
+| Commits of 1 KiB values, 256 clients over 256 databases | 6,604 | 21 ms | 143 ms | 0 | 591 MiB |
+| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 73,440 | 5.8 ms | 29 ms | 0 | 591 MiB |
 
-The server, of release 2.1.4, used 590 MiB at most. No request failed. Release 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script, in which the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
+The server, of release 2.1.5, used 591 MiB at most in this run, and 584 and 589 MiB in two others. No request failed in any. Release 2.1.4 used 582 and 590 MiB, 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script; in those of 2.1.1 and 2.1.0 the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
 
-"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was none of the requests of that load in this run, 0.4% in the run published with 2.1.1, and 1.7% in the one published with 2.1.0. A client waits and sends the request again, as the SDK does.
+The first load is not the same from one run to the next: 3,480, 5,428 and 5,846 requests a second in the three runs of 2.1.5, and 4,116 and 6,417 in two of 2.1.4, an hour apart on the same desktop. The other two loads moved by a few percent.
+
+"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was 2 of the requests of that load in this run, 511 and 1,616 in the two others of 2.1.5, which is up to 0.5%, none in either run of 2.1.4, 0.4% in the run published with 2.1.1, and 1.7% in the one published with 2.1.0. A client waits and sends the request again, as the SDK does.
 
 This is three minutes on a local directory. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
 
