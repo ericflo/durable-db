@@ -242,21 +242,24 @@ To repeat the comparison, take the `ALLOCATOR` and `MALLOC_CONF` items out of `s
 DURABLE_DB=./durable-db scripts/soak-memory.sh
 ```
 
-One server with the flags of the Kubernetes manifest (192 MiB of cache, 96 MiB of unflushed writes, 128 MiB each for request bodies and results), on a local directory, in a systemd scope limited to 1 GiB of memory without swap and to four CPUs. It is killed if it passes the limit. Three loads of a minute each run one after the other against the same server, with values of random text, which does not compress:
+One server with the flags of the Kubernetes manifest (192 MiB of cache, 96 MiB of unflushed writes, 128 MiB each for request bodies and results), on a local directory, in a systemd scope limited to 1 GiB of memory without swap and to four CPUs. It is killed if it passes the limit. Three loads of a minute each run one after the other against the same server, with values of random text, which does not compress. Then the second load runs once more, and halfway through it the script kills the server and starts it again, so that the server that takes its place opens all 256 databases at once, from what the first one stored, while they are written to:
 
 | Load | Requests/s | p50 | p99 | Told to wait | Most memory so far |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 3,480 | 11 ms | 131 ms | 2 | 507 MiB |
-| Commits of 1 KiB values, 256 clients over 256 databases | 6,604 | 21 ms | 143 ms | 0 | 591 MiB |
-| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 73,440 | 5.8 ms | 29 ms | 0 | 591 MiB |
+| Half reads, half commits of 16 KiB values, 64 clients over 4 databases | 4,375 | 2.8 ms | 117 ms | 1,731 | 545 MiB |
+| Commits of 1 KiB values, 256 clients over 256 databases | 6,627 | 21 ms | 134 ms | 0 | 575 MiB |
+| Strong reads of 4 KiB values, 512 clients over 8 databases of 20,000 keys | 71,410 | 5.9 ms | 30 ms | 0 | 575 MiB |
+| The second load again, the server killed halfway and started again | 6,571 | 22 ms | 133 ms | 0 | 541 MiB, the second server |
 
-The server, of release 2.1.5, used 591 MiB at most in this run, and 584 and 589 MiB in two others. No request failed in any. Release 2.1.4 used 582 and 590 MiB, 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script; in those of 2.1.1 and 2.1.0 the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
+The server, of release 2.1.5, used 575 MiB at most in this run, and the one that took its place 541 MiB. In three runs made before the last load was added it used 584, 589 and 591 MiB. No request failed in any of the first three loads. In the last, 5,665 requests failed in the moment between the kill and the next server's start: the benchmark does not send a request again, as a client would.
 
-The first load is not the same from one run to the next: 3,480, 5,428 and 5,846 requests a second in the three runs of 2.1.5, and 4,116 and 6,417 in two of 2.1.4, an hour apart on the same desktop. The other two loads moved by a few percent.
+Ten minutes of each of the first three loads (`SECONDS_EACH=600`), with the server's memory read every ten seconds: 3,169, 6,491 and 78,586 requests a second, no request failed, 825 of the first load's 1.9 million were told to wait, and 599 MiB at most. Memory was level within each load: 365 to 436 MiB through the first, 468 to 515 MiB through the second with no rise from its second minute to its tenth, and 373 MiB through the third. Release 2.1.4 used 582 and 590 MiB, 2.1.1 used 621 MiB and 2.1.0 used 618 and 659 MiB in runs of the same script; in those of 2.1.1 and 2.1.0 the server may have stopped keeping unflushed writes within their budget during the second load ([verification](verification.md#what-these-checks-found), finding 36).
 
-"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was 2 of the requests of that load in this run, 511 and 1,616 in the two others of 2.1.5, which is up to 0.5%, none in either run of 2.1.4, 0.4% in the run published with 2.1.1, and 1.7% in the one published with 2.1.0. A client waits and sends the request again, as the SDK does.
+The first load is not the same from one run to the next: 3,480 to 5,846 requests a second in four runs of 2.1.5, and 4,116 and 6,417 in two of 2.1.4, within two hours on the same desktop. The other two loads moved by a few percent.
 
-This is three minutes on a local directory. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
+"Told to wait" counts answers of `503`. In the first load each of the four databases holds 160 MiB and is overwritten about four times in the minute, so tables are merged all the while; with four CPUs the flushes fall behind now and then, and the server refuses a write to that database instead of holding it in memory. That was 1,731 of the requests of that load in this run, which is 0.7%, between 2 and 1,616 in three others of 2.1.5, none in either run of 2.1.4, 0.4% in the run published with 2.1.1, and 1.7% in the one published with 2.1.0. A client waits and sends the request again, as the SDK does.
+
+This is minutes, thirty at the most, on a local directory. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
 
 ## What it costs in requests
 
