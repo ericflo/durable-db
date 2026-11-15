@@ -17,7 +17,7 @@ The binary carries its own allocator, jemalloc, on every platform but Windows, s
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                            # about 30 seconds
+cargo test                            # about 40 seconds
 scripts/check-model.sh                # the TLA+ model and its negative controls
 scripts/test-clients.sh               # the TypeScript SDK, pi-durable adapter and example
 scripts/soak-memory.sh                # a server under the manifest's memory limit, loaded for three minutes
@@ -25,6 +25,8 @@ scripts/test-slow.sh                  # every test alone on 28% of a processor, 
 scripts/test-stores.sh                # the bucket tests and a ledger on MinIO, RustFS and Garage in containers
 scripts/test-refusals.sh              # what a server sends a store that refuses every change for twenty seconds
 scripts/soak-kills.sh                 # a ledger through three servers while one is stopped every ten seconds
+scripts/soak-bucket.sh                # 256 databases written for twenty minutes on MinIO, then deleted
+scripts/soak-size.sh                  # one database filled to 4 GiB, opened by a new server, read, written over, deleted
 ```
 
 | Suite | What it covers |
@@ -54,6 +56,10 @@ cargo test --test bucket
 `scripts/test-refusals.sh` runs one server on MinIO behind an nginx that it tells to refuse every change for the middle third of a ledger, and prints how many requests the store refused, how soon a change was taken afterwards, and whether the ledger verified. `DURABLE_DB_BIN` names the binary, so that two releases can be compared. It needs Docker and takes about a minute and a half. The commit rate it prints is not a measurement: MinIO on a desktop's disk gave 420 to 1,030 commits a second to the same binary from one run to the next.
 
 `scripts/soak-bucket.sh` runs one server with the flags of the Kubernetes manifest, held to 1 GiB, on MinIO in a container: 256 databases (`SOAK_DATABASES`) are written for twenty minutes (`SOAK_SECONDS`) and then deleted one after another. It prints what memory did, how many purges failed, how the deletions went, and how often the server held requests back from the store, and fails if the server is killed, panics, or says that a round of its housekeeping has not ended. It is the run that found that a store slow to list was taken to refuse reads. `DURABLE_DB` names the binary. It needs Docker and about half an hour.
+
+`scripts/soak-size.sh` fills one database to 4 GiB (`SOAK_GIB`) of 4 KiB values through one server with the flags of the Kubernetes manifest, held to 1 GiB and four CPUs, on a local directory, with `SOAK_STORE=minio` on MinIO in a container, or with `SOAK_STORE=bucket` on the bucket that the `DDB_S3_` variables of the bucket tests name. It prints how fast the fill was and how its rate changed, how much was sent to storage for it, the most memory the server used, how long a new server with an empty cache took to open the database, a minute each (`SOAK_SECONDS`) of strong reads and scans from that server, two minutes of writes over what is there, how long a write then waits when the quota is set under what the database holds, which is how long a merge of all of it takes, and how long the deletion took. It fails if a server is killed or panics, or if that write is refused. It needs four times the size in free disk; 4 GiB take about a quarter of an hour, 16 GiB about an hour. On a bucket every read of what is in neither cache is a request, and the reads send as many at once as they have clients: `SOAK_READ_CLIENTS` gives them fewer than the fill has. `DURABLE_DB` names the binary.
+
+The load generator has what that script uses. `bench --workload fill` writes every one of `--keys` keys once, in an order spread over them, and ends when it has; a write that is answered `503` is made again. `--max-bytes` gives the databases it creates a quota. `--database name` uses databases called `name-0`, `name-1` and so on, which may be there already, loads nothing into them before a read workload and leaves them in place, so that one run can read what another wrote.
 
 `scripts/check-model.sh` runs TLC with a 2 GiB heap, four workers and a time limit, in Docker when no local Java is installed. TLC sizes itself from the whole machine if left alone; do not remove the caps. All configurations take about three minutes. `TLC_TIMEOUT=3600 scripts/check-model.sh DeepDeletion` runs the one configuration that is left out, because it takes nineteen minutes.
 

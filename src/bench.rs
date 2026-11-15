@@ -21,6 +21,10 @@ use std::{
 pub enum Workload {
     /// One-key transactions.
     Write,
+    /// Every key written once, in an order that is spread over the keys,
+    /// by one-key transactions; it ends when all are written. For a
+    /// database of a size: `--keys` times `--value-bytes`.
+    Fill,
     /// Linearizable point reads.
     Read,
     /// Point reads at session consistency.
@@ -52,7 +56,7 @@ pub struct Bench {
     /// Databases the clients are spread over.
     #[arg(long, default_value_t = 1)]
     databases: usize,
-    /// Seconds to measure.
+    /// Seconds to measure. A fill takes as long as it takes.
     #[arg(long, default_value_t = 10)]
     seconds: u64,
     /// Bytes of JSON per value.
@@ -74,6 +78,14 @@ pub struct Bench {
     /// Leave the test databases in place.
     #[arg(long)]
     keep: bool,
+    /// Quota in bytes of the databases created; the server's default without it.
+    #[arg(long)]
+    max_bytes: Option<u64>,
+    /// Use the databases of this name, with -0, -1 and so on after it, as
+    /// they are: they may exist already, nothing is loaded into them before
+    /// they are read, and they are left in place.
+    #[arg(long)]
+    database: Option<String>,
 }
 
 struct Shared {
@@ -85,6 +97,11 @@ struct Shared {
     /// Length of the text in a value that is made up for each write.
     random: Option<usize>,
     keys: usize,
+    /// For a fill: how many of each database's keys have been taken, and
+    /// how far apart one is from the next. The stride shares no factor with
+    /// the number of keys, so every key is reached once.
+    filled: Vec<AtomicU64>,
+    stride: u64,
     idempotent: bool,
     stop: AtomicBool,
     errors: AtomicU64,
@@ -117,6 +134,14 @@ impl Shared {
         Ok(status)
     }
 
+    /// The next key of a fill, or `None` when the database has them all.
+    fn next_to_fill(&self, db: usize) -> Option<usize> {
+        let taken = self.filled[db].fetch_add(1, Ordering::Relaxed);
+        let keys = self.keys as u64;
+        (taken < keys)
+            .then(|| (u128::from(taken) * u128::from(self.stride) % u128::from(keys)) as usize)
+    }
+
     fn write_body(&self, key: usize, unique: u64) -> String {
         let idempotency = if self.idempotent {
             format!(",\"idempotency_key\":\"bench-{unique:016x}\"")
@@ -147,6 +172,22 @@ impl Shared {
     }
 }
 
+/// A step through `keys` keys that reaches each of them once and puts
+/// neighbours in the order far apart among the keys.
+fn stride(keys: u64) -> u64 {
+    let gcd = |mut a: u64, mut b: u64| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let mut stride = ((keys as f64 * 0.618_033_988_75) as u64).max(1);
+    while gcd(stride, keys) != 1 {
+        stride += 1;
+    }
+    stride
+}
+
 fn percentile(sorted: &[u32], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -160,7 +201,10 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
         bail!("clients, databases and keys must be at least 1");
     }
     let keys = Keys::load(&args.key_file)?;
-    let run_id: u32 = rand::random();
+    let prefix = match &args.database {
+        Some(name) => name.clone(),
+        None => format!("bench-{:08x}", rand::random::<u32>()),
+    };
     let padding = args.value_bytes.saturating_sub(12);
     let shared = Arc::new(Shared {
         http: reqwest::Client::builder()
@@ -174,11 +218,13 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
             .collect(),
         token: keys.mint(&Grant::admin()),
         names: (0..args.databases)
-            .map(|i| format!("bench-{run_id:08x}-{i}"))
+            .map(|i| format!("{prefix}-{i}"))
             .collect(),
         value: json!({"pad": "x".repeat(padding)}).to_string(),
         random: args.random_values.then_some(padding),
         keys: args.keys,
+        filled: (0..args.databases).map(|_| AtomicU64::new(0)).collect(),
+        stride: stride(args.keys as u64),
         idempotent: args.idempotent,
         stop: AtomicBool::new(false),
         errors: AtomicU64::new(0),
@@ -190,14 +236,23 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let response = shared
+            let mut request = shared
                 .http
                 .put(format!("{}/v1/databases/{name}", shared.urls[0]))
-                .bearer_auth(&shared.token)
+                .bearer_auth(&shared.token);
+            if let Some(max_bytes) = args.max_bytes {
+                request = request
+                    .header("content-type", "application/json")
+                    .body(json!({ "max_bytes": max_bytes }).to_string());
+            }
+            let response = request
                 .send()
                 .await
                 .with_context(|| format!("cannot reach {}", shared.urls[0]))?;
-            if response.status().is_success() {
+            // One that is there with other limits is used as it is.
+            if response.status().is_success()
+                || (response.status() == 409 && args.database.is_some())
+            {
                 break;
             }
             if response.status() != 503 || attempt >= 20 {
@@ -213,7 +268,8 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
     if args.workload == Workload::Ledger {
         return ledger(&args, shared).await;
     }
-    if args.workload != Workload::Write {
+    let writes_only = matches!(args.workload, Workload::Write | Workload::Fill);
+    if !writes_only && args.database.is_none() {
         // Reads need something to find. Load in batches of 500 keys.
         eprintln!(
             "loading {} keys into each of {} databases",
@@ -245,31 +301,50 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
         }
     }
 
-    eprintln!(
-        "measuring for {}s: {} clients, {} database(s), {} server(s)",
-        args.seconds,
-        args.clients,
-        args.databases,
-        shared.urls.len()
-    );
+    if args.workload == Workload::Fill {
+        eprintln!(
+            "writing {} keys to each of {} database(s): {} clients, {} server(s)",
+            args.keys,
+            args.databases,
+            args.clients,
+            shared.urls.len()
+        );
+    } else {
+        eprintln!(
+            "measuring for {}s: {} clients, {} database(s), {} server(s)",
+            args.seconds,
+            args.clients,
+            args.databases,
+            shared.urls.len()
+        );
+    }
     let started = Instant::now();
     let mut clients = Vec::new();
     for client in 0..args.clients {
         let shared = shared.clone();
         let workload = args.workload;
         clients.push(tokio::spawn(async move {
-            let name = shared.names[client % shared.names.len()].clone();
+            let db = client % shared.names.len();
+            let name = shared.names[db].clone();
             let mut latencies: Vec<u32> = Vec::with_capacity(1 << 16);
+            // For a fill: a key the server asked to wait with.
+            let mut again: Option<usize> = None;
             while !shared.stop.load(Ordering::Relaxed) {
-                let (key, unique, coin): (usize, u64, bool) = {
+                let (mut key, unique, coin): (usize, u64, bool) = {
                     let mut rng = rand::rng();
                     (rng.random_range(0..shared.keys), rng.random(), rng.random())
                 };
+                if workload == Workload::Fill {
+                    match again.take().or_else(|| shared.next_to_fill(db)) {
+                        Some(next) => key = next,
+                        None => break,
+                    }
+                }
                 let read = |consistency: &str| {
                     format!("{{\"keys\":[\"key/{key:08}\"],\"consistency\":\"{consistency}\"}}")
                 };
                 let (action, body) = match workload {
-                    Workload::Write => ("commit", shared.write_body(key, unique)),
+                    Workload::Write | Workload::Fill => ("commit", shared.write_body(key, unique)),
                     Workload::Mixed if coin => ("commit", shared.write_body(key, unique)),
                     Workload::Read | Workload::Mixed => ("read", read("strong")),
                     Workload::SessionRead => ("read", read("session")),
@@ -287,6 +362,10 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
                     }
                     Ok(status) if status == 503 => {
                         shared.refused.fetch_add(1, Ordering::Relaxed);
+                        if workload == Workload::Fill {
+                            again = Some(key);
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
                     }
                     _ => {
                         shared.errors.fetch_add(1, Ordering::Relaxed);
@@ -296,8 +375,11 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
             latencies
         }));
     }
-    tokio::time::sleep(Duration::from_secs(args.seconds)).await;
-    shared.stop.store(true, Ordering::Relaxed);
+    // A fill ends when its clients have written every key.
+    if args.workload != Workload::Fill {
+        tokio::time::sleep(Duration::from_secs(args.seconds)).await;
+        shared.stop.store(true, Ordering::Relaxed);
+    }
     let mut latencies: Vec<u32> = Vec::new();
     for client in clients {
         latencies.extend(client.await?);
@@ -305,7 +387,7 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
     let elapsed = started.elapsed().as_secs_f64();
     latencies.sort_unstable();
 
-    if !args.keep {
+    if !args.keep && args.database.is_none() {
         for name in &shared.names {
             let _ = shared
                 .http
@@ -534,7 +616,7 @@ async fn ledger(args: &Bench, shared: Arc<Shared>) -> anyhow::Result<()> {
         }
         total += expected;
     }
-    if !args.keep {
+    if !args.keep && args.database.is_none() {
         for name in &shared.names {
             let _ = shared
                 .http

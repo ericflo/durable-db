@@ -1363,3 +1363,185 @@ async fn a_merge_that_fails_waits_for_the_next_write() {
         .expect("the merge is made after the next write");
     every_key_is_of(&db, 3).await;
 }
+
+/// A write that the quota has no room for asks for a merge of everything
+/// and is put off. Those that ask while it is made are served by it: it is
+/// not made again for them, though a flush in the middle of it has left a
+/// table above its result.
+#[tokio::test]
+async fn a_merge_for_the_quota_is_made_once_for_all_who_waited() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let config = DbConfig {
+        max_bytes: 44 << 10,
+        ..DbConfig::default()
+    };
+    let (db, _) = Db::open(ctx, "app", Some(config)).await.unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // A quarter of the keys again: a second table, too small to be merged
+    // with the first for its size, and 7 KiB that can no longer be read.
+    let writes = (0..50).map(|i| (b(&format!("k{i:04}")), Some(b(&value(2, i)))));
+    let again = Txn {
+        writes: writes.collect(),
+        ..Txn::default()
+    };
+    commit(&db, again).await.unwrap();
+    db.request_flush();
+    flushed(&db).await;
+    assert_eq!(db.info().tables, 2);
+    // Every table uploaded from here on is noted, and the second is held:
+    // it is the merge's second.
+    let uploads = Arc::new(Mutex::new(Vec::new()));
+    let seen = uploads.clone();
+    gate.rule(Op::Put, Action::Hold, usize::MAX, move |key, _| {
+        if key.contains("/db/app/t/") {
+            seen.lock().unwrap().push(key.to_owned());
+        }
+        false
+    });
+    hold_table(&gate, "app", 2);
+    let more = put("more", &noise(7, 12_000));
+    assert!(matches!(
+        commit(&db, more.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    gate.wait_held(Op::Put).await;
+    // A small write is taken meanwhile, and the large one asks again.
+    commit(&db, put("small", "1")).await.unwrap();
+    assert!(matches!(
+        commit(&db, more.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    gate.release(Op::Put);
+    let taken = async {
+        while matches!(commit(&db, more.clone()).await, Err(Error::Busy(_))) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), taken)
+        .await
+        .expect("the write is taken once the merge has made room");
+    // Time for a second merge, were one to be made.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The merge's first two tables are in the bucket still: nothing has
+    // been merged with them since.
+    let (uploads, stored) = (uploads.lock().unwrap().clone(), bucket.keys());
+    assert!(uploads.len() > 3, "{uploads:?}");
+    for table in &uploads[..2] {
+        assert!(stored.contains(table), "{table} was merged again");
+    }
+    assert_eq!(tables_stored(&bucket, "app"), db.info().tables);
+    assert_eq!(get(&db, b"small").await.unwrap().unwrap().1, "1");
+    assert_eq!(get(&db, b"k0007").await.unwrap().unwrap().1, value(2, 7));
+    assert_eq!(get(&db, b"k0107").await.unwrap().unwrap().1, value(1, 107));
+}
+
+/// A merge of everything that made no room is not made again for four
+/// times as long as it took: a database is rewritten for its quota a fifth
+/// of the time at most, however large it is and however slow its store.
+#[tokio::test]
+async fn a_merge_for_the_quota_that_made_no_room_is_waited_after() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let opts = Options {
+        // No least wait: only the four times.
+        quota_rest: Duration::ZERO,
+        ..small_tables()
+    };
+    let ctx = ctx_with(gate.clone(), opts);
+    let config = DbConfig {
+        max_bytes: 44 << 10,
+        ..DbConfig::default()
+    };
+    let (db, _) = Db::open(ctx, "app", Some(config)).await.unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // One table and a write that is in none: everything is merged for a
+    // write with no room. The first table uploaded is the small write's,
+    // the second is the merge's first, and it takes half a second.
+    commit(&db, put("small/1", "1")).await.unwrap();
+    hold_table(&gate, "app", 2);
+    let more = put("more", &noise(7, 20_000));
+    assert!(matches!(
+        commit(&db, more.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    gate.wait_held(Op::Put).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    gate.release(Op::Put);
+    let refused = async {
+        loop {
+            match commit(&db, more.clone()).await {
+                Err(Error::Busy(_)) => tokio::time::sleep(Duration::from_millis(1)).await,
+                definite => return definite,
+            }
+        }
+    };
+    let definite = tokio::time::timeout(Duration::from_secs(5), refused).await;
+    assert!(matches!(definite, Ok(Err(Error::Quota))), "{definite:?}");
+    // Two seconds, then. After more than one of them a write with no room
+    // is still refused, though there is something to merge again.
+    commit(&db, put("small/2", "2")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    assert!(matches!(commit(&db, more).await, Err(Error::Quota)));
+}
+
+/// A server releases a database that nobody has used for a while. One that
+/// is merging is in use: a merge that takes longer than a database may be
+/// idle for would otherwise be let go every time, and begun again from its
+/// start by the next owner.
+#[tokio::test]
+async fn a_database_is_not_released_as_idle_while_it_merges() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let limits = Limits {
+        idle_close: Duration::from_millis(500),
+        ..Limits::default()
+    };
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let node = Node::new(ctx, limits, Arc::new(Metrics::default()));
+    node.create("app", DbConfig::default()).await.unwrap();
+    let db = node.db("app").await.unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // The second flush takes most of the time a database may be idle, so
+    // that the merge which follows it begins when the database has nearly
+    // been idle for that long. The merge is of seven tables or so. Every
+    // one of them is held for 120 ms, which is longer together than a
+    // database may be idle, and the server's housekeeping runs each time.
+    gate.rule(Op::Put, Action::Hold, usize::MAX, |key, _| {
+        key.contains("/db/app/t/")
+    });
+    commit(&db, round(2)).await.unwrap();
+    gate.wait_held(Op::Put).await;
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    gate.release(Op::Put);
+    let mut merged = 1;
+    loop {
+        let next = async {
+            while gate.held().len() == merged {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        if tokio::time::timeout(Duration::from_millis(300), next)
+            .await
+            .is_err()
+        {
+            break;
+        }
+        merged += 1;
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        node.tend().await;
+        assert_eq!(node.open_count(), 1, "released at table {merged}");
+        gate.release(Op::Put);
+    }
+    assert!(merged > 5, "{merged} tables");
+    every_key_is_of(&db, 2).await;
+    // And when the merge has ended and nobody has used it since, it goes.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    node.tend().await;
+    assert_eq!(node.open_count(), 0);
+    node.shutdown().await;
+}

@@ -436,6 +436,228 @@ async fn the_quota_refuses_growth_but_not_deletes() {
     assert_eq!(open(&ctx, "app").await.config().max_bytes, 1 << 20);
 }
 
+/// A write that the quota has no room for, asked again for as long as the
+/// database says it is making room.
+async fn commit_at_quota(db: &Arc<Db>, txn: Txn) -> Result<u64, Error> {
+    for _ in 0..2_000 {
+        match commit(db, txn.clone()).await {
+            Err(Error::Busy(_)) => tokio::time::sleep(Duration::from_millis(5)).await,
+            definite => return definite,
+        }
+    }
+    panic!("the database went on saying that it was making room");
+}
+
+async fn flushed(db: &Arc<Db>, tables: usize) {
+    db.request_flush();
+    while db.info().tables != tables {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// `rest` is the least a database waits after a merge for its quota that
+/// made little room.
+fn at_quota(max_bytes: u64, rest: Duration) -> (Arc<Ctx>, DbConfig) {
+    let opts = Options {
+        // Nothing is flushed but when the test asks.
+        idle_flush: Duration::from_secs(3600),
+        quota_rest: rest,
+        ..Options::default()
+    };
+    let config = DbConfig {
+        max_bytes,
+        ..DbConfig::default()
+    };
+    (ctx_with(Arc::new(MemoryStore::new()), opts), config)
+}
+
+/// A database that reached its quota stayed full when its keys were
+/// deleted: what they held was counted until a merge of everything, and
+/// nothing made one.
+#[tokio::test]
+async fn what_was_deleted_is_merged_away_before_the_quota_refuses() {
+    let (ctx, config) = at_quota(256 << 10, Duration::from_secs(3600));
+    let (db, _) = Db::open(ctx.clone(), "app", Some(config)).await.unwrap();
+    for i in 0..20 {
+        commit(&db, put(&format!("k{i:02}"), &noise(i + 1, 10_000)))
+            .await
+            .unwrap();
+    }
+    let large = put("large", &noise(99, 100_000));
+    // Nothing is in a table yet, so nothing can be merged away: full.
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Quota)
+    ));
+    flushed(&db, 1).await;
+    // Nor from one table and nothing else.
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Quota)
+    ));
+    let full = db.info().bytes;
+    commit(
+        &db,
+        Txn {
+            writes: (0..20).map(|i| (b(&format!("k{i:02}")), None)).collect(),
+            ..Txn::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Deleting is itself counted, until it is merged.
+    assert!(db.info().bytes > full);
+    // The write is put off, not refused, and then taken.
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    commit_at_quota(&db, large).await.unwrap();
+    assert!(db.info().bytes < 150_000, "{}", db.info().bytes);
+    assert_eq!(get(&db, "k07").await, None);
+    assert!(get(&db, "large").await.is_some());
+    // A merge that made room is not one to wait after: what is written
+    // over next is merged away as soon as its room is asked for.
+    for i in 0..13 {
+        commit(&db, put(&format!("k{i:02}"), &noise(i + 1, 10_000)))
+            .await
+            .unwrap();
+    }
+    // These are on their way into a table when the next is written, so
+    // the merge is asked for with a flush behind it and a write that is
+    // in no table: it takes that write with it.
+    db.request_flush();
+    commit(&db, put("large", "now small")).await.unwrap();
+    let other = put("other", &noise(98, 100_000));
+    assert!(matches!(
+        commit(&db, other.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    commit_at_quota(&db, other).await.unwrap();
+    assert_eq!(get(&db, "large").await.unwrap().1, "now small");
+}
+
+#[tokio::test]
+async fn what_was_overwritten_is_merged_away_before_the_quota_refuses() {
+    let (ctx, config) = at_quota(256 << 10, Duration::from_secs(3600));
+    let (db, _) = Db::open(ctx.clone(), "app", Some(config)).await.unwrap();
+    for i in 0..20 {
+        commit(&db, put(&format!("k{i:02}"), &noise(i + 1, 10_000)))
+            .await
+            .unwrap();
+    }
+    flushed(&db, 1).await;
+    for i in 0..4 {
+        commit(&db, put(&format!("k{i:02}"), &noise(100 + i, 10_000)))
+            .await
+            .unwrap();
+    }
+    // Two tables, the newer too small to be merged with the older for its
+    // size: 240,000 bytes are counted and 200,000 can be read.
+    flushed(&db, 2).await;
+    let another = put("another", &noise(200, 30_000));
+    assert!(matches!(
+        commit(&db, another.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    commit_at_quota(&db, another).await.unwrap();
+    assert_eq!(db.info().tables, 1);
+    assert_eq!(get(&db, "k02").await.unwrap().1, noise(102, 10_000));
+    assert_eq!(get(&db, "k12").await.unwrap().1, noise(13, 10_000));
+}
+
+/// A merge of everything rewrites the database. One that is full of what
+/// can still be read is not rewritten for every write it has no room for.
+#[tokio::test]
+async fn a_database_that_stays_full_is_not_merged_for_every_write() {
+    let (ctx, config) = at_quota(256 << 10, Duration::from_secs(3600));
+    let (db, _) = Db::open(ctx.clone(), "app", Some(config)).await.unwrap();
+    for i in 0..20 {
+        commit(&db, put(&format!("k{i:02}"), &noise(i + 1, 10_000)))
+            .await
+            .unwrap();
+    }
+    flushed(&db, 1).await;
+    let large = put("large", &noise(99, 100_000));
+    // One table and a write that is not in one: everything is merged,
+    // nothing is gained, and the write is refused.
+    commit(&db, put("small/1", "1")).await.unwrap();
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    assert!(matches!(
+        commit_at_quota(&db, large.clone()).await,
+        Err(Error::Quota)
+    ));
+    assert_eq!(db.info().tables, 1);
+    // The same again at once: refused without a merge.
+    commit(&db, put("small/2", "2")).await.unwrap();
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Quota)
+    ));
+    flushed(&db, 2).await;
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Quota)
+    ));
+    assert_eq!(db.info().tables, 2);
+    assert_eq!(get(&db, "small/2").await.unwrap().1, "2");
+    // A deletion is how room is made: it is not made to wait.
+    commit(
+        &db,
+        Txn {
+            writes: (0..10).map(|i| (b(&format!("k{i:02}")), None)).collect(),
+            ..Txn::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        commit(&db, large.clone()).await,
+        Err(Error::Busy(_))
+    ));
+    commit_at_quota(&db, large).await.unwrap();
+    assert_eq!(get(&db, "k03").await, None);
+    assert!(get(&db, "k13").await.is_some());
+}
+
+/// The wait ends: a database that is full of what can still be read is
+/// merged for its quota again, later.
+#[tokio::test]
+async fn a_database_that_stays_full_is_merged_again_after_a_while() {
+    let (ctx, config) = at_quota(256 << 10, Duration::from_millis(50));
+    let (db, _) = Db::open(ctx.clone(), "app", Some(config)).await.unwrap();
+    for i in 0..20 {
+        commit(&db, put(&format!("k{i:02}"), &noise(i + 1, 10_000)))
+            .await
+            .unwrap();
+    }
+    flushed(&db, 1).await;
+    let large = put("large", &noise(99, 100_000));
+    for round in 0..2 {
+        commit(&db, put(&format!("small/{round}"), "1"))
+            .await
+            .unwrap();
+        // Refused while the wait lasts, the second time round; then put
+        // off for a merge, which makes no room.
+        let put_off = async {
+            while !matches!(commit(&db, large.clone()).await, Err(Error::Busy(_))) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(20), put_off)
+            .await
+            .expect("the wait ends");
+        assert!(matches!(
+            commit_at_quota(&db, large.clone()).await,
+            Err(Error::Quota)
+        ));
+        assert_eq!(db.info().tables, 1);
+    }
+}
+
 #[tokio::test]
 async fn a_deleted_database_stays_deleted() {
     let store = Arc::new(MemoryStore::new());

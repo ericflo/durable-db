@@ -61,7 +61,7 @@ Administrator token required, except `GET` on one database, which any token for 
 
 A name is 1 to 128 characters from `A-Z a-z 0-9 . _ -` and does not begin with `.`.
 
-`bytes` counts stored table bytes plus unflushed writes. When it would exceed `max_bytes`, transactions that add data fail with `507`; deletes still succeed.
+`bytes` counts stored table bytes plus unflushed writes. A value that was written over or deleted is stored, and counted, until a merge has removed it. So when a transaction that adds data would take `bytes` over `max_bytes`, the database first merges everything it holds and answers `503` meanwhile; the transaction is taken once that has made room, and fails with `507` if it has not. Deletes always succeed, and the room they make is there for the next write. A database that is nearly full of what can still be read is not rewritten for every write: after a merge that removed less than an eighth, the next waits four times as long as that one took, and writes with no room get `507` until then or until something is deleted. The `503` lasts as long as the merge does, which is as long as reading the database and writing it again takes. A transaction that both deletes and adds is weighed by what it adds, so at the quota delete first, in a transaction of its own.
 
 ## Read
 
@@ -184,7 +184,7 @@ A path with a segment that is `.` or `..`, percent-encoded or not, or with a bac
 | 413 | `too_large` | The request body exceeds 32 MiB. | Split the request. |
 | 429 | `rate_limited` | The database's request budget is spent. | Retry after `Retry-After` seconds. |
 | 503 | `busy`, `ownership_moved`, `storage_unavailable` | The request could not be completed now: ownership is moving, storage did not answer, or the server has no room for another request, request body or read result. | Repeat the identical request. |
-| 507 | `quota_exceeded` | The database is at `max_bytes`. | Delete data or raise the quota. |
+| 507 | `quota_exceeded` | The database is at `max_bytes` with nothing left to merge away. | Delete data or raise the quota. |
 
 A `503` on a commit means the outcome is **unknown**: the transaction may have been applied. Repeating it with the same `idempotency_key` is always safe and returns the definite result. Servers repeat such commits themselves when a key is present, so clients see this rarely.
 

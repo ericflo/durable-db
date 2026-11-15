@@ -69,6 +69,9 @@ pub struct Options {
     /// Keys remembered for range checks, and the bytes they may take.
     pub recent_keys: usize,
     pub recent_bytes: usize,
+    /// The least a database waits after a merge of everything that its
+    /// quota asked for and that made little room, before the next.
+    pub quota_rest: Duration,
 }
 
 impl Default for Options {
@@ -91,6 +94,7 @@ impl Default for Options {
             table_bytes: 32 << 20,
             recent_keys: 100_000,
             recent_bytes: 8 << 20,
+            quota_rest: Duration::from_secs(1),
         }
     }
 }
@@ -281,6 +285,11 @@ pub struct Db {
     wake_maint: Notify,
     /// Woken when a release or a deletion begins, or the database closes.
     leave: Notify,
+    /// A write was put off for the quota: everything is to be merged, so
+    /// that what was overwritten or deleted is no longer counted.
+    reclaim: AtomicBool,
+    /// Milliseconds after `started` before which that is not asked again.
+    reclaim_rests_until: AtomicU64,
     maint: tokio::sync::Mutex<Maint>,
     started: Instant,
     last_used_ms: AtomicU64,
@@ -730,6 +739,8 @@ impl Db {
             wake_writer: Notify::new(),
             wake_maint: Notify::new(),
             leave: Notify::new(),
+            reclaim: AtomicBool::new(false),
+            reclaim_rests_until: AtomicU64::new(0),
             maint: tokio::sync::Mutex::new(Maint {
                 generation: 0,
                 checked: 0,
@@ -1179,7 +1190,8 @@ impl Db {
             // A merge that failed is tried again when the database is next
             // written to, not at once: asking for another turn now would
             // repeat it for as long as storage is failing.
-            if failed || merge_plan(&self.state.read().tables).is_none() || self.closing() {
+            let due = self.plan(&self.state.read().tables).is_some();
+            if failed || !due || self.closing() {
                 (turn, queued) = (None, None);
             } else if turn.is_none() && queued.is_none() {
                 let merges = self.ctx.io.merges.clone();
@@ -1206,6 +1218,36 @@ impl Db {
             leave.as_mut().await;
             leave.set(self.leave.notified());
         }
+    }
+
+    /// How many of the newest tables to merge now, if any, and whether
+    /// that is all of them for the quota's sake.
+    fn plan(&self, tables: &[Arc<Table>]) -> Option<(usize, bool)> {
+        if self.reclaim.load(Ordering::Acquire) && runs(tables).nth(1).is_some() {
+            return Some((tables.len(), true));
+        }
+        merge_plan(tables).map(|count| (count, false))
+    }
+
+    /// Ask for everything to be merged, for a write that the quota has no
+    /// room for. `false` when the last such merge gained too little for
+    /// another to be made yet.
+    ///
+    /// A merge of everything rewrites the database, and a database that is
+    /// full of what can still be read could ask for one with every write.
+    /// So after one that removed less than an eighth of what it merged, the
+    /// next waits four times as long as it took, and a second at least:
+    /// writes that do not fit are refused meanwhile, as they are when there
+    /// is nothing to merge. A deletion ends the wait, since it is how room
+    /// is made.
+    fn reclaim(&self) -> bool {
+        let now = self.started.elapsed().as_millis() as u64;
+        if now < self.reclaim_rests_until.load(Ordering::Acquire) {
+            return false;
+        }
+        self.reclaim.store(true, Ordering::Release);
+        self.request_flush();
+        true
     }
 
     fn should_flush(&self, maint: &Maint) -> bool {
@@ -1272,8 +1314,15 @@ impl Db {
     /// Merge the newest tables when they have grown comparable to the next,
     /// and this database has a turn or can take one. Returns whether it did.
     async fn compact(self: &Arc<Self>, maint: &mut Maint, turn: &mut Option<Turn>) -> Result<bool> {
+        // A merge for the quota is of everything that has been written:
+        // what is not in a table yet is put in one first. Without it, a
+        // value that was written over a moment ago would be kept.
+        if self.reclaim.load(Ordering::Acquire) && self.state.read().confirmed_frame > maint.covered
+        {
+            self.flush(maint, false).await?;
+        }
         let tables = self.state.read().tables.clone();
-        let Some(count) = merge_plan(&tables) else {
+        let Some((count, reclaiming)) = self.plan(&tables) else {
             return Ok(false);
         };
         // A merge holds one table of its output in memory; only a few run
@@ -1284,6 +1333,12 @@ impl Db {
         let Some(_turn) = turn.take() else {
             return Ok(false);
         };
+        let began = Instant::now();
+        // A merge is use. A database that was released for being idle
+        // while it merged would have the merge begun again from its start
+        // by its next owner, and a merge that takes longer than a database
+        // may be idle for would never end.
+        self.touch();
         let bottom = count == tables.len();
         let io = &self.ctx.io;
         let everything = Scan {
@@ -1311,6 +1366,7 @@ impl Db {
                 let (body, mut meta) = full.finish(self.layout.table(self.epoch, maint.next_table));
                 meta.part = merged.len() as u32;
                 merged.push(self.store_table(maint, body, meta).await?);
+                self.touch();
                 // Between tables, a merge gives way to what must not wait
                 // for it: a release, and writes that are due to be flushed.
                 if next.is_some() && self.closing() {
@@ -1344,11 +1400,25 @@ impl Db {
         // Tables flushed meanwhile are newer than everything merged.
         let current = self.state.read().tables.clone();
         let mut result = current[..current.len() - tables.len()].to_vec();
-        result.extend(merged);
+        result.extend(merged.iter().cloned());
         result.extend(tables[count..].iter().cloned());
         let (revision, covered, sealed) = (maint.revision, maint.covered, maint.sealed);
         self.publish(maint, result, revision, covered, sealed, None)
             .await?;
+        if reclaiming {
+            let size = |tables: &[Arc<Table>]| tables.iter().map(|t| t.meta.size).sum::<u64>();
+            let (before, after) = (size(&tables), size(&merged));
+            if after > before - before / 8 {
+                let rest = (began.elapsed() * RECLAIM_REST).max(self.ctx.opts.quota_rest);
+                let until = self.started.elapsed() + rest;
+                self.reclaim_rests_until
+                    .store(until.as_millis() as u64, Ordering::Release);
+            }
+        }
+        if bottom {
+            // Whatever asked for it has it now.
+            self.reclaim.store(false, Ordering::Release);
+        }
         Ok(true)
     }
 
@@ -1650,6 +1720,10 @@ fn runs(tables: &[Arc<Table>]) -> impl Iterator<Item = &[Arc<Table>]> {
         (len > 0).then_some(run)
     })
 }
+
+/// After a merge of everything that the quota asked for and that gained
+/// little, the next waits this many times as long as it took.
+const RECLAIM_REST: u32 = 4;
 
 /// How many of the newest tables to merge, if any: whole runs, taken while
 /// they are together at least half the size of the next.
@@ -2280,7 +2354,19 @@ impl Writer {
         if added > 0
             && state.table_bytes + (state.mem.bytes() + added) as u64 > state.config.max_bytes
         {
-            return Err(Error::Quota);
+            // What was overwritten or deleted is counted until a merge has
+            // removed it, and deleting counts for a little more. So a
+            // database with more than one run, or with one and writes that
+            // are not in a table yet, may have room once all of it is
+            // merged: it is, and the write is asked for again. One with
+            // nothing to merge is full.
+            let merged = runs(&state.tables).count() + usize::from(!state.mem.is_empty()) < 2;
+            if merged || !db.reclaim() {
+                return Err(Error::Quota);
+            }
+            return Err(Error::Busy(
+                "the database is at its quota and is merging away what was overwritten or deleted; retry shortly".into(),
+            ));
         }
         // Writes arriving faster than they can be flushed are refused rather
         // than accumulated without bound.
@@ -2290,6 +2376,10 @@ impl Writer {
             return Err(Error::Busy(
                 "the database is flushing earlier writes; retry shortly".into(),
             ));
+        }
+        if size > added {
+            // A deletion: room has been made, and may be asked for.
+            db.reclaim_rests_until.store(0, Ordering::Release);
         }
         self.assigned += 1;
         let revision = self.assigned;
