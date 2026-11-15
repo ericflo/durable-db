@@ -29,6 +29,14 @@
 # database of a size costs a server in memory, in bytes written and in time
 # to open; it does not say how fast one is on a provider's bucket.
 #
+# The kernel counts what a server reads of a local directory against the
+# server's limit of 1 GiB, and keeps little of a larger database in memory
+# for it: the reads would then measure this machine's disk, and differ
+# several times over from one run to the next. So before the reads and the
+# scans this script reads the directory itself, from outside that limit,
+# and the kernel has it in memory: a local directory needs as much free
+# memory as the database is large.
+#
 # On a bucket every read of what is in neither cache is a request, and the
 # reads and scans send as many at once as they have clients: give them few
 # (SOAK_READ_CLIENTS) on an account that others use. The database is
@@ -140,6 +148,7 @@ bench() {
 }
 # A read workload, and what the server fetched from storage to answer it.
 reading() {
+    [ -n "${SOAK_STORE:-}" ] || find "$dir/data" -type f -exec cat {} + >/dev/null 2>&1 || true
     fetched=$(metric durable_db_storage_received_bytes_total)
     asked=$(metric 'durable_db_storage_seconds_count{op="get"}')
     bench --clients "$readers" --seconds "$seconds" "$@"
