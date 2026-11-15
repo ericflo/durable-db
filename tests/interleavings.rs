@@ -9,11 +9,12 @@ use bytes::Bytes;
 use durable_db::{
     Error,
     db::{Check, Ctx, Db, Options, ReadReq, Scan, Txn},
-    io::{DiskCache, Io},
+    io::{AHEAD_MERGES, AHEAD_SCANS, DiskCache, Io},
     layout::{DbConfig, Layout},
     metrics::Metrics,
     node::{Limits, Node},
     store::{Listed, ObjectStore, StoreError, StoreResult, memory::MemoryStore},
+    table::{Entry, Table, TableBuilder},
 };
 use std::{
     sync::{
@@ -48,6 +49,10 @@ enum Action {
 /// Whether a request for this key, the n-th of its kind, is the one meant.
 type Matches = Box<dyn Fn(&str, u64) -> bool + Send + Sync>;
 
+/// A read of a table: its key and, of a part of it, where that begins and
+/// ends.
+type Read = (String, Option<(u64, u64)>);
+
 struct Rule {
     op: Op,
     matches: Matches,
@@ -61,6 +66,8 @@ struct Gate {
     inner: Arc<MemoryStore>,
     rules: Mutex<Vec<Rule>>,
     held: Mutex<Vec<(Op, String, Arc<Semaphore>)>>,
+    /// Every read of a table that is asked of the store.
+    reads: Mutex<Vec<Read>>,
     /// Send no spare uploads, as a store with nothing to spare does, and
     /// count those that were asked for.
     no_spares: AtomicBool,
@@ -73,6 +80,7 @@ impl Gate {
             inner: inner.clone(),
             rules: Mutex::default(),
             held: Mutex::default(),
+            reads: Mutex::default(),
             no_spares: AtomicBool::new(false),
             spares_refused: AtomicUsize::new(0),
         })
@@ -104,6 +112,25 @@ impl Gate {
             .iter()
             .map(|(op, key, _)| (*op, key.clone()))
             .collect()
+    }
+
+    /// The tables asked for whole so far.
+    fn fetched(&self) -> Vec<String> {
+        let reads = self.reads.lock().unwrap();
+        let whole = reads.iter().filter(|(_, part)| part.is_none());
+        whole.map(|(key, _)| key.clone()).collect()
+    }
+
+    /// The parts of tables asked for so far.
+    fn ranges(&self) -> Vec<(u64, u64)> {
+        let reads = self.reads.lock().unwrap();
+        reads.iter().filter_map(|(_, part)| *part).collect()
+    }
+
+    fn read(&self, key: &str, part: Option<(u64, u64)>) {
+        if key.contains("/t/") {
+            self.reads.lock().unwrap().push((key.to_owned(), part));
+        }
     }
 
     fn release(&self, op: Op) {
@@ -168,10 +195,12 @@ impl ObjectStore for Gate {
         self.put(key, body).await.map(|()| true)
     }
     async fn get(&self, key: &str) -> StoreResult<Option<Bytes>> {
+        self.read(key, None);
         self.pass(Op::Get, key, 0).await?;
         self.inner.get(key).await
     }
     async fn get_range(&self, key: &str, start: u64, end: u64) -> StoreResult<Option<Bytes>> {
+        self.read(key, Some((start, end)));
         self.pass(Op::GetRange, key, start).await?;
         self.inner.get_range(key, start, end).await
     }
@@ -829,6 +858,8 @@ async fn deletions_are_held_back_while_a_flush_is_stuck() {
 #[tokio::test]
 async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
     const SIZE: u64 = 4096;
+    // A read of this much of a table has it fetched.
+    const PART: u64 = SIZE / 16;
     let store = Arc::new(MemoryStore::new());
     let gate = Gate::new(&store);
     let dir = tempfile::tempdir().unwrap();
@@ -844,7 +875,13 @@ async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
     }
     let read_all = || async {
         for key in &tables {
-            assert_eq!(io.range(key, SIZE, 10, 20).await.unwrap().len(), 10);
+            assert_eq!(
+                io.range(key, SIZE, 10, 10 + PART, true)
+                    .await
+                    .unwrap()
+                    .len() as u64,
+                PART
+            );
         }
     };
     gate.rule(Op::Get, Action::Hold, usize::MAX, |_, _| true);
@@ -876,6 +913,648 @@ async fn an_empty_disk_cache_is_filled_two_tables_at_a_time() {
     let body = Bytes::from(vec![7u8; SIZE as usize]);
     io.remember(&tables[0], body).await;
     assert_eq!(disk.used(), tables.len() as u64 * SIZE);
+}
+
+/// A server that read more than its disk cache holds fetched every table a
+/// read missed, whole, into the place of one that was as much in use. With
+/// a cache of 1 GiB and a database of 4 GiB it read a gigabyte a second
+/// from its store, for reads that needed a block each (finding 43). A table
+/// is fetched into room that is free. When there is none, the block is read.
+#[tokio::test]
+async fn a_table_in_use_is_not_put_out_of_the_disk_cache_for_another() {
+    // Larger than the end of a table that is read for its index, so that
+    // no read here is of a whole table.
+    const SIZE: u64 = 400 << 10;
+    // A read of this much of a table has it fetched, where there is room.
+    const PART: u64 = SIZE / 16;
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let dir = tempfile::tempdir().unwrap();
+    let tables: Vec<String> = (0..8).map(|i| format!("root/db/app/t/1/{i:08x}")).collect();
+    for key in &tables {
+        let body = Bytes::from(vec![7u8; SIZE as usize]);
+        store.put(key, body).await.unwrap();
+    }
+    // Room for three of the eight.
+    let disk = DiskCache::open(dir.path(), 3 * SIZE + 1000).unwrap();
+    let io = Io::new(gate.clone(), 1 << 20, Some(disk));
+    let disk = io.disk.clone().unwrap();
+    let read_all = || async {
+        for key in &tables {
+            assert_eq!(
+                io.range(key, SIZE, 10, 10 + PART, true)
+                    .await
+                    .unwrap()
+                    .len() as u64,
+                PART
+            );
+        }
+    };
+    // Reads until `count` tables have been fetched and three are in the cache.
+    let fetched = |count: usize| {
+        let (gate, disk, read_all) = (&gate, &disk, &read_all);
+        async move {
+            let reached = async {
+                while gate.fetched().len() < count || disk.used() < 3 * SIZE {
+                    read_all().await;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(60), reached)
+                .await
+                .expect("tables are fetched into free room");
+        }
+    };
+    fetched(3).await;
+    // Each of the three was fetched once, and the five are not fetched
+    // however often they are read.
+    let first = gate.fetched();
+    for _ in 0..20 {
+        read_all().await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(gate.fetched(), first);
+    assert_eq!(first.len(), 3);
+    assert_eq!(disk.used(), 3 * SIZE);
+    // The three are read from the disk and the five from the store, the
+    // bytes that were asked for.
+    let count = |counter: &std::sync::atomic::AtomicU64| counter.load(Ordering::Relaxed);
+    let (hits, misses, asked) = (count(&disk.hits), count(&disk.misses), gate.ranges().len());
+    read_all().await;
+    assert_eq!(
+        (count(&disk.hits), count(&disk.misses)),
+        (hits + 3, misses + 5)
+    );
+    assert_eq!(gate.ranges()[asked..], [(10, 10 + PART); 5]);
+
+    // A table this server wrote is taken, and the least recently used of
+    // the three makes way for it. That one is not fetched back.
+    let written = "root/db/app/t/1/000000ff".to_owned();
+    io.remember(&written, Bytes::from(vec![9u8; SIZE as usize]))
+        .await;
+    assert_eq!(disk.used(), 3 * SIZE);
+    for _ in 0..20 {
+        read_all().await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(gate.fetched(), first);
+    // What a merge replaced leaves its room to a table that is read.
+    io.discard(&[written]).await;
+    assert_eq!(disk.used(), 2 * SIZE);
+    fetched(4).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(gate.fetched().len(), 4);
+    assert_eq!(disk.used(), 3 * SIZE);
+
+    // A table that a read asked for whole is kept by the same rule: not in
+    // the place of one in use, and at once where there is room.
+    let whole = gate.fetched();
+    let absent = tables.iter().find(|key| !whole.contains(key)).unwrap();
+    let all = io.range(absent, SIZE, 0, SIZE, true).await.unwrap();
+    assert_eq!(all.len() as u64, SIZE);
+    let misses = count(&disk.misses);
+    assert_eq!(
+        io.range(absent, SIZE, 10, 20, true).await.unwrap().len(),
+        10
+    );
+    assert_eq!(count(&disk.misses), misses + 1);
+    assert_eq!(disk.used(), 3 * SIZE);
+    io.discard(&whole[3..]).await;
+    assert_eq!(disk.used(), 2 * SIZE);
+    let all = io.range(absent, SIZE, 0, SIZE + 100, true).await.unwrap();
+    assert_eq!(all.len() as u64, SIZE);
+    assert_eq!(disk.used(), 3 * SIZE);
+    assert_eq!(
+        io.range(absent, SIZE, 10, 20, true).await.unwrap().len(),
+        10
+    );
+    assert_eq!(count(&disk.misses), misses + 2);
+    assert_eq!(gate.fetched(), whole);
+}
+
+/// A merge reads each of its tables once, and they leave the disk cache
+/// when it is done. A server that merges tables it does not have there,
+/// such as those an earlier server wrote, reads them from the store and
+/// does not keep them.
+#[tokio::test]
+async fn a_merge_does_not_keep_the_tables_it_reads() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    // An earlier server flushed one table.
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    db.close().await;
+    // This one has an empty disk cache.
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+    let ctx = Arc::new(Ctx {
+        io: Io::new(gate.clone(), 32 << 20, Some(disk)),
+        opts: small_tables(),
+        root: "root/".into(),
+    });
+    let cached = || std::fs::read_dir(dir.path()).unwrap().count();
+    let (db, _) = Db::open(ctx, "app", None).await.unwrap();
+    assert_eq!(cached(), 0);
+    // Its flush is followed by a merge of both tables. The first table the
+    // merge stores is held: it has read from both by then.
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    gate.wait_held(Op::Put).await;
+    // The table it flushed is in its cache, and the other is not.
+    assert_eq!(cached(), 1);
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while db.info().tables < 4 || cached() != db.info().tables {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the cache holds the tables of the manifest and no others");
+    every_key_is_of(&db, 2).await;
+}
+
+/// A merge that fails has stored some of its tables, and what a server
+/// stores is in its disk cache. The next manifest lists none of them, and
+/// they leave the cache as they leave the bucket, with what a merge that
+/// succeeds replaces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tables_that_no_manifest_lists_leave_the_disk_cache() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+    let ctx = Arc::new(Ctx {
+        io: Io::new(gate.clone(), 32 << 20, Some(disk)),
+        opts: small_tables(),
+        root: "root/".into(),
+    });
+    let disk = ctx.io.disk.clone().unwrap();
+    let cached = || std::fs::read_dir(dir.path()).unwrap().count();
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // The second flush gets its table through, and the merge its first.
+    // The merge's second is refused, and every table after that.
+    let tables = Arc::new(AtomicUsize::new(0));
+    let seen = tables.clone();
+    gate.rule(Op::Put, Action::Break, usize::MAX, move |key, _| {
+        key.contains("/t/") && seen.fetch_add(1, Ordering::SeqCst) >= 2
+    });
+    commit(&db, round(2)).await.unwrap();
+    flushed(&db).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!((db.info().tables, cached()), (2, 3));
+    // Storage recovers, and the next write brings a flush, whose manifest
+    // does not list the table that merge left, and the merge.
+    gate.clear();
+    commit(&db, round(3)).await.unwrap();
+    let merged = async {
+        while db.mem_bytes() > 0
+            || db.info().tables < 4
+            || cached() != db.info().tables
+            || disk.used() != db.info().bytes
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the cache holds the tables of the manifest and no others");
+    every_key_is_of(&db, 3).await;
+}
+
+/// A table that reads miss is fetched whole once they have had a sixteenth
+/// of it from the store, and until then they are given the bytes they asked
+/// for. A table of 32 MiB that was fetched for one read of a value of 4 KiB
+/// was 8,000 times what was read; this way no fetch is more than sixteen.
+#[tokio::test]
+async fn a_table_is_fetched_when_reads_have_had_a_sixteenth_of_it() {
+    const SIZE: u64 = 400 << 10;
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let dir = tempfile::tempdir().unwrap();
+    let tables: Vec<String> = (0..2).map(|i| format!("root/db/app/t/1/{i:08x}")).collect();
+    for key in &tables {
+        let body = Bytes::from(vec![7u8; SIZE as usize]);
+        store.put(key, body).await.unwrap();
+    }
+    // Room for both.
+    let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+    let io = Io::new(gate.clone(), 1 << 20, Some(disk));
+    let disk = io.disk.clone().unwrap();
+    // 255 reads of a hundred bytes are just short of a sixteenth. What a
+    // merge reads meanwhile is not counted, however much it is, and
+    // neither is what is read of another table.
+    for i in 0..255 {
+        if i == 254 {
+            for _ in 0..4 {
+                let read = io.range(&tables[0], SIZE, 0, SIZE / 2, false);
+                assert_eq!(read.await.unwrap().len() as u64, SIZE / 2);
+            }
+            let read = io.range(&tables[1], SIZE, 0, 25_500, true);
+            assert_eq!(read.await.unwrap().len(), 25_500);
+        }
+        let read = io.range(&tables[0], SIZE, i * 100, i * 100 + 100, true);
+        assert_eq!(read.await.unwrap().len(), 100);
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(gate.fetched().is_empty());
+    assert_eq!(disk.used(), 0);
+    assert_eq!(gate.ranges().len(), 260);
+    // The read that makes it a sixteenth has the table fetched.
+    let read = io.range(&tables[0], SIZE, 0, 100, true);
+    assert_eq!(read.await.unwrap().len(), 100);
+    let there = async {
+        while disk.used() < SIZE {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), there)
+        .await
+        .expect("the table reaches the disk cache");
+    assert_eq!(gate.fetched(), [tables[0].clone()]);
+    // Once it has left the cache, it is counted from the beginning.
+    assert!(io.forget(&tables[0]).await);
+    for i in 0..255 {
+        let read = io.range(&tables[0], SIZE, i * 100, i * 100 + 100, true);
+        assert_eq!(read.await.unwrap().len(), 100);
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(gate.fetched().len(), 1);
+    assert_eq!(disk.used(), 0);
+}
+
+/// A fetch that fails gives back the room it was promised, and the table
+/// is fetched after a later read of it.
+#[tokio::test]
+async fn a_fetch_that_fails_gives_its_room_back() {
+    const SIZE: u64 = 400 << 10;
+    const PART: u64 = SIZE / 16;
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let dir = tempfile::tempdir().unwrap();
+    let key = "root/db/app/t/1/00000001";
+    let body = Bytes::from(vec![7u8; SIZE as usize]);
+    store.put(key, body).await.unwrap();
+    // Room for the one table and no more.
+    let disk = DiskCache::open(dir.path(), SIZE + 1000).unwrap();
+    let io = Io::new(gate.clone(), 1 << 20, Some(disk));
+    let disk = io.disk.clone().unwrap();
+    gate.rule(Op::Get, Action::Break, 2, |_, _| true);
+    let there = async {
+        while disk.used() < SIZE {
+            assert_eq!(
+                io.range(key, SIZE, 10, 10 + PART, true)
+                    .await
+                    .unwrap()
+                    .len() as u64,
+                PART
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), there)
+        .await
+        .expect("the table is fetched once the store gives it");
+    // Two fetches that failed, and the one that did not.
+    assert_eq!(gate.fetched().len(), 3);
+}
+
+/// A table of `count` entries, `k000000` and on, each with a value of
+/// `value_bytes` that does not compress, in blocks of `block_bytes`.
+async fn stored_table(
+    store: &MemoryStore,
+    count: usize,
+    value_bytes: usize,
+    block_bytes: usize,
+) -> Arc<Table> {
+    let mut builder = TableBuilder::new(block_bytes);
+    for i in 0..count {
+        builder.add(&Entry {
+            key: b(&format!("k{i:06}")),
+            version: 1,
+            value: Some(b(&noise(i as u64 + 1, value_bytes))),
+        });
+    }
+    let (body, meta) = builder.finish(format!("root/db/app/t/1/{count:08x}"));
+    store.put(&meta.key, body).await.unwrap();
+    Table::new(meta)
+}
+
+fn keys(range: std::ops::Range<usize>) -> Vec<String> {
+    range.map(|i| format!("k{i:06}")).collect()
+}
+
+async fn scanned(
+    table: &Arc<Table>,
+    io: &Arc<Io>,
+    (lo, hi): (&str, &str),
+    reverse: bool,
+    keep: bool,
+) -> Vec<String> {
+    let mut scan = table.scan(io.clone(), b(lo), b(hi), reverse, keep);
+    let mut keys = Vec::new();
+    while let Some(entry) = scan.next().await.unwrap() {
+        keys.push(String::from_utf8(entry.key.to_vec()).unwrap());
+    }
+    keys
+}
+
+const ALL: (&str, &str) = ("", "");
+
+/// A scan that asked for one block at a time asked a bucket a thousand
+/// times for a table of 32 MiB, and a merge that is not read from the disk
+/// cache is such a scan of every table it merges. A scan asks for one
+/// block, then for two, then for four, up to 64 and to 1 MiB, and for none
+/// past its own end.
+#[tokio::test]
+async fn a_scan_reads_ahead_of_itself_and_not_past_its_end() {
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let io = Io::new(gate.clone(), 1 << 20, None);
+    // 2,000 entries of 1 KiB, five to a block: 400 blocks, some 2 MiB.
+    let table = stored_table(&store, 2000, 1000, 4096).await;
+    assert!(table.meta.size > 1 << 20);
+    // The first read of a table is of its end, where its index is, and
+    // the blocks that came with that are kept.
+    assert_eq!(
+        scanned(&table, &io, ("", "k000001"), false, false).await,
+        keys(0..1)
+    );
+    let held = io.cache_bytes();
+    let lengths = |from: usize| -> Vec<u64> {
+        let ranges = gate.ranges();
+        ranges[from..]
+            .iter()
+            .map(|(start, end)| end - start)
+            .collect()
+    };
+
+    // The whole table, forward: each read begins where the last ended and
+    // is at most twice as long, the first is one block and the longest 64.
+    let asked = gate.ranges().len();
+    assert_eq!(scanned(&table, &io, ALL, false, false).await, keys(0..2000));
+    let ranges = gate.ranges()[asked..].to_vec();
+    assert!(ranges.len() >= 8 && ranges.len() <= 14, "{ranges:?}");
+    assert_eq!(ranges[0].0, 0);
+    assert!(ranges[0].1 < 6000, "{ranges:?}");
+    for pair in ranges.windows(2) {
+        assert_eq!(pair[1].0, pair[0].1, "{ranges:?}");
+        let (last, next) = (pair[0].1 - pair[0].0, pair[1].1 - pair[1].0);
+        assert!(next <= 2 * last + 6000, "{ranges:?}");
+    }
+    let longest = lengths(asked).into_iter().max().unwrap();
+    assert!(longest > 32 * 5000 && longest <= 64 * 5200, "{ranges:?}");
+
+    // In reverse: each read ends where the last began.
+    let asked = gate.ranges().len();
+    let mut reversed = keys(0..2000);
+    reversed.reverse();
+    assert_eq!(scanned(&table, &io, ALL, true, false).await, reversed);
+    let ranges = gate.ranges()[asked..].to_vec();
+    assert!(ranges.len() >= 8 && ranges.len() <= 14, "{ranges:?}");
+    for pair in ranges.windows(2) {
+        assert_eq!(pair[1].1, pair[0].0, "{ranges:?}");
+    }
+    assert_eq!(ranges.last().unwrap().0, 0);
+
+    // Forty entries: the blocks that hold them and the one after, which
+    // shows the scan its end. Reading on as far as the last read was long
+    // would be half as much again.
+    for reverse in [false, true] {
+        let asked = gate.ranges().len();
+        let mut selected = keys(100..140);
+        if reverse {
+            selected.reverse();
+        }
+        let found = scanned(&table, &io, ("k000100", "k000140"), reverse, false).await;
+        assert_eq!(found, selected);
+        let ranges = gate.ranges()[asked..].to_vec();
+        assert!(ranges.len() <= 4, "{ranges:?}");
+        assert!(lengths(asked).iter().sum::<u64>() < 52_000, "{ranges:?}");
+    }
+    // A merge reads so, and what it read is not kept in memory.
+    assert_eq!(io.cache_bytes(), held);
+    // What a request scans is, and the store is not asked for it again.
+    let range = ("k000100", "k000140");
+    assert_eq!(
+        scanned(&table, &io, range, false, true).await,
+        keys(100..140)
+    );
+    assert!(io.cache_bytes() > held + 40_000);
+    let asked = gate.ranges().len();
+    assert_eq!(
+        scanned(&table, &io, range, false, true).await,
+        keys(100..140)
+    );
+    assert_eq!(gate.ranges().len(), asked);
+
+    // Blocks of 100 KiB: a read is of no more than 1 MiB of them.
+    let large = stored_table(&store, 60, 100_000, 4096).await;
+    let asked = gate.ranges().len();
+    assert_eq!(scanned(&large, &io, ALL, false, false).await, keys(0..60));
+    let forward = lengths(asked + 1);
+    let longest = *forward.iter().max().unwrap();
+    assert!(longest > 3 << 18 && longest <= 1 << 20, "{forward:?}");
+    let asked = gate.ranges().len();
+    let mut reversed = keys(0..60);
+    reversed.reverse();
+    assert_eq!(scanned(&large, &io, ALL, true, false).await, reversed);
+    let backward = lengths(asked);
+    let longest = *backward.iter().max().unwrap();
+    assert!(longest > 3 << 18 && longest <= 1 << 20, "{backward:?}");
+}
+
+/// What a scan read ahead is in memory until the scan has come to it, and
+/// a server may be asked for a thousand scans at once. So sixteen scans of
+/// requests read ahead at a time, and the others read a block at a time,
+/// as every scan did before. Merges have sixteen turns of their own, for
+/// the runs of tables they read.
+#[tokio::test]
+async fn no_more_than_sixteen_scans_read_ahead_at_a_time() {
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let io = Io::new(gate.clone(), 1 << 20, None);
+    // Tables of some 300 KiB for the scans that hold a turn, and of 2 MiB
+    // for those whose reads are looked at.
+    let mut small = Vec::new();
+    for n in 0..32 {
+        small.push(stored_table(&store, 300 + n, 1000, 4096).await);
+    }
+    let mut large = Vec::new();
+    for n in 0..5 {
+        large.push(stored_table(&store, 2000 + n, 1000, 4096).await);
+    }
+    // What a scan asked the store for, after the end of its table where
+    // the index is: how many reads, and the longest.
+    let read = |from: usize| -> (usize, u64) {
+        let ranges = gate.ranges();
+        let lengths = ranges[from + 1..].iter().map(|(start, end)| end - start);
+        (lengths.clone().count(), lengths.max().unwrap_or(0))
+    };
+    // A scan as far as its second read, which is of two blocks and has
+    // it hold a turn.
+    let begun = |table: &Arc<Table>, keep: bool| {
+        let mut scan = table.scan(io.clone(), b(""), b(""), false, keep);
+        async move {
+            for _ in 0..6 {
+                scan.next().await.unwrap().unwrap();
+            }
+            scan
+        }
+    };
+    let half = ("", "k001000");
+
+    // Sixteen scans of requests hold the sixteen turns.
+    let mut scans = Vec::new();
+    for table in &small[..16] {
+        scans.push(begun(table, true).await);
+    }
+    assert_eq!(io.ahead.available_permits(), 0);
+    // The seventeenth reads a block at a time.
+    let asked = gate.ranges().len();
+    assert_eq!(
+        scanned(&large[0], &io, half, false, true).await,
+        keys(0..1000)
+    );
+    let (reads, longest) = read(asked);
+    assert!(reads >= 200 && longest < 6000, "{reads} {longest}");
+    // A merge has a turn of its own.
+    let asked = gate.ranges().len();
+    assert_eq!(scanned(&large[1], &io, ALL, false, false).await.len(), 2001);
+    let (reads, longest) = read(asked);
+    assert!(reads < 20 && longest > 100_000, "{reads} {longest}");
+    // One of the sixteen goes on to its end. It gives its turn back
+    // before it asks for one, so it reads ahead as before.
+    let asked = gate.ranges().len();
+    let mut first = scans.remove(0);
+    let mut found = 6;
+    while first.next().await.unwrap().is_some() {
+        found += 1;
+    }
+    assert_eq!(found, 300);
+    let ranges = gate.ranges()[asked..].to_vec();
+    assert!(ranges.iter().any(|(start, end)| end - start > 6000));
+    assert_eq!(io.ahead.available_permits(), 0);
+    drop(first);
+    assert_eq!(io.ahead.available_permits(), 1);
+    // With a turn free, the next scan reads ahead.
+    let asked = gate.ranges().len();
+    assert_eq!(
+        scanned(&large[2], &io, half, false, true).await,
+        keys(0..1000)
+    );
+    let (reads, longest) = read(asked);
+    assert!(reads < 20 && longest > 100_000, "{reads} {longest}");
+    assert_eq!(io.ahead.available_permits(), 1);
+    drop(scans);
+    assert_eq!(io.ahead.available_permits(), AHEAD_SCANS);
+
+    // Sixteen runs of tables that merges read hold the merges' turns,
+    // and the seventeenth is read a block at a time.
+    let mut merges = Vec::new();
+    for table in &small[16..] {
+        merges.push(begun(table, false).await);
+    }
+    assert_eq!(io.merge_ahead.available_permits(), 0);
+    let asked = gate.ranges().len();
+    assert_eq!(scanned(&large[3], &io, ALL, false, false).await.len(), 2003);
+    let (reads, longest) = read(asked);
+    assert!(reads >= 300 && longest < 6000, "{reads} {longest}");
+    // The requests' turns are not theirs to take.
+    assert_eq!(io.ahead.available_permits(), AHEAD_SCANS);
+    drop(merges);
+    assert_eq!(io.merge_ahead.available_permits(), AHEAD_MERGES);
+    let asked = gate.ranges().len();
+    assert_eq!(scanned(&large[4], &io, ALL, false, false).await.len(), 2004);
+    let (reads, longest) = read(asked);
+    assert!(reads < 20 && longest > 100_000, "{reads} {longest}");
+}
+
+/// A merge reads each of its tables once. A table it reads from the store
+/// is not fetched for the disk cache, where what the merge replaces has no
+/// place; what a request scans is. And a copy in the disk cache that turns
+/// out to be damaged in the middle of a scan is discarded, and the store's
+/// read.
+#[tokio::test]
+async fn what_a_merge_reads_is_not_fetched_for_the_disk_cache() {
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let dir = tempfile::tempdir().unwrap();
+    let process = || {
+        let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+        Io::new(gate.clone(), 1 << 20, Some(disk))
+    };
+    let io = process();
+    let disk = io.disk.clone().unwrap();
+    let table = stored_table(&store, 2000, 1000, 4096).await;
+    assert_eq!(scanned(&table, &io, ALL, false, false).await, keys(0..2000));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(gate.fetched().is_empty());
+    assert_eq!(disk.used(), 0);
+
+    // A request's scan of forty entries, a fiftieth of the table, does
+    // not have it fetched. One of a quarter of it does, once.
+    assert_eq!(
+        scanned(&table, &io, ("k000100", "k000140"), false, true).await,
+        keys(100..140)
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(gate.fetched().is_empty());
+    assert_eq!(
+        scanned(&table, &io, ("k000500", "k001000"), false, true).await,
+        keys(500..1000)
+    );
+    let there = async {
+        while disk.used() < table.meta.size {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), there)
+        .await
+        .expect("the table reaches the disk cache");
+    assert_eq!(gate.fetched().len(), 1);
+    // From then on the store is not asked, by a merge either.
+    let asked = gate.ranges().len();
+    assert_eq!(scanned(&table, &io, ALL, false, false).await, keys(0..2000));
+    assert_eq!(scanned(&table, &io, ALL, false, true).await, keys(0..2000));
+    assert_eq!(gate.ranges().len(), asked);
+    assert_eq!(gate.fetched().len(), 1);
+    // And nothing is read ahead in a table that is on the disk, where a
+    // read costs no request: a scan of it takes none of the turns to.
+    let mut scan = table.scan(io.clone(), b(""), b(""), false, true);
+    for _ in 0..1500 {
+        scan.next().await.unwrap().unwrap();
+    }
+    assert_eq!(io.ahead.available_permits(), AHEAD_SCANS);
+    assert_eq!(gate.ranges().len(), asked);
+    drop(scan);
+
+    // Damage the blocks of the second quarter of the copy. Its index is
+    // whole, and so are the blocks a scan reads first: it comes to the
+    // damage in the middle of what it has read ahead.
+    let copy = std::fs::read_dir(dir.path()).unwrap().flatten().next();
+    let copy = copy.unwrap().path();
+    let mut bytes = std::fs::read(&copy).unwrap();
+    let quarter = bytes.len() / 4;
+    for byte in bytes[quarter..2 * quarter].iter_mut().step_by(97) {
+        *byte ^= 0x5a;
+    }
+    std::fs::write(&copy, bytes).unwrap();
+    // A new process: empty memory, the same cache directory.
+    let io = process();
+    let table = Table::new(table.meta.clone());
+    assert_eq!(scanned(&table, &io, ALL, false, false).await, keys(0..2000));
+    assert_eq!(io.disk.as_ref().unwrap().used(), 0);
+    assert_eq!(gate.fetched().len(), 1);
 }
 
 /// A store may decline a spare upload. That stores nothing: the commit waits

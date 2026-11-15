@@ -749,6 +749,13 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
     }
     db.close().await;
     assert!(first.io.disk.as_ref().unwrap().used() > 10_000);
+    // What the merges replaced left the cache when it left the manifest.
+    let listed = listed_tables(&store).await;
+    assert_eq!(
+        first.io.disk.as_ref().unwrap().used(),
+        listed.iter().map(|table| table.0).sum::<u64>()
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), listed.len());
 
     let second = process();
     let db = open(&second, "app").await;
@@ -771,12 +778,12 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
     assert_eq!(get(&db, "k0123").await.unwrap().1, noise(124, 200));
     assert_eq!(scan(&db, "", "", true, 1000).await.0.len(), 300);
 
-    // The budget is enforced by deleting the least recently used objects.
+    // A cache that is opened with a smaller budget is fitted to it.
     let small = DiskCache::open(dir.path(), 1).unwrap();
-    assert!(small.used() > 1);
+    assert_eq!(small.used(), 0);
     let tiny = Io::new(store.clone(), 1 << 20, Some(small));
     tiny.remember("anything", Bytes::from_static(b"x")).await;
-    assert!(tiny.disk.as_ref().unwrap().used() <= 1);
+    assert_eq!(tiny.disk.as_ref().unwrap().used(), 1);
 }
 
 /// A change is applied to the configuration as it stands when its turn

@@ -1355,7 +1355,7 @@ impl Db {
             limit: usize::MAX,
         };
         let mut scans: Vec<RunScan> = runs(&tables[..count])
-            .filter_map(|run| RunScan::over(io, run, &everything))
+            .filter_map(|run| RunScan::over(io, run, &everything, false))
             .collect();
         let mut heads = Vec::with_capacity(scans.len());
         for scan in &mut scans {
@@ -1486,6 +1486,10 @@ impl Db {
         maint.revision = revision;
         maint.covered = covered;
         maint.sealed = sealed;
+        // Nothing that begins now reads them, and the room they have in
+        // the disk cache is what the tables in their place are read into.
+        self.ctx.io.discard(&replaced).await;
+        self.ctx.io.discard(&orphaned).await;
         maint.garbage.extend(replaced);
         maint.garbage.extend(orphaned);
         self.collect(maint, false).await;
@@ -1776,7 +1780,7 @@ fn first_key(heads: &[Option<Entry>], reverse: bool) -> Option<usize> {
 
 enum Source {
     Mem(std::vec::IntoIter<Entry>),
-    Run(RunScan),
+    Run(Box<RunScan>),
 }
 
 impl Source {
@@ -1797,12 +1801,14 @@ struct RunScan {
     lo: Bytes,
     hi: Bytes,
     reverse: bool,
+    /// Whether what is read is kept for later readers. A merge keeps none.
+    keep: bool,
     current: Option<TableScan>,
 }
 
 impl RunScan {
     /// `None` when no table of the run can hold a key the scan selects.
-    fn over(io: &Arc<Io>, run: &[Arc<Table>], scan: &Scan) -> Option<Self> {
+    fn over(io: &Arc<Io>, run: &[Arc<Table>], scan: &Scan, keep: bool) -> Option<Self> {
         let within = |table: &&Arc<Table>| {
             let meta = &table.meta;
             meta.entries > 0
@@ -1819,6 +1825,7 @@ impl RunScan {
             lo: scan.lo.clone(),
             hi: scan.hi.clone(),
             reverse: scan.reverse,
+            keep,
             current: None,
         })
     }
@@ -1838,6 +1845,7 @@ impl RunScan {
                 self.lo.clone(),
                 self.hi.clone(),
                 self.reverse,
+                self.keep,
             ));
         }
     }
@@ -1862,8 +1870,8 @@ async fn merge(
     let mut sources = vec![Source::Mem(mem.into_iter())];
     sources.extend(
         runs(tables)
-            .filter_map(|run| RunScan::over(io, run, scan))
-            .map(Source::Run),
+            .filter_map(|run| RunScan::over(io, run, scan, true))
+            .map(|run| Source::Run(Box::new(run))),
     );
     let mut heads = Vec::with_capacity(sources.len());
     for source in &mut sources {

@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use quick_cache::{Weighter, sync::Cache};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     future::Future,
     io::{self, Read, Seek, SeekFrom, Write},
@@ -25,7 +25,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant},
 };
 
 /// What the memory cache holds of a table: its blocks, and its index under
@@ -58,11 +58,103 @@ const DISK_OBJECT_BYTES: u64 = 64 << 20;
 /// this many are fetched at a time.
 const FILLS: usize = 2;
 
+/// The disk cache holds no more tables than 64 and one for each of these
+/// in its budget, and never more than `DISK_TABLES`: it remembers some 150
+/// bytes of each, which is then 40 MiB at most however large the cache.
+const DISK_TABLE_BYTES: u64 = 32 << 10;
+const DISK_TABLES: usize = 1 << 18;
+
+/// How many scans of requests read ahead of themselves at a time, and in
+/// how many runs of tables merges do. What a scan read ahead is in memory,
+/// a megabyte of it at most.
+pub const AHEAD_SCANS: usize = 16;
+pub const AHEAD_MERGES: usize = 16;
+
+/// A table that no read has asked for in this long gives way to one that
+/// reads had to go to the bucket for.
+const IDLE: Duration = Duration::from_secs(300);
+
+/// A table that is not in the disk cache is fetched for it once the reads
+/// that missed it have had one part in this many of it from the bucket. So
+/// what is fetched is never more than this many times what was read.
+const FETCH_PART: u64 = 16;
+
+/// How many tables the disk cache counts such reads for. With more, it
+/// begins the count again.
+const MISSED_TABLES: usize = 1024;
+
+/// A table's name in the cache directory.
+type Name = [u8; 16];
+
+/// What the disk cache holds.
+#[derive(Default)]
+struct Held {
+    /// Each table's size, its place in `order`, and when this server last
+    /// read or wrote it: never, for one an earlier server left.
+    tables: HashMap<Name, (u64, u64, Option<Instant>)>,
+    /// The tables by their last use, the least recent first.
+    order: BTreeMap<u64, Name>,
+    next: u64,
+    /// Bytes of the tables.
+    used: u64,
+    /// Room promised to tables that are being fetched: how many, and
+    /// their bytes.
+    promises: usize,
+    promised: u64,
+    /// Bytes that reads have had from the bucket of tables that are not
+    /// here, since each was last here.
+    missed: HashMap<Name, u64>,
+}
+
+impl Held {
+    fn insert(&mut self, name: Name, size: u64, at: Option<Instant>) {
+        self.tables.insert(name, (size, self.next, at));
+        self.order.insert(self.next, name);
+        self.next += 1;
+        self.used += size;
+    }
+
+    fn remove(&mut self, name: &Name) -> bool {
+        let Some((size, place, _)) = self.tables.remove(name) else {
+            return false;
+        };
+        self.order.remove(&place);
+        self.used -= size;
+        true
+    }
+
+    /// Note that a table is in use. False when it is not here.
+    fn touch(&mut self, name: &Name) -> bool {
+        let Some((_, place, at)) = self.tables.get_mut(name) else {
+            return false;
+        };
+        self.order.remove(place);
+        *place = self.next;
+        *at = Some(Instant::now());
+        self.order.insert(self.next, *name);
+        self.next += 1;
+        true
+    }
+}
+
+/// Whole tables in a directory, the least recently used put out first.
+///
+/// A table this server wrote is always taken, since it cost nothing to
+/// have. One that reads missed is fetched once they have read a sixteenth
+/// of it from the bucket, and only into room that is free, or that tables
+/// no read has asked for in five minutes leave: it never puts out a table
+/// that is in use. When a server reads more than its cache holds, the
+/// tables that were here first stay and the others are read from the
+/// bucket a block at a time. Fetching each one whole at the first read
+/// that missed it, in place of another that was as much in use, had a
+/// server with a 1 GiB cache and a 4 GiB database fetch half a gigabyte a
+/// second from its store (finding 43).
 pub struct DiskCache {
     dir: PathBuf,
     budget: u64,
-    used: AtomicU64,
+    idle: Duration,
     counter: AtomicU64,
+    held: Mutex<Held>,
     /// Objects being downloaded in the background.
     filling: Mutex<HashSet<String>>,
     pub hits: AtomicU64,
@@ -71,119 +163,222 @@ pub struct DiskCache {
 
 impl DiskCache {
     pub fn open(dir: impl Into<PathBuf>, budget: u64) -> io::Result<Self> {
+        Self::open_idle(dir, budget, IDLE)
+    }
+
+    /// As `open`, with how long a table goes unread before one that a read
+    /// missed may take its place.
+    pub fn open_idle(dir: impl Into<PathBuf>, budget: u64, idle: Duration) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        let mut used = 0;
+        let mut found = Vec::new();
         for entry in fs::read_dir(&dir)?.flatten() {
-            // Half-written files from an earlier run.
-            if entry.file_name().to_string_lossy().starts_with("tmp-") {
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            let mut name = Name::default();
+            if file.starts_with("tmp-") {
+                // Half-written, from an earlier run.
                 let _ = fs::remove_file(entry.path());
-            } else if let Ok(meta) = entry.metadata() {
-                used += meta.len();
+            } else if hex::decode_to_slice(file.as_bytes(), &mut name).is_ok()
+                && let Ok(meta) = entry.metadata()
+            {
+                found.push((meta.modified().ok(), name, meta.len()));
             }
         }
-        Ok(Self {
+        // The order they were written in stands for the order of their use.
+        found.sort();
+        let cache = Self {
             dir,
             budget,
-            used: AtomicU64::new(used),
+            idle,
             counter: AtomicU64::new(0),
+            held: Mutex::default(),
             filling: Mutex::default(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
-        })
+        };
+        {
+            let mut held = cache.held.lock();
+            for (_, name, size) in found {
+                held.insert(name, size, None);
+            }
+            // The budget may be smaller than it was.
+            cache.make_room(&mut held, 0);
+        }
+        Ok(cache)
     }
 
     pub fn used(&self) -> u64 {
-        self.used.load(Ordering::Relaxed)
+        self.held.lock().used
     }
 
-    fn path(&self, key: &str) -> PathBuf {
-        self.dir
-            .join(hex::encode(&Sha256::digest(key.as_bytes())[..16]))
+    fn name(key: &str) -> Name {
+        let mut name = Name::default();
+        name.copy_from_slice(&Sha256::digest(key.as_bytes())[..16]);
+        name
     }
 
-    fn read(&self, key: &str, start: u64, end: u64) -> Option<Bytes> {
-        let mut file = fs::File::open(self.path(key)).ok()?;
-        let meta = file.metadata().ok()?;
-        let end = end.min(meta.len());
-        let start = start.min(end);
-        file.seek(SeekFrom::Start(start)).ok()?;
-        let mut body = vec![0; (end - start) as usize];
-        file.read_exact(&mut body).ok()?;
-        // Eviction goes by modification time; refresh it now and then so
-        // that objects in use outlive objects that are not.
-        let stale = SystemTime::now() - Duration::from_secs(600);
-        if meta.modified().is_ok_and(|at| at < stale) {
-            let _ = file.set_modified(SystemTime::now());
+    fn path(&self, name: &Name) -> PathBuf {
+        self.dir.join(hex::encode(name))
+    }
+
+    fn holds(&self, name: &Name) -> bool {
+        self.held.lock().tables.contains_key(name)
+    }
+
+    /// Whether `size` more bytes, in `tables` more tables, are more than
+    /// the cache may hold.
+    fn over(&self, held: &Held, size: u64, tables: usize) -> bool {
+        held.used + held.promised + size > self.budget
+            || held.tables.len() + held.promises + tables > Self::most(self.budget)
+    }
+
+    /// How many tables a cache of `budget` bytes holds at most.
+    fn most(budget: u64) -> usize {
+        ((budget / DISK_TABLE_BYTES) as usize + 64).min(DISK_TABLES)
+    }
+
+    /// The least recently used table, if no read has asked for it in so
+    /// long that it gives way to one that reads want. One that an earlier
+    /// server left has not been asked for.
+    fn unread(&self, held: &Held) -> Option<Name> {
+        let name = held.order.values().next()?;
+        let (_, _, at) = held.tables[name];
+        at.is_none_or(|at| at.elapsed() >= self.idle)
+            .then_some(*name)
+    }
+
+    /// Note that a read had `read` bytes from the bucket of a table of
+    /// `size` bytes that is not here. True when the table is to be fetched:
+    /// such reads have had enough of it, and there is room.
+    fn wanted(&self, name: &Name, size: u64, read: u64) -> bool {
+        let mut held = self.held.lock();
+        if held.missed.len() >= MISSED_TABLES && !held.missed.contains_key(name) {
+            held.missed.clear();
         }
-        Some(Bytes::from(body))
+        let missed = held.missed.entry(*name).or_default();
+        *missed = missed.saturating_add(read);
+        missed.saturating_mul(FETCH_PART) >= size && self.room_in(&held, size)
     }
 
-    fn write(&self, key: &str, body: &[u8]) {
-        let size = body.len() as u64;
+    /// Whether a table of `size` bytes that reads want may be fetched:
+    /// there is room for it, or the least recently used table has gone
+    /// unread, and `reserve` will see how much room such tables make. This
+    /// is asked for every read that misses, so it looks at one table.
+    fn room_in(&self, held: &Held, size: u64) -> bool {
+        size <= self.budget.min(DISK_OBJECT_BYTES)
+            && (!self.over(held, size, 1) || self.unread(held).is_some())
+    }
+
+    /// Put out the least recently used tables until `size` more bytes fit.
+    /// False when they would not with every table gone, for the room that
+    /// fetches under way were promised.
+    fn make_room(&self, held: &mut Held, size: u64) -> bool {
+        let tables = usize::from(size > 0);
+        while self.over(held, size, tables) {
+            let Some(name) = held.order.values().next().copied() else {
+                return false;
+            };
+            held.remove(&name);
+            let _ = fs::remove_file(self.path(&name));
+        }
+        true
+    }
+
+    /// Promise room to a table of `size` bytes that reads want and that is
+    /// about to be fetched. Tables that have gone unread are put out for
+    /// it, the least recently used first, and stay out if they did not
+    /// make enough. What is promised is taken by `put`, or given back by
+    /// `release`.
+    fn reserve(&self, size: u64) -> bool {
         if size > self.budget.min(DISK_OBJECT_BYTES) {
-            return;
+            return false;
         }
-        // A table never changes, and one that a read missed while it was
-        // being fetched is fetched again. It is here already: writing it
-        // again would count its bytes twice.
-        if fs::metadata(self.path(key)).is_ok_and(|meta| meta.len() == size) {
-            return;
+        let mut held = self.held.lock();
+        while self.over(&held, size, 1) {
+            let Some(name) = self.unread(&held) else {
+                return false;
+            };
+            held.remove(&name);
+            let _ = fs::remove_file(self.path(&name));
         }
+        held.promises += 1;
+        held.promised += size;
+        true
+    }
+
+    fn release(&self, size: u64) {
+        let mut held = self.held.lock();
+        held.promises -= 1;
+        held.promised -= size;
+    }
+
+    fn read(&self, name: &Name, start: u64, end: u64) -> Option<Bytes> {
+        if !self.held.lock().touch(name) {
+            return None;
+        }
+        let read = || -> io::Result<Bytes> {
+            let mut file = fs::File::open(self.path(name))?;
+            let end = end.min(file.metadata()?.len());
+            let start = start.min(end);
+            file.seek(SeekFrom::Start(start))?;
+            let mut body = vec![0; (end - start) as usize];
+            file.read_exact(&mut body)?;
+            Ok(Bytes::from(body))
+        };
+        match read() {
+            Ok(body) => Some(body),
+            Err(_) => {
+                // Put out between the two, or gone from the directory
+                // behind the cache's back.
+                self.remove(name);
+                None
+            }
+        }
+    }
+
+    /// Put a whole table here: one this server wrote, for which the least
+    /// recently used make way, or one that was fetched, into the room
+    /// `reserve` promised it. A table never changes, so one that is here is
+    /// not written again.
+    fn put(&self, key: &str, body: &[u8], promised: Option<u64>) {
+        let (name, size) = (Self::name(key), body.len() as u64);
         let tmp = self.dir.join(format!(
             "tmp-{}-{}",
             std::process::id(),
             self.counter.fetch_add(1, Ordering::Relaxed)
         ));
-        let stored = fs::File::create(&tmp)
-            .and_then(|mut file| file.write_all(body))
-            .and_then(|()| fs::rename(&tmp, self.path(key)));
-        match stored {
-            Ok(()) => {
-                if self.used.fetch_add(size, Ordering::Relaxed) + size > self.budget {
-                    self.trim();
-                }
-            }
-            Err(_) => {
-                let _ = fs::remove_file(&tmp);
-            }
+        let written = size <= self.budget.min(DISK_OBJECT_BYTES)
+            && fs::File::create(&tmp)
+                .and_then(|mut file| file.write_all(body))
+                .is_ok();
+        let mut held = self.held.lock();
+        if let Some(bytes) = promised {
+            held.promises -= 1;
+            held.promised -= bytes;
+        }
+        let stored = written
+            && !held.tables.contains_key(&name)
+            && self.make_room(&mut held, size)
+            && fs::rename(&tmp, self.path(&name)).is_ok();
+        if stored {
+            held.insert(name, size, Some(Instant::now()));
+            held.missed.remove(&name);
+        }
+        drop(held);
+        if !stored {
+            let _ = fs::remove_file(&tmp);
         }
     }
 
-    fn remove(&self, key: &str) -> bool {
-        let path = self.path(key);
-        let size = fs::metadata(&path).map_or(0, |meta| meta.len());
-        let removed = fs::remove_file(path).is_ok();
+    fn remove(&self, name: &Name) -> bool {
+        let mut held = self.held.lock();
+        held.missed.remove(name);
+        let removed = held.remove(name);
         if removed {
-            self.used
-                .fetch_sub(size.min(self.used()), Ordering::Relaxed);
+            let _ = fs::remove_file(self.path(name));
         }
         removed
-    }
-
-    /// Delete the least recently used objects until the budget has headroom.
-    fn trim(&self) {
-        let Ok(entries) = fs::read_dir(&self.dir) else {
-            return;
-        };
-        let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let meta = entry.metadata().ok()?;
-                Some((meta.modified().ok()?, meta.len(), entry.path()))
-            })
-            .collect();
-        files.sort();
-        let mut used: u64 = files.iter().map(|(_, size, _)| size).sum();
-        for (_, size, path) in files {
-            if used <= self.budget / 10 * 8 {
-                break;
-            }
-            if fs::remove_file(path).is_ok() {
-                used -= size;
-            }
-        }
-        self.used.store(used, Ordering::Relaxed);
     }
 }
 
@@ -198,6 +393,9 @@ pub struct Io {
     /// Bounds how many table merges run at once on this server.
     pub merges: Arc<tokio::sync::Semaphore>,
     fills: Arc<tokio::sync::Semaphore>,
+    /// The turns of requests' scans to read ahead, and those of merges.
+    pub ahead: Arc<tokio::sync::Semaphore>,
+    pub merge_ahead: Arc<tokio::sync::Semaphore>,
 }
 
 impl Io {
@@ -220,6 +418,8 @@ impl Io {
             index_bytes: Arc::default(),
             merges: Arc::new(tokio::sync::Semaphore::new(2)),
             fills: Arc::new(tokio::sync::Semaphore::new(FILLS)),
+            ahead: Arc::new(tokio::sync::Semaphore::new(AHEAD_SCANS)),
+            merge_ahead: Arc::new(tokio::sync::Semaphore::new(AHEAD_MERGES)),
         })
     }
 
@@ -260,22 +460,39 @@ impl Io {
         self.blocks.weight()
     }
 
+    /// Whether a table is in the disk cache, where reading it costs no
+    /// request.
+    pub fn local(&self, key: &str) -> bool {
+        self.disk
+            .as_ref()
+            .is_some_and(|disk| disk.holds(&DiskCache::name(key)))
+    }
+
     /// Bytes `start..end` of an immutable table of `size` bytes that the
     /// manifest says exists: from the disk cache when it is there, otherwise
-    /// from the bucket, filling the disk cache on the way.
+    /// from the bucket. With `keep`, a table that was not in the disk cache
+    /// is fetched for it when such reads have had enough of it and it has
+    /// room. A merge reads each of its tables once, and keeps none.
     pub async fn range(
         self: &Arc<Self>,
         key: &str,
         size: u64,
         start: u64,
         end: u64,
+        keep: bool,
     ) -> Result<Bytes> {
         if let Some(disk) = &self.disk {
-            let (cache, owned) = (disk.clone(), key.to_owned());
-            let hit = tokio::task::spawn_blocking(move || cache.read(&owned, start, end))
-                .await
-                .ok()
-                .flatten();
+            let name = DiskCache::name(key);
+            // What is not here is known without asking the directory.
+            let hit = if disk.holds(&name) {
+                let cache = disk.clone();
+                tokio::task::spawn_blocking(move || cache.read(&name, start, end))
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
             if let Some(bytes) = hit {
                 disk.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(bytes);
@@ -288,11 +505,21 @@ impl Io {
                 let object = crate::layout::object(key);
                 Error::Lost(format!("{object} was collected by a newer owner"))
             })?;
-        if let Some(disk) = &self.disk {
+        if keep
+            && let Some(disk) = &self.disk
+            && disk.wanted(&DiskCache::name(key), size, bytes.len() as u64)
+        {
             if start == 0 && end >= size {
-                self.remember(key, bytes.clone()).await;
-            } else if size <= DISK_OBJECT_BYTES {
-                self.fill(disk, key);
+                let (disk, key, body) = (disk.clone(), key.to_owned(), bytes.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    let size = body.len() as u64;
+                    if disk.reserve(size) {
+                        disk.put(&key, &body, Some(size));
+                    }
+                })
+                .await;
+            } else {
+                self.fill(disk, key, size);
             }
         }
         Ok(bytes)
@@ -300,32 +527,38 @@ impl Io {
 
     /// Fetch a whole table for the disk cache, off the request's path. One
     /// that has no turn now is fetched after a later read of it.
-    fn fill(self: &Arc<Self>, disk: &Arc<DiskCache>, key: &str) {
+    fn fill(self: &Arc<Self>, disk: &Arc<DiskCache>, key: &str, size: u64) {
         let Ok(turn) = self.fills.clone().try_acquire_owned() else {
             return;
         };
         if !disk.filling.lock().insert(key.to_owned()) {
             return;
         }
-        let (io, key) = (self.clone(), key.to_owned());
+        let (io, disk, key) = (self.clone(), disk.clone(), key.to_owned());
         tokio::spawn(async move {
-            if let Ok(Some(body)) = retry(|| io.store.get(&key)).await {
-                io.remember(&key, body).await;
+            let cache = disk.clone();
+            let room = tokio::task::spawn_blocking(move || cache.reserve(size)).await;
+            if room.unwrap_or(false) {
+                let body = retry(|| io.store.get(&key)).await.ok().flatten();
+                let (cache, key) = (disk.clone(), key.clone());
+                let _ = tokio::task::spawn_blocking(move || match body {
+                    Some(body) => cache.put(&key, &body, Some(size)),
+                    None => cache.release(size),
+                })
+                .await;
             }
-            if let Some(disk) = &io.disk {
-                disk.filling.lock().remove(&key);
-            }
+            disk.filling.lock().remove(&key);
             drop(turn);
         });
     }
 
-    /// Put a whole table into the disk cache, such as one just written.
+    /// Put a whole table that this server wrote into the disk cache.
     /// Returns when it is there, so that its bytes are not left waiting in
     /// memory.
     pub async fn remember(&self, key: &str, body: Bytes) {
         if let Some(disk) = &self.disk {
             let (disk, key) = (disk.clone(), key.to_owned());
-            let _ = tokio::task::spawn_blocking(move || disk.write(&key, &body)).await;
+            let _ = tokio::task::spawn_blocking(move || disk.put(&key, &body, None)).await;
         }
     }
 
@@ -333,10 +566,25 @@ impl Io {
     /// was one, in which case reading again goes to the bucket.
     pub async fn forget(&self, key: &str) -> bool {
         let Some(disk) = &self.disk else { return false };
-        let (disk, key) = (disk.clone(), key.to_owned());
-        tokio::task::spawn_blocking(move || disk.remove(&key))
+        let (disk, name) = (disk.clone(), DiskCache::name(key));
+        tokio::task::spawn_blocking(move || disk.remove(&name))
             .await
             .unwrap_or(false)
+    }
+
+    /// Take out of the disk cache tables that no manifest lists any more.
+    pub async fn discard(&self, keys: &[String]) {
+        if let Some(disk) = &self.disk
+            && !keys.is_empty()
+        {
+            let (disk, keys) = (disk.clone(), keys.to_vec());
+            let _ = tokio::task::spawn_blocking(move || {
+                for key in &keys {
+                    disk.remove(&DiskCache::name(key));
+                }
+            })
+            .await;
+        }
     }
 }
 
@@ -359,4 +607,240 @@ where
         }
     }
     unreachable!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    fn key(n: u8) -> String {
+        format!("root/db/app/t/1/{n:08x}")
+    }
+
+    fn name(n: u8) -> Name {
+        DiskCache::name(&key(n))
+    }
+
+    /// A cache of `budget` bytes with tables of 1000 bytes written into it.
+    fn cache(dir: &tempfile::TempDir, budget: u64, tables: std::ops::Range<u8>) -> DiskCache {
+        let cache = DiskCache::open_idle(dir.path(), budget, HOUR).unwrap();
+        for n in tables {
+            cache.put(&key(n), &[n; 1000], None);
+        }
+        cache
+    }
+
+    fn here(cache: &DiskCache) -> Vec<u8> {
+        (0..=255).filter(|n| cache.holds(&name(*n))).collect()
+    }
+
+    /// Whether a table of `size` bytes that reads missed would be given
+    /// room.
+    fn room(cache: &DiskCache, size: u64) -> bool {
+        cache.room_in(&cache.held.lock(), size)
+    }
+
+    fn files(dir: &tempfile::TempDir) -> usize {
+        fs::read_dir(dir.path()).unwrap().count()
+    }
+
+    #[test]
+    fn a_table_that_was_written_puts_out_the_least_recently_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..4);
+        assert_eq!((cache.used(), files(&dir)), (4000, 4));
+        // The first is read, so the second is the least recently used.
+        assert_eq!(cache.read(&name(0), 990, 2000).unwrap(), vec![0u8; 10]);
+        cache.put(&key(4), &[4; 1000], None);
+        assert_eq!(here(&cache), [0, 2, 3, 4]);
+        // One that needs the room of two puts out two.
+        cache.put(&key(5), &[5; 1500], None);
+        assert_eq!(here(&cache), [0, 4, 5]);
+        assert_eq!((cache.used(), files(&dir)), (3500, 3));
+        // One larger than the cache is not kept, and puts out nothing.
+        cache.put(&key(6), &[6; 4001], None);
+        assert_eq!(here(&cache), [0, 4, 5]);
+        assert_eq!((cache.used(), files(&dir)), (3500, 3));
+        // One that is here is not written again.
+        cache.put(&key(5), &[5; 1500], None);
+        assert_eq!((cache.used(), files(&dir)), (3500, 3));
+    }
+
+    #[test]
+    fn a_table_that_a_read_missed_does_not_put_out_one_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..4);
+        assert!(!room(&cache, 1000) && !cache.reserve(1000));
+        assert_eq!(here(&cache), [0, 1, 2, 3]);
+        // Room that is free is promised, once.
+        assert!(cache.remove(&name(2)));
+        assert!(room(&cache, 1000) && cache.reserve(1000));
+        assert!(!room(&cache, 1000) && !cache.reserve(1000));
+        assert!(!room(&cache, 1) && !cache.reserve(1));
+        // What is promised is not counted as held until it is here.
+        assert_eq!(cache.used(), 3000);
+        cache.put(&key(7), &[7; 1000], Some(1000));
+        assert_eq!(here(&cache), [0, 1, 3, 7]);
+        assert_eq!((cache.used(), files(&dir)), (4000, 4));
+        assert!(!room(&cache, 1));
+        // A promise that is given back is room again.
+        assert!(cache.remove(&name(3)));
+        assert!(cache.reserve(600));
+        assert!(!cache.reserve(600));
+        cache.release(600);
+        assert!(cache.reserve(1000));
+        // A table that was written meanwhile leaves the promise its room.
+        cache.put(&key(8), &[8; 1000], None);
+        assert_eq!(here(&cache), [1, 7, 8]);
+        cache.put(&key(9), &[9; 1000], Some(1000));
+        assert_eq!(here(&cache), [1, 7, 8, 9]);
+        assert_eq!((cache.used(), files(&dir)), (4000, 4));
+        // A fetched table that is here already gives its promise back.
+        assert!(cache.remove(&name(1)));
+        assert!(cache.reserve(1000));
+        cache.put(&key(9), &[9; 1000], Some(1000));
+        assert_eq!((cache.used(), files(&dir)), (3000, 3));
+        assert!(cache.reserve(1000));
+    }
+
+    #[test]
+    fn a_table_is_wanted_when_reads_have_had_a_sixteenth_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..3);
+        // 99 bytes of 1,600 are less than a sixteenth. A hundred are one,
+        // but the room that is free is for 1,000.
+        assert!(!cache.wanted(&name(7), 1600, 99));
+        assert!(!cache.wanted(&name(7), 1600, 1));
+        assert!(!cache.wanted(&name(8), 1000, 62));
+        assert!(cache.wanted(&name(8), 1000, 1));
+        // It is wanted until it is here, and each table is counted alone.
+        assert!(cache.wanted(&name(8), 1000, 0));
+        assert!(!cache.wanted(&name(9), 1000, 62));
+        // What was read of a table while there was no room for it counts
+        // when there is.
+        assert!(cache.remove(&name(0)));
+        assert!(cache.wanted(&name(7), 1600, 0));
+        // A table that has been here is counted from the beginning: one
+        // that tables which were written put out,
+        assert!(cache.reserve(1000));
+        cache.put(&key(8), &[8; 1000], Some(1000));
+        assert!(cache.read(&name(1), 0, 1).is_some());
+        assert!(cache.read(&name(2), 0, 1).is_some());
+        cache.put(&key(20), &[20; 1000], None);
+        cache.put(&key(21), &[21; 1000], None);
+        assert_eq!(here(&cache), [1, 2, 20, 21]);
+        assert!(cache.remove(&name(20)));
+        assert!(!cache.wanted(&name(8), 1000, 62));
+        assert!(cache.wanted(&name(8), 1000, 1));
+        // and one that was discarded, whether it was here
+        assert!(cache.reserve(1000));
+        cache.put(&key(8), &[8; 1000], Some(1000));
+        assert!(cache.remove(&name(8)));
+        assert!(!cache.wanted(&name(8), 1000, 62));
+        // or not.
+        assert!(!cache.remove(&name(9)));
+        assert!(!cache.wanted(&name(9), 1000, 62));
+        // One that is larger than the cache is never wanted.
+        assert!(!cache.wanted(&name(6), 4001, 4001));
+        // No more tables are counted than a thousand or so: with more,
+        // the count begins again.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = self::cache(&dir, 4000, 0..0);
+        let other = |n: usize| DiskCache::name(&format!("other/{n}"));
+        assert!(!cache.wanted(&other(0), 1000, 62));
+        for n in 1..MISSED_TABLES {
+            assert!(!cache.wanted(&other(n), 1000, 1));
+        }
+        assert_eq!(cache.held.lock().missed.len(), MISSED_TABLES);
+        assert!(!cache.wanted(&other(0), 1000, 0));
+        assert_eq!(cache.held.lock().missed.len(), MISSED_TABLES);
+        assert!(!cache.wanted(&other(MISSED_TABLES), 1000, 1));
+        assert_eq!(cache.held.lock().missed.len(), 1);
+        assert!(!cache.wanted(&other(0), 1000, 62));
+    }
+
+    #[test]
+    fn a_table_that_went_unread_gives_way_to_one_that_a_read_missed() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(cache(&dir, 4000, 0..4));
+        // What an earlier server left has gone unread by this one.
+        let cache = cache(&dir, 4000, 0..0);
+        assert_eq!(here(&cache), [0, 1, 2, 3]);
+        // None goes for a table that the cache could not hold.
+        assert!(!room(&cache, 4001) && !cache.reserve(4001));
+        assert_eq!(here(&cache), [0, 1, 2, 3]);
+        assert!(cache.read(&name(0), 0, 1).is_some());
+        assert!(cache.read(&name(2), 0, 1).is_some());
+        // Two are in use now. One of the others goes for the room of one.
+        assert!(room(&cache, 1000) && cache.reserve(1000));
+        assert_eq!(here(&cache), [0, 2, 3]);
+        cache.put(&key(7), &[7; 1000], Some(1000));
+        // The other goes for a table that needs more room than it leaves,
+        // and that is promised none.
+        assert!(room(&cache, 1001) && !cache.reserve(1001));
+        assert_eq!(here(&cache), [0, 2, 7]);
+        // Then the least recently used is in use: nothing more goes, and
+        // the room that was left is for a table it is enough for.
+        assert!(!room(&cache, 1001) && !cache.reserve(1001));
+        assert_eq!(here(&cache), [0, 2, 7]);
+        assert!(room(&cache, 1000) && cache.reserve(1000));
+        assert!(!room(&cache, 1) && !cache.reserve(1));
+        cache.release(1000);
+
+        // With no time to go unread in, every table has.
+        let none = DiskCache::open_idle(dir.path(), 3000, Duration::ZERO).unwrap();
+        assert!(none.read(&name(0), 0, 1).is_some());
+        assert!(none.reserve(2000));
+        assert_eq!(here(&none), [0]);
+    }
+
+    #[test]
+    fn what_an_earlier_server_left_is_found_and_fitted_to_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(cache(&dir, 4000, 0..4));
+        fs::write(dir.path().join("tmp-1-1"), b"half").unwrap();
+        fs::write(dir.path().join("notes"), b"not a table").unwrap();
+        let second = cache(&dir, 4000, 0..0);
+        assert_eq!((second.used(), files(&dir)), (4000, 5));
+        assert_eq!(second.read(&name(3), 0, 4).unwrap(), vec![3u8; 4]);
+        assert!(dir.path().join("notes").exists());
+        drop(second);
+        let third = cache(&dir, 2500, 0..0);
+        assert_eq!((third.used(), files(&dir)), (2000, 3));
+        assert_eq!(here(&third).len(), 2);
+    }
+
+    #[test]
+    fn a_table_that_left_the_directory_is_a_miss_and_is_counted_no_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..2);
+        fs::remove_file(cache.path(&name(0))).unwrap();
+        assert!(cache.read(&name(0), 0, 10).is_none());
+        assert_eq!(here(&cache), [1]);
+        assert_eq!(cache.used(), 1000);
+        cache.put(&key(0), &[0; 1000], None);
+        assert_eq!(cache.read(&name(0), 0, 10).unwrap(), vec![0u8; 10]);
+    }
+
+    #[test]
+    fn the_cache_holds_a_bounded_number_of_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open_idle(dir.path(), 3 * DISK_TABLE_BYTES, HOUR).unwrap();
+        for n in 0..100 {
+            cache.put(&key(n), &[n], None);
+        }
+        assert_eq!(here(&cache), (33..100).collect::<Vec<u8>>());
+        assert_eq!((cache.used(), files(&dir)), (67, 67));
+        assert!(!room(&cache, 1));
+        assert!(cache.remove(&name(50)));
+        assert!(cache.reserve(1));
+        assert!(!cache.reserve(1));
+        // The manifest's cache of 1 GiB holds 32,832 tables at most, and
+        // no cache more than a quarter of a million.
+        assert_eq!(DiskCache::most(1 << 30), 32_832);
+        assert_eq!(DiskCache::most(8 << 30), 262_144);
+        assert_eq!(DiskCache::most(1 << 40), 262_144);
+    }
 }

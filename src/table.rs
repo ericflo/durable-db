@@ -329,7 +329,7 @@ impl Table {
             && key <= self.meta.last.as_bytes()
     }
 
-    async fn index(&self, io: &Arc<Io>) -> Result<Arc<Index>> {
+    async fn index(&self, io: &Arc<Io>, keep: bool) -> Result<Arc<Index>> {
         // Asking the cache is also what tells it the index is in use.
         if let Some(index) = io.cached_index(&self.key) {
             return Ok(index);
@@ -342,10 +342,10 @@ impl Table {
             io.cache_index(&self.key, index.clone());
             return Ok(index);
         }
-        let index = match self.load_index(io).await {
+        let index = match self.load_index(io, keep).await {
             // A damaged copy in the disk cache: discard it and read the
             // bucket's.
-            Err(Error::Corrupt(_)) if io.forget(&self.key).await => self.load_index(io).await,
+            Err(Error::Corrupt(_)) if io.forget(&self.key).await => self.load_index(io, keep).await,
             loaded => loaded,
         };
         let index = Arc::new(index?);
@@ -354,10 +354,10 @@ impl Table {
         Ok(index)
     }
 
-    async fn load_index(&self, io: &Arc<Io>) -> Result<Index> {
+    async fn load_index(&self, io: &Arc<Io>, keep: bool) -> Result<Index> {
         let size = self.meta.size;
         let tail_start = size.saturating_sub(TAIL);
-        let tail = io.range(&self.key, size, tail_start, size).await?;
+        let tail = io.range(&self.key, size, tail_start, size, keep).await?;
         let corrupt = || {
             let object = crate::layout::object(&self.key);
             Error::Corrupt(format!("table {object} has a bad footer"))
@@ -379,8 +379,14 @@ impl Table {
             let start = (index_offset - tail_start) as usize;
             tail.slice(start..start + index_len as usize)
         } else {
-            io.range(&self.key, size, index_offset, index_offset + index_len)
-                .await?
+            io.range(
+                &self.key,
+                size,
+                index_offset,
+                index_offset + index_len,
+                keep,
+            )
+            .await?
         };
         if crc32fast::hash(&bytes) != index_crc {
             return Err(corrupt());
@@ -409,10 +415,14 @@ impl Table {
         }
         let entry = &index.blocks[i];
         let (start, end) = (entry.offset, entry.offset + u64::from(entry.len));
-        let packed = io.range(&self.key, self.meta.size, start, end).await?;
+        let packed = io
+            .range(&self.key, self.meta.size, start, end, true)
+            .await?;
         let block = match Block::decode(&packed, entry.crc) {
             Err(Error::Corrupt(_)) if io.forget(&self.key).await => {
-                let packed = io.range(&self.key, self.meta.size, start, end).await?;
+                let packed = io
+                    .range(&self.key, self.meta.size, start, end, true)
+                    .await?;
                 Block::decode(&packed, entry.crc)?
             }
             decoded => decoded?,
@@ -427,7 +437,7 @@ impl Table {
         if !self.covers(key) {
             return Ok(None);
         }
-        let index = self.index(io).await?;
+        let index = self.index(io, true).await?;
         let i = index
             .blocks
             .partition_point(|block| block.last.as_slice() < key);
@@ -439,19 +449,58 @@ impl Table {
         Ok((at < block.len() && block.key(at) == key).then(|| block.entry(at)))
     }
 
-    /// Entries with `lo <= key < hi` (an empty `hi` is unbounded), in either direction.
-    pub fn scan(self: &Arc<Self>, io: Arc<Io>, lo: Bytes, hi: Bytes, reverse: bool) -> TableScan {
+    /// Entries with `lo <= key < hi` (an empty `hi` is unbounded), in either
+    /// direction. With `keep`, what the scan reads is kept for later
+    /// readers: its blocks in memory, and the table in the disk cache when
+    /// that has room. A merge reads each of its tables once and keeps none.
+    pub fn scan(
+        self: &Arc<Self>,
+        io: Arc<Io>,
+        lo: Bytes,
+        hi: Bytes,
+        reverse: bool,
+        keep: bool,
+    ) -> TableScan {
         TableScan {
             table: self.clone(),
             io,
             lo,
             hi,
             reverse,
+            keep,
             index: None,
             block: None,
             started: false,
+            ahead: None,
+            span: 1,
         }
     }
+}
+
+/// A scan reads ahead of itself. Its first read of a table is one block,
+/// and each read after that asks for twice as many blocks as the last, up
+/// to these and to the end of what the scan selects. A scan that ends in
+/// its first block has read no more than that; one that goes through a
+/// table of 32 MiB asks for it in under forty requests and not a thousand.
+///
+/// What was read ahead is in memory until the scan has come to it, so a
+/// scan holds one of a number of turns meanwhile: `AHEAD_MERGES` for the
+/// runs of tables that merges read, and `AHEAD_SCANS` for the scans of
+/// requests, which read ahead only in a table that is not in the disk
+/// cache, where every read is a request to the bucket. A scan that has no
+/// turn reads a block at a time.
+const AHEAD_BLOCKS: usize = 64;
+const AHEAD_BYTES: u64 = 1 << 20;
+
+/// Blocks that were read with one the scan needed and that it has not come
+/// to yet, as they are stored.
+struct Ahead {
+    /// The number of the first, and how many.
+    first: usize,
+    count: usize,
+    bytes: Bytes,
+    /// The turn to read ahead, held for as long as this is in memory.
+    _turn: tokio::sync::OwnedSemaphorePermit,
 }
 
 pub struct TableScan {
@@ -460,12 +509,16 @@ pub struct TableScan {
     lo: Bytes,
     hi: Bytes,
     reverse: bool,
+    keep: bool,
     /// Held from the first entry to the last.
     index: Option<Arc<Index>>,
     /// The current block, its number, and the next position within it
     /// (for a reverse scan, one past the next entry).
     block: Option<(Arc<Block>, usize, usize)>,
     started: bool,
+    ahead: Option<Ahead>,
+    /// How many blocks the next read asks for.
+    span: usize,
 }
 
 impl TableScan {
@@ -474,22 +527,23 @@ impl TableScan {
             return Ok(None);
         }
         if self.index.is_none() {
-            self.index = Some(self.table.index(&self.io).await?);
+            self.index = Some(self.table.index(&self.io, self.keep).await?);
         }
-        let index: &Index = self.index.as_deref().expect("just loaded");
+        let blocks = self.index.as_ref().expect("just loaded").blocks.len();
         if !self.started {
             self.started = true;
-            let blocks = &index.blocks;
+            let index = self.index.as_ref().expect("just loaded");
             if self.reverse {
                 // The last block that can hold a key below `hi`.
                 let i = if self.hi.is_empty() {
-                    blocks.len() - 1
+                    blocks - 1
                 } else {
-                    blocks
+                    index
+                        .blocks
                         .partition_point(|b| b.last.as_slice() < self.hi.as_ref())
-                        .min(blocks.len() - 1)
+                        .min(blocks - 1)
                 };
-                let block = self.table.block(&self.io, index, i).await?;
+                let block = self.load(i).await?;
                 let position = if self.hi.is_empty() {
                     block.len()
                 } else {
@@ -497,11 +551,13 @@ impl TableScan {
                 };
                 self.block = Some((block, i, position));
             } else {
-                let i = blocks.partition_point(|b| b.last.as_slice() < self.lo.as_ref());
-                if i == blocks.len() {
+                let i = index
+                    .blocks
+                    .partition_point(|b| b.last.as_slice() < self.lo.as_ref());
+                if i == blocks {
                     return Ok(None);
                 }
-                let block = self.table.block(&self.io, index, i).await?;
+                let block = self.load(i).await?;
                 let position = block.lower_bound(&self.lo);
                 self.block = Some((block, i, position));
             }
@@ -525,7 +581,14 @@ impl TableScan {
                     return Ok(None);
                 }
                 let previous = *i - 1;
-                let block = self.table.block(&self.io, index, previous).await?;
+                // The index says when the block before holds nothing the
+                // scan selects: it is not read to find that out.
+                let index = self.index.as_ref().expect("loaded before any block");
+                if index.blocks[previous].last.as_slice() < self.lo.as_ref() {
+                    self.block = None;
+                    return Ok(None);
+                }
+                let block = self.load(previous).await?;
                 let position = block.len();
                 self.block = Some((block, previous, position));
             } else {
@@ -539,13 +602,130 @@ impl TableScan {
                     return Ok(Some(entry));
                 }
                 let next = *i + 1;
-                if next == index.blocks.len() {
+                if next == blocks {
                     self.block = None;
                     return Ok(None);
                 }
-                let block = self.table.block(&self.io, index, next).await?;
+                let block = self.load(next).await?;
                 self.block = Some((block, next, 0));
             }
+        }
+    }
+
+    /// Block `i`: from memory, from what was read ahead, or from a read of
+    /// it and of the blocks the scan comes to after it.
+    async fn load(&mut self, i: usize) -> Result<Arc<Block>> {
+        let table = self.table.clone();
+        if let Some(block) = self.io.cached_block(&table.key, i as u32) {
+            return Ok(block);
+        }
+        let index = self.index.clone().expect("loaded before any block");
+        let entry = &index.blocks[i];
+        let mut again = false;
+        loop {
+            let read = match &self.ahead {
+                Some(ahead) if (ahead.first..ahead.first + ahead.count).contains(&i) => {
+                    (ahead.first, ahead.bytes.clone())
+                }
+                _ => {
+                    // The scan has passed what it read ahead, and gives its
+                    // turn back before it asks for one.
+                    self.ahead = None;
+                    let turn = self.turn();
+                    let (first, last) = match turn {
+                        Some(_) => self.reach(&index, i),
+                        None => (i, i),
+                    };
+                    let (from, to) = (&index.blocks[first], &index.blocks[last]);
+                    let (start, end) = (from.offset, to.offset + u64::from(to.len));
+                    let bytes = self
+                        .io
+                        .range(&table.key, table.meta.size, start, end, self.keep)
+                        .await?;
+                    if let Some(turn) = turn {
+                        self.ahead = Some(Ahead {
+                            first,
+                            count: last - first + 1,
+                            bytes: bytes.clone(),
+                            _turn: turn,
+                        });
+                    }
+                    self.span = (self.span * 2).min(AHEAD_BLOCKS);
+                    (first, bytes)
+                }
+            };
+            let (first, bytes) = read;
+            let at = (entry.offset - index.blocks[first].offset) as usize;
+            let block = bytes
+                .get(at..at + entry.len as usize)
+                .ok_or_else(|| Error::Corrupt("table block is cut short".into()))
+                .and_then(|packed| Block::decode(packed, entry.crc));
+            match block {
+                // A damaged copy in the disk cache: discard it and read
+                // the bucket's.
+                Err(Error::Corrupt(_)) if !again && self.io.forget(&table.key).await => {
+                    self.ahead = None;
+                    again = true;
+                }
+                block => {
+                    let block = Arc::new(block?);
+                    if self.keep {
+                        self.io.cache_block(&table.key, i as u32, block.clone());
+                    }
+                    return Ok(block);
+                }
+            }
+        }
+    }
+
+    /// A turn to read more than one block, if the next read may be of
+    /// more. A merge takes one of the merges' turns. A request's scan
+    /// takes one of the requests', and only for a table that is not in
+    /// the disk cache.
+    fn turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        if self.span < 2 {
+            return None;
+        }
+        let turns = if !self.keep {
+            &self.io.merge_ahead
+        } else if self.io.local(&self.table.key) {
+            return None;
+        } else {
+            &self.io.ahead
+        };
+        turns.clone().try_acquire_owned().ok()
+    }
+
+    /// The blocks to read with block `i`, which is the first of them for a
+    /// scan forward and the last for one in reverse.
+    fn reach(&self, index: &Index, i: usize) -> (usize, usize) {
+        let blocks = &index.blocks;
+        let bytes =
+            |a: usize, b: usize| blocks[b].offset + u64::from(blocks[b].len) - blocks[a].offset;
+        if self.reverse {
+            // The first block that can hold a key the scan selects.
+            let stop = blocks
+                .partition_point(|b| b.last.as_slice() < self.lo.as_ref())
+                .min(i);
+            let mut first = i.saturating_sub(self.span - 1).max(stop);
+            while bytes(first, i) > AHEAD_BYTES && first < i {
+                first += 1;
+            }
+            (first, i)
+        } else {
+            // The last block that can.
+            let stop = if self.hi.is_empty() {
+                blocks.len() - 1
+            } else {
+                blocks
+                    .partition_point(|b| b.last.as_slice() < self.hi.as_ref())
+                    .clamp(i, blocks.len() - 1)
+            };
+            let mut last = (i + self.span - 1).min(stop);
+            while bytes(i, last) > AHEAD_BYTES && last > i {
+                last -= 1;
+            }
+            (i, last)
         }
     }
 }
