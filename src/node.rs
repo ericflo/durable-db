@@ -288,7 +288,10 @@ impl Node {
         let mut open: Vec<Arc<Db>> = self.open.read().values().cloned().collect();
         self.open.write().retain(|_, db| !db.is_closed());
         open.retain(|db| !db.is_closed());
-        open.sort_by_key(|db| std::cmp::Reverse(db.idle_for()));
+        // How long each has been idle is read once. It is read from a clock,
+        // and an order that changes while a sort is under way is one the
+        // sort may refuse with a panic.
+        open.sort_by_cached_key(|db| std::cmp::Reverse(db.idle_for()));
         let surplus = open.len().saturating_sub(self.limits.max_open);
         let mut released = Vec::new();
         for (i, db) in open.iter().enumerate() {

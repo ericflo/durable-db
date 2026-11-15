@@ -321,10 +321,9 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
             args.peers.clone(),
             args.listen.port(),
         );
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                tick.tick().await;
+        let round = move || {
+            let (node, cluster, peers) = (node.clone(), cluster.clone(), peers.clone());
+            async move {
                 if let Some(peers) = &peers {
                     // A list of addresses is used as given; a single name is
                     // resolved each tick, which is how a Kubernetes headless
@@ -356,7 +355,8 @@ async fn serve(args: Serve) -> anyhow::Result<()> {
                 }
                 node.tend().await;
             }
-        })
+        };
+        tokio::spawn(durable_db::server::every(Duration::from_secs(1), round))
     };
 
     let listener = tokio::net::TcpListener::bind(args.listen)

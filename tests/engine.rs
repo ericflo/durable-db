@@ -1013,3 +1013,60 @@ async fn databases_together_remember_a_limited_amount_of_written_keys() {
     let latest = write("a", 400..401).await;
     since("a", latest).await.unwrap();
 }
+
+/// A server tends its databases once a second for as long as it runs, and
+/// begins by putting them in order of how long each has been idle. That is
+/// read from a clock, so it changes while they are being put in order, and
+/// an order that changes under a sort is one the sort may refuse with a
+/// panic. Tending then stopped for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn databases_in_use_are_tended() {
+    let node = Node::new(
+        ctx(Arc::new(MemoryStore::new())),
+        Limits::default(),
+        Arc::new(Metrics::default()),
+    );
+    let names: Vec<String> = (0..96).map(|i| format!("db{i:02}")).collect();
+    for name in &names {
+        node.create(name, DbConfig::default()).await.unwrap();
+    }
+    let busy = tokio::spawn({
+        let (node, names) = (node.clone(), names.clone());
+        async move {
+            loop {
+                for name in &names {
+                    get(&node.db(name).await.unwrap(), "key").await;
+                }
+            }
+        }
+    });
+    for _ in 0..2000 {
+        node.tend().await;
+    }
+    busy.abort();
+    assert_eq!(node.open_names().len(), names.len());
+}
+
+/// What a server does every second is one task for as long as it runs:
+/// following its peers, handing databases over, tending them. A round of it
+/// that panics must not be the last.
+#[tokio::test]
+async fn a_round_of_housekeeping_that_panics_is_one_round_lost() {
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = rounds.clone();
+    let round = move || {
+        let round = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        async move { assert!(round != 1, "the second round panics") }
+    };
+    let task = tokio::spawn(durable_db::server::every(Duration::from_millis(1), round));
+    let went_on = async {
+        while rounds.load(std::sync::atomic::Ordering::Relaxed) < 5 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), went_on)
+        .await
+        .expect("housekeeping stopped at the round that panicked");
+    assert!(!task.is_finished());
+    task.abort();
+}

@@ -5,6 +5,7 @@
 //! many connections are open, how long one may take to send a request, and
 //! how long one may leave an answer unread.
 use crate::http::{App, router};
+use futures::FutureExt;
 use hyper::server::conn::http1;
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
@@ -14,6 +15,7 @@ use hyper_util::{
 use std::{
     future::Future,
     io,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -25,6 +27,25 @@ use tokio::{
     sync::Semaphore,
     time::Sleep,
 };
+
+/// Do `round` again and again, `period` apart, for as long as the server
+/// runs. A round that panics is one round lost. Nothing else follows the
+/// peers, hands databases over or tends them, so a task that ended with its
+/// first panic left a server that went on answering without all three.
+pub async fn every<F, R>(period: Duration, mut round: F)
+where
+    F: FnMut() -> R,
+    R: Future<Output = ()>,
+{
+    let mut tick = tokio::time::interval(period);
+    loop {
+        tick.tick().await;
+        let done = AssertUnwindSafe(async { round().await }).catch_unwind();
+        if done.await.is_err() {
+            tracing::error!("a round of housekeeping panicked; the next follows");
+        }
+    }
+}
 
 /// A request's head may be this large. Hyper holds this much per connection
 /// at most, whatever is sent.
