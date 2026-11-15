@@ -23,6 +23,7 @@ scripts/test-clients.sh               # the TypeScript SDK, pi-durable adapter a
 scripts/soak-memory.sh                # a server under the manifest's memory limit, loaded for three minutes
 scripts/test-slow.sh                  # every test alone on 28% of a processor, as on a slow build machine
 scripts/test-stores.sh                # the bucket tests and a ledger on MinIO, RustFS and Garage in containers
+scripts/test-refusals.sh              # what a server sends a store that refuses every change for twenty seconds
 ```
 
 | Suite | What it covers |
@@ -46,6 +47,8 @@ cargo test --test bucket
 ```
 
 `scripts/test-stores.sh` does that for three S3 servers it starts in containers on this machine, each held to 1 GiB and two CPUs: a community build of MinIO and RustFS, each with a bucket that keeps versions and one that does not, and Garage, which keeps no versions and has no request that lists them. On each store it then runs a ledger through three servers while one is killed, one is stopped and one is killed again. It needs Docker and a release build, and takes about seven minutes.
+
+`scripts/test-refusals.sh` runs one server on MinIO behind an nginx that it tells to refuse every change for the middle third of a ledger, and prints how many requests the store refused, how soon a change was taken afterwards, and whether the ledger verified. `DURABLE_DB_BIN` names the binary, so that two releases can be compared. It needs Docker and takes about a minute and a half. The commit rate it prints is not a measurement: MinIO on a desktop's disk gave 420 to 1,030 commits a second to the same binary from one run to the next.
 
 `scripts/check-model.sh` runs TLC with a 2 GiB heap, four workers and a time limit, in Docker when no local Java is installed. TLC sizes itself from the whole machine if left alone; do not remove the caps. All configurations take about three minutes. `scripts/check-model.sh DeepDeletion` runs the one configuration that is left out because it takes far longer.
 

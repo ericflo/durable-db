@@ -50,6 +50,8 @@ pub struct S3Store {
     host: String,
     client: reqwest::Client,
     b2: Option<Arc<B2Uploader>>,
+    reads: Arc<Gate>,
+    changes: Arc<Gate>,
     /// Whether the bucket takes one request that removes many versions. A
     /// bucket that has refused it is not asked again.
     batches: AtomicBool,
@@ -57,6 +59,190 @@ pub struct S3Store {
     /// no such request is taken to keep none: what a purge removes there it
     /// removes by key, and it is not asked again.
     versions: AtomicBool,
+}
+
+/// What keeps a server from pressing a store that refuses it. Backblaze
+/// answered 503 to every upload for five and a half minutes, and in the first
+/// half minute was sent 28,000 more, each in place of one it had refused.
+///
+/// One busy part of a store refuses a request and the next one, sent
+/// elsewhere, is taken: nothing changes for that. After `REFUSALS` in a row
+/// with none taken, requests fail here without being sent. When the wait is
+/// over one request is sent to try the store, and the others go on failing
+/// until it is answered: taken, and all are sent again; refused, and the wait
+/// is doubled, to four seconds at most or to what the store asks for. A
+/// request that fails unsent has stored nothing, which a caller must already
+/// allow for in every failure.
+///
+/// A store limits one kind of request apart from another, and a read that
+/// is taken says nothing of uploads that are all refused. So reads, changes,
+/// calls of Backblaze's API and uploads to its pods each have a gate of
+/// their own.
+///
+/// The waits are short. What spares the store is that one request is sent
+/// where hundreds were, and a wait of four seconds does that as well as one
+/// of a minute. What a long wait would cost is that long without the store
+/// after it has begun to take requests again.
+struct Gate {
+    /// What is sent through it, for a log.
+    what: &'static str,
+    state: parking_lot::Mutex<Refusing>,
+}
+
+#[derive(Default)]
+struct Refusing {
+    /// Refusals since a request was last taken.
+    run: u32,
+    /// Nothing is sent before this, and one request at a time after it.
+    until: Option<Instant>,
+    /// Requests tried and refused since `until` was first set.
+    tried: u32,
+    /// One is being tried now.
+    trying: bool,
+    /// How long the store last asked to be left alone.
+    asked: Option<Duration>,
+}
+
+/// Leave to send one request. `trial` is set on the one that tries a store
+/// that has been refusing; dropping it lets another be tried.
+struct Pass {
+    trial: Option<Arc<Gate>>,
+}
+
+impl Drop for Pass {
+    fn drop(&mut self) {
+        if let Some(gate) = &self.trial {
+            gate.state.lock().trying = false;
+        }
+    }
+}
+
+/// What an answer changed.
+#[derive(Debug, PartialEq, Eq)]
+enum Turn {
+    Nothing,
+    /// Nothing is sent for this long.
+    Held(Duration),
+    /// Requests that were held are sent again.
+    Freed,
+}
+
+impl Gate {
+    fn new(what: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            what,
+            state: parking_lot::Mutex::default(),
+        })
+    }
+
+    fn enter(self: &Arc<Self>, now: Instant) -> StoreResult<Pass> {
+        let mut state = self.state.lock();
+        match state.until {
+            None => Ok(Pass { trial: None }),
+            Some(until) if until <= now && !state.trying => {
+                state.trying = true;
+                Ok(Pass {
+                    trial: Some(self.clone()),
+                })
+            }
+            Some(_) => Err(StoreError::Unavailable(format!(
+                "the store has refused {}, and this one was not sent",
+                self.what
+            ))),
+        }
+    }
+
+    /// The store asked to be left alone for this long.
+    fn asked(&self, wait: Duration) {
+        self.state.lock().asked = Some(wait.min(HOLD_ASKED));
+    }
+
+    /// The request that `pass` was given for has been answered: `refused`,
+    /// or with anything else, which a store that answers at all has taken.
+    fn settle(&self, pass: &Pass, refused: bool, now: Instant) -> Turn {
+        let mut state = self.state.lock();
+        if !refused {
+            let held = state.until.is_some();
+            // A request on trial clears `trying` itself, when it ends.
+            *state = Refusing {
+                trying: state.trying,
+                ..Refusing::default()
+            };
+            return if held { Turn::Freed } else { Turn::Nothing };
+        }
+        let wait = if state.until.is_none() {
+            state.run += 1;
+            if state.run < REFUSALS {
+                return Turn::Nothing;
+            }
+            HOLD
+        } else if pass.trial.is_some() {
+            state.tried = (state.tried + 1).min(2);
+            HOLD * (1 << state.tried)
+        } else {
+            // Sent before the store began to refuse, and refused after.
+            return Turn::Nothing;
+        };
+        let wait = wait.max(state.asked.unwrap_or_default());
+        state.until = Some(now + wait);
+        Turn::Held(wait)
+    }
+
+    fn answered<T>(&self, pass: Pass, answer: &StoreResult<T>, now: Instant) {
+        let said = match answer {
+            Err(StoreError::Unavailable(said)) => Some(said),
+            _ => None,
+        };
+        let turn = self.settle(&pass, said.is_some(), now);
+        drop(pass);
+        match (turn, said) {
+            (Turn::Held(wait), Some(said)) => tracing::warn!(
+                "the store refuses {}: {said}. None is sent for {} s",
+                self.what,
+                wait.as_secs()
+            ),
+            (Turn::Freed, _) => tracing::info!("the store takes {} again", self.what),
+            _ => {}
+        }
+    }
+
+    /// `sent`, unless the store is refusing what goes through this gate.
+    async fn through<T>(
+        self: &Arc<Self>,
+        sent: impl Future<Output = StoreResult<T>>,
+    ) -> StoreResult<T> {
+        let pass = self.enter(Instant::now())?;
+        let answer = sent.await;
+        self.answered(pass, &answer, Instant::now());
+        answer
+    }
+}
+
+/// What a store said as it refused: its code, and how long it asks to be
+/// left alone. For a log, so only what a code is made of is kept.
+fn said(code: Option<&str>, wait: Option<Duration>) -> String {
+    let code = code.filter(|code| {
+        (1..=40).contains(&code.len())
+            && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    });
+    match (code, wait) {
+        (Some(code), Some(wait)) => format!(" {code}, retry after {} s", wait.as_secs()),
+        (Some(code), None) => format!(" {code}"),
+        (None, Some(wait)) => format!(", retry after {} s", wait.as_secs()),
+        (None, None) => String::new(),
+    }
+}
+
+/// The `Retry-After` of an answer, when it is a number of seconds.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let seconds = headers
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds))
 }
 
 /// A failed exchange. The URL names the bucket and the key, and neither
@@ -83,6 +269,14 @@ const PATIENCE: Duration = Duration::from_secs(20);
 const PURGE_AGAIN: u32 = 2;
 /// How many versions one request may remove, by the S3 API.
 const BATCH: usize = 1000;
+/// Refusals in a row, with no request taken between them, after which the
+/// store is taken to be refusing this server and not to have one busy part.
+const REFUSALS: u32 = 8;
+/// How long nothing is sent after that. Then one request is tried, and each
+/// one that is refused doubles the wait, up to four times this.
+const HOLD: Duration = Duration::from_secs(1);
+/// The longest wait a store is given when it asks for one.
+const HOLD_ASKED: Duration = Duration::from_secs(60);
 /// Google Cloud Storage answers a listing of versions in a shape of its own
 /// unless this header asks for Amazon's. Other stores take no notice of it.
 const AS_AMAZON: (&str, &str) = ("x-goog-interop-list-objects-format", "enabled");
@@ -309,6 +503,8 @@ impl S3Store {
             host,
             client,
             b2: None,
+            reads: Gate::new("reads"),
+            changes: Gate::new("changes"),
             batches: AtomicBool::new(true),
             versions: AtomicBool::new(true),
         })
@@ -329,6 +525,8 @@ impl S3Store {
     pub fn with_b2_uploads(mut self) -> Self {
         self.b2 = Some(Arc::new(B2Uploader {
             client: self.client.clone(),
+            calls: Gate::new("calls of Backblaze's API"),
+            uploads: Gate::new("uploads to Backblaze"),
             key_id: self.config.access_key_id.clone(),
             key: self.config.secret_access_key.clone(),
             bucket: self.config.bucket.clone(),
@@ -352,9 +550,29 @@ impl S3Store {
     }
 
     /// `send`, and the request also carries the header `also`, signed with
-    /// the others.
+    /// the others. Not sent to a store that is refusing requests.
     async fn exchange(
         &self,
+        method: Method,
+        key: &str,
+        query: &[(&str, &str)],
+        range: Option<(u64, u64)>,
+        body: Bytes,
+        also: Option<(&'static str, &str)>,
+    ) -> StoreResult<Reply> {
+        let gate = if method == Method::GET || method == Method::HEAD {
+            &self.reads
+        } else {
+            &self.changes
+        };
+        let sent = self.request(gate, method, key, query, range, body, also);
+        gate.through(sent).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request(
+        &self,
+        gate: &Gate,
         method: Method,
         key: &str,
         query: &[(&str, &str)],
@@ -437,10 +655,14 @@ impl S3Store {
             Err(_) => return Err(StoreError::Unavailable("a storage request stalled".into())),
         };
         let status = response.status();
+        let wait = retry_after(response.headers());
         let body = body_of(response).await?;
+        // What an answer that is an error says it is. Read from no other:
+        // that may be megabytes of a table.
+        let code = || tag(&String::from_utf8_lossy(&body), "Code").map(str::to_owned);
         // S3 reports a connection it gave up on as a client error.
-        let gave_up = status == StatusCode::BAD_REQUEST
-            && tag(&String::from_utf8_lossy(&body), "Code") == Some("RequestTimeout");
+        let gave_up =
+            status == StatusCode::BAD_REQUEST && code().as_deref() == Some("RequestTimeout");
         // A request the store has not implemented is refused, not delayed:
         // the next attempt would be answered the same.
         if (status.is_server_error() && status != StatusCode::NOT_IMPLEMENTED)
@@ -448,7 +670,11 @@ impl S3Store {
             || status == StatusCode::REQUEST_TIMEOUT
             || gave_up
         {
-            return Err(StoreError::Unavailable(format!("{status}")));
+            if let Some(wait) = wait {
+                gate.asked(wait);
+            }
+            let said = said(code().as_deref(), wait);
+            return Err(StoreError::Unavailable(format!("{status}{said}")));
         }
         Ok(Reply { status, body })
     }
@@ -650,6 +876,9 @@ impl S3Store {
 /// others took 0.8 s at the median.
 struct B2Uploader {
     client: reqwest::Client,
+    /// Calls of the API, and uploads to the pods it names.
+    calls: Arc<Gate>,
+    uploads: Arc<Gate>,
     key_id: String,
     key: String,
     bucket: String,
@@ -806,19 +1035,33 @@ impl Drop for Lease {
 }
 
 impl B2Uploader {
+    /// One call of Backblaze's API. Not sent while it refuses them.
     async fn json(
         &self,
         request: reqwest::RequestBuilder,
     ) -> StoreResult<(StatusCode, serde_json::Value)> {
+        self.calls.through(Self::call(&self.calls, request)).await
+    }
+
+    async fn call(
+        gate: &Gate,
+        request: reqwest::RequestBuilder,
+    ) -> StoreResult<(StatusCode, serde_json::Value)> {
         let response = request.send().await.map_err(network)?;
         let status = response.status();
+        let wait = retry_after(response.headers());
         let body = response.bytes().await.map_err(network)?;
         if status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::REQUEST_TIMEOUT
         {
+            if let Some(wait) = wait {
+                gate.asked(wait);
+            }
+            let reply: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let said = said(reply["code"].as_str(), wait);
             return Err(StoreError::Unavailable(format!(
-                "Backblaze answered {status}"
+                "Backblaze answered {status}{said}"
             )));
         }
         Ok((
@@ -999,24 +1242,27 @@ impl B2Uploader {
     /// `false`: a spare that was not sent.
     async fn upload(self: &Arc<Self>, key: &str, body: Bytes, want: Want) -> StoreResult<bool> {
         use sha1::Digest as _;
+        // Before a URL is taken: an upload that is not sent would lose the
+        // pool its URL, and the next would call for a new one.
+        let pass = self.uploads.enter(Instant::now())?;
         let Some((target, _lease)) = self.target(want).await? else {
             return Ok(false);
         };
         let sampled = body.len() <= B2_SAMPLE_BYTES;
         let timeout = Duration::from_secs(20 + body.len() as u64 / (256 << 10));
         let started = std::time::Instant::now();
-        let (status, reply) = self
-            .json(
-                self.client
-                    .post(&target.url)
-                    .timeout(timeout)
-                    .header("authorization", &target.token)
-                    .header("x-bz-file-name", encode(key, true))
-                    .header("content-type", "application/octet-stream")
-                    .header("x-bz-content-sha1", hex::encode(sha1::Sha1::digest(&body)))
-                    .body(body),
-            )
-            .await?;
+        let request = self
+            .client
+            .post(&target.url)
+            .timeout(timeout)
+            .header("authorization", &target.token)
+            .header("x-bz-file-name", encode(key, true))
+            .header("content-type", "application/octet-stream")
+            .header("x-bz-content-sha1", hex::encode(sha1::Sha1::digest(&body)))
+            .body(body);
+        let answer = Self::call(&self.uploads, request).await;
+        self.uploads.answered(pass, &answer, Instant::now());
+        let (status, reply) = answer?;
         if status.is_success() {
             self.keep(target, started.elapsed(), sampled);
             return Ok(true);
@@ -1440,5 +1686,297 @@ mod tests {
             hex::encode(key),
             "f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d"
         );
+    }
+
+    fn no() -> StoreResult<()> {
+        Err(StoreError::Unavailable("503".into()))
+    }
+
+    /// One request, answered at once. Whether it was sent.
+    fn send(gate: &Arc<Gate>, now: Instant, taken: bool) -> bool {
+        let Ok(pass) = gate.enter(now) else {
+            return false;
+        };
+        gate.answered(pass, &if taken { Ok(()) } else { no() }, now);
+        true
+    }
+
+    /// A gate whose store has just refused `REFUSALS` requests in a row.
+    fn held(now: Instant) -> Arc<Gate> {
+        let gate = Gate::new("reads");
+        for _ in 0..REFUSALS {
+            assert!(send(&gate, now, false));
+        }
+        assert!(!send(&gate, now, true));
+        gate
+    }
+
+    #[test]
+    fn a_store_that_refuses_now_and_then_is_sent_every_request() {
+        let gate = Gate::new("reads");
+        let now = Instant::now();
+        for _ in 0..100 {
+            for _ in 0..REFUSALS - 1 {
+                assert!(send(&gate, now, false));
+            }
+            assert!(send(&gate, now, true));
+        }
+    }
+
+    #[test]
+    fn a_store_that_refuses_is_tried_with_one_request_at_a_time() {
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        let gate = held(start);
+        // Nothing is sent for a second.
+        assert!(!send(&gate, at(999), true));
+        // Then one request, and no other while it is unanswered.
+        let trial = gate.enter(at(1000)).unwrap();
+        assert!(gate.enter(at(1000)).is_err());
+        assert!(gate.enter(at(9000)).is_err());
+        // It is refused: the wait doubles, from the answer, up to four
+        // seconds.
+        gate.answered(trial, &no(), at(1200));
+        let mut now = 1200;
+        for wait in [2000, 4000, 4000, 4000] {
+            assert!(!send(&gate, at(now + wait - 1), true), "{wait}");
+            now += wait;
+            assert!(send(&gate, at(now), false), "{wait}");
+            assert!(!send(&gate, at(now), true), "{wait}");
+        }
+        // It is taken: every request is sent again, and a refusal is one
+        // refusal, as it was at first.
+        assert!(send(&gate, at(now + 4000), true));
+        for _ in 0..REFUSALS - 1 {
+            assert!(send(&gate, at(now + 4000), false));
+        }
+        assert!(send(&gate, at(now + 4000), true));
+        // And the first wait of the next time is one second again.
+        for _ in 0..REFUSALS {
+            assert!(send(&gate, at(now + 4000), false));
+        }
+        assert!(!send(&gate, at(now + 4999), true));
+        assert!(send(&gate, at(now + 5000), true));
+    }
+
+    /// An upload that is a spare is given up when the other ends first.
+    #[test]
+    fn a_request_on_trial_that_is_given_up_lets_another_be_tried() {
+        let start = Instant::now();
+        let gate = held(start);
+        let trial = gate.enter(start + HOLD).unwrap();
+        assert!(gate.enter(start + HOLD).is_err());
+        drop(trial);
+        let trial = gate.enter(start + HOLD).unwrap();
+        assert!(trial.trial.is_some());
+        assert!(gate.enter(start + HOLD).is_err());
+    }
+
+    #[test]
+    fn requests_under_way_when_a_store_refuses_change_nothing_by_being_refused() {
+        let start = Instant::now();
+        let gate = Gate::new("changes");
+        let mut sent: Vec<Pass> = (0..40).map(|_| gate.enter(start).unwrap()).collect();
+        for pass in sent.drain(..REFUSALS as usize) {
+            gate.answered(pass, &no(), start);
+        }
+        // The others are answered through the wait and after it.
+        for (i, pass) in sent.drain(..30).enumerate() {
+            gate.answered(pass, &no(), start + HOLD * i as u32 / 10);
+        }
+        assert!(gate.enter(start + HOLD - Duration::from_millis(1)).is_err());
+        // One is tried when the wait is over, and not later for them.
+        let trial = gate.enter(start + 3 * HOLD).unwrap();
+        assert!(trial.trial.is_some());
+        // One of them is taken: the store takes requests, and all are sent.
+        // The one on trial is refused after that, which is one refusal.
+        gate.answered(sent.pop().unwrap(), &Ok(()), start + 3 * HOLD);
+        assert!(send(&gate, start + 3 * HOLD, true));
+        gate.answered(trial, &no(), start + 3 * HOLD);
+        for _ in 0..REFUSALS - 2 {
+            assert!(send(&gate, start + 3 * HOLD, false));
+        }
+        assert!(send(&gate, start + 3 * HOLD, true));
+    }
+
+    #[test]
+    fn a_store_is_left_alone_for_as_long_as_it_asks() {
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        let gate = Gate::new("reads");
+        gate.asked(Duration::from_secs(5));
+        for _ in 0..REFUSALS {
+            assert!(send(&gate, start, false));
+        }
+        // Five seconds where one would have been waited, and two, and four.
+        for now in [5000, 10000, 15000] {
+            assert!(!send(&gate, at(now - 1), true), "{now}");
+            assert!(send(&gate, at(now), false), "{now}");
+        }
+        // A store that asks for an hour is tried after a minute.
+        gate.asked(Duration::from_secs(3600));
+        assert!(send(&gate, at(20_000), false));
+        assert!(!send(&gate, at(79_999), true));
+        assert!(send(&gate, at(80_000), true));
+        // What it asked is forgotten when it takes a request.
+        for _ in 0..REFUSALS {
+            assert!(send(&gate, at(80_000), false));
+        }
+        assert!(!send(&gate, at(80_999), true));
+        assert!(send(&gate, at(81_000), true));
+    }
+
+    #[test]
+    fn what_a_store_said_is_kept_for_a_log() {
+        let secs = Duration::from_secs;
+        assert_eq!(
+            said(Some("SlowDown"), Some(secs(3))),
+            " SlowDown, retry after 3 s"
+        );
+        assert_eq!(
+            said(Some("service_unavailable"), None),
+            " service_unavailable"
+        );
+        assert_eq!(said(None, Some(secs(1))), ", retry after 1 s");
+        assert_eq!(said(None, None), "");
+        // Not what a code is made of, or too long for one.
+        assert_eq!(said(Some("a code\nand a line"), None), "");
+        assert_eq!(said(Some(""), None), "");
+        assert_eq!(
+            said(Some(&"a".repeat(41)), Some(secs(2))),
+            ", retry after 2 s"
+        );
+    }
+
+    /// Backblaze's API as far as an upload needs it: a call that names a
+    /// pod, and pods that refuse every upload or take it.
+    #[derive(Default)]
+    struct Backblaze {
+        refusing: AtomicBool,
+        calls: std::sync::atomic::AtomicUsize,
+        uploads: std::sync::atomic::AtomicUsize,
+    }
+
+    async fn backblaze() -> (Arc<B2Uploader>, Arc<Backblaze>) {
+        use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state: Arc<Backblaze> = Arc::default();
+        let url = move |State(state): State<Arc<Backblaze>>| async move {
+            let n = state.calls.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({
+                "uploadUrl": format!("http://{address}/pod/{n}"),
+                "authorizationToken": "token",
+            }))
+        };
+        let upload = |State(state): State<Arc<Backblaze>>| async move {
+            state.uploads.fetch_add(1, Ordering::SeqCst);
+            if state.refusing.load(Ordering::SeqCst) {
+                let said = serde_json::json!({"status": 503, "code": "service_unavailable"});
+                let wait = [("retry-after", "2")];
+                (StatusCode::SERVICE_UNAVAILABLE, wait, Json(said)).into_response()
+            } else {
+                Json(serde_json::json!({})).into_response()
+            }
+        };
+        let router = Router::new()
+            .route("/b2api/v4/b2_get_upload_url", post(url))
+            .route("/pod/{n}", post(upload))
+            .with_state(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let uploader = B2Uploader {
+            client: reqwest::Client::new(),
+            calls: Gate::new("calls of Backblaze's API"),
+            uploads: Gate::new("uploads to Backblaze"),
+            key_id: String::new(),
+            key: String::new(),
+            bucket: String::new(),
+            // Authorized: nothing here is sent to Backblaze.
+            session: tokio::sync::Mutex::new(Some(B2Session {
+                api_url: format!("http://{address}"),
+                token: "token".into(),
+                bucket_id: "bucket".into(),
+            })),
+            pool: parking_lot::Mutex::default(),
+        };
+        (Arc::new(uploader), state)
+    }
+
+    #[tokio::test]
+    async fn backblaze_is_not_pressed_while_it_refuses_uploads() {
+        let (uploader, backblaze) = backblaze().await;
+        let body = Bytes::from_static(b"1");
+        let counts = || {
+            // Calls for URLs made in the background have ended by now.
+            let calls = backblaze.calls.load(Ordering::SeqCst);
+            (calls, backblaze.uploads.load(Ordering::SeqCst))
+        };
+        let settle = || tokio::time::sleep(Duration::from_millis(100));
+        assert!(
+            uploader
+                .upload("k", body.clone(), Want::First)
+                .await
+                .unwrap()
+        );
+        backblaze.refusing.store(true, Ordering::SeqCst);
+        for _ in 0..REFUSALS {
+            let refused = uploader.upload("k", body.clone(), Want::First).await;
+            let said = refused.unwrap_err().to_string();
+            let code = "503 Service Unavailable service_unavailable, retry after 2 s";
+            assert!(said.ends_with(code), "{said}");
+        }
+        settle().await;
+        let before = counts();
+        assert_eq!(before.1, 1 + REFUSALS as usize);
+        // No upload is sent, and none takes a URL or calls for one.
+        let urls = |uploader: &B2Uploader| {
+            let pool = uploader.pool.lock();
+            pool.proven.len() + pool.untried.len()
+        };
+        let kept = urls(&uploader);
+        for want in [Want::First, Want::Once, Want::Spare].repeat(20) {
+            let unsent = uploader.upload("k", body.clone(), want).await;
+            let said = unsent.unwrap_err().to_string();
+            assert!(said.ends_with("and this one was not sent"), "{said}");
+        }
+        settle().await;
+        assert_eq!((counts(), urls(&uploader)), (before, kept));
+        // Backblaze asked for two seconds, where one would have been
+        // waited. Then one upload is sent, of however many there are.
+        tokio::time::sleep(HOLD).await;
+        assert!(
+            uploader
+                .upload("k", body.clone(), Want::First)
+                .await
+                .is_err()
+        );
+        assert_eq!(counts(), before);
+        tokio::time::sleep(HOLD).await;
+        let all = (0..20).map(|_| uploader.upload("k", body.clone(), Want::First));
+        let all = futures::future::join_all(all).await;
+        assert!(all.iter().all(Result::is_err));
+        assert_eq!(counts().1, before.1 + 1);
+        // It was refused, and for two seconds nothing is sent. Then one is
+        // taken, and all are sent.
+        backblaze.refusing.store(false, Ordering::SeqCst);
+        tokio::time::sleep(HOLD).await;
+        assert!(
+            uploader
+                .upload("k", body.clone(), Want::First)
+                .await
+                .is_err()
+        );
+        assert_eq!(counts().1, before.1 + 1);
+        tokio::time::sleep(HOLD + Duration::from_millis(50)).await;
+        assert!(
+            uploader
+                .upload("k", body.clone(), Want::First)
+                .await
+                .unwrap()
+        );
+        let all = (0..20).map(|_| uploader.upload("k", body.clone(), Want::First));
+        let all = futures::future::join_all(all).await;
+        assert!(all.iter().all(|sent| matches!(sent, Ok(true))));
+        assert_eq!(counts().1, before.1 + 22);
     }
 }

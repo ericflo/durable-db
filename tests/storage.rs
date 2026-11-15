@@ -79,6 +79,8 @@ struct Bucket {
     versionless: bool,
     /// Answer everything with this.
     canned: Option<(StatusCode, &'static str)>,
+    /// Answer requests of these methods as a store that is asked too much.
+    slow_down: Vec<Method>,
     unsigned: Vec<String>,
     requests: usize,
 }
@@ -317,6 +319,15 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
     }
     if let Some((status, text)) = bucket.canned {
         return reply(status, text);
+    }
+    if bucket.slow_down.contains(&parts.method) {
+        let mut slow_down = reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>",
+        );
+        let wait = "2".parse().unwrap();
+        slow_down.headers_mut().insert("retry-after", wait);
+        return slow_down;
     }
     let text = |raw: &str| String::from_utf8(percent_decode(raw)).unwrap();
     let query: Vec<(String, String)> = raw_query
@@ -721,7 +732,6 @@ async fn awkward_keys_are_signed_stored_and_listed() {
 /// worth another attempt.
 #[tokio::test]
 async fn answers_are_read_for_what_they_say() {
-    let (store, bucket) = s3().await;
     let outcome = |result: Result<(), StoreError>| match result {
         Ok(()) => "ok",
         Err(StoreError::Unavailable(_)) => "retry",
@@ -781,6 +791,9 @@ async fn answers_are_read_for_what_they_say() {
             "ok",
         ),
     ] {
+        // A store of its own for each: one that has refused request after
+        // request is not sent the next.
+        let (store, bucket) = s3().await;
         bucket.lock().canned = Some((StatusCode::from_u16(status).unwrap(), text));
         let case = format!("{status} {text}");
         assert_eq!(outcome(store.get("k").await.map(drop)), read, "{case}");
@@ -794,8 +807,8 @@ async fn answers_are_read_for_what_they_say() {
         if status != 404 {
             assert_eq!(outcome(store.put("k", ONE).await), write, "{case}");
         }
+        assert!(bucket.lock().unsigned.is_empty(), "{case}");
     }
-    assert!(bucket.lock().unsigned.is_empty());
 }
 
 #[tokio::test]
@@ -920,6 +933,70 @@ async fn a_purge_sends_a_failed_request_again() {
             assert!(bucket.unsigned.is_empty(), "{case}: {:?}", bucket.unsigned);
         }
     }
+}
+
+/// Backblaze answered 503 to every upload for five and a half minutes. What
+/// a store is sent in such a time is what this is about: eight requests and
+/// then one at a time, as far apart as the store asks or further, where
+/// Backblaze had been sent 800 a second. What the store takes it is sent.
+#[tokio::test]
+async fn a_store_that_refuses_is_not_pressed() {
+    let (store, bucket) = s3().await;
+    let sent = || bucket.lock().requests;
+    let said = |error: StoreError| error.to_string();
+    let unsent = "storage unavailable: the store has refused reads, and this one was not sent";
+    store.put("k", ONE).await.unwrap();
+    // Refused now and then: every request is sent.
+    for _ in 0..3 {
+        bucket.lock().slow_down = vec![Method::GET, Method::HEAD];
+        for _ in 0..7 {
+            assert!(store.get("k").await.is_err());
+        }
+        bucket.lock().slow_down.clear();
+        assert_eq!(store.get("k").await.unwrap(), Some(ONE));
+    }
+    // Refused eight times with nothing taken between: no read is sent, and
+    // what the store said is in the failure of those that were.
+    bucket.lock().slow_down = vec![Method::GET, Method::HEAD];
+    let before = sent();
+    for _ in 0..8 {
+        assert_eq!(
+            said(store.get("k").await.unwrap_err()),
+            "storage unavailable: 503 Service Unavailable SlowDown, retry after 2 s"
+        );
+    }
+    for _ in 0..20 {
+        assert_eq!(said(store.get("k").await.unwrap_err()), unsent);
+        assert_eq!(said(store.exists("k").await.unwrap_err()), unsent);
+        assert_eq!(said(store.list("", None, 10).await.unwrap_err()), unsent);
+    }
+    assert_eq!(sent() - before, 8);
+    // The store takes changes, and they are sent.
+    store.put("k2", ONE).await.unwrap();
+    store.delete("k2").await.unwrap();
+    assert_eq!(sent() - before, 10);
+    // It asked for two seconds, where one would have been waited. Then one
+    // read is sent, of however many there are.
+    let pause = |millis| tokio::time::sleep(std::time::Duration::from_millis(millis));
+    pause(1050).await;
+    assert_eq!(said(store.get("k").await.unwrap_err()), unsent);
+    assert_eq!(sent() - before, 10);
+    pause(1000).await;
+    let reads = futures::future::join_all((0..20).map(|_| store.get("k"))).await;
+    assert!(reads.iter().all(Result::is_err));
+    assert_eq!(sent() - before, 11);
+    // It was refused. The store takes reads again, and for two seconds is
+    // not sent one; then one, and then all.
+    bucket.lock().slow_down.clear();
+    pause(1050).await;
+    assert_eq!(said(store.get("k").await.unwrap_err()), unsent);
+    assert_eq!(sent() - before, 11);
+    pause(1000).await;
+    assert_eq!(store.get("k").await.unwrap(), Some(ONE));
+    let reads = futures::future::join_all((0..20).map(|_| store.get("k"))).await;
+    assert!(reads.iter().all(|read| matches!(read, Ok(Some(_)))));
+    assert_eq!(sent() - before, 32);
+    assert!(bucket.lock().unsigned.is_empty());
 }
 
 const NOT_IMPLEMENTED: (StatusCode, &str) = (
