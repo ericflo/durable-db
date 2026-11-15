@@ -178,7 +178,7 @@ curl $URL/read -H <span class="s">"$AUTH"</span> \
 <div class="card">
 <h3>Not done yet</h3>
 <ul>
-<li><strong>Only Backblaze B2 has been exercised</strong> among cloud providers. Amazon S3 and other providers share the code path except for the upload call, but have not been run. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.</li>
+<li><strong>Only Backblaze B2 has been exercised</strong> among cloud providers. Amazon S3, Google Cloud Storage and other providers share the code path except for the upload call, but have not been run. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.</li>
 <li><strong>No soak of many hours</strong> on a real multi-node cluster. The Kubernetes test ran on kind. Memory was measured under load for minutes on a local directory, not for hours and not on a bucket.</li>
 <li><strong>B2 was measured from one desktop over Wi-Fi</strong>, a link that itself stalled for a second or two about once a minute. The slowest commits in the tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.</li>
 <li><strong>No point-in-time restore.</strong> Deletions are permanent. Protect the bucket with your provider's replication.</li>

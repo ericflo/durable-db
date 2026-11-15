@@ -33,7 +33,7 @@ pid_0='' pid_1='' pid_2=''
 cleanup() {
     for pid in $pid_0 $pid_1 $pid_2; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker rm -f -v "$container" >/dev/null 2>&1 || true
     rm -rf "$dir"
 }
 trap cleanup EXIT INT TERM
@@ -165,10 +165,11 @@ for store in ${*:-minio rustfs garage}; do
         echo "== $store, bucket '$bucket': the bucket tests"
         DDB_S3_ENDPOINT="$endpoint" DDB_S3_REGION="$region" DDB_S3_BUCKET="$bucket" \
             DDB_S3_ACCESS_KEY_ID="$access" DDB_S3_SECRET_ACCESS_KEY="$secret" \
-            cargo test --test bucket >"$dir/bucket.out" 2>&1 || { cat "$dir/bucket.out"; exit 1; }
-        grep '^test result' "$dir/bucket.out"
+            cargo test --test bucket -- --nocapture >"$dir/bucket.out" 2>&1 || { cat "$dir/bucket.out"; exit 1; }
+        # A store that does not take the request that removes many versions is named.
+        grep -e '^test result' -e 'refused the request' "$dir/bucket.out"
     done
     echo "== $store, bucket '${buckets%% *}': a ledger through three servers for $seconds s"
     ledger "${buckets%% *}"
-    docker rm -f "$container" >/dev/null
+    docker rm -f -v "$container" >/dev/null
 done

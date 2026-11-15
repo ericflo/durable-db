@@ -141,7 +141,7 @@ Release 2.0.0 was a complete rewrite; earlier releases used a different design a
 - Transactions do not span databases. There are no historical reads and no point-in-time restore.
 - A deleted database's name cannot be reused.
 - A database is rewritten in full each time it grows by half. The default quota is 1 GiB; larger databases have not been measured.
-- Among cloud stores only Backblaze B2 has been exercised. Amazon S3, Cloudflare R2 and others share the code but are untested. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.
+- Among cloud stores only Backblaze B2 has been exercised. Amazon S3, Google Cloud Storage, Cloudflare R2 and others share the code but have not been run; what the first two answer without an account has been read, and two requests were changed to suit it. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.
 - Every B2 figure was measured from one desktop over Wi-Fi, a link that itself stalled for a second or two about once a minute; the slowest commits in those tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.
 - Memory was measured for minutes on a local directory, not for hours and not on a bucket. No soak of many hours on a real multi-node cluster yet, and no independent review.
 - The prebuilt binary is Linux x86_64.

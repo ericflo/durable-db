@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use bytes::{Bytes, BytesMut};
 use hmac::{Hmac, Mac};
+use md5::Md5;
 use reqwest::{Method, StatusCode};
 use sha2::{Digest, Sha256};
 use std::{
@@ -82,6 +83,9 @@ const PATIENCE: Duration = Duration::from_secs(20);
 const PURGE_AGAIN: u32 = 2;
 /// How many versions one request may remove, by the S3 API.
 const BATCH: usize = 1000;
+/// Google Cloud Storage answers a listing of versions in a shape of its own
+/// unless this header asks for Amazon's. Other stores take no notice of it.
+const AS_AMAZON: (&str, &str) = ("x-goog-interop-list-objects-format", "enabled");
 
 /// The whole body of a response. Its size is not known in advance, so the
 /// limit is on each wait for more of it rather than on the transfer.
@@ -344,11 +348,11 @@ impl S3Store {
         range: Option<(u64, u64)>,
         body: Bytes,
     ) -> StoreResult<Reply> {
-        self.exchange(method, key, query, range, body, false).await
+        self.exchange(method, key, query, range, body, None).await
     }
 
-    /// `send`, and with `checked` the request also carries a checksum of
-    /// its body, which a request that removes many versions must.
+    /// `send`, and the request also carries the header `also`, signed with
+    /// the others.
     async fn exchange(
         &self,
         method: Method,
@@ -356,7 +360,7 @@ impl S3Store {
         query: &[(&str, &str)],
         range: Option<(u64, u64)>,
         body: Bytes,
-        checked: bool,
+        also: Option<(&'static str, &str)>,
     ) -> StoreResult<Reply> {
         let path = if key.is_empty() {
             format!("/{}", self.config.bucket)
@@ -373,22 +377,24 @@ impl S3Store {
             .map(|(n, v)| format!("{n}={v}"))
             .collect::<Vec<_>>()
             .join("&");
-        let digest = Sha256::digest(&body);
-        let payload_hash = hex::encode(digest);
-        // Every x-amz header that is sent is signed, in order of its name.
-        let checksum = checked.then(|| base64::engine::general_purpose::STANDARD.encode(digest));
-        let (checksum_line, signed) = match &checksum {
-            Some(checksum) => (
-                format!("x-amz-checksum-sha256:{checksum}\n"),
-                "host;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date",
-            ),
-            None => (String::new(), "host;x-amz-content-sha256;x-amz-date"),
-        };
+        let payload_hash = hex_sha256(&body);
         let (date, time) = timestamp();
-        let canonical = format!(
-            "{method}\n{path}\n{query_string}\nhost:{}\n{checksum_line}x-amz-content-sha256:{payload_hash}\nx-amz-date:{time}\n\n{signed}\n{payload_hash}",
-            self.host
-        );
+        // These headers are signed, in order of their names.
+        let mut headers = vec![
+            ("host", self.host.as_str()),
+            ("x-amz-content-sha256", payload_hash.as_str()),
+            ("x-amz-date", time.as_str()),
+        ];
+        headers.extend(also);
+        headers.sort();
+        let names: Vec<&str> = headers.iter().map(|(name, _)| *name).collect();
+        let signed = names.join(";");
+        let lines: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}:{value}\n"))
+            .collect();
+        let canonical =
+            format!("{method}\n{path}\n{query_string}\n{lines}\n{signed}\n{payload_hash}");
         let scope = format!("{date}/{}/s3/aws4_request", self.config.region);
         let to_sign = format!(
             "AWS4-HMAC-SHA256\n{time}\n{scope}\n{}",
@@ -423,8 +429,8 @@ impl S3Store {
         if let Some((start, end)) = range {
             request = request.header("range", format!("bytes={start}-{}", end.saturating_sub(1)));
         }
-        if let Some(checksum) = checksum {
-            request = request.header("x-amz-checksum-sha256", checksum);
+        if let Some((name, value)) = also {
+            request = request.header(name, value);
         }
         let response = match tokio::time::timeout(patience, request.body(body).send()).await {
             Ok(response) => response.map_err(network)?,
@@ -536,8 +542,9 @@ impl S3Store {
         method: Method,
         key: &str,
         query: &[(&str, &str)],
+        also: Option<(&'static str, &str)>,
     ) -> StoreResult<Reply> {
-        again(|| self.exchange(method.clone(), key, query, None, Bytes::new(), false)).await
+        again(|| self.exchange(method.clone(), key, query, None, Bytes::new(), also)).await
     }
 
     /// Remove these exact versions. One with no name is a key on a bucket
@@ -570,7 +577,9 @@ impl S3Store {
                     // marker.
                     let query = [("versionId", version.as_str())];
                     let named = usize::from(!version.is_empty());
-                    let reply = self.purging(Method::DELETE, key, &query[..named]).await?;
+                    let reply = self
+                        .purging(Method::DELETE, key, &query[..named], None)
+                        .await?;
                     if reply.status.is_success() || reply.absent() {
                         Ok(())
                     } else {
@@ -587,11 +596,15 @@ impl S3Store {
     /// bucket does not take such a request.
     async fn delete_batch(&self, body: String) -> StoreResult<bool> {
         let body = Bytes::from(body);
+        // The checksum Amazon documents as required of this request, and
+        // the one every store that was run or read about accepts.
+        let md5 = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&body));
         // A version that the bucket says it did not remove is asked for
         // again with the others, like a request that was not answered.
         again(|| async {
             let query = [("delete", "")];
-            let sent = self.exchange(Method::POST, "", &query, None, body.clone(), true);
+            let checksum = Some(("content-md5", md5.as_str()));
+            let sent = self.exchange(Method::POST, "", &query, None, body.clone(), checksum);
             let reply = sent.await?;
             let text = String::from_utf8_lossy(&reply.body);
             if !reply.status.is_success() || !text.contains("<DeleteResult") {
@@ -1183,7 +1196,8 @@ impl ObjectStore for S3Store {
                 query.push(("key-marker", key));
                 query.push(("version-id-marker", version));
             }
-            let reply = self.purging(Method::GET, "", &query).await?;
+            let listed = self.purging(Method::GET, "", &query, Some(AS_AMAZON));
+            let reply = listed.await?;
             if reply.status == StatusCode::NOT_IMPLEMENTED {
                 if self.versions.swap(false, Ordering::Relaxed) {
                     tracing::warn!(

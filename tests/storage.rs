@@ -28,6 +28,7 @@ use durable_db::{
     table::{Entry, Table, TableBuilder},
 };
 use hmac::{Hmac, Mac};
+use md5::Md5;
 use parking_lot::Mutex;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
@@ -190,6 +191,10 @@ fn verify(
         field("SignedHeaders=")?,
         field("Signature=")?,
     );
+    // The service signs the headers in order of their names.
+    if !signed_headers.split(';').is_sorted() {
+        return Err("the signed headers are not in order".into());
+    }
     let scope = credential.split_once('/').ok_or("no scope")?.1;
     let parts: Vec<&str> = scope.split('/').collect();
     let [date, region, service, _] = parts[..] else {
@@ -297,7 +302,7 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
         .unwrap_or_default();
     let names = parts.headers.keys().map(|name| name.as_str());
     let stray = names
-        .filter(|name| name.starts_with("x-amz-"))
+        .filter(|name| name.starts_with("x-amz-") || name.starts_with("x-goog-"))
         .find(|name| !signed.split(';').any(|signed| signed == *name));
     let verified = match stray {
         Some(name) => Err(format!("{name} is sent and not signed")),
@@ -339,7 +344,7 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
         );
     }
     if parts.method == Method::POST && param("delete").is_some() {
-        return remove_many(&mut bucket, &body, header("x-amz-checksum-sha256"));
+        return remove_many(&mut bucket, &body, header("content-md5"));
     }
     let prefix = param("prefix").unwrap_or_default();
     if param("versions").is_some() {
@@ -373,10 +378,30 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
         let size = bucket.page_size(param("max-keys"));
         let truncated = entries.len() > size;
         entries.truncate(size);
-        let mut xml = format!("{VERSIONS}<IsTruncated>{truncated}</IsTruncated>");
+        // Google Cloud Storage answers in Amazon's shape only when asked
+        // to, and otherwise in its own, which names no version as Amazon
+        // does.
+        let asked = header("x-goog-interop-list-objects-format");
+        let [open, close, id, next_key, next_id] = match asked.as_deref() {
+            Some("enabled") => [
+                VERSIONS,
+                "</ListVersionsResult>",
+                "VersionId",
+                "NextKeyMarker",
+                "NextVersionIdMarker",
+            ],
+            _ => [
+                LISTING,
+                "</ListBucketResult>",
+                "Generation",
+                "NextMarker",
+                "NextGenerationMarker",
+            ],
+        };
+        let mut xml = format!("{open}<IsTruncated>{truncated}</IsTruncated>");
         if let (true, Some(last)) = (truncated, entries.last()) {
             xml.push_str(&format!(
-                "<NextKeyMarker>{}</NextKeyMarker><NextVersionIdMarker>{}</NextVersionIdMarker>",
+                "<{next_key}>{}</{next_key}><{next_id}>{}</{next_id}>",
                 escape(&last.key),
                 last.id
             ));
@@ -384,13 +409,13 @@ async fn handle(State(bucket): State<Shared>, request: Request) -> Response {
         for v in &entries {
             let element = if v.marker { "DeleteMarker" } else { "Version" };
             xml.push_str(&format!(
-                "<{element}><Key>{}</Key><VersionId>{}</VersionId><Size>{}</Size></{element}>",
+                "<{element}><Key>{}</Key><{id}>{}</{id}><Size>{}</Size></{element}>",
                 escape(&v.key),
                 v.id,
                 v.body.len()
             ));
         }
-        return reply(StatusCode::OK, xml + "</ListVersionsResult>");
+        return reply(StatusCode::OK, xml + close);
     }
     // A continuation token stands for the place the listing had reached.
     let start = match param("continuation-token") {
@@ -472,7 +497,7 @@ fn remove_many(bucket: &mut Bucket, body: &[u8], checksum: Option<String>) -> Re
     }
     let text = std::str::from_utf8(body).unwrap();
     let objects: Vec<&str> = text.split("<Object>").skip(1).collect();
-    if checksum != Some(B64.encode(Sha256::digest(body))) || objects.len() > 1000 {
+    if checksum != Some(B64.encode(Md5::digest(body))) || objects.len() > 1000 {
         return reply(
             StatusCode::BAD_REQUEST,
             "<Error><Code>InvalidRequest</Code></Error>",

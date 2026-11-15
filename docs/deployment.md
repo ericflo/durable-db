@@ -61,7 +61,17 @@ durable-db serve --bucket my-bucket --endpoint https://s3.us-east-1.amazonaws.co
 
 For other providers pass `--region` as well. The server signs requests with static credentials from the environment and addresses the bucket path-style. The bucket may keep versions or not. A store that has no request that lists versions, such as Garage, is taken to keep none: what is collected there is removed by key, and the server says so once in its log.
 
+The credentials must be allowed to read, write, list and delete objects, and to list and delete their versions. By Amazon's documentation that is `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` and `s3:DeleteObjectVersion` on the objects, and `s3:ListBucket` and `s3:ListBucketVersions` on the bucket, whether or not the bucket keeps versions. A server that lacks one of them stops at its storage check and names the request that was refused.
+
 Among cloud providers only Backblaze B2 has been exercised by the test suite and benchmarks so far. Three S3 servers that you can run yourself have been, each on one machine: a community build of MinIO, RustFS and Garage. See [verification](verification.md#what-has-been-run-where).
+
+Amazon S3, Google Cloud Storage and Cloudflare R2 have not been run. What is known of them without an account:
+
+- **Amazon S3** answers listings in the shapes durable-db reads.
+- **Google Cloud Storage**, through its S3-compatible endpoint with HMAC keys, does too, since release 2.1.4 asks it to. Turn off soft delete on the bucket: Google's documentation gives it as on for a new bucket, and with it everything durable-db removes is kept, and billed, for seven days more.
+- **Cloudflare R2** keeps no versions by its documentation, and is expected to be handled as Garage is.
+
+[Finding 35](verification.md#what-these-checks-found) says what was asked of each and what was not.
 
 At startup the server writes, reads, lists and deletes one probe object and refuses to start if storage does not behave as required.
 

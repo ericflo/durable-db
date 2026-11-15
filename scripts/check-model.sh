@@ -28,6 +28,8 @@ run() {
   tlc -deadlock -workers "$workers" -metadir "../.tools/tlc-$name" -config "$name.cfg" DurableDb.tla > "$log" 2>&1
   status=$?
   set -e
+  # A run that is stopped leaves its states on disk, gigabytes of them.
+  rm -rf "${repo:?}/.tools/tlc-${name:?}"
   case "$name" in
     Unsafe*)
       if [ "$status" = 12 ] && grep -q 'Invariant .* is violated' "$log"; then
