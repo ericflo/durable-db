@@ -503,6 +503,12 @@ struct Ahead {
     _turn: tokio::sync::OwnedSemaphorePermit,
 }
 
+impl Ahead {
+    fn holds(&self, i: usize) -> bool {
+        (self.first..self.first + self.count).contains(&i)
+    }
+}
+
 pub struct TableScan {
     table: Arc<Table>,
     io: Arc<Io>,
@@ -615,6 +621,24 @@ impl TableScan {
     /// Block `i`: from memory, from what was read ahead, or from a read of
     /// it and of the blocks the scan comes to after it.
     async fn load(&mut self, i: usize) -> Result<Arc<Block>> {
+        let block = self.find(i).await;
+        // What was read ahead leaves memory, and its turn is another
+        // scan's, when the block the scan comes to next is not in it.
+        let next = if self.reverse {
+            i.checked_sub(1)
+        } else {
+            Some(i + 1)
+        };
+        if let Some(ahead) = &self.ahead
+            && !next.is_some_and(|next| ahead.holds(next))
+        {
+            self.ahead = None;
+        }
+        block
+    }
+
+    /// Block `i`, and what was read with it kept for the blocks after it.
+    async fn find(&mut self, i: usize) -> Result<Arc<Block>> {
         let table = self.table.clone();
         if let Some(block) = self.io.cached_block(&table.key, i as u32) {
             return Ok(block);
@@ -624,9 +648,7 @@ impl TableScan {
         let mut again = false;
         loop {
             let read = match &self.ahead {
-                Some(ahead) if (ahead.first..ahead.first + ahead.count).contains(&i) => {
-                    (ahead.first, ahead.bytes.clone())
-                }
+                Some(ahead) if ahead.holds(i) => (ahead.first, ahead.bytes.clone()),
                 _ => {
                     // The scan has passed what it read ahead, and gives its
                     // turn back before it asks for one.

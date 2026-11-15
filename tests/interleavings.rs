@@ -1373,6 +1373,70 @@ async fn a_scan_reads_ahead_of_itself_and_not_past_its_end() {
     assert!(longest > 3 << 18 && longest <= 1 << 20, "{backward:?}");
 }
 
+/// Two readers may have the bytes of a damaged copy at once. The one that
+/// meets the damage first discards the copy. The other meets it in what it
+/// read before that and finds no copy to discard: it reads the store's all
+/// the same, where it was answered that the table is damaged.
+#[tokio::test]
+async fn a_damaged_copy_that_another_reader_discarded_is_read_from_the_store() {
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    let table = stored_table(&store, 2000, 1000, 4096).await;
+    // What a merge asks for as it reads the table through: the eighth of
+    // its reads after the first block is of 64 blocks.
+    let plain = Io::new(gate.clone(), 1 << 20, None);
+    assert_eq!(
+        scanned(&table, &plain, ALL, false, false).await,
+        keys(0..2000)
+    );
+    let (start, end) = gate.ranges()[8];
+    assert!(end - start > 200_000, "{start} {end}");
+
+    // A server that wrote the table has a copy of it, of which the second
+    // half of that read is then damaged.
+    let dir = tempfile::tempdir().unwrap();
+    let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+    let io = Io::new(gate.clone(), 1 << 20, Some(disk));
+    let disk = io.disk.clone().unwrap();
+    let body = store.get(&table.meta.key).await.unwrap().unwrap();
+    io.remember(&table.meta.key, body).await;
+    let copy = std::fs::read_dir(dir.path()).unwrap().flatten().next();
+    let copy = copy.unwrap().path();
+    let mut bytes = std::fs::read(&copy).unwrap();
+    let (middle, end) = ((start + end) as usize / 2, end as usize);
+    for byte in bytes[middle..end].iter_mut().step_by(97) {
+        *byte ^= 0x5a;
+    }
+    std::fs::write(&copy, bytes).unwrap();
+
+    // A merge reads the copy as far as that read, whose first block is
+    // whole.
+    let table = Table::new(table.meta.clone());
+    let hits = || disk.hits.load(Ordering::Relaxed);
+    let mut scan = table.scan(io.clone(), b(""), b(""), false, false);
+    let mut found = vec![scan.next().await.unwrap().unwrap()];
+    let first = hits();
+    while hits() < first + 7 {
+        found.push(scan.next().await.unwrap().unwrap());
+    }
+    // Another reader met the damage and discarded the copy.
+    assert!(io.forget(&table.meta.key).await);
+    assert_eq!(disk.used(), 0);
+    // The merge comes to the damage in what it had read, and reads the
+    // store's from there.
+    let asked = gate.ranges().len();
+    while let Some(entry) = scan.next().await.unwrap() {
+        found.push(entry);
+    }
+    let found: Vec<String> = found
+        .iter()
+        .map(|entry| String::from_utf8(entry.key.to_vec()).unwrap())
+        .collect();
+    assert_eq!(found, keys(0..2000));
+    assert!(gate.ranges().len() > asked);
+    assert_eq!(hits(), first + 7);
+}
+
 /// What a scan read ahead is in memory until the scan has come to it, and
 /// a server may be asked for a thousand scans at once. So sixteen scans of
 /// requests read ahead at a time, and the others read a block at a time,
@@ -1443,7 +1507,9 @@ async fn no_more_than_sixteen_scans_read_ahead_at_a_time() {
     assert_eq!(found, 300);
     let ranges = gate.ranges()[asked..].to_vec();
     assert!(ranges.iter().any(|(start, end)| end - start > 6000));
-    assert_eq!(io.ahead.available_permits(), 0);
+    // At its end nothing is ahead of it, and it holds no turn though it
+    // is still there: a merge keeps the scans of the runs it has read.
+    assert_eq!(io.ahead.available_permits(), 1);
     drop(first);
     assert_eq!(io.ahead.available_permits(), 1);
     // With a turn free, the next scan reads ahead.
@@ -1473,6 +1539,15 @@ async fn no_more_than_sixteen_scans_read_ahead_at_a_time() {
     assert_eq!(io.ahead.available_permits(), AHEAD_SCANS);
     drop(merges);
     assert_eq!(io.merge_ahead.available_permits(), AHEAD_MERGES);
+
+    // A block of more than 1 MiB is read by itself. Nothing is ahead of
+    // the scan then, and it holds no turn.
+    let huge = stored_table(&store, 4, 1_500_000, 4096).await;
+    let mut scan = huge.scan(io.clone(), b(""), b(""), false, false);
+    for _ in 0..3 {
+        scan.next().await.unwrap().unwrap();
+        assert_eq!(io.merge_ahead.available_permits(), AHEAD_MERGES);
+    }
     let asked = gate.ranges().len();
     assert_eq!(scanned(&large[4], &io, ALL, false, false).await.len(), 2004);
     let (reads, longest) = read(asked);

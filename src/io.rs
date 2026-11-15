@@ -197,14 +197,16 @@ impl DiskCache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         };
+        let mut out = Vec::new();
         {
             let mut held = cache.held.lock();
             for (_, name, size) in found {
                 held.insert(name, size, None);
             }
             // The budget may be smaller than it was.
-            cache.make_room(&mut held, 0);
+            cache.make_room(&mut held, 0, &mut out);
         }
+        cache.unlink(&out);
         Ok(cache)
     }
 
@@ -270,19 +272,31 @@ impl DiskCache {
             && (!self.over(held, size, 1) || self.unread(held).is_some())
     }
 
-    /// Put out the least recently used tables until `size` more bytes fit.
-    /// False when they would not with every table gone, for the room that
-    /// fetches under way were promised.
-    fn make_room(&self, held: &mut Held, size: u64) -> bool {
+    /// Put out the least recently used tables until `size` more bytes fit,
+    /// and name them in `out` for `unlink`. False, with none put out, when
+    /// they would not fit with every table gone, for the room that fetches
+    /// under way were promised.
+    fn make_room(&self, held: &mut Held, size: u64, out: &mut Vec<Name>) -> bool {
         let tables = usize::from(size > 0);
+        if held.promised + size > self.budget || held.promises + tables > Self::most(self.budget) {
+            return false;
+        }
         while self.over(held, size, tables) {
             let Some(name) = held.order.values().next().copied() else {
-                return false;
+                break;
             };
             held.remove(&name);
-            let _ = fs::remove_file(self.path(&name));
+            out.push(name);
         }
         true
+    }
+
+    /// Remove the files of tables that were put out. Every read of a table
+    /// asks what is held, so this is done when that has been let go of.
+    fn unlink(&self, names: &[Name]) {
+        for name in names {
+            let _ = fs::remove_file(self.path(name));
+        }
     }
 
     /// Promise room to a table of `size` bytes that reads want and that is
@@ -295,16 +309,23 @@ impl DiskCache {
             return false;
         }
         let mut held = self.held.lock();
+        let mut out = Vec::new();
+        let mut room = true;
         while self.over(&held, size, 1) {
             let Some(name) = self.unread(&held) else {
-                return false;
+                room = false;
+                break;
             };
             held.remove(&name);
-            let _ = fs::remove_file(self.path(&name));
+            out.push(name);
         }
-        held.promises += 1;
-        held.promised += size;
-        true
+        if room {
+            held.promises += 1;
+            held.promised += size;
+        }
+        drop(held);
+        self.unlink(&out);
+        room
     }
 
     fn release(&self, size: u64) {
@@ -357,26 +378,30 @@ impl DiskCache {
             held.promises -= 1;
             held.promised -= bytes;
         }
+        let mut out = Vec::new();
         let stored = written
             && !held.tables.contains_key(&name)
-            && self.make_room(&mut held, size)
+            && self.make_room(&mut held, size, &mut out)
             && fs::rename(&tmp, self.path(&name)).is_ok();
         if stored {
             held.insert(name, size, Some(Instant::now()));
             held.missed.remove(&name);
         }
         drop(held);
+        self.unlink(&out);
         if !stored {
             let _ = fs::remove_file(&tmp);
         }
     }
 
     fn remove(&self, name: &Name) -> bool {
-        let mut held = self.held.lock();
-        held.missed.remove(name);
-        let removed = held.remove(name);
+        let removed = {
+            let mut held = self.held.lock();
+            held.missed.remove(name);
+            held.remove(name)
+        };
         if removed {
-            let _ = fs::remove_file(self.path(name));
+            self.unlink(&[*name]);
         }
         removed
     }
@@ -562,14 +587,16 @@ impl Io {
         }
     }
 
-    /// Discard a cached table that failed its checksum. Returns whether there
-    /// was one, in which case reading again goes to the bucket.
+    /// Discard a table's copy in the disk cache, when what was read of the
+    /// table failed its checksum. Returns whether there is a disk cache, in
+    /// which case reading again goes to the bucket. The copy may be gone
+    /// already: another reader that it failed has discarded it, and this
+    /// one had its bytes all the same.
     pub async fn forget(&self, key: &str) -> bool {
         let Some(disk) = &self.disk else { return false };
         let (disk, name) = (disk.clone(), DiskCache::name(key));
-        tokio::task::spawn_blocking(move || disk.remove(&name))
-            .await
-            .unwrap_or(false)
+        let _ = tokio::task::spawn_blocking(move || disk.remove(&name)).await;
+        true
     }
 
     /// Take out of the disk cache tables that no manifest lists any more.
@@ -694,6 +721,11 @@ mod tests {
         // A table that was written meanwhile leaves the promise its room.
         cache.put(&key(8), &[8; 1000], None);
         assert_eq!(here(&cache), [1, 7, 8]);
+        // One that would not fit beside the promise with every table gone
+        // is not kept, and puts out nothing.
+        cache.put(&key(10), &[10; 3001], None);
+        assert_eq!(here(&cache), [1, 7, 8]);
+        assert_eq!((cache.used(), files(&dir)), (3000, 3));
         cache.put(&key(9), &[9; 1000], Some(1000));
         assert_eq!(here(&cache), [1, 7, 8, 9]);
         assert_eq!((cache.used(), files(&dir)), (4000, 4));
@@ -842,5 +874,14 @@ mod tests {
         assert_eq!(DiskCache::most(1 << 30), 32_832);
         assert_eq!(DiskCache::most(8 << 30), 262_144);
         assert_eq!(DiskCache::most(1 << 40), 262_144);
+        // A table that is written when every place is promised to one
+        // that is being fetched is not kept.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open_idle(dir.path(), 3 * DISK_TABLE_BYTES, HOUR).unwrap();
+        for _ in 0..67 {
+            assert!(cache.reserve(1));
+        }
+        cache.put(&key(0), &[0], None);
+        assert_eq!((cache.used(), files(&dir)), (0, 0));
     }
 }
