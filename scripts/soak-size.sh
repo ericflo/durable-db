@@ -15,7 +15,8 @@
 # was read back; the most memory the server used; how long a new server with
 # an empty cache took to open it after the first was killed; strong reads
 # from that server, twice over, since the first are of what it has in
-# neither cache, and scans, each with what was read from storage for it;
+# neither cache, and scans, each with what was read from storage for it
+# and in how many requests;
 # writes over keys taken at random; how long a write
 # waits when the quota is then set under what the database holds, which is
 # how long a merge of all of it takes; how long a third server took to open
@@ -41,6 +42,7 @@
 #   SOAK_READ_CLIENTS  clients that read and scan (default: as many)
 #   SOAK_SECONDS       how long it is read, and scanned; written over for twice that (default 60)
 #   SOAK_STORE         minio or bucket (default: a local directory)
+#   SOAK_CACHE_MIB     the servers' disk cache, in MiB (default 1024, the Kubernetes manifest's)
 #   SOAK_DIR           where to put the data (default: a temporary directory)
 #   STORE_PORT         the port MinIO is given (default 19310)
 #   SOAK_PORT          the server's port (default 17783)
@@ -54,6 +56,7 @@ value=${SOAK_VALUE_BYTES:-4096}
 clients=${SOAK_CLIENTS:-64}
 readers=${SOAK_READ_CLIENTS:-$clients}
 seconds=${SOAK_SECONDS:-60}
+cache=${SOAK_CACHE_MIB:-1024}
 keys=$((gib * 1073741824 / value))
 endpoint="http://127.0.0.1:${STORE_PORT:-19310}"
 url="http://127.0.0.1:${SOAK_PORT:-17783}"
@@ -115,7 +118,7 @@ fi
 start() {
     systemd-run --user --scope -q -p MemoryMax=1G -p MemorySwapMax=0 -p CPUQuota=400% \
         "$bin" serve --listen "${url#http://}" "$@" \
-        --cache-dir "$dir/cache" --cache-dir-bytes 1073741824 \
+        --cache-dir "$dir/cache" --cache-dir-bytes $((cache * 1048576)) \
         --cache-bytes 201326592 --memtable-bytes 100663296 \
         --body-bytes 134217728 --result-bytes 134217728 --max-connections 1024 \
         >>"$dir/server.log" 2>&1 &
@@ -138,8 +141,9 @@ bench() {
 # A read workload, and what the server fetched from storage to answer it.
 reading() {
     fetched=$(metric durable_db_storage_received_bytes_total)
+    asked=$(metric 'durable_db_storage_seconds_count{op="get"}')
     bench --clients "$readers" --seconds "$seconds" "$@"
-    echo "    for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage"
+    echo "    for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage in $(($(metric 'durable_db_storage_seconds_count{op="get"}') - asked)) requests"
 }
 token=$("$bin" token --admin --key-file "$dir/admin.key")
 info() { curl -fsS -m 60 -H "authorization: Bearer $token" "$url/v1/databases/size-0"; }
@@ -150,7 +154,7 @@ peak() { awk '/^VmHWM/ { print int($2 / 1024) }' "/proc/$server/status"; }
 failures() { curl -fs "$url/metrics" | awk '/^durable_db_storage_failures_total/ { n += $2 } END { print n + 0 }'; }
 
 start "$@"
-echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $gib GiB, by $clients clients; $readers read it"
+echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $gib GiB, by $clients clients; $readers read it; a server's disk cache is $cache MiB"
 
 # Seconds since the start and the commits made so far, every ten seconds.
 began=$(date +%s)
