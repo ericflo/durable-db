@@ -308,6 +308,11 @@ pub struct Db {
 /// A turn at merging tables: one of the few that run at once on a server.
 type Turn = tokio::sync::OwnedSemaphorePermit;
 
+/// What a merge under way tells the disk cache with a table that is
+/// stored meanwhile: the tables it has read through, and those it has yet
+/// to read through or has stored itself. Both are empty outside a merge.
+type Beside<'a> = (&'a [Arc<Table>], &'a [Arc<Table>]);
+
 /// Objects above this size are uploaded once at a time: racing them would
 /// spend real bandwidth, and they are never on the path of a commit.
 const RACE_BYTES: usize = 256 << 10;
@@ -1170,7 +1175,7 @@ impl Db {
             }
             unflushed = self.state.read().confirmed_frame > maint.covered;
             if self.should_flush(&maint)
-                && let Err(error) = self.flush(&mut maint, false).await
+                && let Err(error) = self.flush(&mut maint, false, (&[], &[])).await
             {
                 report(&self.tag, "flush failed", &error);
                 // Storage is failing: a turn would only be kept from others.
@@ -1266,7 +1271,13 @@ impl Db {
     }
 
     /// Move acknowledged writes from the in-memory table into a new table.
-    async fn flush(self: &Arc<Self>, maint: &mut Maint, seal: bool) -> Result<()> {
+    /// `beside` is of the merge that gives way to this flush, if one does.
+    async fn flush(
+        self: &Arc<Self>,
+        maint: &mut Maint,
+        seal: bool,
+        beside: Beside<'_>,
+    ) -> Result<()> {
         let (revision, frame, entries, mut tables) = {
             let state = self.state.read();
             (
@@ -1294,7 +1305,7 @@ impl Db {
             .await
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
-                let table = self.store_table(maint, body, meta, (&[], &[])).await?;
+                let table = self.store_table(maint, body, meta, beside).await?;
                 tables.insert(0, table);
             }
         }
@@ -1302,21 +1313,24 @@ impl Db {
             .await
     }
 
-    /// Upload a table that the next manifest will list. `done` and
-    /// `coming` are the tables that the merge which made it has read
-    /// through and has yet to: in the disk cache it takes the room of the
-    /// first before that of others in use, and never that of the second.
+    /// Upload a table that the next manifest will list. While a merge
+    /// runs, `done` are the tables it has read through and `kept` those it
+    /// has yet to and those it has stored: in the disk cache the table
+    /// takes the room of the first before that of others in use, and
+    /// never that of the second.
     async fn store_table(
         &self,
         maint: &mut Maint,
         body: Bytes,
         meta: TableMeta,
-        (done, coming): (&[&str], &[&str]),
+        (done, kept): Beside<'_>,
     ) -> Result<Arc<Table>> {
         maint.next_table += 1;
         maint.unpublished.push(meta.key.clone());
         self.uploads.put(&meta.key, body.clone()).await?;
-        self.ctx.io.remember(&meta.key, body, done, coming).await;
+        let done: Vec<&str> = done.iter().map(|table| table.meta.key.as_str()).collect();
+        let kept: Vec<&str> = kept.iter().map(|table| table.meta.key.as_str()).collect();
+        self.ctx.io.remember(&meta.key, body, &done, &kept).await;
         Ok(Table::new(meta))
     }
 
@@ -1330,7 +1344,7 @@ impl Db {
             // What has been deleted up to here is in the tables it merges.
             self.reclaim_deleted.store(false, Ordering::Release);
             if self.state.read().confirmed_frame > maint.covered {
-                self.flush(maint, false).await?;
+                self.flush(maint, false, (&[], &[])).await?;
             }
         }
         let tables = self.state.read().tables.clone();
@@ -1378,14 +1392,15 @@ impl Db {
                 let (body, mut meta) = full.finish(self.layout.table(self.epoch, maint.next_table));
                 meta.part = merged.len() as u32;
                 // In the disk cache the table takes the room of those the
-                // merge has read through, not of those it is coming to.
-                fn keys<'a>(tables: impl Iterator<Item = &'a Arc<Table>>) -> Vec<&'a str> {
-                    tables.map(|table| table.meta.key.as_str()).collect()
-                }
-                let done = keys(scans.iter().flat_map(|scan| &scan.done));
-                let coming = keys(scans.iter().flat_map(RunScan::unread));
-                let table = self.store_table(maint, body, meta, (&done, &coming));
-                merged.push(table.await?);
+                // merge has read through, and not of those it is coming to
+                // or has stored.
+                let done: Vec<Arc<Table>> =
+                    scans.iter().flat_map(|scan| &scan.done).cloned().collect();
+                let coming = scans.iter().flat_map(RunScan::unread);
+                let mut kept: Vec<Arc<Table>> = coming.chain(&merged).cloned().collect();
+                let table = self.store_table(maint, body, meta, (&done, &kept)).await?;
+                kept.push(table.clone());
+                merged.push(table);
                 self.touch();
                 // Between tables, a merge gives way to what must not wait
                 // for it: a release, and writes that are due to be flushed.
@@ -1397,7 +1412,7 @@ impl Db {
                     // no manifest lists. These are not finished, not lost.
                     let at = maint.unpublished.len() - merged.len();
                     let mine = maint.unpublished.split_off(at);
-                    let flushed = self.flush(maint, false).await;
+                    let flushed = self.flush(maint, false, (&done, &kept)).await;
                     maint.unpublished.extend(mine);
                     flushed?;
                 }
@@ -1610,7 +1625,7 @@ impl Db {
         }
         let mut maint = self.maint.lock().await;
         if !self.is_closed() {
-            match self.flush(&mut maint, true).await {
+            match self.flush(&mut maint, true, (&[], &[])).await {
                 Ok(()) => {
                     // Duplicates of raced uploads may still be arriving.
                     // Let them land, then collect once more, so that what

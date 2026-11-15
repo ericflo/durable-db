@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use quick_cache::{Weighter, sync::Cache};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     future::Future,
     io::{self, Read, Seek, SeekFrom, Write},
@@ -84,7 +84,7 @@ const FETCH_PART: u64 = 16;
 const MISSED_TABLES: usize = 1024;
 
 /// How many tables that have left their manifests are remembered, so that
-/// none of them is fetched: 2 MiB of names.
+/// none of them is fetched: 3 MiB of names.
 const GONE_TABLES: usize = 65_536;
 
 /// A table's name in the cache directory.
@@ -108,8 +108,10 @@ struct Held {
     /// Bytes that reads have had from the bucket of tables that are not
     /// here, since each was last here.
     missed: HashMap<Name, u64>,
-    /// Tables that no manifest lists any more.
+    /// Tables that no manifest lists any more, and the order they left
+    /// in: the first to leave is the first forgotten.
     gone: HashSet<Name>,
+    left: VecDeque<Name>,
 }
 
 impl Held {
@@ -160,11 +162,11 @@ impl Held {
 /// Whole tables in a directory, the least recently used put out first.
 ///
 /// A table this server wrote is taken, since it cost nothing to have,
-/// and the least recently used make way. For one that a merge wrote, the
-/// tables that merge has read through make way before any that is in
-/// use, since they leave with the merge's manifest, and those it has yet
-/// to read never do, since it would read them from the bucket. One that
-/// reads missed is fetched once they have read a sixteenth
+/// and the least recently used make way. While a merge runs, the tables
+/// it has read through make way before any that is in use, since they
+/// leave with the merge's manifest, and those it has yet to read and
+/// those it has stored never do. One that reads missed is fetched once
+/// they have read a sixteenth
 /// of it from the bucket, and only into room that is free, or that tables
 /// no read has asked for in five minutes leave: it never puts out a table
 /// that is in use. When a server reads more than its cache holds, the
@@ -409,22 +411,25 @@ impl DiskCache {
         self.put_merged(key, body, promised, &[], &[]);
     }
 
-    /// `put`, of a table that a merge wrote when it had read through
-    /// `done` and had `coming` yet to read through. Of the tables that are
-    /// in use, those of `done` make way first: they leave the cache when
-    /// the merge is published, and to put out others for its tables has a
-    /// merge of a database that was all here leave half of it here. Those
-    /// of `coming` count as just used and none makes way: the merge would
-    /// read it from the bucket, which is certain and at once, where a read
-    /// of the table it wrote is neither. When the others do not make
-    /// enough room, the table is not kept.
+    /// `put`, of a table written while a merge has read through `done`
+    /// and has `kept`: the tables it has yet to read through and those it
+    /// has stored. Of the tables that are in use, those of `done` make way
+    /// first: they leave the cache when the merge is published, and to put
+    /// out others for its tables has a merge of a database that was all
+    /// here leave half of it here. Those of `kept` count as just used and
+    /// none makes way. A table the merge is coming to it would read from
+    /// the bucket, which is certain and at once, where a read of the table
+    /// being put is neither. A table it has stored is read by nothing
+    /// until the merge is published, and would count as unread, and be the
+    /// first to go, in a merge that takes more than five minutes. When the
+    /// others do not make enough room, the table is not kept.
     fn put_merged(
         &self,
         key: &str,
         body: &[u8],
         promised: Option<u64>,
         done: &[Name],
-        coming: &[Name],
+        kept: &[Name],
     ) {
         let (name, size) = (Self::name(key), body.len() as u64);
         let tmp = self.dir.join(format!(
@@ -441,7 +446,7 @@ impl DiskCache {
             held.promises -= 1;
             held.promised -= bytes;
         }
-        let kept = held.keep(coming);
+        let kept = held.keep(kept);
         let mut out = Vec::new();
         let stored = written
             && !held.gone.contains(&name)
@@ -480,15 +485,19 @@ impl DiskCache {
     fn discard(&self, names: &[Name]) {
         let mut out = Vec::new();
         let mut held = self.held.lock();
-        if held.gone.len() + names.len() > GONE_TABLES {
-            held.gone.clear();
-        }
         for name in names {
             held.missed.remove(name);
             if held.remove(name) {
                 out.push(*name);
             }
-            held.gone.insert(*name);
+            if held.gone.insert(*name) {
+                if held.left.len() == GONE_TABLES
+                    && let Some(first) = held.left.pop_front()
+                {
+                    held.gone.remove(&first);
+                }
+                held.left.push_back(*name);
+            }
         }
         drop(held);
         self.unlink(&out);
@@ -667,22 +676,22 @@ impl Io {
 
     /// Put a whole table that this server wrote into the disk cache.
     /// Returns when it is there, so that its bytes are not left waiting in
-    /// memory. `done` and `coming` are the tables that the merge which
-    /// wrote it has read through and has yet to, and none for a flush: the
-    /// table takes the room of the first before that of any other in use,
-    /// and never that of the second. Left to the order of their use it
-    /// took just that, since those are the tables its merge used longest
-    /// ago, and the merge then read them from the bucket: a merge of a
-    /// whole database, with a cache as large as that database, fetched
-    /// most of it again.
-    pub async fn remember(&self, key: &str, body: Bytes, done: &[&str], coming: &[&str]) {
+    /// memory. While a merge runs, `done` are the tables it has read
+    /// through and `kept` those it has yet to and those it has stored; a
+    /// flush outside a merge has neither. The table takes the room of the
+    /// first before that of any other in use, and never that of the
+    /// second. Left to the order of their use it took just that, since the
+    /// tables a merge is coming to are those it used longest ago, and the
+    /// merge then read them from the bucket: a merge of a whole database,
+    /// with a cache as large as that database, fetched most of it again.
+    pub async fn remember(&self, key: &str, body: Bytes, done: &[&str], kept: &[&str]) {
         if let Some(disk) = &self.disk {
             let names = |keys: &[&str]| -> Vec<Name> {
                 keys.iter().map(|key| DiskCache::name(key)).collect()
             };
-            let (done, coming) = (names(done), names(coming));
+            let (done, kept) = (names(done), names(kept));
             let (disk, key) = (disk.clone(), key.to_owned());
-            let put = move || disk.put_merged(&key, &body, None, &done, &coming);
+            let put = move || disk.put_merged(&key, &body, None, &done, &kept);
             let _ = tokio::task::spawn_blocking(put).await;
         }
     }
@@ -854,6 +863,38 @@ mod tests {
         }
         idle.put_merged(&key(4), &[4; 1000], None, &[name(2)], &[name(3)]);
         assert_eq!(here(&idle), [1, 2, 3, 4]);
+        // The tables the merge has stored are read by nothing until it is
+        // published. They do not count as unread: each one after them
+        // takes the room of a table the merge has read through.
+        let dir = tempfile::tempdir().unwrap();
+        let idle = DiskCache::open_idle(dir.path(), 4000, Duration::ZERO).unwrap();
+        for n in 0..4 {
+            idle.put(&key(n), &[n; 1000], None);
+        }
+        let names = |tables: &[u8]| -> Vec<Name> { tables.iter().map(|n| name(*n)).collect() };
+        idle.put_merged(
+            &key(10),
+            &[10; 1000],
+            None,
+            &names(&[0]),
+            &names(&[1, 2, 3]),
+        );
+        idle.put_merged(
+            &key(11),
+            &[11; 1000],
+            None,
+            &names(&[0, 1]),
+            &names(&[2, 3, 10]),
+        );
+        assert_eq!(here(&idle), [2, 3, 10, 11]);
+        idle.put_merged(
+            &key(12),
+            &[12; 1000],
+            None,
+            &names(&[1, 2]),
+            &names(&[3, 10, 11]),
+        );
+        assert_eq!(here(&idle), [3, 10, 11, 12]);
     }
 
     #[test]
@@ -873,16 +914,24 @@ mod tests {
         assert!(!cache.wanted(&name(7), 1000, 1000));
         assert!(!cache.wanted(&name(1), 1000, 1000));
         assert!(cache.wanted(&name(8), 1000, 1000));
-        // What is remembered of them is bounded: with as many again gone,
-        // they are forgotten.
+        // What is remembered of them is bounded, and the first to leave is
+        // the first forgotten.
         let other = |n: usize| DiskCache::name(&format!("other/{n}"));
         let gone: Vec<Name> = (0..GONE_TABLES - 2).map(other).collect();
         cache.discard(&gone);
         assert!(!cache.wanted(&name(7), 1000, 1000) && !cache.wanted(&other(0), 1000, 1000));
-        cache.discard(&[other(GONE_TABLES)]);
-        assert!(
-            cache.wanted(&name(7), 1000, 1000) && !cache.wanted(&other(GONE_TABLES), 1000, 1000)
+        cache.discard(&[other(GONE_TABLES), other(0)]);
+        assert!(cache.wanted(&name(7), 1000, 1000));
+        assert!(!cache.wanted(&name(1), 1000, 1000) && !cache.wanted(&other(0), 1000, 1000));
+        // Also when more leave at once than are remembered.
+        let many: Vec<Name> = (0..GONE_TABLES + 3).map(|n| other(n + 100_000)).collect();
+        cache.discard(&many);
+        let held = cache.held.lock();
+        assert_eq!(
+            (held.gone.len(), held.left.len()),
+            (GONE_TABLES, GONE_TABLES)
         );
+        assert!(!held.gone.contains(&many[2]) && held.gone.contains(&many[3]));
     }
 
     #[test]
