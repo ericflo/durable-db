@@ -185,6 +185,16 @@ The limits were then tested instead of added up: one server with the flags of th
 
     Since 2.1.4 the idle time of each database is read once before they are sorted, and a round of housekeeping that panics is one round lost: it is reported as an error and the next round runs. `tests/engine.rs` tends 96 databases in use 2,000 times, which fails within 10 ms with the old sort, and runs a round that panics, which fails without the guard. With the old sort put back under the guard, 16 rounds of the same 90 seconds panicked and every database was released when it fell idle. A database's own tasks were already kept in this way: a panic there closes that database, and it is opened again from the bucket. The server's own task was not. The four scripts that run servers now fail when a server's log holds a panic.
 
+37. **Backblaze refused every upload for five and a half minutes, eleven minutes into a run.** The five-minute run of finding 36 was made again for twenty minutes with 2.1.4, to see where memory stops: 256 databases, one client each, one server. For eleven and a half minutes it committed 1,333 times a second on average, which is about 1,750 uploads and 1,330 HEADs a second. Then Backblaze answered `503 Service Unavailable` to every upload, and GETs, HEADs, listings and deletions failed with them. The desktop's link was working: of 4,710 pings to the router five took longer than half a second.
+
+    Backblaze's documentation gives a new account 500 requests a second for uploads and downloads, and says that an account beyond its limit is answered `429` by its own API and `503` by its S3 API. The run was at about six times that figure, as the five-minute runs were for as long as they lasted. So this was most likely that limit, eleven minutes late. It was not established: durable-db logs the status of such an answer and not its code or its `Retry-After`, and the run was not made again, because an account that goes on doing this is one Backblaze may act on, and a limit on an account is a limit on every bucket in it.
+
+    What durable-db did is what [architecture](architecture.md#what-happens-when-things-fail) says of storage that is unreachable. No commit was acknowledged from the moment the uploads failed. Each of the 256 clients had one commit answered with an error. Every database was closed about half a minute later, when its flush failed. When uploads were accepted again, every database was opened again within a minute and committed for the rest of the run.
+
+    Two things in it are not good. In the first half minute some 28,000 uploads failed, about 800 a second: an upload that fails is sent again at once to another storage pod, which is what Backblaze asks for when one pod is busy and the wrong thing to do to a service that is refusing an account. And the server used 932 MiB at the moment all 256 databases were opened again together, against 683 MiB before, under a limit of 4 GiB.
+
+    Nothing was changed for this in 2.1.4. Reading the code and `Retry-After` of such an answer, holding back when an account is refused, and keeping a server's own requests under a rate it is given are the next work. Until then the figures in [performance](performance.md) for many databases on Backblaze are of a rate that an account with the default limit cannot expect to keep.
+
 ### What has been run where
 
 | Storage | Unit, engine, chaos | HTTP, cluster | Bucket tests | Benchmarks | Kubernetes |
@@ -209,6 +219,7 @@ What Amazon S3 and Google Cloud Storage answer to listings without an account ha
 - Check a liveness property: with one correct server and working storage, a request is eventually answered.
 - Make the chaos test repeatable from its seed alone, by giving the engine the simulated clock for its deadlines, and run it routinely under CPU pressure as well as without.
 - The rule for choosing storage pods on Backblaze B2 was measured from one desktop on Wi-Fi, for minutes at a time. A server in a data centre, and hours of load, have not been measured.
+- On Backblaze B2 a server sends requests as fast as its databases commit, and does not hold back when the account is refused (finding 37). What Backblaze answers then, with which code and `Retry-After`, has not been read.
 - A round of a server's housekeeping that panics is reported and the next one runs; nothing reports a round that does not end. None is known.
 - A review by people outside the project. The reviews recorded above were automated and commissioned by the project itself.
 - Behaviour when the bucket itself misbehaves beyond the assumptions (lost objects, stale listings) is undefined; block checksums detect corrupted table data only, and a manifest carries no checksum of its own.

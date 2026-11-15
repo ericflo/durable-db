@@ -50,6 +50,8 @@ durable-db serve \
 
 The endpoint is shown on the bucket's page. `B2_APPLICATION_KEY_ID` and `B2_APPLICATION_KEY` are accepted in place of the AWS variable names.
 
+Backblaze limits the requests of an account, over all of its buckets: its documentation gives a new account 500 a second for uploads and downloads, and raises that on request. A commit is two to three requests. durable-db does not yet keep itself under a rate, and a benchmark here that ran at six times that figure had every upload refused for five and a half minutes ([performance](performance.md#backblaze-b2)). Keep load tests in an account of their own.
+
 Reads, lists and deletes use B2's S3-compatible API. Uploads use B2's own upload call with the same key, because it measured two to three times faster than PutObject through B2's S3 gateway; `--s3-uploads-only` turns that off. Each small object is uploaded to the fastest storage pod the server knows, and a second, identical upload races it on another pod when one can be spared, since B2 uploads are free and their latency varies widely between pods. [Performance](performance.md#backblaze-b2) says how pods are chosen.
 
 ### Amazon S3 and other S3-compatible storage
