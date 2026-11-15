@@ -650,9 +650,6 @@ impl TableScan {
             let read = match &self.ahead {
                 Some(ahead) if ahead.holds(i) => (ahead.first, ahead.bytes.clone()),
                 _ => {
-                    // The scan has passed what it read ahead, and gives its
-                    // turn back before it asks for one.
-                    self.ahead = None;
                     let turn = self.turn();
                     let (first, last) = match turn {
                         Some(_) => self.reach(&index, i),

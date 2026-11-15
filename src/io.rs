@@ -693,6 +693,14 @@ mod tests {
         // One that is here is not written again.
         cache.put(&key(5), &[5; 1500], None);
         assert_eq!((cache.used(), files(&dir)), (3500, 3));
+        // A table of more than 64 MiB is not kept by a cache that has the
+        // room, nor fetched for it.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open_idle(dir.path(), 1 << 30, HOUR).unwrap();
+        cache.put(&key(7), &vec![7; DISK_OBJECT_BYTES as usize + 1], None);
+        assert_eq!((cache.used(), files(&dir)), (0, 0));
+        assert!(!room(&cache, DISK_OBJECT_BYTES + 1) && !cache.reserve(DISK_OBJECT_BYTES + 1));
+        assert!(room(&cache, DISK_OBJECT_BYTES) && cache.reserve(DISK_OBJECT_BYTES));
     }
 
     #[test]
