@@ -35,6 +35,13 @@ fn put(key: &str, value: &str) -> Txn {
     }
 }
 
+fn delete(key: &str) -> Txn {
+    Txn {
+        writes: vec![(b(key), None)],
+        ..Txn::default()
+    }
+}
+
 async fn create(ctx: &Arc<Ctx>, name: &str) -> Arc<Db> {
     Db::open(ctx.clone(), name, Some(DbConfig::default()))
         .await
@@ -439,7 +446,8 @@ async fn the_quota_refuses_growth_but_not_deletes() {
 /// A write that the quota has no room for, asked again for as long as the
 /// database says it is making room.
 async fn commit_at_quota(db: &Arc<Db>, txn: Txn) -> Result<u64, Error> {
-    for _ in 0..2_000 {
+    let began = std::time::Instant::now();
+    while began.elapsed() < Duration::from_secs(60) {
         match commit(db, txn.clone()).await {
             Err(Error::Busy(_)) => tokio::time::sleep(Duration::from_millis(5)).await,
             definite => return definite,
@@ -579,9 +587,9 @@ async fn a_database_that_stays_full_is_not_merged_for_every_write() {
     }
     flushed(&db, 1).await;
     let large = put("large", &noise(99, 100_000));
-    // One table and a write that is not in one: everything is merged,
-    // nothing is gained, and the write is refused.
-    commit(&db, put("small/1", "1")).await.unwrap();
+    // One table and a deletion that is not in one: everything is merged,
+    // a twentieth is gained, and the write is refused.
+    commit(&db, delete("k19")).await.unwrap();
     assert!(matches!(
         commit(&db, large.clone()).await,
         Err(Error::Busy(_))
@@ -604,22 +612,19 @@ async fn a_database_that_stays_full_is_not_merged_for_every_write() {
     ));
     assert_eq!(db.info().tables, 2);
     assert_eq!(get(&db, "small/2").await.unwrap().1, "2");
-    // A deletion is how room is made: it is not made to wait.
-    commit(
-        &db,
-        Txn {
-            writes: (0..10).map(|i| (b(&format!("k{i:02}")), None)).collect(),
-            ..Txn::default()
-        },
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
-        commit(&db, large.clone()).await,
-        Err(Error::Busy(_))
-    ));
-    commit_at_quota(&db, large).await.unwrap();
-    assert_eq!(get(&db, "k03").await, None);
+    // Nor does a deletion bring the next merge forward: one deletion and
+    // one write, over and over, would have everything merged for each. The
+    // write is told to wait, since what was deleted will be merged away,
+    // and nothing is merged while the wait lasts.
+    for i in 0..3 {
+        commit(&db, delete(&format!("k{i:02}"))).await.unwrap();
+        assert!(matches!(
+            commit(&db, large.clone()).await,
+            Err(Error::Busy(_))
+        ));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(db.info().tables, 2);
+    }
     assert!(get(&db, "k13").await.is_some());
 }
 
@@ -656,6 +661,20 @@ async fn a_database_that_stays_full_is_merged_again_after_a_while() {
         ));
         assert_eq!(db.info().tables, 1);
     }
+    // What is deleted now is merged away when the wait is over, and the
+    // write that needs its room is told to wait until then, not refused.
+    commit(
+        &db,
+        Txn {
+            writes: (0..10).map(|i| (b(&format!("k{i:02}")), None)).collect(),
+            ..Txn::default()
+        },
+    )
+    .await
+    .unwrap();
+    commit_at_quota(&db, large).await.unwrap();
+    assert_eq!(get(&db, "k03").await, None);
+    assert!(get(&db, "k13").await.is_some());
 }
 
 #[tokio::test]
@@ -721,8 +740,10 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
     };
     let first = process();
     let db = create(&first, "app").await;
+    // Values that do not compress to nothing, so that what the cache holds
+    // does not depend on how many tables they were merged into.
     for i in 0..300 {
-        commit(&db, put(&format!("k{i:04}"), &"v".repeat(200)))
+        commit(&db, put(&format!("k{i:04}"), &noise(i + 1, 200)))
             .await
             .unwrap();
     }
@@ -747,7 +768,7 @@ async fn the_disk_cache_serves_tables_and_survives_damage() {
     }
     let third = process();
     let db = open(&third, "app").await;
-    assert_eq!(get(&db, "k0123").await.unwrap().1, "v".repeat(200));
+    assert_eq!(get(&db, "k0123").await.unwrap().1, noise(124, 200));
     assert_eq!(scan(&db, "", "", true, 1000).await.0.len(), 300);
 
     // The budget is enforced by deleting the least recently used objects.

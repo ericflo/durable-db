@@ -13,11 +13,14 @@
 # that do not compress. Printed: the fill's result and how its rate changed;
 # what the database holds, how much was sent to storage for it and how much
 # was read back; the most memory the server used; how long a new server with
-# an empty cache took to open it; strong reads and scans from that server;
-# writes over keys taken at random; how long a write waits when the quota
-# is then set under what the database holds, which is how long a merge of
-# all of it takes; and how long the deletion took. No server may panic, and no
-# round of housekeeping may run for thirty seconds.
+# an empty cache took to open it after the first was killed; strong reads
+# from that server, twice over, since the first are of what it has in
+# neither cache; scans; writes over keys taken at random; how long a write
+# waits when the quota is then set under what the database holds, which is
+# how long a merge of all of it takes; how long a third server took to open
+# it after the second was stopped, with nothing left to store again; how
+# long the deletion took; and how many requests to storage failed. No server
+# may panic, and no round of housekeeping may run for thirty seconds.
 #
 # A local directory answers in a fraction of a millisecond, and MinIO here
 # is one process on the machine that loads it. On those this says what a
@@ -137,6 +140,7 @@ field() { sed -E "s/.*\"$1\":([0-9]+).*/\1/"; }
 metric() { curl -fs "$url/metrics" | awk -v name="$1" '$1 == name { print int($2) }'; }
 mib() { echo $(($1 / 1048576)); }
 peak() { awk '/^VmHWM/ { print int($2 / 1024) }' "/proc/$server/status"; }
+failures() { curl -fs "$url/metrics" | awk '/^durable_db_storage_failures_total/ { n += $2 } END { print n + 0 }'; }
 
 start "$@"
 echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $gib GiB, by $clients clients; $readers read it"
@@ -159,6 +163,8 @@ sent=$(metric durable_db_storage_sent_bytes_total)
 echo "the database holds $(mib "$(echo "$held" | field bytes)") MiB in $(echo "$held" | field tables) tables; $(mib "$sent") MiB were sent to storage for it, $(awk -v s="$sent" -v w="$((keys * value))" 'BEGIN { printf "%.1f", s / w }') times what was written, and $(mib "$(metric durable_db_storage_received_bytes_total)") MiB were read back"
 echo "most memory: $(peak) MiB, under a limit of 1024 MiB"
 
+failed=$(failures)
+
 # A new server, with nothing in memory and nothing in its disk cache.
 kill -KILL "$server"
 wait "$server" 2>/dev/null || true
@@ -166,7 +172,8 @@ rm -rf "$dir/cache"
 start "$@"
 from=$(date +%s%N)
 info >/dev/null
-echo "a new server with an empty cache opened it in $((($(date +%s%N) - from) / 1000000)) ms"
+echo "a new server with an empty cache opened it in $((($(date +%s%N) - from) / 1000000)) ms, and stored again what the one that was killed had not flushed"
+bench --clients "$readers" --workload read --seconds "$seconds"
 bench --clients "$readers" --workload read --seconds "$seconds"
 bench --clients "$readers" --workload scan --seconds "$seconds"
 sent=$(metric durable_db_storage_sent_bytes_total)
@@ -201,10 +208,21 @@ alive
 after=$(info)
 echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was told to wait for $took ms while everything was merged, and then taken; the database then held $(mib "$(echo "$after" | field bytes)") MiB in $(echo "$after" | field tables) tables"
 echo "most memory of the second server: $(peak) MiB"
+failed=$((failed + $(failures)))
+
+# A third server, after one that was told to stop and released the database.
+kill "$server"
+wait "$server" 2>/dev/null || true
+rm -rf "$dir/cache"
+start "$@"
+from=$(date +%s%N)
+info >/dev/null
+echo "a third server with an empty cache, after one that was stopped and not killed, opened it in $((($(date +%s%N) - from) / 1000000)) ms"
 from=$(date +%s%N)
 "$bin" delete size-0 --url "$url" --key-file "$dir/admin.key" >/dev/null
 echo "the database was deleted in $((($(date +%s%N) - from) / 1000000)) ms"
 alive
+echo "requests to storage that failed: $((failed + $(failures))); the servers said $(grep -c 'the store refuses' "$dir/server.log") times that the store refuses"
 kill "$server"
 wait "$server" 2>/dev/null || true
 server=''

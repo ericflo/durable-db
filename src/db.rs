@@ -290,6 +290,8 @@ pub struct Db {
     reclaim: AtomicBool,
     /// Milliseconds after `started` before which that is not asked again.
     reclaim_rests_until: AtomicU64,
+    /// Something was deleted that no merge for the quota has taken in yet.
+    reclaim_deleted: AtomicBool,
     maint: tokio::sync::Mutex<Maint>,
     started: Instant,
     last_used_ms: AtomicU64,
@@ -741,6 +743,7 @@ impl Db {
             leave: Notify::new(),
             reclaim: AtomicBool::new(false),
             reclaim_rests_until: AtomicU64::new(0),
+            reclaim_deleted: AtomicBool::new(false),
             maint: tokio::sync::Mutex::new(Maint {
                 generation: 0,
                 checked: 0,
@@ -1238,8 +1241,9 @@ impl Db {
     /// So after one that removed less than an eighth of what it merged, the
     /// next waits four times as long as it took, and a second at least:
     /// writes that do not fit are refused meanwhile, as they are when there
-    /// is nothing to merge. A deletion ends the wait, since it is how room
-    /// is made.
+    /// is nothing to merge. Nothing but time ends the wait. If a deletion
+    /// did, one deletion and one write, over and over, would have a full
+    /// database rewritten for each.
     fn reclaim(&self) -> bool {
         let now = self.started.elapsed().as_millis() as u64;
         if now < self.reclaim_rests_until.load(Ordering::Acquire) {
@@ -1317,9 +1321,12 @@ impl Db {
         // A merge for the quota is of everything that has been written:
         // what is not in a table yet is put in one first. Without it, a
         // value that was written over a moment ago would be kept.
-        if self.reclaim.load(Ordering::Acquire) && self.state.read().confirmed_frame > maint.covered
-        {
-            self.flush(maint, false).await?;
+        if self.reclaim.load(Ordering::Acquire) {
+            // What has been deleted up to here is in the tables it merges.
+            self.reclaim_deleted.store(false, Ordering::Release);
+            if self.state.read().confirmed_frame > maint.covered {
+                self.flush(maint, false).await?;
+            }
         }
         let tables = self.state.read().tables.clone();
         let Some((count, reclaiming)) = self.plan(&tables) else {
@@ -2361,12 +2368,22 @@ impl Writer {
             // merged: it is, and the write is asked for again. One with
             // nothing to merge is full.
             let merged = runs(&state.tables).count() + usize::from(!state.mem.is_empty()) < 2;
-            if merged || !db.reclaim() {
+            if merged {
                 return Err(Error::Quota);
             }
-            return Err(Error::Busy(
-                "the database is at its quota and is merging away what was overwritten or deleted; retry shortly".into(),
-            ));
+            if db.reclaim() {
+                return Err(Error::Busy(
+                    "the database is at its quota and is merging away what was overwritten or deleted; retry shortly".into(),
+                ));
+            }
+            // The last merge made little room and the next is not due. A
+            // write that waits for what has been deleted since is told so.
+            if db.reclaim_deleted.load(Ordering::Acquire) {
+                return Err(Error::Busy(
+                    "the database is at its quota, and what was deleted from it has not been merged away yet; retry later".into(),
+                ));
+            }
+            return Err(Error::Quota);
         }
         // Writes arriving faster than they can be flushed are refused rather
         // than accumulated without bound.
@@ -2378,8 +2395,8 @@ impl Writer {
             ));
         }
         if size > added {
-            // A deletion: room has been made, and may be asked for.
-            db.reclaim_rests_until.store(0, Ordering::Release);
+            // A deletion makes room, once it has been merged away.
+            db.reclaim_deleted.store(true, Ordering::Release);
         }
         self.assigned += 1;
         let revision = self.assigned;
