@@ -15,7 +15,8 @@
 # was read back; the most memory the server used; how long a new server with
 # an empty cache took to open it after the first was killed; strong reads
 # from that server, twice over, since the first are of what it has in
-# neither cache; scans; writes over keys taken at random; how long a write
+# neither cache, and scans, each with what was read from storage for it;
+# writes over keys taken at random; how long a write
 # waits when the quota is then set under what the database holds, which is
 # how long a merge of all of it takes; how long a third server took to open
 # it after the second was stopped, with nothing left to store again; how
@@ -134,6 +135,12 @@ bench() {
         --keys "$keys" "$@" 2>/dev/null | tail -1
     alive
 }
+# A read workload, and what the server fetched from storage to answer it.
+reading() {
+    fetched=$(metric durable_db_storage_received_bytes_total)
+    bench --clients "$readers" --seconds "$seconds" "$@"
+    echo "    for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage"
+}
 token=$("$bin" token --admin --key-file "$dir/admin.key")
 info() { curl -fsS -m 60 -H "authorization: Bearer $token" "$url/v1/databases/size-0"; }
 field() { sed -E "s/.*\"$1\":([0-9]+).*/\1/"; }
@@ -173,9 +180,9 @@ start "$@"
 from=$(date +%s%N)
 info >/dev/null
 echo "a new server with an empty cache opened it in $((($(date +%s%N) - from) / 1000000)) ms, and stored again what the one that was killed had not flushed"
-bench --clients "$readers" --workload read --seconds "$seconds"
-bench --clients "$readers" --workload read --seconds "$seconds"
-bench --clients "$readers" --workload scan --seconds "$seconds"
+reading --workload read
+reading --workload read
+reading --workload scan
 sent=$(metric durable_db_storage_sent_bytes_total)
 written=$(metric 'durable_db_request_seconds_count{kind="commit"}')
 bench --clients "$clients" --workload write --value-bytes "$value" --random-values --seconds $((seconds * 2))
