@@ -2610,8 +2610,13 @@ impl Writer {
         }
         // And faster than they can be merged: every flush is a run, and a
         // read looks in each. Over a link that carried less than the merges
-        // had to send, a database of 1 GiB was left with 29 runs.
+        // had to send, a database of 1 GiB was left with 32 runs. A write
+        // that waits is one the database was written to: a merge that
+        // failed is begun again then, and with this many runs no write is
+        // taken that would begin it.
         if state.runs > db.ctx.opts.max_runs.max(1).saturating_mul(2) {
+            drop(state);
+            db.wake_maint.notify_one();
             return Err(Error::Busy(
                 "the database is merging earlier writes; retry shortly".into(),
             ));
