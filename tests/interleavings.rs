@@ -3630,7 +3630,11 @@ async fn a_release_does_not_wait_for_a_merge_that_gave_way_to_another() {
         assert_eq!(gate.held().len(), 3, "{nth}");
         // What the merge that waited had stored is removed.
         assert_eq!(tables_stored(&bucket, "app"), left, "{nth}");
-        let (db, _) = Db::open(ctx, "app", None).await.unwrap();
+        // Opened by a server without the disk cache, which reads every table
+        // the manifest lists from the bucket.
+        let (db, _) = Db::open(ctx_with(gate.clone(), few_runs()), "app", None)
+            .await
+            .unwrap();
         the_first_ten_are_of(&db, 4, true).await;
     }
 }

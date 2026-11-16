@@ -1165,7 +1165,10 @@ mod tests {
         });
         let began = tokio::time::Instant::now();
         let gave_up = tokio::time::timeout(HOUR, retry_for(PATIENCE, &stop, hung));
-        assert!(gave_up.await.expect("it gives up").is_err());
+        // Told to stop, it says the database is leaving, not that the store
+        // failed: what the merge gave way to is not gone on past for it.
+        let stopped = gave_up.await.expect("it gives up");
+        assert!(matches!(stopped, Err(Error::Busy(_))), "{stopped:?}");
         assert!(began.elapsed() < Duration::from_millis(1100));
         // And while it waits to ask again: after five seconds of failures
         // it waits two between them.
@@ -1177,7 +1180,8 @@ mod tests {
         });
         let began = tokio::time::Instant::now();
         let gave_up = tokio::time::timeout(HOUR, retry_for(PATIENCE, &stop, failing));
-        assert!(gave_up.await.expect("it gives up").is_err());
+        let stopped = gave_up.await.expect("it gives up");
+        assert!(matches!(stopped, Err(Error::Busy(_))), "{stopped:?}");
         assert!(
             began.elapsed() < Duration::from_millis(5100),
             "{:?}",
