@@ -238,6 +238,17 @@ impl ObjectStore for Gate {
     }
 }
 
+/// `ctx_with`, with a disk cache in `dir`, which keeps the tables the server
+/// writes.
+fn ctx_with_disk(store: Arc<dyn ObjectStore>, opts: Options, dir: &tempfile::TempDir) -> Arc<Ctx> {
+    let disk = DiskCache::open(dir.path(), 64 << 20).unwrap();
+    Arc::new(Ctx {
+        io: Io::new(store, 32 << 20, Some(disk)),
+        opts,
+        root: "root/".into(),
+    })
+}
+
 /// A request's reader, which keeps what it reads, or a merge's.
 fn reader(keep: bool) -> Reader {
     match keep {
@@ -3183,7 +3194,7 @@ async fn a_merge_ends_when_what_it_gave_way_to_is_refused_for_good() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
     let ctx = ctx_with(gate.clone(), small_tables());
-    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+    let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
         .await
         .unwrap();
     commit(&db, wide(1)).await.unwrap();
@@ -3198,8 +3209,9 @@ async fn a_merge_ends_when_what_it_gave_way_to_is_refused_for_good() {
     });
     gate.release(Op::Put);
     flushed(&db).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    // The two tables of 300 KiB were not merged: three runs.
+    // The merge ended, and gave its turn back, before the round was
+    // flushed after it; the two tables of 300 KiB were not merged.
+    assert_eq!(ctx.io.merges.available_permits(), 2);
     assert_eq!(db.info().runs, 3);
     every_key_is_of(&db, 3).await;
 }
@@ -3564,7 +3576,9 @@ async fn a_release_does_not_wait_for_a_merge() {
 /// Nor for a merge that gave way to another. The one that waited stops as
 /// soon as the other has ended: left to find out after its next table, a
 /// release waited for one table more. And a merge that gave way to a
-/// flush begins no merge once a release has begun.
+/// flush begins no merge once a release has begun. The server has a disk
+/// cache, which holds the tables it wrote: a merge begun after the release
+/// would read nothing from the store, where a release stops its reads.
 #[tokio::test]
 async fn a_release_does_not_wait_for_a_merge_that_gave_way_to_another() {
     // The release begins while the second upload after the merge gave way
@@ -3574,7 +3588,8 @@ async fn a_release_does_not_wait_for_a_merge_that_gave_way_to_another() {
     for (nth, left) in [(2, 3), (1, 4)] {
         let bucket = Arc::new(MemoryStore::new());
         let gate = Gate::new(&bucket);
-        let ctx = ctx_with(gate.clone(), few_runs());
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_disk(gate.clone(), few_runs(), &dir);
         let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
             .await
             .unwrap();

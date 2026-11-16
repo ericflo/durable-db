@@ -1005,7 +1005,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = StoreResult<T>>,
 {
-    let stopped = || Error::Unavailable("the read was given up: the database is leaving".into());
+    let stopped = || Error::Busy("the read was given up: the database is leaving".into());
     let deadline = tokio::time::Instant::now() + patience;
     let mut delay = Duration::from_millis(20);
     loop {

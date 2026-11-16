@@ -1219,9 +1219,12 @@ impl Db {
                     Err(error) => {
                         // A merge that a release, a deletion or a takeover
                         // stopped at a read is not a failure of the store.
-                        match self.halt.load(Ordering::Acquire) {
-                            true => tracing::debug!(db = %self.tag, %error, "merge stopped"),
-                            false => report(&self.tag, "compaction failed", &error),
+                        let leaving = self.halt.load(Ordering::Acquire);
+                        match error {
+                            Error::Busy(_) | Error::Lost(_) if leaving => {
+                                tracing::debug!(db = %self.tag, %error, "merge stopped");
+                            }
+                            _ => report(&self.tag, "compaction failed", &error),
                         }
                         failed = true;
                         break;
@@ -1894,14 +1897,14 @@ impl Drop for Fuse {
     }
 }
 
-/// Losing ownership in the middle of maintenance is routine; anything else
-/// deserves attention.
 /// Whether `error` is a failure of the store that may pass, and not one it
 /// said is for good (`StoreError::Fatal`, which comes as `fatal: ...`).
 fn passing(error: &Error) -> bool {
     matches!(error, Error::Unavailable(reason) if !reason.starts_with("fatal:"))
 }
 
+/// Losing ownership in the middle of maintenance is routine; anything else
+/// deserves attention.
 fn report(db: &str, what: &str, error: &Error) {
     if matches!(error, Error::Lost(_)) {
         tracing::debug!(db, %error, "{what}");
