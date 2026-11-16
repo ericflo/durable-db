@@ -532,10 +532,14 @@ async fn what_was_deleted_is_merged_away_before_the_quota_refuses() {
             .await
             .unwrap();
     }
-    // These are on their way into a table when the next is written, so
-    // the merge is asked for with a flush behind it and a write that is
-    // in no table: it takes that write with it.
+    // These are flushed, and the next is written after them: the merge is
+    // asked for with a write that is in no table, and takes it with it.
+    // Were the write in the flush, a merge of the two tables would leave
+    // out what it wrote over, and the write that follows would have room.
     db.request_flush();
+    while db.mem_bytes() > 0 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     commit(&db, put("large", "now small")).await.unwrap();
     let other = put("other", &noise(98, 100_000));
     assert!(matches!(
