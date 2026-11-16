@@ -10,7 +10,10 @@
 //!
 //! A table is written once and never changed, so anything read from it can be
 //! cached forever under its key.
-use crate::{Error, Result, io::Io};
+use crate::{
+    Error, Result,
+    io::{Io, Reader},
+};
 use bytes::{Buf, BufMut, Bytes};
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -352,7 +355,7 @@ impl Table {
             && key <= self.meta.last.as_bytes()
     }
 
-    async fn index(&self, io: &Arc<Io>, keep: bool) -> Result<Arc<Index>> {
+    async fn index(&self, io: &Arc<Io>, reader: &Reader) -> Result<Arc<Index>> {
         // Asking the cache is also what tells it the index is in use.
         if let Some(index) = io.cached_index(&self.key) {
             return Ok(index);
@@ -360,9 +363,9 @@ impl Table {
         // One reader fetches it; the others wait for that. A merge fetches
         // its own: it waits for a store that fails, and no request is to
         // wait for that.
-        let _loading = match keep {
-            true => Some(self.loading.lock().await),
-            false => None,
+        let _loading = match reader {
+            Reader::Request => Some(self.loading.lock().await),
+            Reader::Merge(_) => None,
         };
         let held = self.index.lock().upgrade();
         if let Some(index) = held {
@@ -370,10 +373,12 @@ impl Table {
             io.cache_index(&self.key, index.clone());
             return Ok(index);
         }
-        let index = match self.load_index(io, keep).await {
+        let index = match self.load_index(io, reader).await {
             // A damaged copy in the disk cache: discard it and read the
             // bucket's.
-            Err(Error::Corrupt(_)) if io.forget(&self.key).await => self.load_index(io, keep).await,
+            Err(Error::Corrupt(_)) if io.forget(&self.key).await => {
+                self.load_index(io, reader).await
+            }
             loaded => loaded,
         };
         let index = Arc::new(index?);
@@ -382,10 +387,10 @@ impl Table {
         Ok(index)
     }
 
-    async fn load_index(&self, io: &Arc<Io>, keep: bool) -> Result<Index> {
+    async fn load_index(&self, io: &Arc<Io>, reader: &Reader) -> Result<Index> {
         let size = self.meta.size;
         let tail_start = size.saturating_sub(TAIL);
-        let tail = io.range(&self.key, size, tail_start, size, keep).await?;
+        let tail = io.range(&self.key, size, tail_start, size, reader).await?;
         let corrupt = || {
             let object = crate::layout::object(&self.key);
             Error::Corrupt(format!("table {object} has a bad footer"))
@@ -412,7 +417,7 @@ impl Table {
                 size,
                 index_offset,
                 index_offset + index_len,
-                keep,
+                reader,
             )
             .await?
         };
@@ -444,12 +449,12 @@ impl Table {
         let entry = &index.blocks[i];
         let (start, end) = (entry.offset, entry.offset + u64::from(entry.len));
         let packed = io
-            .range(&self.key, self.meta.size, start, end, true)
+            .range(&self.key, self.meta.size, start, end, &Reader::Request)
             .await?;
         let block = match Block::decode(&packed, entry.crc) {
             Err(Error::Corrupt(_)) if io.forget(&self.key).await => {
                 let packed = io
-                    .range(&self.key, self.meta.size, start, end, true)
+                    .range(&self.key, self.meta.size, start, end, &Reader::Request)
                     .await?;
                 Block::decode(&packed, entry.crc)?
             }
@@ -465,7 +470,7 @@ impl Table {
         if !self.covers(key) {
             return Ok(None);
         }
-        let index = self.index(io, true).await?;
+        let index = self.index(io, &Reader::Request).await?;
         let i = index
             .blocks
             .partition_point(|block| block.last.as_slice() < key);
@@ -478,16 +483,16 @@ impl Table {
     }
 
     /// Entries with `lo <= key < hi` (an empty `hi` is unbounded), in either
-    /// direction. With `keep`, what the scan reads is kept for later
-    /// readers: its blocks in memory, and the table in the disk cache when
-    /// that has room. A merge reads each of its tables once and keeps none.
+    /// direction. A request's scan keeps what it reads for later readers:
+    /// its blocks in memory, and the table in the disk cache when that has
+    /// room. A merge reads each of its tables once and keeps none.
     pub fn scan(
         self: &Arc<Self>,
         io: Arc<Io>,
         lo: Bytes,
         hi: Bytes,
         reverse: bool,
-        keep: bool,
+        reader: Reader,
     ) -> TableScan {
         TableScan {
             table: self.clone(),
@@ -495,7 +500,7 @@ impl Table {
             lo,
             hi,
             reverse,
-            keep,
+            reader,
             index: None,
             block: None,
             started: false,
@@ -543,7 +548,7 @@ pub struct TableScan {
     lo: Bytes,
     hi: Bytes,
     reverse: bool,
-    keep: bool,
+    reader: Reader,
     /// Held from the first entry to the last.
     index: Option<Arc<Index>>,
     /// The current block, its number, and the next position within it
@@ -568,7 +573,7 @@ impl TableScan {
             return Ok(None);
         }
         if self.index.is_none() {
-            self.index = Some(self.table.index(&self.io, self.keep).await?);
+            self.index = Some(self.table.index(&self.io, &self.reader).await?);
         }
         let blocks = self.index.as_ref().expect("just loaded").blocks.len();
         if !self.started {
@@ -694,7 +699,7 @@ impl TableScan {
                     let (start, end) = (from.offset, to.offset + u64::from(to.len));
                     let bytes = self
                         .io
-                        .range(&table.key, table.meta.size, start, end, self.keep)
+                        .range(&table.key, table.meta.size, start, end, &self.reader)
                         .await?;
                     if let Some(turn) = turn {
                         self.ahead = Some(Ahead {
@@ -723,7 +728,7 @@ impl TableScan {
                 }
                 block => {
                     let block = Arc::new(block?);
-                    if self.keep {
+                    if self.reader.keeps() {
                         self.io.cache_block(&table.key, i as u32, block.clone());
                     }
                     return Ok(block);
@@ -740,7 +745,7 @@ impl TableScan {
         if self.span < 2 {
             return None;
         }
-        let turns = if !self.keep {
+        let turns = if !self.reader.keeps() {
             &self.io.merge_ahead
         } else if self.io.local(&self.table.key) {
             return None;

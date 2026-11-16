@@ -171,18 +171,19 @@ failures() { curl -fs "$url/metrics" | awk '/^durable_db_storage_failures_total/
 start "$@"
 echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $gib GiB, by $clients clients; $readers read it; a server's disk cache is $cache MiB"
 
-# Seconds since the start and the commits made so far, every ten seconds.
+# Seconds since the start, the commit requests answered so far, and the
+# runs the database has, every ten seconds.
 began=$(date +%s)
 while sleep 10; do
-    echo "$(($(date +%s) - began)) $(metric 'durable_db_request_seconds_count{kind="commit"}')"
+    echo "$(($(date +%s) - began)) $(metric 'durable_db_request_seconds_count{kind="commit"}') $(runs "$(info 2>/dev/null)")"
 done >"$dir/commits" 2>/dev/null &
 sampler=$!
 bench --clients "$clients" --workload fill --max-bytes $((gib * 4 * 1073741824)) --value-bytes "$value" --random-values
 took=$(($(date +%s) - began))
 kill "$sampler"
 sampler=''
-awk -v took="$took" 'NF == 2 { if (NR > 1) { d = $2 - last; if (low == "" || d < low) low = d; if (d > high) high = d } last = $2 }
-    END { printf "the fill took %d s; in ten seconds of it between %d and %d commits were made\n", took, low, high }' "$dir/commits"
+awk -v took="$took" 'NF >= 2 { if (NR > 1) { d = $2 - last; if (low == "" || d < low) low = d; if (d > high) high = d } last = $2; if ($3 > most) most = $3 }
+    END { printf "the fill took %d s; in ten seconds of it between %d and %d commit requests were answered, those told to wait among them; the database had %s runs at most\n", took, low, high, most == "" ? "?" : most }' "$dir/commits"
 held=$(info)
 filled=$(echo "$held" | field bytes)
 sent=$(metric durable_db_storage_sent_bytes_total)

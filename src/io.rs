@@ -23,7 +23,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -824,7 +824,7 @@ impl Io {
         size: u64,
         start: u64,
         end: u64,
-        keep: bool,
+        reader: &Reader,
     ) -> Result<Bytes> {
         if let Some(disk) = &self.disk {
             let name = DiskCache::name(key);
@@ -849,16 +849,15 @@ impl Io {
         // and a merge of a large database over a link that resets now and
         // then would not end.
         let read = || self.store.get_range(key, start, end);
-        let bytes = if keep {
-            retry(read).await
-        } else {
-            retry_for(PATIENCE, read).await
+        let bytes = match reader {
+            Reader::Request => retry(read).await,
+            Reader::Merge(stop) => retry_for(PATIENCE, stop, read).await,
         }?
         .ok_or_else(|| {
             let object = crate::layout::object(key);
             Error::Lost(format!("{object} was collected by a newer owner"))
         })?;
-        if keep
+        if reader.keeps()
             && let Some(disk) = &self.disk
             && disk.wanted(&DiskCache::name(key), size, bytes.len() as u64)
         {
@@ -975,24 +974,45 @@ where
     unreachable!()
 }
 
-/// How long a merge's read waits for a store that fails, where a request's
-/// gives up after a second or so: long enough for a link that resets now
-/// and then, and short enough for a release, which waits for the merge to
-/// stop, to end within a pod's grace of a minute with a seal to store.
+/// Who reads a table. A request's reads keep what they read for later
+/// readers, and give up on a store that fails after a second or so, since a
+/// client waits for them. A merge keeps nothing, and waits for a store that
+/// fails up to `PATIENCE`, or until the flag it carries is set, which a
+/// release or a deletion does: a merge that failed is begun again from its
+/// start, and one stopped by a release is discarded.
+#[derive(Clone)]
+pub enum Reader {
+    Request,
+    Merge(Arc<AtomicBool>),
+}
+
+impl Reader {
+    /// Whether what is read is kept for later readers.
+    pub fn keeps(&self) -> bool {
+        matches!(self, Reader::Request)
+    }
+}
+
+/// How long a merge's read waits for a store that fails: long enough for a
+/// link that resets its connections now and then.
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// `retry`, for as long as `patience` and not a number of times.
-pub async fn retry_for<T, F, Fut>(patience: Duration, mut call: F) -> Result<T>
+/// `retry`, for as long as `patience` and not a number of times, and no
+/// longer once `stop` is set.
+pub async fn retry_for<T, F, Fut>(patience: Duration, stop: &AtomicBool, mut call: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = StoreResult<T>>,
 {
-    let deadline = Instant::now() + patience;
+    let deadline = tokio::time::Instant::now() + patience;
     let mut delay = Duration::from_millis(20);
     loop {
+        let stopped = || stop.load(Ordering::Acquire);
         match call().await {
             Ok(value) => return Ok(value),
-            Err(StoreError::Unavailable(reason)) if Instant::now() + delay < deadline => {
+            Err(StoreError::Unavailable(reason))
+                if !stopped() && tokio::time::Instant::now() + delay < deadline =>
+            {
                 tracing::debug!(%reason, "storage call failed; retrying");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(2));
