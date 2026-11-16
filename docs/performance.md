@@ -344,7 +344,7 @@ DURABLE_DB=./durable-db SOAK_GIB=16 SOAK_RUNS=16 scripts/soak-size.sh
 
 Written over by 64 clients, the database of 16 GiB took 571 of the ten minutes to reach 16 runs: a merge gives way to merges of what is flushed behind it once a database has more than twelve. The server that opened it merged the newest that were too many at once and read 12,004 keys a second in the first minute, with 12 runs, while the rule of sizes merged the rest; in the second minute the database was one run, and it read 18,255 a second. The writes it was killed in were the same 64 clients' as the fill's, at keys taken at random, and the fill ends with every key written once: a database that is written over faster, or by more clients, or for longer, can be left with more.
 
-A database whose merges cannot keep up with what is written to it gains runs for as long as that lasts. On Backblaze that night the link carried less than the fill's merges had to send, merges that met a connection reset failed and were begun again, and the database had 32 runs when its server was killed. Each read of a key the disk cache did not hold then asked the bucket for a block of up to 33 runs, one request after another: two and three reads a second, half of them taking 2.3 s or more. No write is told to wait for runs in this release.
+A database whose merges cannot keep up with what is written to it gains runs for as long as that lasts. On Backblaze that night the link carried less than the fill's merges had to send, merges that met a connection reset failed and were begun again, and the database had 32 runs when its server was killed. Each read of a key the disk cache did not hold then asked the bucket for a block of up to 33 runs, one request after another: two and three reads a second, half of them taking 2.3 s or more. No write was told to wait for runs in 2.1.8; since 2.1.9 one is, while a merge would leave more than twenty-four ([below](#when-merges-fall-behind)).
 
 **A read of what the disk cache does not hold costs a request to the store for a block, and since 2.1.8 no more than that.** A read whose table is not in the disk cache asks the store for the block that would hold its key, 32 KiB for a value of 4 KiB here, in each run it looks in. In the first minute of reads of the 4 GiB database on a local directory, the server answered 36,109 reads a second and asked its store 1.2 times for each, for 32 KiB each time: the cache held a quarter of the database. That is 1.3 GiB a second from the store, in proportion to the reads. Every release before this one read more, and not in proportion to anything: a read that missed also had its whole table fetched for the disk cache, in the place of other tables, which were then fetched in their turn ([verification](verification.md#what-these-checks-found), finding 43). Release 2.1.7 under the same script, on the same desktop, the same night, between the runs above:
 
@@ -387,6 +387,47 @@ With a cache that holds the database, the server read 13,450 MiB from its store 
 **A write at the quota waits for as long as reading the database and writing it again takes.** That was 33 s at 4 GiB and 83 s at 16 GiB on a local directory, 148 and 207 MiB a second, and 47 s at 4 GiB on MinIO; 2.1.7 took 48 s for the same at 4 GiB the same night. With the disk cache of 8 GiB it took 54 s: every table a merge stores and the cache keeps is synced to the disk the cache is on, so that what is written there and not yet on the disk does not pass the server's memory limit (finding 44), and on a local directory that disk is the store's as well. On Backblaze the write waited 1,227 s for 1 GiB over that night's link, 0.8 MiB a second; 2.1.7 had waited 525 s over a link nearly four times as fast. A client that writes at a quota has to be prepared to ask again for that long. A database that holds nothing that was written over or deleted is not merged for its quota at all, and is refused at once ([API](api.md#databases)).
 
 The local directory answers in a fraction of a millisecond and MinIO here is one process on the desktop that loads it, so the rates in those columns are not those of a provider's bucket. What ran beside what, on a desktop of 32 cores: the local runs one after another, beside the run on Backblaze, which waited on its link; during the first three local runs, those of 4 GiB of 2.1.8 and of 2.1.7, the test suite forty-two times and its engine tests forty, each held to between 0.4 and 2.3 processors; and during the second half of the run with `SOAK_RUNS`, `scripts/soak-bucket.sh` on MinIO, 256 databases written through another server.
+
+### When merges fall behind
+
+Release 2.1.9 tells a write to wait while a merge would leave more than twenty-four runs, and keeps a merge going through a store that fails for a while (finding 45). The script above, with 2.1.8 and then 2.1.9 the morning 2.1.9 was released, one run of each, on a local directory at 4 GiB and on Backblaze at 1 GiB; the runs on Backblaze beside the local ones and the release's other checks:
+
+| | 2.1.8, local, 4 GiB | 2.1.9, local, 4 GiB | 2.1.8, Backblaze, 1 GiB | 2.1.9, Backblaze, 1 GiB |
+| --- | ---: | ---: | ---: | ---: |
+| Commits a second while it was filled | 2,365 | 2,437 | 160 | 215 |
+| Commits that were told to wait | 0 | 0 | 9,097 | 3,370 |
+| The fill took | 443 s | 430 s | 1,634 s | 1,218 s |
+| Most runs while it was filled | 13 | 12 | 18 | 16 |
+| Strong reads a second, at first | 28,952 (p50 1.7 ms, p99 22 ms) | 37,544 (p50 1.3 ms, p99 23 ms) | 17 (p50 344 ms, p99 3.0 s) | 18 (p50 334 ms, p99 2.1 s) |
+| It then had | 129 tables in 5 runs, their indexes 6 MiB of its memory | 129 tables in 6 runs, their indexes 6 MiB of its memory | 37 tables in 18 runs, their indexes 1 MiB of its memory | 40 tables in 17 runs, their indexes 1 MiB of its memory |
+| Strong reads a second, after that | 35,401 (p50 1.4 ms, p99 23 ms) | 37,429 (p50 1.3 ms, p99 23 ms) | 79 (p50 82 ms, p99 340 ms) | 73 (p50 76 ms, p99 540 ms) |
+| Scans a second | 15,510 (p50 3.3 ms, p99 25 ms) | 15,874 (p50 3.2 ms, p99 25 ms) | 89 (p50 65 ms, p99 309 ms) | 82 (p50 57 ms, p99 448 ms) |
+| Writes over it a second | 2,417 (p50 23 ms, p99 92 ms) | 2,319 (p50 23 ms, p99 111 ms) | 211 (p50 290 ms, p99 588 ms) | 225 (p50 276 ms, p99 457 ms) |
+| A write at a quota under that waited | 48.4 s | 27.7 s | 475 s | 495 s |
+| Requests to storage that failed and were made again | 0 | 0 | 76 | 43 |
+
+The two releases are within what one run differs from the next. The reads of a database depend on how many runs it was read with, which depends on the moment the soak kills the server that filled it. The link to Backblaze carried 2.9 MB a second up before the runs and 4.5 MB a second after them, and the fill of 2.1.9 had the better part of it. Neither fill had more than 18 runs, below where 2.1.9 holds writes back, so these runs say that nothing else changed.
+
+Four times the writers, to see whether they would pass the bound:
+
+```sh
+DURABLE_DB=./durable-db SOAK_STORE=bucket SOAK_GIB=1 SOAK_READ_CLIENTS=8 SOAK_SECONDS=30 SOAK_CLIENTS=256 scripts/soak-size.sh
+```
+
+| | 2.1.8 | 2.1.9 |
+| --- | ---: | ---: |
+| Commits a second while it was filled | 345 | 339 |
+| Commits that were told to wait | 445,044 | 469,703 |
+| The fill took | 761 s | 772 s |
+| Most runs while it was filled | 20 | 18 |
+| Strong reads a second, at first | 10 (p50 659 ms, p99 2.9 s) | 10 (p50 743 ms, p99 2.9 s) |
+| It then had | 38 tables in 18 runs, their indexes 1 MiB of its memory | 39 tables in 19 runs, their indexes 1 MiB of its memory |
+| Strong reads a second, after that | 77 (p50 74 ms, p99 602 ms) | 40 (p50 136 ms, p99 913 ms) |
+| Scans a second | 68 (p50 84 ms, p99 416 ms) | 37 (p50 190 ms, p99 702 ms) |
+| A write at a quota under that waited | 528 s | 282 s |
+| Requests to storage that failed and were made again | 24 | 11 |
+
+They did not. A database takes no more writes than it can flush, 32 MiB of them at most, and the writes of 256 clients were held to that, told to wait some 450,000 times, before the runs came to 24; the link carried 4.7 MB a second up that morning. The night before, over a link that carried 1.1 MiB a second, 2.1.8 had 32 runs with 64 clients ([above](#a-large-database)). The bound of 2.1.9 is shown by the tests of finding 45 and not by a run here. The reads after the first minute and the scans differ more than the fills. The server that opens the database begins a merge of the runs that are too many: 2.1.8's ended during its second minute of reads, and its scans found 12 runs; 2.1.9's had not ended when its scans did, and they found 19. Over a link that merge takes minutes, and when it ends is not the same from one run to the next.
 
 ## What it costs in requests
 
