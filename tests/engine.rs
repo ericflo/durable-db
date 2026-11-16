@@ -360,9 +360,10 @@ async fn flushes_merges_and_collects() {
     // after that. How many tables are then at rest depends on the sizes the
     // flushes had, and so on the machine's speed: runs are merged from the
     // newest while they are together at least half the next (`merge_plan`),
-    // and twelve may remain.
+    // and as many as a database may have may remain.
+    let most = Options::default().max_runs;
     let settled = async {
-        while db.mem_bytes() > 0 || db.info().tables > 12 {
+        while db.mem_bytes() > 0 || db.info().tables > most {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     };
@@ -376,7 +377,7 @@ async fn flushes_merges_and_collects() {
     let (reversed, _) = scan(&db, "k0100", "k0110", true, 3).await;
     assert_eq!(reversed, ["k0109", "k0107", "k0105"]);
     let info = db.info();
-    assert!(info.tables >= 1 && info.tables <= 12, "{info:?}");
+    assert!(info.tables >= 1 && info.tables <= most, "{info:?}");
 
     // A sealed database is one claimless manifest plus the tables it names.
     db.close().await;

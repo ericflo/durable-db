@@ -115,6 +115,13 @@ impl Lifecycle<(Arc<str>, u32), Part> for Pins {
 /// Tables larger than this are read from the bucket by range only.
 const DISK_OBJECT_BYTES: u64 = 64 << 20;
 
+/// What may be written to the cache directory and not yet be on the disk,
+/// beside the table being written, and in how many tables at most, before
+/// the disk is asked for it. A request's own table does not have the disk
+/// asked until there is twice as much.
+const UNSYNCED_BYTES: u64 = 32 << 20;
+const UNSYNCED_TABLES: usize = 64;
+
 /// A table is in memory while it is fetched for the disk cache, so only
 /// this many are fetched at a time.
 const FILLS: usize = 2;
@@ -248,6 +255,26 @@ pub struct DiskCache {
     pub misses: AtomicU64,
     /// Tables fetched whole, for reads of parts of them that missed.
     pub fetched: AtomicU64,
+    /// Tables written here that the disk has not been asked for yet.
+    unsynced: Mutex<Unsynced>,
+    /// Held while the disk is asked for what was written: one at a time.
+    syncing: Mutex<()>,
+    /// How many bytes of tables it has been asked for.
+    synced: AtomicU64,
+}
+
+/// Files of tables written to the cache directory, open, and their bytes.
+#[derive(Default)]
+struct Unsynced {
+    files: Vec<(Name, fs::File, u64)>,
+    bytes: u64,
+}
+
+impl Unsynced {
+    fn over(&self, times: u64) -> bool {
+        self.bytes > UNSYNCED_BYTES * times
+            || self.files.len() as u64 > UNSYNCED_TABLES as u64 * times
+    }
 }
 
 impl DiskCache {
@@ -286,6 +313,9 @@ impl DiskCache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             fetched: AtomicU64::new(0),
+            unsynced: Mutex::default(),
+            syncing: Mutex::new(()),
+            synced: AtomicU64::new(0),
         };
         let mut out = Vec::new();
         {
@@ -403,6 +433,25 @@ impl DiskCache {
     /// Remove the files of tables that were put out. Every read of a table
     /// asks what is held, so this is done when that has been let go of.
     fn unlink(&self, names: &[Name]) {
+        if names.is_empty() {
+            return;
+        }
+        // A file that is still open is not gone with its name, and what
+        // was written to it would be written to the disk for nothing.
+        let mut closed = Vec::new();
+        {
+            let mut unsynced = self.unsynced.lock();
+            let files = std::mem::take(&mut unsynced.files);
+            for (name, file, size) in files {
+                if names.contains(&name) {
+                    unsynced.bytes -= size;
+                    closed.push(file);
+                } else {
+                    unsynced.files.push((name, file, size));
+                }
+            }
+        }
+        drop(closed);
         for name in names {
             let _ = fs::remove_file(self.path(name));
         }
@@ -472,7 +521,13 @@ impl DiskCache {
     /// `reserve` promised it. A table never changes, so one that is here is
     /// not written again.
     fn put(&self, key: &str, body: &[u8], promised: Option<u64>) {
-        self.put_merged(key, body, promised, &[], &[]);
+        self.store(key, body, promised, (&[], &[]), true);
+    }
+
+    /// `put`, of a table that a request read whole, which the request
+    /// waits for: it never waits for the disk to take what others wrote.
+    fn put_read(&self, key: &str, body: &[u8], promised: Option<u64>) {
+        self.store(key, body, promised, (&[], &[]), false);
     }
 
     /// `put`, of a table written while a merge has read through `done`
@@ -495,24 +550,32 @@ impl DiskCache {
         done: &[Name],
         kept: &[Name],
     ) {
+        self.store(key, body, promised, (done, kept), true);
+    }
+
+    /// `put_merged`; with `wait`, what stores a table waits for the disk to
+    /// take what was written, when that is too much.
+    fn store(
+        &self,
+        key: &str,
+        body: &[u8],
+        promised: Option<u64>,
+        (done, kept): (&[Name], &[Name]),
+        wait: bool,
+    ) {
         let (name, size) = (Self::name(key), body.len() as u64);
         let tmp = self.dir.join(format!(
             "tmp-{}-{}",
             std::process::id(),
             self.counter.fetch_add(1, Ordering::Relaxed)
         ));
-        // Synced, and not for the table's sake, which the bucket has: what
-        // is written and not yet on the disk is memory that cannot be given
-        // up, and it counts against the limit a server is held to. Two
-        // fetches and a merge wrote 570 MiB so in a second, to a disk that
-        // was not asked to hurry, and the server was killed at its limit
-        // of 1 GiB.
         let write = || {
             let mut file = fs::File::create(&tmp)?;
             file.write_all(body)?;
-            file.sync_data()
+            io::Result::Ok(file)
         };
-        let written = size <= self.budget.min(DISK_OBJECT_BYTES) && write().is_ok();
+        let fits = size <= self.budget.min(DISK_OBJECT_BYTES);
+        let written = fits.then(write).and_then(Result::ok);
         let mut held = self.held.lock();
         if let Some(bytes) = promised {
             held.promises -= 1;
@@ -520,7 +583,7 @@ impl DiskCache {
         }
         let kept = held.keep(kept);
         let mut out = Vec::new();
-        let stored = written
+        let stored = written.is_some()
             && !held.gone.contains(&name)
             && !held.tables.contains_key(&name)
             && self.make_room(&mut held, size, (done, kept), &mut out)
@@ -531,9 +594,58 @@ impl DiskCache {
         }
         drop(held);
         self.unlink(&out);
-        if !stored {
-            let _ = fs::remove_file(&tmp);
+        match written {
+            Some(file) if stored => self.sync(name, file, size, wait),
+            _ => {
+                let _ = fs::remove_file(&tmp);
+            }
         }
+    }
+
+    /// Have the disk take what was written, once the tables it has not
+    /// been asked for are more than `UNSYNCED_BYTES` or `UNSYNCED_TABLES`.
+    /// Not for the tables' sake, which the bucket has: what is written and
+    /// not yet on the disk is memory that cannot be given up, and it
+    /// counts against the limit a server is held to. Two fetches and a
+    /// merge wrote 570 MiB so in a second, to a disk that was not asked to
+    /// hurry, and the server was killed at its limit of 1 GiB.
+    ///
+    /// The disk is asked once at a time. Whoever stores a table that is
+    /// one too many waits for it, and for one that is under way, so that
+    /// what is stored is held to the disk's speed: written and not yet on
+    /// the disk are then the tables of one request to the disk, and as
+    /// many again waiting, and the tables being written. A request's own
+    /// table, which a client waits for, does not have the disk asked until
+    /// there are twice as many. And not after each table: a table that is
+    /// not kept is never synced, and that is most of what a merge stores
+    /// in a cache smaller than its database. Where the store was a
+    /// directory on the same disk, a sync of every table made a merge of
+    /// everything take half as long again.
+    fn sync(&self, name: Name, file: fs::File, size: u64, wait: bool) {
+        {
+            let mut unsynced = self.unsynced.lock();
+            unsynced.files.push((name, file, size));
+            unsynced.bytes += size;
+            if !unsynced.over(if wait { 1 } else { 2 }) {
+                return;
+            }
+        }
+        let _turn = self.syncing.lock();
+        let taken = {
+            let mut unsynced = self.unsynced.lock();
+            // Another took them while this waited for its turn.
+            if !unsynced.over(1) {
+                return;
+            }
+            std::mem::take(&mut *unsynced)
+        };
+        for (name, file, _) in &taken.files {
+            // A table the disk did not take is not trusted to be there.
+            if file.sync_data().is_err() {
+                self.remove(name);
+            }
+        }
+        self.synced.fetch_add(taken.bytes, Ordering::Relaxed);
     }
 
     fn remove(&self, name: &Name) -> bool {
@@ -747,7 +859,7 @@ impl Io {
                 let _ = tokio::task::spawn_blocking(move || {
                     let size = body.len() as u64;
                     if disk.reserve(size) {
-                        disk.put(&key, &body, Some(size));
+                        disk.put_read(&key, &body, Some(size));
                     }
                 })
                 .await;
@@ -931,6 +1043,108 @@ mod tests {
 
     fn files(dir: &tempfile::TempDir) -> usize {
         fs::read_dir(dir.path()).unwrap().count()
+    }
+
+    /// A table that could not be written, as on a disk that is full, is
+    /// not kept and puts out nothing to make room for itself. Here the
+    /// file it would be written to cannot be made, since a directory has
+    /// its name: so it is even where the directory's mode would not stop
+    /// whoever runs the test.
+    #[test]
+    fn a_table_that_could_not_be_written_puts_out_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir, 4000, 0..4);
+        let next = cache.counter.load(Ordering::Relaxed);
+        let tmp = dir
+            .path()
+            .join(format!("tmp-{}-{next}", std::process::id()));
+        fs::create_dir(&tmp).unwrap();
+        cache.put(&key(4), &[4; 1000], None);
+        assert_eq!(here(&cache), [0, 1, 2, 3]);
+        assert_eq!((cache.used(), cache.unsynced.lock().files.len()), (4000, 4));
+        // The next is written, and the least recently used makes way.
+        cache.put(&key(5), &[5; 1000], None);
+        assert_eq!(here(&cache), [1, 2, 3, 5]);
+    }
+
+    /// What is written to the cache directory is memory until the disk
+    /// has it, so the disk is asked for it before it is too much: after
+    /// more than sixty-four tables, or more than 32 MiB of them, and twice
+    /// that for a table a request put. A table that is not kept is not
+    /// among them, and one that is put out leaves them.
+    #[test]
+    fn the_disk_is_asked_for_what_was_written_before_it_is_too_much() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::open(dir.path(), 200 << 20).unwrap();
+        let synced = || cache.synced.load(Ordering::Relaxed);
+        let unsynced = || {
+            let unsynced = cache.unsynced.lock();
+            (unsynced.files.len(), unsynced.bytes)
+        };
+        for n in 0..UNSYNCED_TABLES as u8 {
+            cache.put(&key(n), &[n; 1000], None);
+        }
+        // One that is here already is written and not kept.
+        cache.put(&key(0), &[0; 1000], None);
+        assert_eq!((synced(), unsynced()), (0, (64, 64_000)));
+        cache.put(&key(100), &[100; 1000], None);
+        assert_eq!((synced(), unsynced()), (65_000, (0, 0)));
+        // Two of 16 MiB are not more than 32 MiB, and a table of a
+        // thousand bytes with them is.
+        let large = vec![1; 16 << 20];
+        cache.put(&key(101), &large, None);
+        cache.put(&key(102), &large, None);
+        assert_eq!((synced(), unsynced().1), (65_000, 32 << 20));
+        cache.put(&key(103), &[103; 1000], None);
+        let at = 66_000 + (32 << 20);
+        assert_eq!((synced(), unsynced()), (at, (0, 0)));
+        // A request's table has the disk asked at twice as much.
+        cache.put(&key(104), &large, None);
+        cache.put(&key(105), &large, None);
+        cache.put_read(&key(106), &[106; 1000], None);
+        cache.put_read(&key(107), &large, None);
+        assert_eq!((synced(), unsynced()), (at, (4, (48 << 20) + 1000)));
+        cache.put_read(&key(108), &large, None);
+        let at = at + (64 << 20) + 1000;
+        assert_eq!((synced(), unsynced()), (at, (0, 0)));
+        // A table that is put out is not synced: its file is closed.
+        cache.put(&key(109), &[109; 1000], None);
+        assert_eq!(unsynced(), (1, 1000));
+        assert!(cache.remove(&name(109)));
+        assert_eq!((synced(), unsynced()), (at, (0, 0)));
+        assert_eq!(files(&dir), 73);
+    }
+
+    /// The disk is asked once at a time, and whoever stores a table that is
+    /// one too many while it is asked waits for that, and then for nothing
+    /// if what was written was taken meanwhile.
+    #[test]
+    fn the_disk_is_asked_once_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(DiskCache::open(dir.path(), 200 << 20).unwrap());
+        let turn = cache.syncing.lock();
+        let writer = |n: u8| {
+            let cache = cache.clone();
+            std::thread::spawn(move || cache.put(&key(n), &vec![n; (32 << 20) + 1], None))
+        };
+        let (first, second) = (writer(1), writer(2));
+        // Both store their tables, and wait.
+        let begun = Instant::now();
+        while cache.unsynced.lock().files.len() < 2 {
+            assert!(begun.elapsed() < Duration::from_secs(20), "both are stored");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!first.is_finished() && !second.is_finished());
+        assert_eq!(cache.synced.load(Ordering::Relaxed), 0);
+        drop(turn);
+        first.join().unwrap();
+        second.join().unwrap();
+        let synced = cache.synced.load(Ordering::Relaxed);
+        assert_eq!(
+            (synced, cache.unsynced.lock().bytes),
+            (2 * ((32 << 20) + 1), 0)
+        );
     }
 
     #[test]

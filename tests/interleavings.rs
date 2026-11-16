@@ -2176,6 +2176,15 @@ fn small_tables() -> Options {
     }
 }
 
+/// `small_tables`, of a database that may have three runs: with a fourth,
+/// a merge gives way to merges of what was flushed behind it.
+fn few_runs() -> Options {
+    Options {
+        max_runs: 3,
+        ..small_tables()
+    }
+}
+
 /// Text that does not compress.
 fn noise(mut seed: u64, len: usize) -> String {
     let mut out = String::with_capacity(len + 16);
@@ -2411,7 +2420,7 @@ async fn only_the_tables_listed_are_stored(bucket: &MemoryStore, db: &Arc<Db>) {
 async fn a_merge_gives_way_to_a_merge_of_what_was_flushed_behind_it() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
-    let ctx = ctx_with(gate.clone(), small_tables());
+    let ctx = ctx_with(gate.clone(), few_runs());
     let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
         .await
         .unwrap();
@@ -2486,7 +2495,7 @@ async fn a_merge_gives_way_to_a_merge_of_what_was_flushed_behind_it() {
 async fn a_merge_that_waits_gives_up_its_turns_to_read_ahead() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
-    let ctx = ctx_with(gate.clone(), small_tables());
+    let ctx = ctx_with(gate.clone(), few_runs());
     let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
         .await
         .unwrap();
@@ -2572,7 +2581,7 @@ async fn scanned_wide(db: &Arc<Db>) -> Vec<Option<Bytes>> {
 async fn a_merge_that_another_gave_way_to_gives_way_to_no_merge() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
-    let ctx = ctx_with(gate.clone(), small_tables());
+    let ctx = ctx_with(gate.clone(), few_runs());
     let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
         .await
         .unwrap();
@@ -2659,7 +2668,7 @@ async fn a_merge_that_another_gave_way_to_gives_way_to_no_merge() {
 async fn a_merge_gives_way_to_no_merge_larger_than_what_it_has_stored() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
-    let ctx = ctx_with(gate.clone(), small_tables());
+    let ctx = ctx_with(gate.clone(), few_runs());
     let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
         .await
         .unwrap();
@@ -2712,6 +2721,65 @@ async fn a_merge_gives_way_to_no_merge_larger_than_what_it_has_stored() {
     only_the_tables_listed_are_stored(&bucket, &db).await;
 }
 
+/// A merge gives way to merges only when the database has more runs than
+/// it may: what is merged behind a merge is merged again with what that
+/// merge makes, and is sent to the store once more for it. Here a database
+/// that may have twelve runs has four, and the two tables flushed behind
+/// its merge wait for it, though it has stored more than both.
+#[tokio::test]
+async fn a_merge_gives_way_to_no_merge_while_the_runs_are_few() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    few(&db, 3, true).await;
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    few(&db, 4, true).await;
+    // The next manifest after that flush's is the merge's own.
+    gate.clear();
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    gate.rule(Op::Put, Action::Hold, 1, move |key, _| {
+        key.contains("/db/app/m/") && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    gate.release(Op::Put);
+    assert!(held_upload(&gate, 3).await.contains("/db/app/m/"));
+    let info = db.info();
+    assert_eq!((db.mem_bytes(), info.tables, info.runs), (0, 4, 4));
+    // It is published, and the two tables are merged then: when the
+    // first table of that merge is held, nothing is stored but what is
+    // listed. Had they been merged behind it, this would be its own third
+    // table, with two stored before it.
+    gate.clear();
+    hold_table(&gate, "app", 1);
+    gate.release(Op::Put);
+    held_upload(&gate, 4).await;
+    let info = db.info();
+    assert_eq!(info.runs, 3, "{info:?}");
+    assert_eq!(tables_stored(&bucket, "app"), info.tables);
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while db.info().runs != 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the tables flushed behind the merge are merged after it");
+    the_first_ten_are_of(&db, 4, true).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
 /// What falls due while a merge that another gave way to runs is flushed
 /// when that merge is published, before the one that waited stores its
 /// next table: it would otherwise wait for a table of each.
@@ -2719,7 +2787,7 @@ async fn a_merge_gives_way_to_no_merge_larger_than_what_it_has_stored() {
 async fn what_falls_due_during_a_merge_another_gave_way_to_is_flushed_after_it() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
-    let ctx = ctx_with(gate.clone(), small_tables());
+    let ctx = ctx_with(gate.clone(), few_runs());
     let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
         .await
         .unwrap();
@@ -2873,7 +2941,7 @@ async fn a_release_does_not_wait_for_a_merge_that_gave_way_to_another() {
     for (nth, left) in [(2, 3), (1, 4)] {
         let bucket = Arc::new(MemoryStore::new());
         let gate = Gate::new(&bucket);
-        let ctx = ctx_with(gate.clone(), small_tables());
+        let ctx = ctx_with(gate.clone(), few_runs());
         let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
             .await
             .unwrap();

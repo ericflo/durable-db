@@ -72,6 +72,10 @@ pub struct Options {
     /// The least a database waits after a merge of everything that its
     /// quota asked for and that made little room, before the next.
     pub quota_rest: Duration,
+    /// A read looks in every run of tables. A database with more runs than
+    /// this merges the newest that are too many, and only then does a
+    /// merge give way to merges of what is flushed behind it. One at least.
+    pub max_runs: usize,
 }
 
 impl Default for Options {
@@ -95,6 +99,7 @@ impl Default for Options {
             recent_keys: 100_000,
             recent_bytes: 8 << 20,
             quota_rest: Duration::from_secs(1),
+            max_runs: 12,
         }
     }
 }
@@ -1245,7 +1250,7 @@ impl Db {
         if self.reclaim.load(Ordering::Acquire) && runs(tables).nth(1).is_some() {
             return Some((tables.len(), true));
         }
-        merge_plan(tables, u64::MAX).map(|count| (count, false))
+        merge_plan(tables, u64::MAX, self.ctx.opts.max_runs).map(|count| (count, false))
     }
 
     /// Ask for everything to be merged, for a write that the quota has no
@@ -1495,7 +1500,8 @@ impl Db {
 
     /// What a merge does between two of its tables for the writes that are
     /// due: they are flushed, and with `behind` the tables flushed since
-    /// the merge began are merged among themselves as `merge_plan` has it.
+    /// the merge began are merged among themselves as `plan_behind` has
+    /// it, which is when the database has more runs than it may.
     /// `under` is how many tables the database had when the merge began,
     /// and `beside` is what that merge tells the disk cache with the
     /// flushed table. `behind` is what the merge has stored and not yet
@@ -1530,7 +1536,8 @@ impl Db {
         };
         while !self.closing() {
             let tables = self.state.read().tables.clone();
-            let Some(count) = plan_behind(&tables, under, spare) else {
+            let most = self.ctx.opts.max_runs;
+            let Some(count) = plan_behind(&tables, under, spare, most) else {
                 break;
             };
             scans.iter_mut().for_each(RunScan::rest);
@@ -1876,7 +1883,7 @@ const RECLAIM_REST: u32 = 4;
 /// How many of the newest tables to merge, if any: whole runs, taken while
 /// they are together at least half the size of the next.
 ///
-/// A read looks in every run, so no more than `MAX_RUNS` are left: with
+/// A read looks in every run, so no more than `max_runs` are left: with
 /// more, the newest that are too many are merged first, whatever their
 /// sizes and with nothing else. They are the smallest. To merge everything
 /// for them rewrote a database of 16 GiB for a dozen tables of 8 MiB that
@@ -1888,14 +1895,14 @@ const RECLAIM_REST: u32 = 4;
 /// more than that, it is of the newest of them that are not, if those are
 /// two at least: they are runs the rule would have merged before it came
 /// to the others.
-fn merge_plan(tables: &[Arc<Table>], most: u64) -> Option<usize> {
-    const MAX_RUNS: usize = 12;
+fn merge_plan(tables: &[Arc<Table>], most: u64, max_runs: usize) -> Option<usize> {
+    let max_runs = max_runs.max(1);
     let runs: Vec<(usize, u64)> = runs(tables)
         .map(|run| (run.len(), run.iter().map(|table| table.meta.size).sum()))
         .collect();
     let mut count = 1;
-    if runs.len() > MAX_RUNS {
-        count = runs.len() - MAX_RUNS + 1;
+    if runs.len() > max_runs {
+        count = runs.len() - max_runs + 1;
     } else {
         let mut size = runs.first()?.1;
         while count < runs.len() && size * 2 >= runs[count].1 {
@@ -1912,9 +1919,21 @@ fn merge_plan(tables: &[Arc<Table>], most: u64) -> Option<usize> {
 
 /// How many of the newest tables to merge while a merge of the `under`
 /// oldest waits: of those flushed since it began, and of no more bytes
-/// than `spare`, from which they are taken.
-fn plan_behind(tables: &[Arc<Table>], under: usize, spare: &mut u64) -> Option<usize> {
-    let count = merge_plan(&tables[..tables.len() - under], *spare)?;
+/// than `spare`, from which they are taken. None while the database has
+/// no more than `max_runs` runs: what is merged behind a merge is merged
+/// again with what that merge makes, and each such byte is sent to the
+/// store once more. On a bucket that is as fast as its link, those bytes
+/// are taken from the commits.
+fn plan_behind(
+    tables: &[Arc<Table>],
+    under: usize,
+    spare: &mut u64,
+    max_runs: usize,
+) -> Option<usize> {
+    if runs(tables).count() <= max_runs {
+        return None;
+    }
+    let count = merge_plan(&tables[..tables.len() - under], *spare, max_runs)?;
     *spare -= tables[..count].iter().map(|t| t.meta.size).sum::<u64>();
     Some(count)
 }
@@ -2656,6 +2675,8 @@ mod tests {
 
     #[test]
     fn runs_are_merged_whole_when_they_are_comparable_in_size() {
+        // As many runs as a database may have: twelve.
+        let limit = Options::default().max_runs;
         let run = |size: u64, pieces: u32, from: u8| -> Vec<Arc<Table>> {
             (0..pieces)
                 .map(|part| {
@@ -2666,51 +2687,66 @@ mod tests {
                 .collect()
         };
         // One run, however many tables it has, is left alone.
-        assert_eq!(merge_plan(&run(400, 4, b'a'), u64::MAX), None);
-        assert_eq!(merge_plan(&[], u64::MAX), None);
+        assert_eq!(merge_plan(&run(400, 4, b'a'), u64::MAX, limit), None);
+        assert_eq!(merge_plan(&[], u64::MAX, limit), None);
         // A small new table waits until it is half the size of the run below.
         let small = [vec![table(100, "a", "z", 0)], run(400, 4, b'a')].concat();
-        assert_eq!(merge_plan(&small, u64::MAX), None);
+        assert_eq!(merge_plan(&small, u64::MAX, limit), None);
         let grown = [vec![table(200, "a", "z", 0)], run(400, 4, b'a')].concat();
-        assert_eq!(merge_plan(&grown, u64::MAX), Some(5));
+        assert_eq!(merge_plan(&grown, u64::MAX, limit), Some(5));
         // The merge takes whole runs, and as many as have become comparable.
         let three = [run(90, 3, b'a'), run(120, 2, b'a'), run(1000, 5, b'a')].concat();
-        assert_eq!(merge_plan(&three, u64::MAX), Some(5));
+        assert_eq!(merge_plan(&three, u64::MAX, limit), Some(5));
         let all = [run(300, 3, b'a'), run(400, 2, b'a'), run(1000, 5, b'a')].concat();
-        assert_eq!(merge_plan(&all, u64::MAX), Some(10));
+        assert_eq!(merge_plan(&all, u64::MAX, limit), Some(10));
         // With more runs than twelve, the newest that are too many are
         // merged whatever their sizes, and not the rest for their sake.
         let many: Vec<Arc<Table>> = (0..15).map(|i| table(1 << (2 * i), "a", "z", 0)).collect();
-        assert_eq!(merge_plan(&many[3..], u64::MAX), None);
-        assert_eq!(merge_plan(&many[2..], u64::MAX), Some(2));
-        assert_eq!(merge_plan(&many, u64::MAX), Some(4));
+        assert_eq!(merge_plan(&many[3..], u64::MAX, limit), None);
+        assert_eq!(merge_plan(&many[2..], u64::MAX, limit), Some(2));
+        assert_eq!(merge_plan(&many, u64::MAX, limit), Some(4));
         // Nor any that the rule would take after them: of these fourteen
         // it would take all, and twelve are merged once three are one.
         let level: Vec<Arc<Table>> = (0..14).map(|_| table(8, "a", "z", 0)).collect();
-        assert_eq!(merge_plan(&level, u64::MAX), Some(3));
-        assert_eq!(merge_plan(&level[2..], u64::MAX), Some(12));
+        assert_eq!(merge_plan(&level, u64::MAX, limit), Some(3));
+        assert_eq!(merge_plan(&level[2..], u64::MAX, limit), Some(12));
         // A merge that may take so many bytes and no more is of the
         // newest of those runs that are within them, when two are.
-        assert_eq!(merge_plan(&all, 700), Some(5));
-        assert_eq!(merge_plan(&all, 699), None);
-        assert_eq!(merge_plan(&level, 23), Some(2));
-        assert_eq!(merge_plan(&level, 15), None);
+        assert_eq!(merge_plan(&all, 700, limit), Some(5));
+        assert_eq!(merge_plan(&all, 699, limit), None);
+        assert_eq!(merge_plan(&level, 23, limit), Some(2));
+        assert_eq!(merge_plan(&level, 15, limit), None);
         // While a merge of the two oldest of these waits, the two flushed
         // since it began are merged and not its own, which the rule would
         // take with them; and what they take is not there for the next.
         let waiting = [run(100, 1, b'a'), run(100, 1, b'a')].concat();
         let behind = [run(40, 1, b'a'), run(40, 1, b'a'), waiting.clone()].concat();
+        // With three runs at most, the four here are too many.
         let mut spare = 1000;
-        assert_eq!(merge_plan(&behind, spare), Some(4));
-        assert_eq!(plan_behind(&behind, 2, &mut spare), Some(2));
+        assert_eq!(merge_plan(&behind, spare, limit), Some(4));
+        assert_eq!(plan_behind(&behind, 2, &mut spare, 3), Some(2));
         assert_eq!(spare, 920);
         let later = [run(10, 1, b'a'), run(15, 1, b'a'), waiting].concat();
         spare = 24;
-        assert_eq!(plan_behind(&later, 2, &mut spare), None);
+        assert_eq!(plan_behind(&later, 2, &mut spare, 3), None);
         assert_eq!(spare, 24);
         spare = 25;
-        assert_eq!(plan_behind(&later, 2, &mut spare), Some(2));
+        assert_eq!(plan_behind(&later, 2, &mut spare, 3), Some(2));
         assert_eq!(spare, 0);
+        // No limit is less than one run.
+        assert_eq!(
+            merge_plan(&behind, u64::MAX, 0),
+            merge_plan(&behind, u64::MAX, 1)
+        );
+        // With two at most, three of the four are too many, and one of
+        // those is the waiting merge's: it is not taken.
+        spare = 1000;
+        assert_eq!(plan_behind(&behind, 2, &mut spare, 2), Some(2));
+        // And none are merged behind it while the database has no more
+        // runs than it may: these are four.
+        spare = 1000;
+        assert_eq!(plan_behind(&behind, 2, &mut spare, 4), None);
+        assert_eq!(spare, 1000);
     }
 
     #[test]
