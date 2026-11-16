@@ -429,6 +429,47 @@ DURABLE_DB=./durable-db SOAK_STORE=bucket SOAK_GIB=1 SOAK_READ_CLIENTS=8 SOAK_SE
 
 They did not. A database takes no more writes than it can flush, 32 MiB of them at most, and the writes of 256 clients were held to that, told to wait some 450,000 times, before the runs came to 24; the link carried 4.7 MB a second up that morning. The night before, over a link that carried 1.1 MiB a second, 2.1.8 had 32 runs with 64 clients ([above](#a-large-database)). The bound of 2.1.9 is shown by the tests of finding 45 and not by a run here. The reads after the first minute and the scans differ more than the fills. The server that opens the database begins a merge of the runs that are too many: 2.1.8's ended during its second minute of reads, and its scans found 12 runs; 2.1.9's had not ended when its scans did, and they found 19. Over a link that merge takes minutes, and when it ends is not the same from one run to the next.
 
+### Several databases merging at once
+
+A server merges two databases at a time. Release 2.1.9 let a merge hold its turn from its first table to its last, and a database that waited for a turn meanwhile went on taking writes and gained a run with every flush. Since 2.1.10 a merge gives its turn to a database that waits for one between two of its tables, and waits for a turn again (finding 46).
+
+```sh
+DURABLE_DB=./durable-db scripts/soak-tenants.sh
+DURABLE_DB=./durable-db SOAK_LARGE=3 SOAK_GIB=2 scripts/soak-tenants.sh
+```
+
+The script runs one server with the flags of the Kubernetes manifest, in a scope of 1 GiB and four CPUs, on a local directory. Two databases are filled with 4 GiB each, values of 4 KiB that do not compress, and written over for half a minute. Then each is given a quota under what it holds, so that the next write to each waits while all of it is merged, and the two merges begin together and take both of the server's turns. Meanwhile a small database is written by 64 clients, which make a flush of it about once a second, and read at keys taken at random by 8, in rounds of five seconds. The runs below were made with 2.1.9 and then with the release binary of 2.1.10, one of each, one after another on the desktop, the afternoon of the release, with nothing else running.
+
+| | 2.1.9 | 2.1.10 |
+| --- | ---: | ---: |
+| Each write at a quota waited | 47.5 s, 48.3 s | 52.5 s, 52.6 s |
+| Read from storage and sent to it, until the last was taken | 14,690 MiB and 8,534 MiB | 12,225 MiB and 9,085 MiB |
+| The small database: runs before | 2 | 3 |
+| Most runs while the merges ran | 27 | 5 |
+| Its reads a second, round by round while they ran | 45,580 to 151,317 | 114,316 to 158,932 |
+| Its writes a second, round by round while they ran | 507 to 1,328 | 677 to 1,907 |
+| Its writes told to wait | 0 | 0 |
+| The round after: reads a second, runs at most | 133,845, 4 | 116,548, 5 |
+
+With 2.1.9 the small database's merge waited for a turn until the first of the two others ended, after 47.5 seconds, and it went from 2 runs to 27; in the last three rounds before then it was read at 45,580 to 66,503 keys a second, less than half of what it had been read at first. With 2.1.10 it had 5 runs at most, and was read at 114,316 keys a second at the least. What that cost the two large merges: each took 52.5 seconds where they had taken 47.5 and 48.3, a tenth longer. Each gave its turn up at every table at which the small database waited for one, and when it went on read again what it had read ahead and the index of each table it was in. What was read from storage and sent to it is the server's count for all its databases together, the small one's merges among them. One run of each was made, and how much one run of this script differs from the next has not been measured.
+
+Three large databases of 2 GiB, so that one of them waits for a turn as well:
+
+| | 2.1.9 | 2.1.10 |
+| --- | ---: | ---: |
+| Each write at a quota waited | 42.7 s, 24.5 s, 25.3 s | 38.6 s, 37.7 s, 38.4 s |
+| Read from storage and sent to it, until the last was taken | 8,670 MiB and 7,001 MiB | 7,342 MiB and 6,889 MiB |
+| The small database: runs before | 2 | 2 |
+| Most runs while the merges ran | 16 | 5 |
+| Its reads a second, round by round while they ran | 117,243 to 149,258 | 136,398 to 153,472 |
+| Its writes a second, round by round while they ran | 843 to 2,144 | 976 to 1,409 |
+| Its writes told to wait | 0 | 0 |
+| The round after: reads a second, runs at most | 104,604, 6 | 135,657, 4 |
+
+With 2.1.9 two of them merged first, and their writes were taken after 24.5 and 25.3 seconds; the third waited for a turn, and was taken after 42.7. The small database had 16 runs by the time a turn came free. With 2.1.10 the three merged a table at a time, and their writes were taken after 37.7 to 38.6 seconds: the last four seconds sooner, the first two thirteen seconds later, and the three seven seconds later on average. The small database had 5 runs at most.
+
+On a bucket a merge of a large database takes as long as its link takes to carry the database twice over, so a database that waited for a turn with 2.1.9 waited minutes, and what a merge reads again when it goes on is a request to the bucket each time, and download. Neither has been measured on a bucket.
+
 ## What it costs in requests
 
 Uploads are free on B2; HEAD and GET are billed per call, LIST at a higher rate. Per request:
@@ -453,4 +494,5 @@ A database committing as fast as B2 allows from one location runs about ten grou
 - Amazon S3 or any provider other than B2.
 - A server in the same region as its bucket.
 - Many hours of sustained load.
+- Several databases merging at once on a bucket, where a merge takes minutes and what a merge that gave its turn up reads again is download ([above](#several-databases-merging-at-once)).
 - A database larger than 1 GiB on a provider's bucket, or larger than 16 GiB anywhere. A database larger than its server's disk cache on a bucket, where what [a large database](#a-large-database) shows of the disk cache would be paid for.
