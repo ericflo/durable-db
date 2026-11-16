@@ -23,7 +23,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -699,6 +699,9 @@ pub struct Io {
     pub index_bytes: Arc<AtomicU64>,
     /// Bounds how many table merges run at once on this server.
     pub merges: Arc<tokio::sync::Semaphore>,
+    /// How many databases wait for one of those turns. A merge gives its
+    /// turn to them between two of its tables.
+    merges_waiting: AtomicUsize,
     fills: Arc<tokio::sync::Semaphore>,
     /// The turns of requests' scans to read ahead, and those of merges.
     pub ahead: Arc<tokio::sync::Semaphore>,
@@ -758,6 +761,7 @@ impl Io {
             index_bytes: pins.indexes.clone(),
             pins,
             merges: Arc::new(tokio::sync::Semaphore::new(2)),
+            merges_waiting: AtomicUsize::new(0),
             fills: Arc::new(tokio::sync::Semaphore::new(FILLS)),
             ahead: Arc::new(tokio::sync::Semaphore::new(AHEAD_SCANS)),
             merge_ahead: Arc::new(tokio::sync::Semaphore::new(AHEAD_MERGES)),
@@ -803,6 +807,25 @@ impl Io {
 
     pub fn cache_bytes(&self) -> u64 {
         self.blocks.weight()
+    }
+
+    /// A turn to merge, in the order asked for; counted as waited for until
+    /// it is had or given up.
+    pub async fn merge_turn(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        self.merges_waiting.fetch_add(1, Ordering::AcqRel);
+        let _waiting = Waiting(&self.merges_waiting);
+        self.merges.clone().acquire_owned().await.ok()
+    }
+
+    /// Whether a database waits for a turn to merge.
+    pub fn merge_waited_for(&self) -> bool {
+        self.merges_waiting.load(Ordering::Acquire) > 0
     }
 
     /// Whether a table is in the disk cache, where reading it costs no
@@ -1031,7 +1054,7 @@ where
 }
 
 /// Resolves when `flag` is set, looking every fiftieth of a second.
-async fn until_set(flag: &AtomicBool) {
+pub(crate) async fn until_set(flag: &AtomicBool) {
     while !flag.load(Ordering::Acquire) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

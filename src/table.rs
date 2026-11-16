@@ -562,11 +562,14 @@ pub struct TableScan {
 }
 
 impl TableScan {
-    /// Give up what was read ahead and the turn held for it, as a merge
-    /// does while it waits for another. The scan reads those blocks again
-    /// when it comes to them.
+    /// Give up what was read ahead and the turn held for it, and the
+    /// index, as a merge does while it waits for another or for its turn:
+    /// the merges that wait may be many, and an index can be as large as
+    /// its table. The scan reads them again when it goes on. The block it
+    /// is in stays: what the scan returned last holds it.
     pub fn rest(&mut self) {
         self.ahead = None;
+        self.index = None;
     }
 
     pub async fn next(&mut self) -> Result<Option<Entry>> {

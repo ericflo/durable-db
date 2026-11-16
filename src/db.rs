@@ -363,9 +363,9 @@ impl Uploader {
     /// A spare is the store's to refuse (`put_spare`). One that was not sent
     /// has stored nothing and has used no attempt: it is asked for again
     /// after the same wait.
-    async fn raced(&self, key: &str, body: &Bytes) -> Result<(), StoreError> {
+    async fn raced(&self, key: &str, body: &Bytes, race: bool) -> Result<(), StoreError> {
         let opts = &self.ctx.opts;
-        let attempts = if body.len() > RACE_BYTES {
+        let attempts = if !race || body.len() > RACE_BYTES {
             1
         } else {
             opts.upload_attempts.max(1)
@@ -441,10 +441,21 @@ impl Uploader {
     /// Upload immutable bytes until they are stored. Repeats are harmless:
     /// the key is ours alone and the content never changes.
     async fn put(&self, key: &str, body: Bytes) -> Result<()> {
+        self.upload(key, body, true).await
+    }
+
+    /// `put`, one attempt at a time, as for a merge's table, which no
+    /// commit waits for: when it ends, no other attempt is on its way, but
+    /// one the store reported failed and applies late.
+    async fn put_alone(&self, key: &str, body: Bytes) -> Result<()> {
+        self.upload(key, body, false).await
+    }
+
+    async fn upload(&self, key: &str, body: Bytes, race: bool) -> Result<()> {
         let deadline = Instant::now() + self.ctx.opts.store_deadline;
         let mut delay = Duration::from_millis(10);
         loop {
-            match self.raced(key, &body).await {
+            match self.raced(key, &body, race).await {
                 Ok(()) => return Ok(()),
                 Err(StoreError::Unavailable(reason)) if Instant::now() + delay < deadline => {
                     let object = crate::layout::object(key);
@@ -1239,8 +1250,8 @@ impl Db {
             if failed || !due || self.closing() {
                 (turn, queued) = (None, None);
             } else if turn.is_none() && queued.is_none() {
-                let merges = self.ctx.io.merges.clone();
-                queued = Some(Box::pin(async move { merges.acquire_owned().await.ok() }));
+                let io = self.ctx.io.clone();
+                queued = Some(Box::pin(async move { io.merge_turn().await }));
             }
         }
     }
@@ -1355,7 +1366,7 @@ impl Db {
             .await
             .map_err(|e| Error::Unavailable(e.to_string()))?;
             if let Some((body, meta)) = built {
-                let table = self.store_table(maint, body, meta, beside).await?;
+                let table = self.store_table(maint, body, meta, beside, None).await?;
                 tables.insert(0, table);
             }
         }
@@ -1368,16 +1379,54 @@ impl Db {
     /// has yet to and those it has stored: in the disk cache the table
     /// takes the room of the first before that of others in use, and
     /// never that of the second.
+    /// With `halt`, as a merge stores a table, it does not wait for the
+    /// upload once the flag is set: a release or a deletion would wait for
+    /// an upload the merge is discarded with, a minute or more over a slow
+    /// link. The upload ends by itself, and deletes what it stored: the
+    /// table is in no manifest, and it may arrive after the release has
+    /// collected what it left and the next owner has swept, or after the
+    /// deletion has erased the database.
     async fn store_table(
         &self,
         maint: &mut Maint,
         body: Bytes,
         meta: TableMeta,
         (done, kept): Beside<'_>,
+        halt: Option<&AtomicBool>,
     ) -> Result<Arc<Table>> {
         maint.next_table += 1;
         maint.unpublished.push(meta.key.clone());
-        self.uploads.put(&meta.key, body.clone()).await?;
+        match halt {
+            None => self.uploads.put(&meta.key, body.clone()).await?,
+            Some(halt) => {
+                let given_up = Arc::new(AtomicBool::new(false));
+                let mut stored = tokio::spawn({
+                    let (uploads, key, upload) =
+                        (self.uploads.clone(), meta.key.clone(), body.clone());
+                    let given_up = given_up.clone();
+                    async move {
+                        let stored = uploads.put_alone(&key, upload).await;
+                        // Failed or not, an attempt may have stored it.
+                        if given_up.swap(true, Ordering::AcqRel) {
+                            let store = &*uploads.ctx.io.store;
+                            let only = |candidate: &str| candidate == key;
+                            let _ = retry(|| store.purge(&key, None, &only)).await;
+                        }
+                        stored
+                    }
+                });
+                tokio::select! {
+                    stored = &mut stored => stored
+                        .unwrap_or_else(|error| Err(Error::Unavailable(error.to_string())))?,
+                    () = crate::io::until_set(halt) => {
+                        // Ended meanwhile, it stored the table under the
+                        // key the release collects with the merge's others.
+                        given_up.swap(true, Ordering::AcqRel);
+                        return Err(Error::Busy("the database is leaving".into()));
+                    }
+                }
+            }
+        }
         let done: Vec<&str> = done.iter().map(|table| table.meta.key.as_str()).collect();
         let kept: Vec<&str> = kept.iter().map(|table| table.meta.key.as_str()).collect();
         self.ctx.io.remember(&meta.key, body, &done, &kept).await;
@@ -1397,6 +1446,11 @@ impl Db {
                 self.flush(maint, false, (&[], &[])).await?;
             }
         }
+        // A release that began meanwhile, as during a flush before this,
+        // would wait for the merge to build a table it then discards.
+        if self.closing() {
+            return Ok(false);
+        }
         let tables = self.state.read().tables.clone();
         let Some((count, reclaiming)) = self.plan(&tables) else {
             return Ok(false);
@@ -1406,16 +1460,19 @@ impl Db {
         if turn.is_none() {
             *turn = self.ctx.io.merges.clone().try_acquire_owned().ok();
         }
-        let Some(_turn) = turn.take() else {
+        let mut held = turn.take();
+        if held.is_none() {
             return Ok(false);
-        };
+        }
         let began = Instant::now();
         let merged = {
             // Only while it merges: once its result is published the runs
             // are those of the tables listed.
             let _merging = UnderWay::begin(&self.merging, runs(&tables[..count]).count());
-            self.merge(maint, &tables, count, true).await?
+            self.merge(maint, &tables, count, true, Some(&mut held))
+                .await?
         };
+        drop(held);
         let Some(merged) = merged else {
             return Ok(false);
         };
@@ -1440,13 +1497,18 @@ impl Db {
     /// The `count` newest of `tables` merged into new tables, each stored
     /// before the next is begun, for the caller to publish. `None` when a
     /// release began meanwhile. With `behind`, it gives way to merges of
-    /// what is flushed behind it as it does to the flushes.
+    /// what is flushed behind it as it does to the flushes. `turn` is the
+    /// server's turn to merge that it holds, which it gives to a database
+    /// that waits for one, between two of its tables, and waits for one
+    /// again; `None` for a merge that another gave way to, which holds
+    /// that one's.
     fn merge<'a>(
         self: &'a Arc<Self>,
         maint: &'a mut Maint,
         tables: &'a [Arc<Table>],
         count: usize,
         behind: bool,
+        mut turn: Option<&'a mut Option<Turn>>,
     ) -> Merging<'a> {
         Box::pin(async move {
             // A merge is use. A database that was released for being idle
@@ -1493,7 +1555,10 @@ impl Db {
                         scans.iter().flat_map(|scan| &scan.done).cloned().collect();
                     let coming = scans.iter().flat_map(RunScan::unread);
                     let mut kept: Vec<Arc<Table>> = coming.chain(&merged).cloned().collect();
-                    let table = self.store_table(maint, body, meta, (&done, &kept)).await?;
+                    let halt = Some(self.halt.as_ref());
+                    let table = self
+                        .store_table(maint, body, meta, (&done, &kept), halt)
+                        .await?;
                     kept.push(table.clone());
                     spare += table.meta.size;
                     merged.push(table);
@@ -1536,6 +1601,30 @@ impl Db {
                         // that, and waits for no table more.
                         if self.closing() {
                             return Ok(None);
+                        }
+                    }
+                    // And it gives its turn to merge to a database that
+                    // waits for one, and waits for one again: a merge of a
+                    // large database over a bucket holds a turn for many
+                    // minutes, and a database that waits for one gains a
+                    // run with every flush, which every read looks in.
+                    // Meanwhile it holds no more than where it is in each
+                    // run. A merge that another gave way to has no turn of
+                    // its own.
+                    if next.is_some()
+                        && let Some(turn) = turn.as_mut()
+                        && self.ctx.io.merge_waited_for()
+                    {
+                        let at = maint.unpublished.len() - merged.len();
+                        let mine = maint.unpublished.split_off(at);
+                        drop(turn.take());
+                        scans.iter_mut().for_each(RunScan::rest);
+                        let beside = (done.as_slice(), kept.as_slice());
+                        let waited = self.await_turn(maint, beside).await;
+                        maint.unpublished.extend(mine);
+                        match waited? {
+                            Some(again) => **turn = Some(again),
+                            None => return Ok(None),
                         }
                     }
                 }
@@ -1601,7 +1690,7 @@ impl Db {
                 break;
             };
             scans.iter_mut().for_each(RunScan::rest);
-            let Some(merged) = self.merge(maint, &tables, count, false).await? else {
+            let Some(merged) = self.merge(maint, &tables, count, false, None).await? else {
                 break;
             };
             self.publish_merged(maint, &tables, count, &merged).await?;
@@ -1612,6 +1701,42 @@ impl Db {
             }
         }
         Ok(())
+    }
+
+    /// Wait for a turn to merge, after a merge gave its own to a database
+    /// that waited. Meanwhile what falls due is flushed, as between two
+    /// tables, the merge is use, and its database takes writes as one that
+    /// waits for its turn to begin a merge does: refusing them would not
+    /// bring its runs down. `None` once a release has begun.
+    async fn await_turn(
+        self: &Arc<Self>,
+        maint: &mut Maint,
+        beside: Beside<'_>,
+    ) -> Result<Option<Turn>> {
+        let _resting = Resting::begin(&self.merging);
+        let io = self.ctx.io.clone();
+        let mut turn = std::pin::pin!(io.merge_turn());
+        loop {
+            tokio::select! {
+                biased;
+                () = self.leaving() => return Ok(None),
+                turn = &mut turn => return Ok(turn),
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+            self.touch();
+            if self.should_flush(maint)
+                && let Err(error) = self.flush(maint, false, beside).await
+            {
+                if !passing(&error) {
+                    return Err(error);
+                }
+                report(
+                    &self.tag,
+                    "a flush while a merge waited for its turn failed",
+                    &error,
+                );
+            }
+        }
     }
 
     /// Publish what a merge of the `count` newest of `tables` made, in
@@ -2002,6 +2127,22 @@ impl Drop for UnderWay<'_> {
     }
 }
 
+/// The runs of a merge under way, not counted while it waits for its turn
+/// again, and counted again after.
+struct Resting<'a>(&'a AtomicUsize, usize);
+
+impl<'a> Resting<'a> {
+    fn begin(taking: &'a AtomicUsize) -> Self {
+        Self(taking, taking.swap(0, Ordering::AcqRel))
+    }
+}
+
+impl Drop for Resting<'_> {
+    fn drop(&mut self) {
+        self.0.store(self.1, Ordering::Release);
+    }
+}
+
 /// How many of the newest tables to merge while a merge of the `under`
 /// oldest waits: of those flushed since it began, and of no more bytes
 /// than `spare`, from which they are taken. None while the database has
@@ -2125,6 +2266,8 @@ impl RunScan {
             self.done.extend(self.at.take());
             self.at = self.rest.pop();
             let Some(table) = &self.at else {
+                // Nor the index of the table it has read through.
+                self.current = None;
                 return Ok(None);
             };
             self.current = Some(table.scan(

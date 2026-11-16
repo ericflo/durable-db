@@ -1133,8 +1133,11 @@ async fn table_indexes_stay_within_the_cache() {
         )
         .await;
     }
+    // The writes are flushed, and the merges they set off have ended: a
+    // merge holds the index of a table of each run it reads, and here an
+    // index is as large as its table.
     db.request_flush();
-    while db.mem_bytes() > 0 {
+    while db.mem_bytes() > 0 || db.info().runs > 1 {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let indexes = || {

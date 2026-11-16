@@ -110,7 +110,7 @@ Applications connect to `http://durable-db.durable-db.svc:7654`. Put TLS and any
 | Recently written keys, remembered for range checks | a quarter of `--memtable-bytes` |
 | Request bodies | `--body-bytes` |
 | Read results | `--result-bytes` |
-| Merges | two at a time, one table of 32 MiB each |
+| Merges | two at a time, one table of 32 MiB each; and the table of each merge whose database was released or deleted while it was being uploaded, until that upload ends. A merge that waits for its turn holds no table, only where it is in each run |
 | Tables being fetched for the disk cache | two at a time, 64 MiB each |
 | Tables written to the disk cache that the disk does not have yet. The kernel holds them, and counts them against the limit | 64 MiB, beside the tables being written, which are in memory twice while they are |
 | What scans and merges have read ahead | 1 MiB each, for sixteen scans of requests and sixteen runs of tables in merges at a time |
