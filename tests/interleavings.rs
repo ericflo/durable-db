@@ -2771,12 +2771,11 @@ async fn writes_wait_while_a_database_has_far_more_runs_than_it_may() {
     only_the_tables_listed_are_stored(&bucket, &db).await;
 }
 
-/// A merge that failed is begun again when the database is next written to,
-/// and a write that is told to wait for runs is that. Here the merge of a
-/// database with too many runs fails twice, and the writes that wait for it
-/// have it begun a third time: no write would be taken that began it.
+/// Writes wait for runs only while the database merges. One whose merge
+/// failed takes them, and the next it takes begins the merge again: here
+/// the merge of a database with too many runs fails twice.
 #[tokio::test]
-async fn a_write_that_waits_for_runs_begins_again_a_merge_that_failed() {
+async fn a_database_whose_merge_failed_takes_writes_that_begin_it_again() {
     let bucket = Arc::new(MemoryStore::new());
     let gate = Gate::new(&bucket);
     let opts = Options {
@@ -2815,21 +2814,127 @@ async fn a_write_that_waits_for_runs_begins_again_a_merge_that_failed() {
     tokio::time::timeout(Duration::from_secs(5), failed)
         .await
         .expect("both merges fail");
-    assert_eq!(db.info().runs, 3);
+    let merging = async {
+        while db.info().runs != 3 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merging)
+        .await
+        .expect("the database has the runs it had");
+    commit(&db, round(4)).await.unwrap();
+    let merged = async {
+        while db.info().runs != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the write begins the merge again");
+    every_key_is_of(&db, 4).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// A merge that has made more runs than writes may wait for does not wait
+/// for a flush to merge what was flushed behind it: no write is taken that
+/// would make one fall due. Here a long merge has three flushes behind it,
+/// which it has not stored enough to merge, and writes are told to wait;
+/// it merges them as soon as it has, and the write is taken while it goes
+/// on.
+#[tokio::test]
+async fn a_merge_with_too_many_runs_merges_behind_it_without_a_flush() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let opts = Options {
+        max_runs: 2,
+        ..small_tables()
+    };
+    let ctx = ctx_with(gate.clone(), opts);
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    // Two tables of 300 KiB, whose merge is some seventy-five tables.
+    commit(&db, wide(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, wide(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    // A round of 26 KiB is flushed behind each of its first three tables.
+    for (n, round_) in [(2, 3), (3, 4), (4, 5)] {
+        commit(&db, round(round_)).await.unwrap();
+        gate.clear();
+        hold_table(&gate, "app", 2);
+        gate.release(Op::Put);
+        held_upload(&gate, n).await;
+    }
+    // Five runs are more than twice two.
+    assert_eq!((db.mem_bytes(), db.info().runs), (0, 5));
+    assert!(matches!(commit(&db, round(6)).await, Err(Error::Busy(_))));
+    // The merge goes on, held at its fortieth table from here.
+    gate.clear();
+    hold_table(&gate, "app", 40);
+    gate.release(Op::Put);
     let taken = async {
         loop {
-            match commit(&db, round(4)).await {
+            match commit(&db, round(6)).await {
                 Err(Error::Busy(_)) => tokio::time::sleep(Duration::from_millis(1)).await,
                 other => return other,
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), taken)
+    tokio::time::timeout(Duration::from_secs(10), taken)
         .await
-        .expect("a write that waits has the merge begun again")
+        .expect("the write is taken while the merge goes on")
         .unwrap();
-    every_key_is_of(&db, 4).await;
+    // It had not ended: it comes to the table it is held at.
+    held_upload(&gate, 5).await;
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while db.info().runs > 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), merged)
+        .await
+        .expect("the merges end");
     only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// A merge loads the index of a table by itself: it waits for a store that
+/// fails, and a request for the same table does not wait for it. Here the
+/// merge's first read of a table is held, and a key that both tables cover
+/// is read meanwhile.
+#[tokio::test]
+async fn a_read_does_not_wait_for_a_merge_that_waits_for_the_store() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    gate.rule(Op::GetRange, Action::Hold, 1, |key, _| {
+        key.contains("/db/app/t/")
+    });
+    commit(&db, round(2)).await.unwrap();
+    flushed(&db).await;
+    gate.wait_held(Op::GetRange).await;
+    let read = tokio::time::timeout(Duration::from_secs(5), get(&db, b"k0001x"))
+        .await
+        .expect("a read is answered while the merge waits");
+    assert_eq!(read.unwrap(), None);
+    gate.release(Op::GetRange);
+    let merged = async {
+        while db.info().runs != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the merge ends");
+    every_key_is_of(&db, 2).await;
 }
 
 /// A database is opened with the runs its manifest lists, and one opened

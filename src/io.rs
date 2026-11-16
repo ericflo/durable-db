@@ -847,7 +847,7 @@ impl Io {
         // A merge, which keeps nothing, is not given up for a store that
         // fails for a while: one that fails is begun again from its start,
         // and a merge of a large database over a link that resets now and
-        // then would not end. It waits for the store as an upload does.
+        // then would not end.
         let read = || self.store.get_range(key, start, end);
         let bytes = if keep {
             retry(read).await
@@ -975,9 +975,11 @@ where
     unreachable!()
 }
 
-/// How long a merge's read waits for a store that fails: as long as an
-/// upload does (`Options::store_deadline`).
-const PATIENCE: Duration = Duration::from_secs(30);
+/// How long a merge's read waits for a store that fails, where a request's
+/// gives up after a second or so: long enough for a link that resets now
+/// and then, and short enough for a release, which waits for the merge to
+/// stop, to end within a pod's grace of a minute with a seal to store.
+const PATIENCE: Duration = Duration::from_secs(10);
 
 /// `retry`, for as long as `patience` and not a number of times.
 pub async fn retry_for<T, F, Fut>(patience: Duration, mut call: F) -> Result<T>

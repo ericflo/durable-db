@@ -75,7 +75,7 @@ pub struct Options {
     /// A read looks in every run of tables. A database with more runs than
     /// this merges the newest that are too many, and only then does a
     /// merge give way to merges of what is flushed behind it; with more
-    /// than twice as many, writes wait for the merges. One at least.
+    /// than twice as many, writes wait while it merges. One at least.
     pub max_runs: usize,
 }
 
@@ -302,6 +302,9 @@ pub struct Db {
     reclaim_rests_until: AtomicU64,
     /// Something was deleted that no merge for the quota has taken in yet.
     reclaim_deleted: AtomicBool,
+    /// A merge of this database is under way, with one of the server's
+    /// turns.
+    merging: AtomicBool,
     maint: tokio::sync::Mutex<Maint>,
     started: Instant,
     last_used_ms: AtomicU64,
@@ -764,6 +767,7 @@ impl Db {
             reclaim: AtomicBool::new(false),
             reclaim_rests_until: AtomicU64::new(0),
             reclaim_deleted: AtomicBool::new(false),
+            merging: AtomicBool::new(false),
             maint: tokio::sync::Mutex::new(Maint {
                 generation: 0,
                 checked: 0,
@@ -1232,6 +1236,12 @@ impl Db {
         self.is_closed() || self.closing.load(Ordering::Acquire)
     }
 
+    /// Whether `runs` are more than writes may wait for: twice as many as
+    /// the database may keep.
+    fn too_many_runs(&self, runs: usize) -> bool {
+        runs > self.ctx.opts.max_runs.max(1).saturating_mul(2)
+    }
+
     /// Resolves when a release or a deletion has begun, or the database
     /// has closed.
     async fn leaving(&self) {
@@ -1379,6 +1389,7 @@ impl Db {
         let Some(_turn) = turn.take() else {
             return Ok(false);
         };
+        let _merging = UnderWay::begin(&self.merging);
         let began = Instant::now();
         let Some(merged) = self.merge(maint, &tables, count, true).await? else {
             return Ok(false);
@@ -1466,7 +1477,12 @@ impl Db {
                     if next.is_some() && self.closing() {
                         return Ok(None);
                     }
-                    if next.is_some() && self.should_flush(maint) {
+                    // And, while the database has more runs than writes
+                    // may wait for, to merges of what was flushed behind
+                    // it: no write falls due that would give way for them,
+                    // and its stored tables are what they may take.
+                    let crowded = behind && self.too_many_runs(self.state.read().runs);
+                    if next.is_some() && (self.should_flush(maint) || crowded) {
                         // What is published meanwhile discards tables no
                         // manifest lists. These are not finished, not lost.
                         let at = maint.unpublished.len() - merged.len();
@@ -1920,6 +1936,22 @@ fn merge_plan(tables: &[Arc<Table>], most: u64, max_runs: usize) -> Option<usize
         count -= 1;
     }
     (count > 1).then(|| runs[..count].iter().map(|(tables, _)| tables).sum())
+}
+
+/// Set while a merge runs, whatever way it ends.
+struct UnderWay<'a>(&'a AtomicBool);
+
+impl<'a> UnderWay<'a> {
+    fn begin(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for UnderWay<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// How many of the newest tables to merge while a merge of the `under`
@@ -2610,13 +2642,11 @@ impl Writer {
         }
         // And faster than they can be merged: every flush is a run, and a
         // read looks in each. Over a link that carried less than the merges
-        // had to send, a database of 1 GiB was left with 32 runs. A write
-        // that waits is one the database was written to: a merge that
-        // failed is begun again then, and with this many runs no write is
-        // taken that would begin it.
-        if state.runs > db.ctx.opts.max_runs.max(1).saturating_mul(2) {
-            drop(state);
-            db.wake_maint.notify_one();
+        // had to send, a database of 1 GiB was left with 32 runs. Only while
+        // it merges: a database that waits for a turn, or whose merge
+        // failed, can do nothing for the writes it would refuse, and the
+        // next it takes begins that merge again.
+        if db.merging.load(Ordering::Acquire) && db.too_many_runs(state.runs) {
             return Err(Error::Busy(
                 "the database is merging earlier writes; retry shortly".into(),
             ));

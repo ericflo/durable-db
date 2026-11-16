@@ -357,8 +357,13 @@ impl Table {
         if let Some(index) = io.cached_index(&self.key) {
             return Ok(index);
         }
-        // One reader fetches it; the others wait for that.
-        let _loading = self.loading.lock().await;
+        // One reader fetches it; the others wait for that. A merge fetches
+        // its own: it waits for a store that fails, and no request is to
+        // wait for that.
+        let _loading = match keep {
+            true => Some(self.loading.lock().await),
+            false => None,
+        };
         let held = self.index.lock().upgrade();
         if let Some(index) = held {
             // Dropped by the cache while a reader still had it.

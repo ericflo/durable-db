@@ -219,6 +219,9 @@ impl World {
                     self.acknowledged(committed.revision);
                     return Ok(committed.revision);
                 }
+                // Refused before it was given a revision: while the
+                // database flushes or merges earlier writes. Asked again.
+                Ok(Err(Error::Busy(_))) => {}
                 Ok(Err(error)) => return Err(error),
                 Err(error) => assert!(error.retryable(), "{error:?}"),
             }
