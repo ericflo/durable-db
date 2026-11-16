@@ -74,7 +74,8 @@ pub struct Options {
     pub quota_rest: Duration,
     /// A read looks in every run of tables. A database with more runs than
     /// this merges the newest that are too many, and only then does a
-    /// merge give way to merges of what is flushed behind it. One at least.
+    /// merge give way to merges of what is flushed behind it; with more
+    /// than twice as many, writes wait for the merges. One at least.
     pub max_runs: usize,
 }
 
@@ -231,6 +232,8 @@ struct State {
     /// Newest first.
     tables: Arc<Vec<Arc<Table>>>,
     table_bytes: u64,
+    /// How many runs `tables` are.
+    runs: usize,
     /// The newest acknowledged revision: what readers see.
     confirmed: u64,
     confirmed_frame: u64,
@@ -744,6 +747,7 @@ impl Db {
             state: RwLock::new(State {
                 mem,
                 table_bytes: tables.iter().map(|t| t.meta.size).sum(),
+                runs: runs(&tables).count(),
                 tables: Arc::new(tables),
                 confirmed: revision,
                 confirmed_frame: 0,
@@ -879,7 +883,7 @@ impl Db {
             revision: state.confirmed,
             bytes: state.table_bytes + state.mem.bytes() as u64,
             tables: state.tables.len(),
-            runs: runs(&state.tables).count(),
+            runs: state.runs,
             epoch: self.epoch.to_string(),
             config: state.config.clone(),
         }
@@ -1621,6 +1625,7 @@ impl Db {
         {
             let mut state = self.state.write();
             state.table_bytes = tables.iter().map(|t| t.meta.size).sum();
+            state.runs = runs(&tables).count();
             state.tables = Arc::new(tables);
             if let Some(upto) = flushed {
                 state.mem.drain(upto);
@@ -2601,6 +2606,14 @@ impl Writer {
             db.request_flush();
             return Err(Error::Busy(
                 "the database is flushing earlier writes; retry shortly".into(),
+            ));
+        }
+        // And faster than they can be merged: every flush is a run, and a
+        // read looks in each. Over a link that carried less than the merges
+        // had to send, a database of 1 GiB was left with 29 runs.
+        if state.runs > db.ctx.opts.max_runs.max(1).saturating_mul(2) {
+            return Err(Error::Busy(
+                "the database is merging earlier writes; retry shortly".into(),
             ));
         }
         if size > added {

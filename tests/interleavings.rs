@@ -2721,6 +2721,97 @@ async fn a_merge_gives_way_to_no_merge_larger_than_what_it_has_stored() {
     only_the_tables_listed_are_stored(&bucket, &db).await;
 }
 
+/// Every flush is a run and a read looks in each, so writes wait while a
+/// database has more than twice the runs it may: with one at most, three.
+/// Here a merge is held while a flush is made behind it, and a write is told
+/// to wait until the merge is published.
+#[tokio::test]
+async fn writes_wait_while_a_database_has_far_more_runs_than_it_may() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let opts = Options {
+        max_runs: 1,
+        ..small_tables()
+    };
+    let ctx = ctx_with(gate.clone(), opts);
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // A merge of the two rounds is held at its first table.
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    // It stores that table, gives way to the flush of ten keys, and is held
+    // at its second.
+    few(&db, 3, true).await;
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    assert_eq!((db.mem_bytes(), db.info().runs), (0, 3));
+    assert!(matches!(commit(&db, round(4)).await, Err(Error::Busy(_))));
+    // Once the merge is published the write is taken.
+    gate.clear();
+    gate.release(Op::Put);
+    let taken = async {
+        loop {
+            match commit(&db, round(4)).await {
+                Err(Error::Busy(_)) => tokio::time::sleep(Duration::from_millis(1)).await,
+                other => return other,
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), taken)
+        .await
+        .expect("the write is taken when the runs are fewer")
+        .unwrap();
+    every_key_is_of(&db, 4).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// A merge that reads a table from a store that fails for a while waits for
+/// it, as an upload does, where a request gives up after a second or so: a
+/// merge that failed was begun again from its start, at the next write, and
+/// one of a large database over a link that resets now and then would not
+/// end. Here seven reads of tables fail, one more than a request's read is
+/// tried again for.
+#[tokio::test]
+async fn a_merge_waits_for_a_store_that_fails_for_a_while() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    gate.rule(Op::GetRange, Action::Fail, 7, |key, _| {
+        key.contains("/db/app/t/")
+    });
+    commit(&db, round(2)).await.unwrap();
+    flushed(&db).await;
+    let merged = async {
+        while db.info().runs != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), merged)
+        .await
+        .expect("the merge ends without another write");
+    // The reads failed: the merge read its tables from the store.
+    assert!(
+        gate.rules
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|rule| rule.remaining == 0)
+    );
+    every_key_is_of(&db, 2).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
 /// A merge gives way to merges only when the database has more runs than
 /// it may: what is merged behind a merge is merged again with what that
 /// merge makes, and is sent to the store once more for it. Here a database

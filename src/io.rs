@@ -844,12 +844,20 @@ impl Io {
             }
             disk.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let bytes = retry(|| self.store.get_range(key, start, end))
-            .await?
-            .ok_or_else(|| {
-                let object = crate::layout::object(key);
-                Error::Lost(format!("{object} was collected by a newer owner"))
-            })?;
+        // A merge, which keeps nothing, is not given up for a store that
+        // fails for a while: one that fails is begun again from its start,
+        // and a merge of a large database over a link that resets now and
+        // then would not end. It waits for the store as an upload does.
+        let read = || self.store.get_range(key, start, end);
+        let bytes = if keep {
+            retry(read).await
+        } else {
+            retry_for(PATIENCE, read).await
+        }?
+        .ok_or_else(|| {
+            let object = crate::layout::object(key);
+            Error::Lost(format!("{object} was collected by a newer owner"))
+        })?;
         if keep
             && let Some(disk) = &self.disk
             && disk.wanted(&DiskCache::name(key), size, bytes.len() as u64)
@@ -965,6 +973,31 @@ where
         }
     }
     unreachable!()
+}
+
+/// How long a merge's read waits for a store that fails: as long as an
+/// upload does (`Options::store_deadline`).
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// `retry`, for as long as `patience` and not a number of times.
+pub async fn retry_for<T, F, Fut>(patience: Duration, mut call: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = StoreResult<T>>,
+{
+    let deadline = Instant::now() + patience;
+    let mut delay = Duration::from_millis(20);
+    loop {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(StoreError::Unavailable(reason)) if Instant::now() + delay < deadline => {
+                tracing::debug!(%reason, "storage call failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 #[cfg(test)]
