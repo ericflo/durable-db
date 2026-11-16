@@ -207,6 +207,8 @@ pub struct Info {
     pub revision: u64,
     pub bytes: u64,
     pub tables: usize,
+    /// A read of a key looks in one table of each run.
+    pub runs: usize,
     pub epoch: String,
     pub config: DbConfig,
 }
@@ -312,6 +314,10 @@ type Turn = tokio::sync::OwnedSemaphorePermit;
 /// stored meanwhile: the tables it has read through, and those it has yet
 /// to read through or has stored itself. Both are empty outside a merge.
 type Beside<'a> = (&'a [Arc<Table>], &'a [Arc<Table>]);
+
+/// A merge under way: the tables it makes, or `None` when a release began.
+/// Boxed, since a merge that gives way to another holds that one.
+type Merging<'a> = Pin<Box<dyn Future<Output = Result<Option<Vec<Arc<Table>>>>> + Send + 'a>>;
 
 /// Objects above this size are uploaded once at a time: racing them would
 /// spend real bandwidth, and they are never on the path of a commit.
@@ -868,6 +874,7 @@ impl Db {
             revision: state.confirmed,
             bytes: state.table_bytes + state.mem.bytes() as u64,
             tables: state.tables.len(),
+            runs: runs(&state.tables).count(),
             epoch: self.epoch.to_string(),
             config: state.config.clone(),
         }
@@ -1120,6 +1127,10 @@ impl Db {
             let _maint = self.maint.lock().await;
             self.sweep().await;
         }
+        // A merge may be due: one that the last owner was killed in, or
+        // one for the table of what it had not flushed. It is not left to
+        // wait for a write.
+        self.wake_maint.notify_one();
         // A revoked owner can still store an object or two before it
         // notices. Sweep once more after it has had time to.
         let mut resweep = Some(tokio::time::Instant::now() + self.ctx.opts.resweep_after);
@@ -1234,7 +1245,7 @@ impl Db {
         if self.reclaim.load(Ordering::Acquire) && runs(tables).nth(1).is_some() {
             return Some((tables.len(), true));
         }
-        merge_plan(tables).map(|count| (count, false))
+        merge_plan(tables, u64::MAX).map(|count| (count, false))
     }
 
     /// Ask for everything to be merged, for a write that the quota has no
@@ -1360,86 +1371,10 @@ impl Db {
             return Ok(false);
         };
         let began = Instant::now();
-        // A merge is use. A database that was released for being idle
-        // while it merged would have the merge begun again from its start
-        // by its next owner, and a merge that takes longer than a database
-        // may be idle for would never end.
-        self.touch();
-        let bottom = count == tables.len();
-        let io = &self.ctx.io;
-        let everything = Scan {
-            lo: Bytes::new(),
-            hi: Bytes::new(),
-            reverse: false,
-            limit: usize::MAX,
+        let Some(merged) = self.merge(maint, &tables, count, true).await? else {
+            return Ok(false);
         };
-        let mut scans: Vec<RunScan> = runs(&tables[..count])
-            .filter_map(|run| RunScan::over(io, run, &everything, false))
-            .collect();
-        let mut heads = Vec::with_capacity(scans.len());
-        for scan in &mut scans {
-            heads.push(scan.next().await?);
-        }
-        // The result is written as tables of limited size, each uploaded
-        // before the next is begun.
-        let (block_bytes, table_bytes) = (self.ctx.opts.block_bytes, self.ctx.opts.table_bytes);
-        let mut merged: Vec<Arc<Table>> = Vec::new();
-        let mut builder = TableBuilder::new(block_bytes);
-        loop {
-            let next = first_key(&heads, false);
-            if !builder.is_empty() && (next.is_none() || builder.len() >= table_bytes) {
-                let full = std::mem::replace(&mut builder, TableBuilder::new(block_bytes));
-                let (body, mut meta) = full.finish(self.layout.table(self.epoch, maint.next_table));
-                meta.part = merged.len() as u32;
-                // In the disk cache the table takes the room of those the
-                // merge has read through, and not of those it is coming to
-                // or has stored.
-                let done: Vec<Arc<Table>> =
-                    scans.iter().flat_map(|scan| &scan.done).cloned().collect();
-                let coming = scans.iter().flat_map(RunScan::unread);
-                let mut kept: Vec<Arc<Table>> = coming.chain(&merged).cloned().collect();
-                let table = self.store_table(maint, body, meta, (&done, &kept)).await?;
-                kept.push(table.clone());
-                merged.push(table);
-                self.touch();
-                // Between tables, a merge gives way to what must not wait
-                // for it: a release, and writes that are due to be flushed.
-                if next.is_some() && self.closing() {
-                    return Ok(false);
-                }
-                if next.is_some() && self.should_flush(maint) {
-                    // The flush publishes a manifest, which discards tables
-                    // no manifest lists. These are not finished, not lost.
-                    let at = maint.unpublished.len() - merged.len();
-                    let mine = maint.unpublished.split_off(at);
-                    let flushed = self.flush(maint, false, (&done, &kept)).await;
-                    maint.unpublished.extend(mine);
-                    flushed?;
-                }
-            }
-            let Some(best) = next else { break };
-            let entry = heads[best].take().expect("chosen head exists");
-            for i in 0..scans.len() {
-                if i == best
-                    || heads[i]
-                        .as_ref()
-                        .is_some_and(|other| other.key == entry.key)
-                {
-                    heads[i] = scans[i].next().await?;
-                }
-            }
-            if keep(&entry, bottom, maint.revision, self.ctx.opts.receipt_window) {
-                builder.add(&entry);
-            }
-        }
-        // Tables flushed meanwhile are newer than everything merged.
-        let current = self.state.read().tables.clone();
-        let mut result = current[..current.len() - tables.len()].to_vec();
-        result.extend(merged.iter().cloned());
-        result.extend(tables[count..].iter().cloned());
-        let (revision, covered, sealed) = (maint.revision, maint.covered, maint.sealed);
-        self.publish(maint, result, revision, covered, sealed, None)
-            .await?;
+        self.publish_merged(maint, &tables, count, &merged).await?;
         if reclaiming {
             let size = |tables: &[Arc<Table>]| tables.iter().map(|t| t.meta.size).sum::<u64>();
             let (before, after) = (size(&tables), size(&merged));
@@ -1450,11 +1385,185 @@ impl Db {
                     .store(until.as_millis() as u64, Ordering::Release);
             }
         }
-        if bottom {
+        if count == tables.len() {
             // Whatever asked for it has it now.
             self.reclaim.store(false, Ordering::Release);
         }
         Ok(true)
+    }
+
+    /// The `count` newest of `tables` merged into new tables, each stored
+    /// before the next is begun, for the caller to publish. `None` when a
+    /// release began meanwhile. With `behind`, it gives way to merges of
+    /// what is flushed behind it as it does to the flushes.
+    fn merge<'a>(
+        self: &'a Arc<Self>,
+        maint: &'a mut Maint,
+        tables: &'a [Arc<Table>],
+        count: usize,
+        behind: bool,
+    ) -> Merging<'a> {
+        Box::pin(async move {
+            // A merge is use. A database that was released for being idle
+            // while it merged would have the merge begun again from its
+            // start by its next owner, and a merge that takes longer than
+            // a database may be idle for would never end.
+            self.touch();
+            let bottom = count == tables.len();
+            let io = &self.ctx.io;
+            let everything = Scan {
+                lo: Bytes::new(),
+                hi: Bytes::new(),
+                reverse: false,
+                limit: usize::MAX,
+            };
+            let mut scans: Vec<RunScan> = runs(&tables[..count])
+                .filter_map(|run| RunScan::over(io, run, &everything, false))
+                .collect();
+            let mut heads = Vec::with_capacity(scans.len());
+            for scan in &mut scans {
+                heads.push(scan.next().await?);
+            }
+            // The result is written as tables of limited size, each
+            // uploaded before the next is begun.
+            let (block_bytes, table_bytes) = (self.ctx.opts.block_bytes, self.ctx.opts.table_bytes);
+            let mut merged: Vec<Arc<Table>> = Vec::new();
+            let mut builder = TableBuilder::new(block_bytes);
+            // What this merge has stored, less what the merges it gave way
+            // to have merged.
+            let mut spare = 0;
+            loop {
+                let next = first_key(&heads, false);
+                if !builder.is_empty() && (next.is_none() || builder.len() >= table_bytes) {
+                    let full = std::mem::replace(&mut builder, TableBuilder::new(block_bytes));
+                    let (body, mut meta) =
+                        full.finish(self.layout.table(self.epoch, maint.next_table));
+                    meta.part = merged.len() as u32;
+                    // In the disk cache the table takes the room of those
+                    // the merge has read through, and not of those it is
+                    // coming to or has stored.
+                    let done: Vec<Arc<Table>> =
+                        scans.iter().flat_map(|scan| &scan.done).cloned().collect();
+                    let coming = scans.iter().flat_map(RunScan::unread);
+                    let mut kept: Vec<Arc<Table>> = coming.chain(&merged).cloned().collect();
+                    let table = self.store_table(maint, body, meta, (&done, &kept)).await?;
+                    kept.push(table.clone());
+                    spare += table.meta.size;
+                    merged.push(table);
+                    self.touch();
+                    // Between tables, a merge gives way to what must not
+                    // wait for it: a release, and writes that are due to
+                    // be flushed.
+                    if next.is_some() && self.closing() {
+                        return Ok(None);
+                    }
+                    if next.is_some() && self.should_flush(maint) {
+                        // What is published meanwhile discards tables no
+                        // manifest lists. These are not finished, not lost.
+                        let at = maint.unpublished.len() - merged.len();
+                        let mine = maint.unpublished.split_off(at);
+                        let beside = (done.as_slice(), kept.as_slice());
+                        let behind = behind.then_some((&mut spare, scans.as_mut_slice()));
+                        let gave = self.give_way(maint, tables.len(), beside, behind).await;
+                        maint.unpublished.extend(mine);
+                        gave?;
+                        // A release that began meanwhile has waited for
+                        // that, and waits for no table more.
+                        if self.closing() {
+                            return Ok(None);
+                        }
+                    }
+                }
+                let Some(best) = next else { break };
+                let entry = heads[best].take().expect("chosen head exists");
+                for i in 0..scans.len() {
+                    if i == best
+                        || heads[i]
+                            .as_ref()
+                            .is_some_and(|other| other.key == entry.key)
+                    {
+                        heads[i] = scans[i].next().await?;
+                    }
+                }
+                if keep(&entry, bottom, maint.revision, self.ctx.opts.receipt_window) {
+                    builder.add(&entry);
+                }
+            }
+            Ok(Some(merged))
+        })
+    }
+
+    /// What a merge does between two of its tables for the writes that are
+    /// due: they are flushed, and with `behind` the tables flushed since
+    /// the merge began are merged among themselves as `merge_plan` has it.
+    /// `under` is how many tables the database had when the merge began,
+    /// and `beside` is what that merge tells the disk cache with the
+    /// flushed table. `behind` is what the merge has stored and not yet
+    /// given way for, and its scans.
+    ///
+    /// Every flush is a run, and a read looks in every run. A merge of
+    /// 16 GiB takes two minutes on a local directory and far longer on a
+    /// bucket, and writes went on being flushed behind it at a run for
+    /// every 8 MiB: a server killed during one left 27 runs, and reads of
+    /// that database were a quarter as fast as with seven.
+    ///
+    /// The merges it gives way to take no more together than it has itself
+    /// stored, so it has half the merging at least and ends, however fast
+    /// the database is written: it holds one of a server's turns to merge
+    /// until then. They give way to flushes and to no merge of their own.
+    /// While one runs, the merge that waits gives up what its scans had
+    /// read ahead, and with that the turns to read ahead, of which a
+    /// server has sixteen. A merge it gave way to tells the disk cache of
+    /// its own tables and not of those the waiting merge is coming to: in
+    /// a full cache its tables may take their room, and the waiting merge
+    /// then reads those from the bucket.
+    async fn give_way(
+        self: &Arc<Self>,
+        maint: &mut Maint,
+        under: usize,
+        beside: Beside<'_>,
+        behind: Option<(&mut u64, &mut [RunScan])>,
+    ) -> Result<()> {
+        self.flush(maint, false, beside).await?;
+        let Some((spare, scans)) = behind else {
+            return Ok(());
+        };
+        while !self.closing() {
+            let tables = self.state.read().tables.clone();
+            let Some(count) = plan_behind(&tables, under, spare) else {
+                break;
+            };
+            scans.iter_mut().for_each(RunScan::rest);
+            let Some(merged) = self.merge(maint, &tables, count, false).await? else {
+                break;
+            };
+            self.publish_merged(maint, &tables, count, &merged).await?;
+            // What fell due meanwhile does not wait for a table of the
+            // merge that gave way as well.
+            if self.should_flush(maint) {
+                self.flush(maint, false, beside).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Publish what a merge of the `count` newest of `tables` made, in
+    /// their place. Tables flushed meanwhile are newer than everything
+    /// merged.
+    async fn publish_merged(
+        self: &Arc<Self>,
+        maint: &mut Maint,
+        tables: &[Arc<Table>],
+        count: usize,
+        merged: &[Arc<Table>],
+    ) -> Result<()> {
+        let current = self.state.read().tables.clone();
+        let mut result = current[..current.len() - tables.len()].to_vec();
+        result.extend(merged.iter().cloned());
+        result.extend(tables[count..].iter().cloned());
+        let (revision, covered, sealed) = (maint.revision, maint.covered, maint.sealed);
+        self.publish(maint, result, revision, covered, sealed, None)
+            .await
     }
 
     /// Store the next manifest, confirm ownership, switch readers to its
@@ -1766,24 +1875,48 @@ const RECLAIM_REST: u32 = 4;
 
 /// How many of the newest tables to merge, if any: whole runs, taken while
 /// they are together at least half the size of the next.
-fn merge_plan(tables: &[Arc<Table>]) -> Option<usize> {
+///
+/// A read looks in every run, so no more than `MAX_RUNS` are left: with
+/// more, the newest that are too many are merged first, whatever their
+/// sizes and with nothing else. They are the smallest. To merge everything
+/// for them rewrote a database of 16 GiB for a dozen tables of 8 MiB that
+/// a server had flushed and not merged when it was killed; and to go on
+/// from them by the rule above can come to the same, with every one of
+/// those runs still read for as long as that takes.
+///
+/// `most` is how many bytes the merge may take. When the runs chosen are
+/// more than that, it is of the newest of them that are not, if those are
+/// two at least: they are runs the rule would have merged before it came
+/// to the others.
+fn merge_plan(tables: &[Arc<Table>], most: u64) -> Option<usize> {
     const MAX_RUNS: usize = 12;
     let runs: Vec<(usize, u64)> = runs(tables)
         .map(|run| (run.len(), run.iter().map(|table| table.meta.size).sum()))
         .collect();
     let mut count = 1;
-    let mut size = runs.first()?.1;
-    while count < runs.len() && size * 2 >= runs[count].1 {
-        size += runs[count].1;
-        count += 1;
-    }
-    if count < 2 {
-        if runs.len() <= MAX_RUNS {
-            return None;
+    if runs.len() > MAX_RUNS {
+        count = runs.len() - MAX_RUNS + 1;
+    } else {
+        let mut size = runs.first()?.1;
+        while count < runs.len() && size * 2 >= runs[count].1 {
+            size += runs[count].1;
+            count += 1;
         }
-        count = runs.len();
     }
-    Some(runs[..count].iter().map(|(tables, _)| tables).sum())
+    let size = |count: usize| runs[..count].iter().map(|(_, size)| size).sum::<u64>();
+    while count > 1 && size(count) > most {
+        count -= 1;
+    }
+    (count > 1).then(|| runs[..count].iter().map(|(tables, _)| tables).sum())
+}
+
+/// How many of the newest tables to merge while a merge of the `under`
+/// oldest waits: of those flushed since it began, and of no more bytes
+/// than `spare`, from which they are taken.
+fn plan_behind(tables: &[Arc<Table>], under: usize, spare: &mut u64) -> Option<usize> {
+    let count = merge_plan(&tables[..tables.len() - under], *spare)?;
+    *spare -= tables[..count].iter().map(|t| t.meta.size).sum::<u64>();
+    Some(count)
 }
 
 /// The source holding the next key in scan order; the earliest source wins a tie.
@@ -1867,6 +2000,14 @@ impl RunScan {
     /// those after it.
     fn unread(&self) -> impl Iterator<Item = &Arc<Table>> {
         self.at.iter().chain(&self.rest)
+    }
+
+    /// Give up what was read ahead, and the turn held for it, while the
+    /// scan waits.
+    fn rest(&mut self) {
+        if let Some(scan) = &mut self.current {
+            scan.rest();
+        }
     }
 
     async fn next(&mut self) -> Result<Option<Entry>> {
@@ -2525,22 +2666,51 @@ mod tests {
                 .collect()
         };
         // One run, however many tables it has, is left alone.
-        assert_eq!(merge_plan(&run(400, 4, b'a')), None);
-        assert_eq!(merge_plan(&[]), None);
+        assert_eq!(merge_plan(&run(400, 4, b'a'), u64::MAX), None);
+        assert_eq!(merge_plan(&[], u64::MAX), None);
         // A small new table waits until it is half the size of the run below.
         let small = [vec![table(100, "a", "z", 0)], run(400, 4, b'a')].concat();
-        assert_eq!(merge_plan(&small), None);
+        assert_eq!(merge_plan(&small, u64::MAX), None);
         let grown = [vec![table(200, "a", "z", 0)], run(400, 4, b'a')].concat();
-        assert_eq!(merge_plan(&grown), Some(5));
+        assert_eq!(merge_plan(&grown, u64::MAX), Some(5));
         // The merge takes whole runs, and as many as have become comparable.
         let three = [run(90, 3, b'a'), run(120, 2, b'a'), run(1000, 5, b'a')].concat();
-        assert_eq!(merge_plan(&three), Some(5));
+        assert_eq!(merge_plan(&three, u64::MAX), Some(5));
         let all = [run(300, 3, b'a'), run(400, 2, b'a'), run(1000, 5, b'a')].concat();
-        assert_eq!(merge_plan(&all), Some(10));
-        // Too many runs are merged whatever their sizes.
-        let many: Vec<Arc<Table>> = (0..13).map(|i| table(1 << (2 * i), "a", "z", 0)).collect();
-        assert_eq!(merge_plan(&many[1..]), None);
-        assert_eq!(merge_plan(&many), Some(13));
+        assert_eq!(merge_plan(&all, u64::MAX), Some(10));
+        // With more runs than twelve, the newest that are too many are
+        // merged whatever their sizes, and not the rest for their sake.
+        let many: Vec<Arc<Table>> = (0..15).map(|i| table(1 << (2 * i), "a", "z", 0)).collect();
+        assert_eq!(merge_plan(&many[3..], u64::MAX), None);
+        assert_eq!(merge_plan(&many[2..], u64::MAX), Some(2));
+        assert_eq!(merge_plan(&many, u64::MAX), Some(4));
+        // Nor any that the rule would take after them: of these fourteen
+        // it would take all, and twelve are merged once three are one.
+        let level: Vec<Arc<Table>> = (0..14).map(|_| table(8, "a", "z", 0)).collect();
+        assert_eq!(merge_plan(&level, u64::MAX), Some(3));
+        assert_eq!(merge_plan(&level[2..], u64::MAX), Some(12));
+        // A merge that may take so many bytes and no more is of the
+        // newest of those runs that are within them, when two are.
+        assert_eq!(merge_plan(&all, 700), Some(5));
+        assert_eq!(merge_plan(&all, 699), None);
+        assert_eq!(merge_plan(&level, 23), Some(2));
+        assert_eq!(merge_plan(&level, 15), None);
+        // While a merge of the two oldest of these waits, the two flushed
+        // since it began are merged and not its own, which the rule would
+        // take with them; and what they take is not there for the next.
+        let waiting = [run(100, 1, b'a'), run(100, 1, b'a')].concat();
+        let behind = [run(40, 1, b'a'), run(40, 1, b'a'), waiting.clone()].concat();
+        let mut spare = 1000;
+        assert_eq!(merge_plan(&behind, spare), Some(4));
+        assert_eq!(plan_behind(&behind, 2, &mut spare), Some(2));
+        assert_eq!(spare, 920);
+        let later = [run(10, 1, b'a'), run(15, 1, b'a'), waiting].concat();
+        spare = 24;
+        assert_eq!(plan_behind(&later, 2, &mut spare), None);
+        assert_eq!(spare, 24);
+        spare = 25;
+        assert_eq!(plan_behind(&later, 2, &mut spare), Some(2));
+        assert_eq!(spare, 0);
     }
 
     #[test]

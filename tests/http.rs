@@ -75,6 +75,7 @@ async fn database_lifecycle() {
         ),
         (Some("app"), Some(0), Some(1000000))
     );
+    assert_eq!((&info["tables"], &info["runs"]), (&json!(0), &json!(0)));
     let (_, info) = call("PATCH", &url, &f.admin, Some(json!({"max_bytes": 2000000}))).await;
     assert_eq!(info["max_bytes"], 2000000);
 

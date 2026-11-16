@@ -105,7 +105,7 @@ Applications connect to `http://durable-db.durable-db.svc:7654`. Put TLS and any
 
 | What | At most |
 | --- | --- |
-| Table blocks and indexes | `--cache-bytes` |
+| Table blocks and indexes | `--cache-bytes`. Indexes are about 2 MiB for each GiB of tables being read, and are kept ahead of blocks up to half of it |
 | Unflushed writes | `--memtable-bytes`, and as much again while they are written to tables |
 | Recently written keys, remembered for range checks | a quarter of `--memtable-bytes` |
 | Request bodies | `--body-bytes` |
@@ -193,7 +193,8 @@ What it does not do: per-tenant CPU accounting, or billing. A tenant inside its 
 | `durable_db_request_body_bytes`, `durable_db_read_result_bytes` | Memory reserved right now for request bodies and for read results, against `--body-bytes` and `--result-bytes`. |
 | `durable_db_open_databases` | Databases this server holds. |
 | `durable_db_block_cache_bytes`, `..._hits_total`, `..._misses_total` | Memory cache use. |
-| `durable_db_table_index_bytes` | Table indexes in memory, in the cache or in use by a read. |
+| `durable_db_table_index_bytes` | Table indexes in memory, in the cache or in use by a read. Those that reads ask for stay there while they are within half of `--cache-bytes`. |
+| `durable_db_disk_cache_bytes`, `..._hits_total`, `..._misses_total`, `..._fetches_total` | With `--cache-dir`: what the disk cache holds, the reads of tables that it answered and those that went to the bucket, and the tables fetched whole for it. Misses that go on while it is full say that the server reads more than it holds. |
 | `durable_db_recent_key_bytes` | Recently written keys remembered for range checks, by all open databases. |
 
 Watch storage latency and failures first: every commit is one upload and one HEAD, so they are the service's latency floor.

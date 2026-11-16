@@ -49,6 +49,7 @@
 #   SOAK_CLIENTS       clients that write (default 64)
 #   SOAK_READ_CLIENTS  clients that read and scan (default: as many)
 #   SOAK_SECONDS       how long it is read, and scanned; written over for twice that (default 60)
+#   SOAK_RUNS          runs the database is to have when the first server is killed (default: as the fill left it)
 #   SOAK_STORE         minio or bucket (default: a local directory)
 #   SOAK_CACHE_MIB     the servers' disk cache, in MiB (default 1024, the Kubernetes manifest's)
 #   SOAK_DIR           where to put the data (default: a temporary directory)
@@ -152,11 +153,16 @@ reading() {
     fetched=$(metric durable_db_storage_received_bytes_total)
     asked=$(metric 'durable_db_storage_seconds_count{op="get"}')
     bench --clients "$readers" --seconds "$seconds" "$@"
-    echo "    for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage in $(($(metric 'durable_db_storage_seconds_count{op="get"}') - asked)) requests"
+    echo "    for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage in $(($(metric 'durable_db_storage_seconds_count{op="get"}') - asked)) requests; the indexes of $(tables "$(info)") were then $(mib "$(metric durable_db_table_index_bytes)") MiB of the server's memory"
 }
 token=$("$bin" token --admin --key-file "$dir/admin.key")
 info() { curl -fsS -m 60 -H "authorization: Bearer $token" "$url/v1/databases/size-0"; }
 field() { sed -E "s/.*\"$1\":([0-9]+).*/\1/"; }
+# The runs of what `info` printed, and its tables with them: a read of a
+# key looks in one table of each run. A server before 2.1.8 does not say
+# how many.
+runs() { echo "$1" | sed -nE 's/.*"runs":([0-9]+).*/\1/p'; }
+tables() { echo "$(echo "$1" | field tables) tables of $(runs "$1" | grep . || echo '?') runs"; }
 metric() { curl -fs "$url/metrics" | awk -v name="$1" '$1 == name { print int($2) }'; }
 mib() { echo $(($1 / 1048576)); }
 peak() { awk '/^VmHWM/ { print int($2 / 1024) }' "/proc/$server/status"; }
@@ -180,7 +186,31 @@ awk -v took="$took" 'NF == 2 { if (NR > 1) { d = $2 - last; if (low == "" || d <
 held=$(info)
 filled=$(echo "$held" | field bytes)
 sent=$(metric durable_db_storage_sent_bytes_total)
-echo "the database holds $(mib "$(echo "$held" | field bytes)") MiB in $(echo "$held" | field tables) tables; $(mib "$sent") MiB were sent to storage for it, $(awk -v s="$sent" -v w="$((keys * value))" 'BEGIN { printf "%.1f", s / w }') times what was written, and $(mib "$(metric durable_db_storage_received_bytes_total)") MiB were read back"
+echo "the database holds $(mib "$(echo "$held" | field bytes)") MiB in $(tables "$held"); $(mib "$sent") MiB were sent to storage for it, $(awk -v s="$sent" -v w="$((keys * value))" 'BEGIN { printf "%.1f", s / w }') times what was written, and $(mib "$(metric durable_db_storage_received_bytes_total)") MiB were read back"
+# A read looks in every run, and a database has most when its server is in
+# a long merge that tables have been flushed behind. With SOAK_RUNS, keys
+# taken at random are written over until it has that many, for ten minutes
+# at most, and the server is killed then.
+if [ -n "${SOAK_RUNS:-}" ]; then
+    from=$(date +%s)
+    timeout 600 "$bin" bench --url "$url" --key-file "$dir/admin.key" --database size --keys "$keys" \
+        --clients "$clients" --workload write --value-bytes "$value" --random-values --seconds 600 \
+        >/dev/null 2>&1 &
+    sampler=$!
+    most=0
+    while kill -0 "$sampler" 2>/dev/null; do
+        sleep 1
+        alive
+        # A server that is written this hard may not answer at once.
+        now=$(info 2>/dev/null) || continue
+        held=$now
+        now=$(runs "$held")
+        [ -n "$now" ] || { echo "this server does not say how many runs a database has"; exit 1; }
+        [ "$now" -le "$most" ] || most=$now
+        [ "$now" -lt "$SOAK_RUNS" ] || break
+    done
+    echo "written over for $(($(date +%s) - from)) s, in which it had $most runs at most, it is killed with $(tables "$held")"
+fi
 echo "most memory: $(peak) MiB, under a limit of 1024 MiB"
 
 failed=$(failures)
@@ -188,6 +218,11 @@ failed=$(failures)
 # A new server, with nothing in memory and nothing in its disk cache.
 kill -KILL "$server"
 wait "$server" 2>/dev/null || true
+if [ -n "${SOAK_RUNS:-}" ]; then
+    kill "$sampler" 2>/dev/null || true
+    wait "$sampler" 2>/dev/null || true
+    sampler=''
+fi
 rm -rf "$dir/cache"
 start "$@"
 from=$(date +%s%N)
@@ -202,7 +237,7 @@ bench --clients "$clients" --workload write --value-bytes "$value" --random-valu
 written=$((($(metric 'durable_db_request_seconds_count{kind="commit"}') - written) * value))
 sent=$(($(metric durable_db_storage_sent_bytes_total) - sent))
 held=$(info)
-echo "after that the database holds $(mib "$(echo "$held" | field bytes)") MiB in $(echo "$held" | field tables) tables; $(mib "$sent") MiB were sent to storage, $(awk -v s="$sent" -v w="$written" 'BEGIN { printf "%.1f", s / (w > 0 ? w : 1) }') times what was written"
+echo "after that the database holds $(mib "$(echo "$held" | field bytes)") MiB in $(tables "$held"); $(mib "$sent") MiB were sent to storage, $(awk -v s="$sent" -v w="$written" 'BEGIN { printf "%.1f", s / (w > 0 ? w : 1) }') times what was written"
 
 # The quota is set to a hundredth more than the database held when every
 # key had been written once. It holds more than that now, because what was
@@ -227,7 +262,7 @@ took=$((($(date +%s%N) - from) / 1000000))
 alive
 [ "$code" = 200 ] || { echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was answered $code after $took ms"; exit 1; }
 after=$(info)
-echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was told to wait for $took ms while everything was merged, for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage, and then taken; the database then held $(mib "$(echo "$after" | field bytes)") MiB in $(echo "$after" | field tables) tables"
+echo "with its quota set to $(mib "$quota") MiB, under the $(mib "$held") MiB it held, a write was told to wait for $took ms while everything was merged, for which $(mib $(($(metric durable_db_storage_received_bytes_total) - fetched))) MiB were read from storage, and then taken; the database then held $(mib "$(echo "$after" | field bytes)") MiB in $(tables "$after")"
 echo "most memory of the second server: $(peak) MiB"
 failed=$((failed + $(failures)))
 

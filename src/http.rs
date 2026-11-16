@@ -357,6 +357,17 @@ async fn metrics(State(app): State<Arc<App>>) -> Response {
         io.index_bytes.load(Relaxed),
         app.node.recent_bytes(),
     ));
+    // What the disk cache holds, how many reads of tables it answered and
+    // how many went to the bucket, and how many tables it fetched whole.
+    if let Some(disk) = &io.disk {
+        text.push_str(&format!(
+            "durable_db_disk_cache_bytes {}\ndurable_db_disk_cache_hits_total {}\ndurable_db_disk_cache_misses_total {}\ndurable_db_disk_cache_fetches_total {}\n",
+            disk.used(),
+            disk.hits.load(Relaxed),
+            disk.misses.load(Relaxed),
+            disk.fetched.load(Relaxed),
+        ));
+    }
     text.into_response()
 }
 
@@ -961,6 +972,7 @@ fn info_json(name: &str, info: &Info) -> String {
         "max_bytes": info.config.max_bytes,
         "max_requests_per_second": info.config.max_requests_per_second,
         "tables": info.tables,
+        "runs": info.runs,
     })
     .to_string()
 }

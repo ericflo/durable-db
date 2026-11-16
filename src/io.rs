@@ -13,7 +13,7 @@ use crate::{
 };
 use bytes::Bytes;
 use parking_lot::Mutex;
-use quick_cache::{Weighter, sync::Cache};
+use quick_cache::{DefaultHashBuilder, Lifecycle, OptionsBuilder, Weighter, sync::Cache};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -48,6 +48,67 @@ impl Weighter<(Arc<str>, u32), Part> for PartWeight {
             Part::Index(index) => index.weight(),
         };
         (key.0.len() + held) as u64
+    }
+}
+
+/// A table's index stays in memory, whatever blocks want its room, for this
+/// long after a read last asked for it.
+const INDEX_IDLE: Duration = Duration::from_secs(60);
+
+/// Keeps the indexes of tables that are being read in the memory cache.
+///
+/// The cache puts out what was asked for least recently, and counted an
+/// index as it counts a block. But every read of a table needs its index
+/// and one block of very many, and an index that is put out costs the end
+/// of its table, 256 KiB, from the bucket where a block costs 32 KiB. A
+/// database killed with 27 runs had each read ask for a block of each: so
+/// many passed through the cache that it held two thirds of the indexes at
+/// a time, and a third of all that was read from storage was indexes read
+/// again. So an index that a read asked for within `INDEX_IDLE` is not put
+/// out, while all the indexes in memory are within half the cache: with
+/// more than that they go as blocks do.
+///
+/// The cache is of parts, each with its share of the bytes, and what is
+/// held in a part stays there when the part is full: blocks then make way
+/// for one another around it. So an index is held only when sixteen of
+/// its size fit in a part, and a part is `CACHE_PART` at least when the
+/// cache is. A part passes its share only when the indexes held in it
+/// alone come to more than that, which with indexes of 52 KiB and parts
+/// of 12 MiB takes 230 of them in one part.
+#[derive(Clone)]
+struct Pins {
+    /// Bytes of all indexes in memory, and how many may be held to.
+    indexes: Arc<AtomicU64>,
+    most: u64,
+    /// The largest index that is held, once the cache is made.
+    largest: Arc<AtomicU64>,
+    started: Instant,
+    idle: Duration,
+}
+
+/// The least that a part of the memory cache holds, of a cache that large.
+const CACHE_PART: u64 = 4 << 20;
+
+impl Pins {
+    fn now(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+}
+
+impl Lifecycle<(Arc<str>, u32), Part> for Pins {
+    type RequestState = ();
+
+    fn begin_request(&self) {}
+
+    fn is_pinned(&self, _: &(Arc<str>, u32), part: &Part) -> bool {
+        match part {
+            Part::Index(index) => {
+                index.weight() as u64 <= self.largest.load(Ordering::Relaxed)
+                    && self.indexes.load(Ordering::Relaxed) <= self.most
+                    && self.now().saturating_sub(index.used()) < self.idle.as_millis() as u64
+            }
+            Part::Block(_) => false,
+        }
     }
 }
 
@@ -185,6 +246,8 @@ pub struct DiskCache {
     filling: Mutex<HashSet<String>>,
     pub hits: AtomicU64,
     pub misses: AtomicU64,
+    /// Tables fetched whole, for reads of parts of them that missed.
+    pub fetched: AtomicU64,
 }
 
 impl DiskCache {
@@ -222,6 +285,7 @@ impl DiskCache {
             filling: Mutex::default(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            fetched: AtomicU64::new(0),
         };
         let mut out = Vec::new();
         {
@@ -437,10 +501,18 @@ impl DiskCache {
             std::process::id(),
             self.counter.fetch_add(1, Ordering::Relaxed)
         ));
-        let written = size <= self.budget.min(DISK_OBJECT_BYTES)
-            && fs::File::create(&tmp)
-                .and_then(|mut file| file.write_all(body))
-                .is_ok();
+        // Synced, and not for the table's sake, which the bucket has: what
+        // is written and not yet on the disk is memory that cannot be given
+        // up, and it counts against the limit a server is held to. Two
+        // fetches and a merge wrote 570 MiB so in a second, to a disk that
+        // was not asked to hurry, and the server was killed at its limit
+        // of 1 GiB.
+        let write = || {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(body)?;
+            file.sync_data()
+        };
+        let written = size <= self.budget.min(DISK_OBJECT_BYTES) && write().is_ok();
         let mut held = self.held.lock();
         if let Some(bytes) = promised {
             held.promises -= 1;
@@ -506,7 +578,8 @@ impl DiskCache {
 
 pub struct Io {
     pub store: Arc<dyn ObjectStore>,
-    blocks: Cache<(Arc<str>, u32), Part, PartWeight>,
+    blocks: Cache<(Arc<str>, u32), Part, PartWeight, DefaultHashBuilder, Pins>,
+    pins: Pins,
     pub disk: Option<Arc<DiskCache>>,
     pub block_hits: AtomicU64,
     pub block_misses: AtomicU64,
@@ -526,18 +599,52 @@ impl Io {
         cache_bytes: u64,
         disk: Option<DiskCache>,
     ) -> Arc<Self> {
+        Self::new_idle(store, cache_bytes, disk, INDEX_IDLE)
+    }
+
+    /// As `new`, with how long an index stays in memory after a read last
+    /// asked for it, whatever blocks want its room.
+    pub fn new_idle(
+        store: Arc<dyn ObjectStore>,
+        cache_bytes: u64,
+        disk: Option<DiskCache>,
+        idle: Duration,
+    ) -> Arc<Self> {
         let cache_bytes = cache_bytes.max(1 << 20);
+        let pins = Pins {
+            indexes: Arc::default(),
+            most: cache_bytes / 2,
+            largest: Arc::default(),
+            started: Instant::now(),
+            idle,
+        };
+        // As many parts as the cache library makes by itself, four for
+        // each processor, and no more than are `CACHE_PART` each.
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let large = (cache_bytes / CACHE_PART).max(1);
+        let parts = (cores * 4).next_power_of_two().min(1 << large.ilog2());
+        let options = OptionsBuilder::new()
+            .estimated_items_capacity((cache_bytes / 16_384) as usize + 16)
+            .weight_capacity(cache_bytes)
+            .shards(parts)
+            .build()
+            .expect("a cache of some size");
+        let blocks = Cache::with_options(
+            options,
+            PartWeight,
+            DefaultHashBuilder::default(),
+            pins.clone(),
+        );
+        let largest = blocks.shard_capacity() / 16;
+        pins.largest.store(largest, Ordering::Relaxed);
         Arc::new(Self {
             store,
-            blocks: Cache::with_weighter(
-                (cache_bytes / 16_384) as usize + 16,
-                cache_bytes,
-                PartWeight,
-            ),
+            blocks,
             disk: disk.map(Arc::new),
             block_hits: AtomicU64::new(0),
             block_misses: AtomicU64::new(0),
-            index_bytes: Arc::default(),
+            index_bytes: pins.indexes.clone(),
+            pins,
             merges: Arc::new(tokio::sync::Semaphore::new(2)),
             fills: Arc::new(tokio::sync::Semaphore::new(FILLS)),
             ahead: Arc::new(tokio::sync::Semaphore::new(AHEAD_SCANS)),
@@ -566,14 +673,18 @@ impl Io {
 
     pub fn cached_index(&self, table: &Arc<str>) -> Option<Arc<Index>> {
         match self.blocks.get(&(table.clone(), INDEX)) {
-            Some(Part::Index(index)) => Some(index),
+            Some(Part::Index(index)) => {
+                index.use_at(self.pins.now());
+                Some(index)
+            }
             _ => None,
         }
     }
 
-    /// Keep a table's index for as long as the cache has room for it. The
-    /// table itself only remembers where it is.
+    /// Keep a table's index for as long as reads ask for it and the cache
+    /// has room for it. The table itself only remembers where it is.
     pub fn cache_index(&self, table: &Arc<str>, index: Arc<Index>) {
+        index.use_at(self.pins.now());
         self.blocks
             .insert((table.clone(), INDEX), Part::Index(index));
     }
@@ -664,7 +775,10 @@ impl Io {
                 let body = retry(|| io.store.get(&key)).await.ok().flatten();
                 let (cache, key) = (disk.clone(), key.clone());
                 let _ = tokio::task::spawn_blocking(move || match body {
-                    Some(body) => cache.put(&key, &body, Some(size)),
+                    Some(body) => {
+                        cache.fetched.fetch_add(1, Ordering::Relaxed);
+                        cache.put(&key, &body, Some(size));
+                    }
                     None => cache.release(size),
                 })
                 .await;
@@ -753,6 +867,47 @@ mod tests {
 
     fn name(n: u8) -> Name {
         DiskCache::name(&key(n))
+    }
+
+    /// An index is held in the memory cache while reads ask for it and
+    /// the indexes are within half the cache, and no longer.
+    #[test]
+    fn an_index_is_held_while_reads_ask_for_it() {
+        let store = Arc::new(crate::store::memory::MemoryStore::new());
+        let io = Io::new(store, 64 << 20, None);
+        // A part of the cache is 4 MiB at least, whatever the processors.
+        let size = io.blocks.shard_capacity();
+        assert!(size >= CACHE_PART && io.blocks.capacity() == 64 << 20);
+        let table: Arc<str> = Arc::from(key(1));
+        let index = Arc::new(Index::weighing(size as usize / 16, &io.index_bytes));
+        let part = Part::Index(index.clone());
+        let held = |pins: &Pins| pins.is_pinned(&(table.clone(), INDEX), &part);
+        // An index of which sixteen do not fit in a part is not held.
+        let large = Arc::new(Index::weighing(size as usize / 16 + 1, &io.index_bytes));
+        large.use_at(io.pins.now());
+        let large = Part::Index(large);
+        assert!(!io.pins.is_pinned(&(table.clone(), INDEX), &large));
+        drop(large);
+        let brief = Pins {
+            idle: Duration::from_millis(5),
+            ..io.pins.clone()
+        };
+        index.use_at(io.pins.now());
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(held(&io.pins) && !held(&brief));
+        // With more than half the cache in indexes, none is held.
+        let loaded = io.index_bytes.swap((32 << 20) + 1, Ordering::Relaxed);
+        assert!(!held(&io.pins));
+        io.index_bytes.store(32 << 20, Ordering::Relaxed);
+        assert!(held(&io.pins));
+        io.index_bytes.store(loaded, Ordering::Relaxed);
+        // To ask the cache for it is use, as to put it there is.
+        index.use_at(u64::MAX);
+        io.cache_index(&table, index.clone());
+        assert!(index.used() < u64::MAX);
+        index.use_at(u64::MAX);
+        assert!(io.cached_index(&table).is_some());
+        assert!(index.used() < u64::MAX);
     }
 
     /// A cache of `budget` bytes with tables of 1000 bytes written into it.

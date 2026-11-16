@@ -274,6 +274,8 @@ pub struct Index {
     weight: usize,
     /// Bytes of all indexes in memory; this one's are taken off when it goes.
     loaded: Arc<AtomicU64>,
+    /// When a read last asked the memory cache for it, on the cache's clock.
+    used: AtomicU64,
 }
 
 impl Index {
@@ -288,11 +290,32 @@ impl Index {
             blocks,
             weight,
             loaded: loaded.clone(),
+            used: AtomicU64::new(0),
+        }
+    }
+
+    /// An index of this weight, of a table of no blocks.
+    #[cfg(test)]
+    pub(crate) fn weighing(weight: usize, loaded: &Arc<AtomicU64>) -> Self {
+        loaded.fetch_add(weight as u64, Ordering::Relaxed);
+        Self {
+            blocks: Vec::new(),
+            weight,
+            loaded: loaded.clone(),
+            used: AtomicU64::new(0),
         }
     }
 
     pub fn weight(&self) -> usize {
         self.weight
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    pub fn use_at(&self, now: u64) {
+        self.used.store(now, Ordering::Relaxed);
     }
 }
 
@@ -528,6 +551,13 @@ pub struct TableScan {
 }
 
 impl TableScan {
+    /// Give up what was read ahead and the turn held for it, as a merge
+    /// does while it waits for another. The scan reads those blocks again
+    /// when it comes to them.
+    pub fn rest(&mut self) {
+        self.ahead = None;
+    }
+
     pub async fn next(&mut self) -> Result<Option<Entry>> {
         if self.table.meta.entries == 0 {
             return Ok(None);

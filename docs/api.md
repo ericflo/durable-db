@@ -54,7 +54,7 @@ Administrator token required, except `GET` on one database, which any token for 
 | Request | Effect |
 | --- | --- |
 | `PUT /v1/databases/{name}` | Create. Body (optional): `{"max_bytes": 1073741824, "max_requests_per_second": 0}`. `201` when created, `200` when it already exists with these settings, `409` when it exists with others. |
-| `GET /v1/databases/{name}` | `{"name", "revision", "bytes", "max_bytes", "max_requests_per_second", "tables"}` |
+| `GET /v1/databases/{name}` | `{"name", "revision", "bytes", "max_bytes", "max_requests_per_second", "tables", "runs"}`. A read of one key looks in one table of each run. |
 | `PATCH /v1/databases/{name}` | Change `max_bytes` or `max_requests_per_second`, or set `"revoke_tokens": true`. |
 | `DELETE /v1/databases/{name}` | Delete permanently. The name cannot be reused. Repeating the request is safe and answers `200` again. If it fails with `503` the outcome is unknown; repeat it. |
 | `GET /v1/databases?after=&limit=` | `{"databases": [...], "next": "name" or null}`. Pass `next` as `after` to continue. Names come in the order of the bucket's keys, which is name order except that a name follows the names that extend it with `-` or `.`: `app-2` and `app.old` come before `app`. |

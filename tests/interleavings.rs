@@ -1801,6 +1801,44 @@ async fn a_scan_reads_ahead_of_itself_and_not_past_its_end() {
     assert!(longest > 3 << 18 && longest <= 1 << 20, "{backward:?}");
 }
 
+/// Every read of a table needs its index, and the memory cache counted an
+/// index as it counts a block. Reads of other tables then put it out, and
+/// the next read of its table had the end of the table from the store
+/// again. An index that a read asked for within the last minute stays.
+#[tokio::test]
+async fn an_index_that_reads_ask_for_is_not_put_out_for_blocks() {
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&store);
+    // Two tables of some 2 MiB, 400 blocks each, and a cache of 1 MiB.
+    let first = stored_table(&store, 2000, 1000, 4096).await;
+    let other = stored_table(&store, 1999, 1000, 4096).await;
+    // How often the end of the first table, where its index is, was asked
+    // of the store.
+    let ends = |from: usize| {
+        let ranges = gate.ranges();
+        let end = |(_, end): &&(u64, u64)| *end == first.meta.size;
+        ranges[from..].iter().filter(end).count()
+    };
+    for (idle, again) in [(Duration::from_secs(60), 0), (Duration::ZERO, 1)] {
+        let io = Io::new_idle(gate.clone(), 1 << 20, None, idle);
+        let asked = gate.ranges().len();
+        assert!(first.get(&io, b"k000000").await.unwrap().is_some());
+        assert_eq!(ends(asked), 1);
+        // Twice the cache in blocks of the other table, each asked for
+        // twice: a block that is asked for again is kept before what has
+        // not been.
+        for i in (0..1995).step_by(5).flat_map(|i| [i, i + 1]) {
+            let key = format!("k{i:06}");
+            assert!(other.get(&io, key.as_bytes()).await.unwrap().is_some());
+        }
+        assert!(io.cache_bytes() <= 1 << 20);
+        // Without the minute, the index went as a block that was asked
+        // for once.
+        assert!(first.get(&io, b"k001000").await.unwrap().is_some());
+        assert_eq!(ends(asked), 1 + again, "{idle:?}");
+    }
+}
+
 /// Two readers may have the bytes of a damaged copy at once. The one that
 /// meets the damage first discards the copy. The other meets it in what it
 /// read before that and finds no copy to discard: it reads the store's all
@@ -2258,7 +2296,475 @@ async fn a_merge_gives_way_to_a_flush() {
     let (db, _) = Db::open(ctx, "app", None).await.unwrap();
     every_key_is_of(&db, 3).await;
     // Every table in the bucket is one the manifest lists.
-    assert_eq!(tables_stored(&bucket, "app"), db.info().tables);
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// A server that is killed in a merge leaves the runs it was merging, and
+/// every one is read until they are merged. The server that opens the
+/// database begins the merge then: it waited for a write to, or for half a
+/// minute.
+#[tokio::test]
+async fn a_merge_that_is_due_when_a_database_is_opened_begins_then() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // The second flush is followed by a merge of both tables, whose first
+    // table never arrives.
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    gate.wait_held(Op::Put).await;
+    assert_eq!((db.mem_bytes(), db.info().runs), (0, 2));
+    // Another server takes the database, and nothing is written to it.
+    gate.clear();
+    let other = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(other, "app", None).await.unwrap();
+    let merged = async {
+        while db.info().runs != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the merge begins when the database is opened");
+    every_key_is_of(&db, 2).await;
+}
+
+/// The key of the `nth` upload that was held since the test began.
+async fn held_upload(gate: &Gate, nth: usize) -> String {
+    let held = async {
+        while gate.held().len() < nth {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        gate.held()[nth - 1].1.clone()
+    };
+    tokio::time::timeout(Duration::from_secs(5), held)
+        .await
+        .expect("an upload is held")
+}
+
+/// The first ten keys of a round, 1.4 KiB, and a flush of them asked for:
+/// a table a third the size of those a merge makes of `small_tables`, as a
+/// flush is a quarter of a table. Without the tenth, that key is deleted.
+async fn few(db: &Arc<Db>, round: u64, tenth: bool) {
+    let write = |i: usize| {
+        let value = (tenth || i != 9).then(|| b(&value(round, i)));
+        (b(&format!("k{i:04}")), value)
+    };
+    let txn = Txn {
+        writes: (0..10).map(write).collect(),
+        ..Txn::default()
+    };
+    commit(db, txn).await.unwrap();
+    db.request_flush();
+}
+
+/// Every key is there with what the second round wrote, but the first ten
+/// with what `round` did, and without the tenth where that was deleted.
+async fn the_first_ten_are_of(db: &Arc<Db>, round: u64, tenth: bool) {
+    let all = Scan {
+        lo: Bytes::new(),
+        hi: Bytes::new(),
+        reverse: false,
+        limit: 1000,
+    };
+    let request = ReadReq {
+        scans: vec![all],
+        strong: true,
+        ..ReadReq::default()
+    };
+    let items = db.read(request).await.unwrap().scans.remove(0).items;
+    let keys = (0..200).filter(|i| tenth || *i != 9);
+    let expected: Vec<_> = keys
+        .map(|i| Some(b(&value(if i < 10 { round } else { 2 }, i))))
+        .collect();
+    let found: Vec<_> = items.into_iter().map(|item| item.value).collect();
+    assert!(found == expected, "{} keys", found.len());
+}
+
+/// Every table in the bucket is one the manifest lists, once what was
+/// being merged has been.
+async fn only_the_tables_listed_are_stored(bucket: &MemoryStore, db: &Arc<Db>) {
+    let settled = async {
+        while tables_stored(bucket, "app") != db.info().tables {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), settled)
+        .await
+        .expect("every table in the bucket is one the manifest lists");
+}
+
+/// Every flush is a run, and a read looks in every run. A merge gave way
+/// to flushes and to nothing else, so behind a long one the runs went on
+/// growing in number: a server killed while it merged 16 GiB left 27. A
+/// merge that has given way to a flush merges what has been flushed since
+/// it began, when that has grown to runs the rule would merge and is no
+/// more than the merge has itself stored, and then goes on. Its own
+/// tables, stored and not yet published, are still there after the
+/// manifest of the other.
+#[tokio::test]
+async fn a_merge_gives_way_to_a_merge_of_what_was_flushed_behind_it() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    let manifest = |nth: usize| {
+        let seen = std::sync::atomic::AtomicUsize::new(0);
+        gate.rule(Op::Put, Action::Hold, 1, move |key, _| {
+            key.contains("/db/app/m/")
+                && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == nth
+        });
+    };
+    let held = |nth: usize| held_upload(&gate, nth);
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // The second flush is followed by a merge of both tables into a dozen
+    // or so. Its first is held, and ten keys are written.
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    assert!(held(1).await.contains("/db/app/t/"));
+    few(&db, 3, true).await;
+    // The merge gives way to a flush of that: one table behind it, and
+    // nothing to merge it with. The merge's second table is held, and the
+    // ten keys are written again, but that the last is deleted: the merge
+    // that gave way has that key in both its tables.
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    assert!(held(2).await.contains("/db/app/t/"));
+    assert_eq!((db.mem_bytes(), db.info().tables), (0, 3));
+    few(&db, 4, false).await;
+    // It gives way to a flush again, and now to a merge of the two tables
+    // flushed behind it, whose manifest is the second from here.
+    gate.clear();
+    manifest(2);
+    gate.release(Op::Put);
+    assert!(held(3).await.contains("/db/app/m/"));
+    let before = db.info();
+    assert_eq!((db.mem_bytes(), before.tables, before.runs), (0, 4, 4));
+    // That manifest is let through, and the next table held: the third of
+    // the merge that gave way.
+    gate.clear();
+    hold_table(&gate, "app", 1);
+    gate.release(Op::Put);
+    assert!(held(4).await.contains("/db/app/t/"));
+    // Two tables of the same keys became one: a table's worth is gone.
+    let after = db.info();
+    assert!(after.bytes + 1_000 < before.bytes, "{before:?} {after:?}");
+    assert_eq!((after.tables, after.runs), (3, 3));
+    the_first_ten_are_of(&db, 4, false).await;
+    // The two tables that were merged have been deleted, and the two that
+    // the first merge had stored are still there beside those listed.
+    assert_eq!(tables_stored(&bucket, "app"), after.tables + 2);
+    // The first merge ends, and what it publishes keeps the newer tables
+    // on top: the key that was deleted stays deleted, which it would not
+    // had the merge of the newer tables left out what says so.
+    gate.clear();
+    gate.release(Op::Put);
+    for _ in 0..60 {
+        the_first_ten_are_of(&db, 4, false).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    db.close().await;
+    let (db, _) = Db::open(ctx, "app", None).await.unwrap();
+    the_first_ten_are_of(&db, 4, false).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// A merge reads ahead in its tables, and holds one of a server's sixteen
+/// turns to for each run it reads. While it waits for a merge it gave way
+/// to, it gives them up with what it had read ahead: that merge, and those
+/// of other databases, would read a block at a time without.
+#[tokio::test]
+async fn a_merge_that_waits_gives_up_its_turns_to_read_ahead() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    let manifest = |nth: usize| {
+        let seen = std::sync::atomic::AtomicUsize::new(0);
+        gate.rule(Op::Put, Action::Hold, 1, move |key, _| {
+            key.contains("/db/app/m/")
+                && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == nth
+        });
+    };
+    // Two tables of 300 KiB, more than is read of one at once, are merged.
+    commit(&db, wide(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, wide(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    few(&db, 3, true).await;
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    // The merge has read ahead in both, and holds two turns.
+    assert_eq!(ctx.io.merge_ahead.available_permits(), AHEAD_MERGES - 2);
+    few(&db, 4, true).await;
+    // It gives way to a merge of the two tables flushed behind it, which
+    // has read them and is about to be published.
+    gate.clear();
+    manifest(2);
+    gate.release(Op::Put);
+    assert!(held_upload(&gate, 3).await.contains("/db/app/m/"));
+    assert_eq!(db.info().runs, 4);
+    assert_eq!(ctx.io.merge_ahead.available_permits(), AHEAD_MERGES);
+    // It reads on from where it was.
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while db.info().runs != 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), merged)
+        .await
+        .expect("both merges end");
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+    let table = scanned_wide(&db).await;
+    assert_eq!(table.len(), 2400);
+    for (i, found) in table.iter().enumerate() {
+        assert_eq!(found, &Some(b(&value(2, i))), "key {i}");
+    }
+}
+
+/// The keys that `wide` wrote, in order, with what a scan finds of each.
+async fn scanned_wide(db: &Arc<Db>) -> Vec<Option<Bytes>> {
+    let mut found = Vec::new();
+    let mut lo = b("a");
+    loop {
+        let scan = Scan {
+            lo: lo.clone(),
+            hi: b("b"),
+            reverse: false,
+            limit: 1000,
+        };
+        let request = ReadReq {
+            scans: vec![scan],
+            strong: true,
+            ..ReadReq::default()
+        };
+        let items = db.read(request).await.unwrap().scans.remove(0).items;
+        let Some(last) = items.last() else {
+            return found;
+        };
+        lo = Bytes::from([last.key.as_ref(), b"\0"].concat());
+        found.extend(items.into_iter().map(|item| item.value));
+    }
+}
+
+/// A merge that another gave way to gives way to flushes and to no merge:
+/// what is flushed behind it waits until it has ended. Were it to give way
+/// as the first does, a database written fast enough would have merges
+/// waiting on merges without end, the first of them with one of a server's
+/// two turns to merge.
+#[tokio::test]
+async fn a_merge_that_another_gave_way_to_gives_way_to_no_merge() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    // Thirty-five keys from `from`, 4.7 KiB, and a flush of them asked for.
+    let some = |round: u64, from: usize| {
+        let write = |i: usize| (b(&format!("k{i:04}")), Some(b(&value(round, i))));
+        let txn = Txn {
+            writes: (from..from + 35).map(write).collect(),
+            ..Txn::default()
+        };
+        let db = db.clone();
+        async move {
+            commit(&db, txn).await.unwrap();
+            db.request_flush();
+        }
+    };
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    // A merge of two rounds is held at its first table, and at its fourth
+    // with one table flushed behind it.
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    some(3, 0).await;
+    gate.clear();
+    hold_table(&gate, "app", 4);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    assert_eq!((db.mem_bytes(), db.info().tables), (0, 3));
+    // A second is flushed behind it, of other keys: the merge of the two
+    // makes three tables, and is held at its first.
+    some(4, 100).await;
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 3).await;
+    assert_eq!((db.mem_bytes(), db.info().tables), (0, 4));
+    // Ten keys are flushed behind that merge, which is held at its second
+    // table, and ten more.
+    few(&db, 5, true).await;
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 4).await;
+    assert_eq!((db.mem_bytes(), db.info().tables), (0, 5));
+    few(&db, 6, true).await;
+    // The next manifest after that flush's is of the merge of the two
+    // tables of thirty-five keys: the two of ten have not been merged
+    // before it, and are listed with its three tables.
+    gate.clear();
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    gate.rule(Op::Put, Action::Hold, 1, move |key, _| {
+        key.contains("/db/app/m/") && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    gate.release(Op::Put);
+    assert!(held_upload(&gate, 5).await.contains("/db/app/m/"));
+    assert_eq!((db.mem_bytes(), db.info().runs), (0, 6));
+    gate.clear();
+    hold_table(&gate, "app", 1);
+    gate.release(Op::Put);
+    held_upload(&gate, 6).await;
+    let info = db.info();
+    assert_eq!((info.runs, info.tables), (5, 7), "{info:?}");
+    gate.clear();
+    gate.release(Op::Put);
+    // The two of ten are merged then, and the first merge ends: three
+    // runs, each more than twice the one before it.
+    let merged = async {
+        while db.info().runs != 3 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the merges end");
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// The merges a merge gives way to are together no larger than what it has
+/// itself stored: it keeps half the merging and ends, however fast the
+/// database is written. Here two rounds are flushed behind a merge that
+/// has stored two tables, a sixth of them, and they wait.
+#[tokio::test]
+async fn a_merge_gives_way_to_no_merge_larger_than_what_it_has_stored() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    commit(&db, round(3)).await.unwrap();
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    commit(&db, round(4)).await.unwrap();
+    // The fourth round is flushed, and the next manifest after that
+    // flush's is of the merge that gave way: it has stored all its tables
+    // meanwhile, and the two rounds are listed as they were flushed.
+    gate.clear();
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    gate.rule(Op::Put, Action::Hold, 1, move |key, _| {
+        key.contains("/db/app/m/") && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    gate.release(Op::Put);
+    assert!(held_upload(&gate, 3).await.contains("/db/app/m/"));
+    let info = db.info();
+    assert_eq!((db.mem_bytes(), info.tables, info.runs), (0, 4, 4));
+    // It is published, and the two tables it merged are gone from the
+    // bucket: nothing is stored there but what is listed, when the first
+    // table of the next merge is held. Had the rounds been merged behind
+    // it, this would be its own third table, with two stored before it.
+    gate.clear();
+    hold_table(&gate, "app", 1);
+    gate.release(Op::Put);
+    held_upload(&gate, 4).await;
+    let info = db.info();
+    assert_eq!(info.runs, 3, "{info:?}");
+    assert_eq!(tables_stored(&bucket, "app"), info.tables);
+    // The rounds are merged with it then.
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while db.info().runs != 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the rounds flushed behind the merge are merged after it");
+    every_key_is_of(&db, 4).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// What falls due while a merge that another gave way to runs is flushed
+/// when that merge is published, before the one that waited stores its
+/// next table: it would otherwise wait for a table of each.
+#[tokio::test]
+async fn what_falls_due_during_a_merge_another_gave_way_to_is_flushed_after_it() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, round(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    few(&db, 3, true).await;
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    few(&db, 4, true).await;
+    // The merge of the two tables flushed behind the first is about to be
+    // published when ten keys more are written.
+    gate.clear();
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    gate.rule(Op::Put, Action::Hold, 1, move |key, _| {
+        key.contains("/db/app/m/") && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    gate.release(Op::Put);
+    assert!(held_upload(&gate, 3).await.contains("/db/app/m/"));
+    few(&db, 5, true).await;
+    assert!(db.mem_bytes() > 0);
+    // The second table stored from here is held. The first was the flush
+    // of those keys, and not a table of the merge that waited.
+    gate.clear();
+    hold_table(&gate, "app", 2);
+    gate.release(Op::Put);
+    held_upload(&gate, 4).await;
+    let info = db.info();
+    assert_eq!((db.mem_bytes(), info.tables, info.runs), (0, 4, 4));
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while db.info().runs != 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), merged)
+        .await
+        .expect("the merges end");
+    the_first_ten_are_of(&db, 5, true).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
 }
 
 /// Two merges run at once on a server. A database that has to wait for its
@@ -2352,6 +2858,65 @@ async fn a_release_does_not_wait_for_a_merge() {
     assert_eq!(tables_stored(&bucket, "app"), 2);
     let (db, _) = Db::open(ctx, "app", None).await.unwrap();
     every_key_is_of(&db, 2).await;
+}
+
+/// Nor for a merge that gave way to another. The one that waited stops as
+/// soon as the other has ended: left to find out after its next table, a
+/// release waited for one table more. And a merge that gave way to a
+/// flush begins no merge once a release has begun.
+#[tokio::test]
+async fn a_release_does_not_wait_for_a_merge_that_gave_way_to_another() {
+    // The release begins while the second upload after the merge gave way
+    // is held, which is the one table of the merge it gave way to, and
+    // that merge is published; and while the first is, which is the flush
+    // before it, and then there is no such merge.
+    for (nth, left) in [(2, 3), (1, 4)] {
+        let bucket = Arc::new(MemoryStore::new());
+        let gate = Gate::new(&bucket);
+        let ctx = ctx_with(gate.clone(), small_tables());
+        let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
+            .await
+            .unwrap();
+        commit(&db, round(1)).await.unwrap();
+        flushed(&db).await;
+        // A merge is held at its first table and then at its second, with
+        // ten keys flushed behind it each time, as in the test of that.
+        hold_table(&gate, "app", 2);
+        commit(&db, round(2)).await.unwrap();
+        held_upload(&gate, 1).await;
+        few(&db, 3, true).await;
+        gate.clear();
+        hold_table(&gate, "app", 2);
+        gate.release(Op::Put);
+        held_upload(&gate, 2).await;
+        few(&db, 4, true).await;
+        gate.clear();
+        hold_table(&gate, "app", nth);
+        gate.release(Op::Put);
+        held_upload(&gate, 3).await;
+        assert_eq!(db.info().tables, 2 + nth);
+        let released = tokio::spawn({
+            let db = db.clone();
+            async move { db.close().await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!released.is_finished());
+        // The table being written is finished. No merge begins another.
+        gate.clear();
+        gate.rule(Op::Put, Action::Hold, usize::MAX, |key, _| {
+            key.contains("/t/")
+        });
+        gate.release(Op::Put);
+        tokio::time::timeout(Duration::from_secs(5), released)
+            .await
+            .expect("the release waits for neither merge")
+            .unwrap();
+        assert_eq!(gate.held().len(), 3, "{nth}");
+        // What the merge that waited had stored is removed.
+        assert_eq!(tables_stored(&bucket, "app"), left, "{nth}");
+        let (db, _) = Db::open(ctx, "app", None).await.unwrap();
+        the_first_ten_are_of(&db, 4, true).await;
+    }
 }
 
 /// A database with one write flushed, and the purge of the frames that
@@ -2624,7 +3189,7 @@ async fn a_merge_for_the_quota_is_made_once_for_all_who_waited() {
     for table in &uploads[..2] {
         assert!(stored.contains(table), "{table} was merged again");
     }
-    assert_eq!(tables_stored(&bucket, "app"), db.info().tables);
+    only_the_tables_listed_are_stored(&bucket, &db).await;
     assert_eq!(get(&db, b"small").await.unwrap().unwrap().1, "1");
     assert_eq!(get(&db, b"k0007").await.unwrap().unwrap().1, value(2, 7));
     assert_eq!(get(&db, b"k0107").await.unwrap().unwrap().1, value(1, 107));
