@@ -240,7 +240,10 @@ reading --workload scan
 sent=$(metric durable_db_storage_sent_bytes_total)
 written=$(metric 'durable_db_request_seconds_count{kind="commit"}')
 bench --clients "$clients" --workload write --value-bytes "$value" --random-values --seconds $((seconds * 2)) | tee "$dir/write.out"
-# What was written is what was taken: those told to wait were answered too.
+alive
+# What was written is what was taken: those told to wait were answered too,
+# and counted with them. A request refused by the server before it reached
+# the database is not, and is not written: none is, with one database.
 waited=$(sed -nE 's/.*told to wait ([0-9]+).*/\1/p' "$dir/write.out")
 written=$((($(metric 'durable_db_request_seconds_count{kind="commit"}') - written - ${waited:-0}) * value))
 sent=$(($(metric durable_db_storage_sent_bytes_total) - sent))

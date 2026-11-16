@@ -3072,6 +3072,34 @@ async fn a_merge_goes_on_when_what_it_gave_way_to_failed() {
     only_the_tables_listed_are_stored(&bucket, &db).await;
 }
 
+/// A release gives up a read that a merge has under way: a merge stopped by
+/// a release is discarded, and the store may take long to answer. Here the
+/// merge's first read of a table never comes back.
+#[tokio::test]
+async fn a_release_gives_up_a_merges_read_under_way() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    gate.rule(Op::GetRange, Action::Hold, 1, |key, _| {
+        key.contains("/db/app/t/")
+    });
+    commit(&db, round(2)).await.unwrap();
+    flushed(&db).await;
+    gate.wait_held(Op::GetRange).await;
+    tokio::time::timeout(Duration::from_secs(5), db.close())
+        .await
+        .expect("the release ends");
+    let (db, _) = Db::open(ctx_with(gate.clone(), small_tables()), "app", None)
+        .await
+        .unwrap();
+    every_key_is_of(&db, 2).await;
+}
+
 /// A deletion, like a release, does not wait out a merge's read of a store
 /// that fails.
 #[tokio::test]
@@ -3144,6 +3172,36 @@ async fn a_database_that_closes_stops_its_merges_reads() {
     tokio::time::timeout(Duration::from_secs(3), freed)
         .await
         .expect("the merge gives its turn back");
+}
+
+/// A store that refuses for good what a merge gave way to, as a claim
+/// check it says is forbidden, ends the merge: it would be refused at every
+/// table. Here the merge fails, and the round that was to be flushed is
+/// flushed after it.
+#[tokio::test]
+async fn a_merge_ends_when_what_it_gave_way_to_is_refused_for_good() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, wide(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, wide(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    commit(&db, round(3)).await.unwrap();
+    gate.clear();
+    gate.rule(Op::Exists, Action::Break, 1, |key, _| {
+        key.contains("/db/app/c/")
+    });
+    gate.release(Op::Put);
+    flushed(&db).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The two tables of 300 KiB were not merged: three runs.
+    assert_eq!(db.info().runs, 3);
+    every_key_is_of(&db, 3).await;
 }
 
 /// A merge loads the index of a table by itself: it waits for a store that

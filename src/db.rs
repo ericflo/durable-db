@@ -1217,7 +1217,12 @@ impl Db {
                     Ok(true) => continue,
                     Ok(false) => break,
                     Err(error) => {
-                        report(&self.tag, "compaction failed", &error);
+                        // A merge that a release, a deletion or a takeover
+                        // stopped at a read is not a failure of the store.
+                        match self.halt.load(Ordering::Acquire) {
+                            true => tracing::debug!(db = %self.tag, %error, "merge stopped"),
+                            false => report(&self.tag, "compaction failed", &error),
+                        }
                         failed = true;
                         break;
                     }
@@ -1513,12 +1518,13 @@ impl Db {
                         match gave {
                             Ok(()) => {}
                             // A flush or a merge behind that the store
-                            // failed is asked for again at the next table,
+                            // failed for a while is asked for again later,
                             // as the maintenance loop asks for a flush
-                            // again: this merge waits out a store that
-                            // fails for a while, and one that failed would
-                            // be begun again from its start.
-                            Err(error @ Error::Unavailable(_)) => {
+                            // again: this merge waits out such a store, and
+                            // one that failed would be begun again from its
+                            // start. Not past a store that refused it for
+                            // good.
+                            Err(error) if passing(&error) => {
                                 report(&self.tag, "what a merge gave way to failed", &error);
                             }
                             Err(error) => return Err(error),
@@ -1890,6 +1896,12 @@ impl Drop for Fuse {
 
 /// Losing ownership in the middle of maintenance is routine; anything else
 /// deserves attention.
+/// Whether `error` is a failure of the store that may pass, and not one it
+/// said is for good (`StoreError::Fatal`, which comes as `fatal: ...`).
+fn passing(error: &Error) -> bool {
+    matches!(error, Error::Unavailable(reason) if !reason.starts_with("fatal:"))
+}
+
 fn report(db: &str, what: &str, error: &Error) {
     if matches!(error, Error::Lost(_)) {
         tracing::debug!(db, %error, "{what}");
