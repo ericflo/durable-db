@@ -284,45 +284,109 @@ DURABLE_DB=./durable-db SOAK_STORE=bucket SOAK_GIB=1 SOAK_READ_CLIENTS=8 SOAK_SE
 
 The last runs on the bucket that `DDB_S3_ENDPOINT`, `DDB_S3_BUCKET`, `DDB_S3_ACCESS_KEY_ID` and `DDB_S3_SECRET_ACCESS_KEY` name, here Backblaze B2 from the desktop and over the link described [above](#backblaze-b2).
 
-These runs were made with release 2.1.7. One database is filled by 64 clients, each commit one key with a value of 4 KiB that does not compress, through one server with the flags of the Kubernetes manifest in a scope limited to 1 GiB of memory and four CPUs. Its cache in memory is 192 MiB and its disk cache 1 GiB, so the databases here are as large as the disk cache or larger. That server is killed. A second, with an empty cache, opens the database. It is read at keys taken at random for a minute and then for another, by as many clients as wrote it; scanned, twenty keys from a key taken at random, for a minute; and written over at keys taken at random for two. Then its quota is set a hundredth above what it held when it was filled, which is under what it holds by then, and one write is made, which waits for a merge of everything. The second server is stopped, a third opens the database, and it is deleted. On the bucket eight clients read and scan, for thirty seconds each, and the writes take a minute. Release 2.1.7, one run of each.
+These runs were made with release 2.1.8, one of each, one after another on the desktop, the night the release was made. One database is filled by 64 clients, each commit one key with a value of 4 KiB that does not compress, through one server with the flags of the Kubernetes manifest in a scope limited to 1 GiB of memory and four CPUs. Its cache in memory is 192 MiB and its disk cache 1 GiB, so the databases here are as large as the disk cache or larger. That server is killed. A second, with an empty cache, opens the database. It is read at keys taken at random for a minute and then for another, by as many clients as wrote it; scanned, twenty keys from a key taken at random, for a minute; and written over at keys taken at random for two. Then its quota is set a hundredth above what it held when it was filled, which is under what it holds by then, and one write is made, which waits for a merge of everything. The second server is stopped, a third opens the database, and it is deleted. On the bucket eight clients read and scan, for thirty seconds each, and the writes take a minute. With each load the script prints what the server read from its store for it, in how many requests, and how many runs of tables the database had then.
 
 | | Local directory, 4 GiB | Local directory, 16 GiB | MinIO, 4 GiB | Backblaze B2, 1 GiB |
 | --- | ---: | ---: | ---: | ---: |
-| Commits a second while it was filled | 2,601 | 2,005 | 2,088 | 186 |
-| p50 and p99 of a commit | 23 ms, 122 ms | 23 ms, 194 ms | 22 ms, 165 ms | 301 ms, 1.0 s |
-| Commits that were told to wait | 0 | 0 | 0 | 6,655 |
-| The fill took | 403 s | 2,092 s | 502 s | 1,414 s |
-| Fewest and most commits in ten seconds of it | 17,664, 29,654 | 5,800, 26,239 | 13,394, 25,179 | 586, 4,403 |
-| Tables it then held | 129, of 4,030 MiB | 508, of 16,124 MiB | 130, of 4,030 MiB | 39, of 1,008 MiB |
-| Sent to storage for it | 28,230 MiB, 6.9 times what was written | 133,771 MiB, 8.2 times what was written | 26,820 MiB, 6.5 times what was written | 5,597 MiB, 5.5 times what was written |
-| Read back from storage meanwhile | 9,846 MiB | 74,968 MiB | 10,635 MiB | 947 MiB |
-| Most memory of that server | 448 MiB | 488 MiB | 462 MiB | 495 MiB |
-| A new server opened it, after a kill, in | 47 ms | 39 ms | 121 ms | 10.7 s |
-| Strong reads a second, at first | 14,228 (p50 2.5 ms, p99 49 ms) | 11,066 (p50 3.2 ms, p99 51 ms) | 3,050 (p50 17 ms, p99 104 ms) | 21 (p50 182 ms, p99 2.9 s) |
-| Read from storage for them | 73,388 MiB | 74,928 MiB | 33,401 MiB | 576 MiB |
-| Strong reads a second, after that | 14,601 (p50 2.4 ms, p99 47 ms) | 8,200 (p50 3.3 ms, p99 77 ms) | 3,227 (p50 16 ms, p99 93 ms) | 117 (p50 57 ms, p99 239 ms) |
-| Read from storage for them | 65,810 MiB | 53,880 MiB | 37,985 MiB | 399 MiB |
-| Scans a second | 6,122 (p50 6.0 ms, p99 56 ms) | 5,092 (p50 7.7 ms, p99 62 ms) | 1,327 (p50 44 ms, p99 135 ms) | 49 (p50 86 ms, p99 889 ms) |
-| Read from storage for them | 64,621 MiB | 68,244 MiB | 38,821 MiB | 310 MiB |
-| Writes over it a second | 2,014 (p50 23 ms, p99 208 ms) | 2,004 (p50 23 ms, p99 222 ms) | 1,994 (p50 22 ms, p99 214 ms) | 187 (p50 311 ms, p99 757 ms) |
-| Sent to storage for them | 8,555 MiB, 9.1 times what was written | 7,772 MiB, 8.2 times what was written | 7,721 MiB, 8.3 times what was written | 204 MiB, 4.7 times what was written |
-| It then held | 4,661 MiB in 148 tables | 17,011 MiB in 539 tables | 4,810 MiB in 159 tables | 1,051 MiB in 41 tables |
-| A write at a quota under that waited | 35.9 s | 168 s | 67 s | 525 s |
-| and it then held | 4,029 MiB in 126 tables | 16,124 MiB in 504 tables | 4,030 MiB in 126 tables | 1,007 MiB in 32 tables |
-| Most memory of the second server | 441 MiB | 447 MiB | 493 MiB | 422 MiB |
-| A third server opened it, after a stop, in | 78 ms | 25 ms | 28 ms | 327 ms |
-| It was deleted in | 48 ms | 49 ms | 48 ms | 1.1 s |
-| Requests to storage that failed and were made again | 0 | 0 | 0 | 56 |
+| Commits a second while it was filled | 1,830 | 2,576 | 2,441 | 47 |
+| p50 and p99 of a commit | 27 ms, 163 ms | 23 ms, 111 ms | 21 ms, 126 ms | 998 ms, 3.8 s |
+| Commits that were told to wait | 0 | 0 | 0 | 306,742 |
+| The fill took | 574 s | 1,628 s | 429 s | 5,539 s |
+| Fewest and most commits in ten seconds of it | 10,717, 24,255 | 20,851, 29,502 | 18,038, 28,029 | 2, 7,623 |
+| Tables it then held | 129 in 8 runs, of 4,030 MiB | 506 in 5 runs, of 16,124 MiB | 132 in 11 runs, of 4,030 MiB | 42 in 32 runs, of 1,007 MiB |
+| Sent to storage for it | 28,452 MiB, 6.9 times what was written | 139,309 MiB, 8.5 times what was written | 27,394 MiB, 6.7 times what was written | 6,230 MiB, 6.1 times what was written |
+| Read back from storage meanwhile | 3,609 MiB | 51,700 MiB | 5,443 MiB | 0 MiB |
+| Most memory of that server | 414 MiB | 453 MiB | 427 MiB | 232 MiB |
+| A new server opened it, after a kill, in | 91 ms | 50 ms | 108 ms | 18.8 s |
+| Strong reads a second, at first | 36,109 (p50 1.2 ms, p99 29 ms) | 30,513 (p50 1.6 ms, p99 23 ms) | 6,191 (p50 9.6 ms, p99 27 ms) | 2 (p50 3.2 s, p99 16.9 s) |
+| Read from storage for them | 81,045 MiB in 2,593,289 requests | 111,867 MiB in 3,603,376 requests | 13,714 MiB in 412,488 requests | 100 MiB in 1,029 requests |
+| It then had | 127 tables in 2 runs, their indexes 8 MiB of its memory | 507 tables in 6 runs, their indexes 26 MiB of its memory | 133 tables in 12 runs, their indexes 6 MiB of its memory | 43 tables in 33 runs, their indexes 1 MiB of its memory |
+| Strong reads a second, after that | 41,044 (p50 1.1 ms, p99 29 ms) | 31,280 (p50 1.6 ms, p99 23 ms) | 6,567 (p50 9.2 ms, p99 24 ms) | 3 (p50 2.3 s, p99 8.3 s) |
+| Read from storage for them | 67,881 MiB in 2,209,974 requests | 113,280 MiB in 3,686,219 requests | 13,344 MiB in 434,431 requests | 167 MiB in 1,409 requests |
+| Scans a second | 15,053 (p50 3.0 ms, p99 30 ms) | 13,397 (p50 3.8 ms, p99 26 ms) | 2,222 (p50 27 ms, p99 68 ms) | 2 (p50 4.5 s, p99 13.0 s) |
+| Read from storage for them | 106,531 MiB in 2,368,508 requests | 158,419 MiB in 3,185,105 requests | 17,400 MiB in 446,033 requests | 116 MiB in 1,318 requests |
+| Writes over it a second | 1,979 (p50 25 ms, p99 143 ms) | 2,509 (p50 23 ms, p99 102 ms) | 2,711 (p50 20 ms, p99 124 ms) | 50 (p50 1.2 s, p99 4.7 s) |
+| Sent to storage for them | 5,431 MiB, 5.9 times what was written | 10,216 MiB, 8.7 times what was written | 11,375 MiB, 9.0 times what was written | 46 MiB, 3.9 times what was written |
+| It then held | 4,888 MiB in 157 tables of 9 runs | 17,172 MiB in 538 tables of 5 runs | 5,145 MiB in 162 tables of 5 runs | 1,019 MiB in 43 tables of 33 runs |
+| A write at a quota under that waited | 33.0 s | 83 s | 47.2 s | 1,227 s |
+| Read from storage for that merge | 3,924 MiB | 16,225 MiB | 4,155 MiB | 683 MiB |
+| and it then held | 4,029 MiB in 126 tables | 16,125 MiB in 504 tables | 4,030 MiB in 126 tables | 1,007 MiB in 32 tables |
+| Most memory of the second server | 444 MiB | 433 MiB | 534 MiB | 373 MiB |
+| A third server opened it, after a stop, in | 29 ms | 23 ms | 19 ms | 424 ms |
+| It was deleted in | 39 ms | 46 ms | 41 ms | 636 ms |
+| Requests to storage that failed and were made again | 0 | 0 | 0 | 247 |
 
-**Memory does not grow with the database**, and neither does the time to open it. A server holds the tables' indexes and blocks in a cache of a fixed size, and to open a database it reads one manifest and what had not been flushed. The servers used between 422 and 495 MiB, under the limit of 1 GiB, at 1 GiB as at 16. After a kill the next server opened the database in 47 ms at 4 GiB and in 39 ms at 16 GiB on a local directory, and in 121 ms on MinIO. On Backblaze it took 10.7 s, which is what the killed server had not flushed, fetched and stored again over this desktop's link; after a stop, with nothing to store again, 0.3 s.
+The link to Backblaze carried less that night than for any figure above it on this page: a test upload of 32 MiB went at 0.5 MB a second and a download at 1.5 MB a second, and the server sent 6,230 MiB in the 92 minutes of the fill, 1.1 MiB a second, where 2.1.7's run had sent 4 MiB a second. That column says what a bucket costs when the link is the limit, and is not to be set beside the others or beside 2.1.7's.
 
-**A database is sent to its store several times over while it grows.** Tables are merged with those next in size, so each value is written again as its table grows: 6.9 times what was written at 4 GiB and 8.2 times at 16 GiB on a local directory, 6.5 times on MinIO, and 5.5 times at 1 GiB on Backblaze. Writing over what is there costs more for each byte, since the value that was written over is carried along until a merge reaches the oldest table. The slowest ten seconds of each fill are those in which the largest merges ran.
+**Memory does not grow with the database**, and neither does the time to open it. A server holds the tables' indexes and blocks in a cache of a fixed size, and to open a database it reads one manifest and what had not been flushed. The servers used between 232 and 534 MiB, under the limit of 1 GiB, at 1 GiB as at 16. After a kill the next server opened the database in 91 ms at 4 GiB and in 50 ms at 16 GiB on a local directory, and in 108 ms on MinIO. On Backblaze it took 18.8 s, which is what the killed server had not flushed, fetched and stored again over that link; after a stop, with nothing to store again, 0.4 s.
 
-**A write at the quota waits for as long as reading the database and writing it again takes.** That was 36 s at 4 GiB and 168 s at 16 GiB on a local directory, which is about 100 MiB a second, and 67 s at 4 GiB on MinIO. On Backblaze from this desktop it was 525 s for 1 GiB, 2 MiB a second: a merge stores one table at a time, over the desktop's uplink. A client that writes at a quota has to be prepared to ask again for that long. A database that holds nothing that was written over or deleted is not merged for its quota at all, and is refused at once ([API](api.md#databases)).
+**A database is sent to its store several times over while it grows.** Tables are merged with those next in size, so each value is written again as its table grows: 6.9 times what was written at 4 GiB and 8.5 times at 16 GiB on a local directory, 6.7 times on MinIO, and 6.1 times at 1 GiB on Backblaze. Writing over what is there costs more for each byte, since the value that was written over is carried along until a merge reaches the oldest table. The slowest ten seconds of each fill are those in which the largest merges ran.
 
-**A server of 2.1.7 that read more than its disk cache held read far more from its store than its clients read from it.** In the minute of reads of the 4 GiB database on a local directory, the clients were sent 3.3 GiB and the server read 72 GiB from its store, 1.2 GiB a second. That has two parts, which the server's count of its requests tells apart: 21,700 a second, read from its metrics every ten seconds, three for every two reads. A read whose table is not in the disk cache asks the store for the block that would hold its key, 32 KiB for a value of 4 KiB, from each run of tables it looks in. That is some 0.7 GiB a second, and it is in proportion to the reads. The rest, half a gigabyte a second, was whole tables: such a read also had its table fetched for the disk cache, in the place of other tables, which were then fetched in their turn ([verification](verification.md#what-these-checks-found), finding 43). That part was in proportion to nothing. It went on as fast as the store gave, for as long as any read missed. A local directory gave it at once and the reads stayed fast. A bucket would have given what the link carries and billed it as download. That was release 2.1.7, with which every figure in this section was measured. Release 2.1.8 fetches a table only when reads have had a sixteenth of it from the store, and only into room that is free or that no read has asked for in five minutes, so the second part ends; the first stays. On Backblaze the database was as large as the disk cache: 1,285 MiB were read from the bucket for all its reads and scans, little more than the database once. Its first thirty seconds answered 21 reads a second, while tables were fetched, and the next thirty 117.
+**A read of a key looks in one table of each run**, newest first, so how fast a database is read depends on how many runs it has. A run is the tables of one merge, or the table of one flush. A database with more than twelve merges the newest that are too many; one with fewer keeps what the rule of sizes leaves, which was between 5 and 11 runs at the end of the fills on a local directory and on MinIO. A server that opens a database after a kill merges what is due at once. Here the database of 4 GiB was read with 2 runs, at 36,109 and 41,044 reads a second; the one of 16 GiB with 6, at 30,513 and 31,280; the one on MinIO with 12. A database that is written while its server merges gains a run for every flush until that merge ends, and a merge of 16 GiB takes more than a minute on a local directory. With `SOAK_RUNS` the script writes over the database with every client, at keys taken at random, until it has that many runs, for ten minutes at most, and kills the server then:
 
-The local directory answers in a fraction of a millisecond and MinIO here is one process on the desktop that loads it, so the rates in those columns are not those of a provider's bucket. The Backblaze column is what one desktop's uplink carries: it sent 5.6 GiB in the 24 minutes of the fill, which is 4 MiB a second. Other work ran on the desktop meanwhile: the Backblaze run beside the two on a local directory, and test builds on four of its 32 cores, at idle priority, during the second half of the 16 GiB run and the first minutes of the one on MinIO.
+```sh
+DURABLE_DB=./durable-db SOAK_GIB=16 SOAK_RUNS=16 scripts/soak-size.sh
+```
+
+| | Killed when it was filled | Killed when it had 16 runs |
+| --- | ---: | ---: |
+| The fill took | 1,628 s | 1,937 s |
+| It was then written over for | not at all | 571 s, with 16 runs at most |
+| and killed with | 506 tables in 5 runs | 599 tables in 16 runs |
+| Strong reads a second, at first | 30,513 (p50 1.6 ms, p99 23 ms) | 12,004 (p50 3.9 ms, p99 31 ms) |
+| Read from storage for them | 111,867 MiB in 3,603,376 requests | 145,174 MiB in 4,444,789 requests |
+| It then had | 507 tables in 6 runs, their indexes 26 MiB of its memory | 596 tables in 12 runs, their indexes 30 MiB of its memory |
+| Strong reads a second, after that | 31,280 (p50 1.6 ms, p99 23 ms) | 18,255 (p50 1.4 ms, p99 32 ms) |
+| Read from storage for them | 113,280 MiB in 3,686,219 requests | 128,652 MiB in 3,983,716 requests |
+| Scans a second | 13,397 (p50 3.8 ms, p99 26 ms) | 18,853 (p50 2.7 ms, p99 26 ms) |
+| Read from storage for them | 158,419 MiB in 3,185,105 requests | 180,963 MiB in 2,887,716 requests |
+| A write at a quota under that waited | 83 s | 102 s |
+
+Written over by 64 clients, the database of 16 GiB took 571 of the ten minutes to reach 16 runs: a merge gives way to merges of what is flushed behind it once a database has more than twelve. The server that opened it merged the newest that were too many at once and read 12,004 keys a second in the first minute, with 12 runs, while the rule of sizes merged the rest; in the second minute the database was one run, and it read 18,255 a second. The writes it was killed in were the same 64 clients' as the fill's, at keys taken at random, and the fill ends with every key written once: a database that is written over faster, or by more clients, or for longer, can be left with more.
+
+A database whose merges cannot keep up with what is written to it gains runs for as long as that lasts. On Backblaze that night the link carried less than the fill's merges had to send, merges that met a connection reset failed and were begun again, and the database had 32 runs when its server was killed. Each read of a key the disk cache did not hold then asked the bucket for a block of up to 33 runs, one request after another: two and three reads a second, half of them taking 2.3 s or more. No write is told to wait for runs in this release.
+
+**A read of what the disk cache does not hold costs a request to the store for a block, and since 2.1.8 no more than that.** A read whose table is not in the disk cache asks the store for the block that would hold its key, 32 KiB for a value of 4 KiB here, in each run it looks in. In the first minute of reads of the 4 GiB database on a local directory, the server answered 36,109 reads a second and asked its store 1.2 times for each, for 32 KiB each time: the cache held a quarter of the database. That is 1.3 GiB a second from the store, in proportion to the reads. Every release before this one read more, and not in proportion to anything: a read that missed also had its whole table fetched for the disk cache, in the place of other tables, which were then fetched in their turn ([verification](verification.md#what-these-checks-found), finding 43). Release 2.1.7 under the same script, on the same desktop, the same night, between the runs above:
+
+| | 2.1.7 | 2.1.8 |
+| --- | ---: | ---: |
+| Commits a second while it was filled | 1,537 | 1,830 |
+| Read back from storage meanwhile | 10,621 MiB | 3,609 MiB |
+| Strong reads a second, at first | 15,060 (p50 2.1 ms, p99 55 ms) | 36,109 (p50 1.2 ms, p99 29 ms) |
+| Read from storage for them | 83,282 MiB in 1,353,143 requests | 81,045 MiB in 2,593,289 requests |
+| Scans a second | 6,318 (p50 5.0 ms, p99 92 ms) | 15,053 (p50 3.0 ms, p99 30 ms) |
+| Read from storage for them | 76,354 MiB in 1,490,914 requests | 106,531 MiB in 2,368,508 requests |
+| Writes over it a second | 1,565 (p50 26 ms, p99 314 ms) | 1,979 (p50 25 ms, p99 143 ms) |
+| A write at a quota under that waited | 48.3 s | 33.0 s |
+| Read from storage for that merge | 5,015 MiB | 3,924 MiB |
+
+By the server's count of its requests, of the 83,282 MiB that 2.1.7 read from its store in the first minute of reads, some 41 GiB were the blocks its reads asked for and 40 GiB were whole tables, 21 of them a second. A local directory gave that at once; a bucket gives what the link carries and bills it as download. Release 2.1.8 fetches a table only when reads have had a sixteenth of it from the store, and only into room that is free or that no read has asked for in five minutes. A merge has none of its tables fetched, and what it stores does not put out what it has yet to read. So the fill read back a third of what it had, the reads and scans were more than twice as fast, and their slowest hundredth took about half the time or less.
+
+**On a bucket, give a server a disk cache as large as the databases it reads.** The same database of 4 GiB with a disk cache of 8 GiB:
+
+```sh
+DURABLE_DB=./durable-db SOAK_CACHE_MIB=8192 scripts/soak-size.sh
+```
+
+| | Disk cache of 1 GiB | Disk cache of 8 GiB |
+| --- | ---: | ---: |
+| Read back from storage meanwhile | 3,609 MiB | 0 MiB |
+| Strong reads a second, at first | 36,109 (p50 1.2 ms, p99 29 ms) | 17,306 (p50 2.4 ms, p99 36 ms) |
+| Read from storage for them | 81,045 MiB in 2,593,289 requests | 13,450 MiB in 305,879 requests |
+| It then had | 127 tables in 2 runs, their indexes 8 MiB of its memory | 132 tables in 10 runs, their indexes 6 MiB of its memory |
+| Strong reads a second, after that | 41,044 (p50 1.1 ms, p99 29 ms) | 17,413 (p50 2.3 ms, p99 38 ms) |
+| Read from storage for them | 67,881 MiB in 2,209,974 requests | 0 MiB in 0 requests |
+| Scans a second | 15,053 (p50 3.0 ms, p99 30 ms) | 5,123 (p50 5.9 ms, p99 112 ms) |
+| Read from storage for them | 106,531 MiB in 2,368,508 requests | 0 MiB in 0 requests |
+| It then held | 4,888 MiB in 157 tables of 9 runs | 4,769 MiB in 154 tables of 8 runs |
+| A write at a quota under that waited | 33.0 s | 53.8 s |
+| Read from storage for that merge | 3,924 MiB | 0 MiB |
+
+With a cache that holds the database, the server read 13,450 MiB from its store in the first minute of reads: the blocks its reads asked for while the tables were fetched whole, two at a time, each once reads had had a sixteenth of it. After that it asked its store for nothing: not for the second minute of reads, not for the scans, and not for the merge at the quota. With the cache of 1 GiB it went on asking for 32 KiB 37,000 to 43,000 times a second, which on a bucket is a request to the bucket each time, and download. On a local directory the run with the larger cache was not the faster one, and that says nothing of a bucket. The script holds the store's directory in memory, from outside the server's limit, so a read of the store costs less there than a read of the server's own disk, where the cache is; and the database of that run was read with 10 runs, where the other had merged down to 2. What carries over is the rows of what was read from the store.
+
+**A write at the quota waits for as long as reading the database and writing it again takes.** That was 33 s at 4 GiB and 83 s at 16 GiB on a local directory, 148 and 207 MiB a second, and 47 s at 4 GiB on MinIO; 2.1.7 took 48 s for the same at 4 GiB the same night. With the disk cache of 8 GiB it took 54 s: every table a merge stores and the cache keeps is synced to the disk the cache is on, so that what is written there and not yet on the disk does not pass the server's memory limit (finding 44), and on a local directory that disk is the store's as well. On Backblaze the write waited 1,227 s for 1 GiB over that night's link, 0.8 MiB a second; 2.1.7 had waited 525 s over a link nearly four times as fast. A client that writes at a quota has to be prepared to ask again for that long. A database that holds nothing that was written over or deleted is not merged for its quota at all, and is refused at once ([API](api.md#databases)).
+
+The local directory answers in a fraction of a millisecond and MinIO here is one process on the desktop that loads it, so the rates in those columns are not those of a provider's bucket. What ran beside what, on a desktop of 32 cores: the local runs one after another, beside the run on Backblaze, which waited on its link; during the first three local runs, those of 4 GiB of 2.1.8 and of 2.1.7, the test suite forty-two times and its engine tests forty, each held to between 0.4 and 2.3 processors; and during the second half of the run with `SOAK_RUNS`, `scripts/soak-bucket.sh` on MinIO, 256 databases written through another server.
 
 ## What it costs in requests
 
