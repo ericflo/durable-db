@@ -815,9 +815,9 @@ impl Io {
 
     /// Bytes `start..end` of an immutable table of `size` bytes that the
     /// manifest says exists: from the disk cache when it is there, otherwise
-    /// from the bucket. With `keep`, a table that was not in the disk cache
+    /// from the bucket. For a request, a table that was not in the disk cache
     /// is fetched for it when such reads have had enough of it and it has
-    /// room. A merge reads each of its tables once, and keeps none.
+    /// room. A merge reads each of its tables once, and has none fetched.
     pub async fn range(
         self: &Arc<Self>,
         key: &str,
@@ -844,10 +844,9 @@ impl Io {
             }
             disk.misses.fetch_add(1, Ordering::Relaxed);
         }
-        // A merge, which keeps nothing, is not given up for a store that
-        // fails for a while: one that fails is begun again from its start,
-        // and a merge of a large database over a link that resets now and
-        // then would not end.
+        // A merge's read is not given up for a store that fails for a while:
+        // a merge that fails is begun again from its start, and one of a
+        // large database over a link that resets now and then would not end.
         let read = || self.store.get_range(key, start, end);
         let bytes = match reader {
             Reader::Request => retry(read).await,
@@ -974,12 +973,13 @@ where
     unreachable!()
 }
 
-/// Who reads a table. A request's reads keep what they read for later
-/// readers, and give up on a store that fails after a second or so, since a
-/// client waits for them. A merge keeps nothing, and waits for a store that
-/// fails up to `PATIENCE`, or until the flag it carries is set, which a
-/// release or a deletion does: a merge that failed is begun again from its
-/// start, and one stopped by a release is discarded.
+/// Who reads a table. A request's reads keep the blocks they read in memory
+/// and have tables fetched for the disk cache, and give up on a store that
+/// fails after a second or so, since a client waits for them. A merge's do
+/// neither, and wait for a store that fails up to `PATIENCE`, or until the
+/// flag they carry is set, which a release, a deletion or the closing of
+/// the database does: a merge that failed is begun again from its start,
+/// and one stopped by a release is discarded.
 #[derive(Clone)]
 pub enum Reader {
     Request,
@@ -998,27 +998,42 @@ impl Reader {
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// `retry`, for as long as `patience` and not a number of times, and no
-/// longer once `stop` is set.
+/// longer once `stop` is set: a call under way is then given up, which a
+/// read may be.
 pub async fn retry_for<T, F, Fut>(patience: Duration, stop: &AtomicBool, mut call: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = StoreResult<T>>,
 {
+    let stopped = || Error::Unavailable("the read was given up: the database is leaving".into());
     let deadline = tokio::time::Instant::now() + patience;
     let mut delay = Duration::from_millis(20);
     loop {
-        let stopped = || stop.load(Ordering::Acquire);
-        match call().await {
+        let result = tokio::select! {
+            result = call() => result,
+            () = until_set(stop) => return Err(stopped()),
+        };
+        match result {
             Ok(value) => return Ok(value),
             Err(StoreError::Unavailable(reason))
-                if !stopped() && tokio::time::Instant::now() + delay < deadline =>
+                if tokio::time::Instant::now() + delay < deadline =>
             {
                 tracing::debug!(%reason, "storage call failed; retrying");
-                tokio::time::sleep(delay).await;
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = until_set(stop) => return Err(stopped()),
+                }
                 delay = (delay * 2).min(Duration::from_secs(2));
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+/// Resolves when `flag` is set, looking every fiftieth of a second.
+async fn until_set(flag: &AtomicBool) {
+    while !flag.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -1120,6 +1135,54 @@ mod tests {
         // The next is written, and the least recently used makes way.
         cache.put(&key(5), &[5; 1000], None);
         assert_eq!(here(&cache), [1, 2, 3, 5]);
+    }
+
+    /// A merge's read gives up on a store that fails for good once its
+    /// patience is spent, and at once, with a call under way, when it is
+    /// told to stop.
+    #[tokio::test(start_paused = true)]
+    async fn a_merges_read_gives_up_after_its_patience_or_when_told_to() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let calls = AtomicU64::new(0);
+        let failing = || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async { StoreResult::<()>::Err(StoreError::Unavailable("down".into())) }
+        };
+        let began = tokio::time::Instant::now();
+        let gave_up = tokio::time::timeout(HOUR, retry_for(PATIENCE, &stop, failing));
+        assert!(gave_up.await.expect("it gives up").is_err());
+        let waited = began.elapsed();
+        assert!(
+            waited > PATIENCE - Duration::from_secs(2) && waited <= PATIENCE,
+            "{waited:?}"
+        );
+        assert!(calls.load(Ordering::Relaxed) > 7);
+        let hung = || std::future::pending::<StoreResult<()>>();
+        let told = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            told.store(true, Ordering::Release);
+        });
+        let began = tokio::time::Instant::now();
+        let gave_up = tokio::time::timeout(HOUR, retry_for(PATIENCE, &stop, hung));
+        assert!(gave_up.await.expect("it gives up").is_err());
+        assert!(began.elapsed() < Duration::from_millis(1100));
+        // And while it waits to ask again: after five seconds of failures
+        // it waits two between them.
+        let stop = Arc::new(AtomicBool::new(false));
+        let told = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            told.store(true, Ordering::Release);
+        });
+        let began = tokio::time::Instant::now();
+        let gave_up = tokio::time::timeout(HOUR, retry_for(PATIENCE, &stop, failing));
+        assert!(gave_up.await.expect("it gives up").is_err());
+        assert!(
+            began.elapsed() < Duration::from_millis(5100),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     /// What is written to the cache directory is memory until the disk

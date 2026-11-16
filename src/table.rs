@@ -485,7 +485,8 @@ impl Table {
     /// Entries with `lo <= key < hi` (an empty `hi` is unbounded), in either
     /// direction. A request's scan keeps what it reads for later readers:
     /// its blocks in memory, and the table in the disk cache when that has
-    /// room. A merge reads each of its tables once and keeps none.
+    /// room. A merge reads each of its tables once, and keeps no block it
+    /// reads past those that arrive with an index.
     pub fn scan(
         self: &Arc<Self>,
         io: Arc<Io>,

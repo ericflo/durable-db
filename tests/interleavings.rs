@@ -2832,8 +2832,9 @@ async fn a_merge_that_would_leave_too_many_runs_merges_behind_it_without_a_flush
     gate.clear();
     hold_table(&gate, "app", 40);
     gate.release(Op::Put);
+    // Taken while the merge goes on: it is held at its fortieth table, and
+    // cannot have published before that.
     when_taken(&db, round(5), Duration::from_secs(10)).await;
-    // It had not ended: it comes to the table it is held at.
     held_upload(&gate, 4).await;
     gate.clear();
     gate.release(Op::Put);
@@ -2888,7 +2889,7 @@ async fn a_database_whose_merge_failed_takes_writes_that_begin_it_again() {
 /// runs it has: refusing them would not bring the runs down, and the
 /// server's two turns may be held by other databases' long merges for as
 /// long as those take. Here a database merges once, two others then hold
-/// both turns, and it is written and flushed until it has four runs.
+/// both turns, and it is written and flushed until it has six runs.
 #[tokio::test]
 async fn a_database_that_waits_for_its_turn_to_merge_takes_writes() {
     let bucket = Arc::new(MemoryStore::new());
@@ -3025,6 +3026,124 @@ async fn a_release_does_not_wait_out_a_merge_that_waits_for_the_store() {
         .await
         .unwrap();
     every_key_is_of(&db, 2).await;
+}
+
+/// What a merge gives way to may fail for the store, as a claim check that
+/// is not answered: it is asked for again at the next table, and the merge
+/// goes on, where it had failed and been begun again from its start. Here
+/// the claim checks of the flush a long merge gives way to fail seven times.
+#[tokio::test]
+async fn a_merge_goes_on_when_what_it_gave_way_to_failed() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, wide(1)).await.unwrap();
+    flushed(&db).await;
+    hold_table(&gate, "app", 2);
+    commit(&db, wide(2)).await.unwrap();
+    held_upload(&gate, 1).await;
+    commit(&db, round(3)).await.unwrap();
+    gate.clear();
+    gate.rule(Op::Exists, Action::Fail, 7, |key, _| {
+        key.contains("/db/app/c/")
+    });
+    gate.release(Op::Put);
+    // The merge ends with the round flushed beside it, and nothing else is
+    // written.
+    let merged = async {
+        while db.mem_bytes() > 0 || db.info().runs != 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), merged)
+        .await
+        .expect("the merge goes on");
+    assert!(
+        gate.rules
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|rule| rule.remaining == 0)
+    );
+    every_key_is_of(&db, 3).await;
+    only_the_tables_listed_are_stored(&bucket, &db).await;
+}
+
+/// A deletion, like a release, does not wait out a merge's read of a store
+/// that fails.
+#[tokio::test]
+async fn a_deletion_does_not_wait_out_a_merge_that_waits_for_the_store() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx, "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    gate.rule(Op::GetRange, Action::Fail, 1000, |key, _| {
+        key.contains("/db/app/t/")
+    });
+    commit(&db, round(2)).await.unwrap();
+    flushed(&db).await;
+    let waiting = async {
+        while gate.rules.lock().unwrap()[0].remaining > 995 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the merge reads its tables");
+    tokio::time::timeout(Duration::from_secs(5), db.destroy())
+        .await
+        .expect("the deletion ends")
+        .unwrap();
+}
+
+/// A database that closes, as one whose claim another server took, stops
+/// the reads its merge waits on: the merge holds one of the server's two
+/// turns, and would keep it for ten seconds more on each read. Here a merge
+/// is asking again for reads that fail when another server takes the
+/// database, and a strong read finds the claim gone.
+#[tokio::test]
+async fn a_database_that_closes_stops_its_merges_reads() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let (db, _) = Db::open(ctx.clone(), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, round(1)).await.unwrap();
+    flushed(&db).await;
+    gate.rule(Op::GetRange, Action::Fail, 1000, |key, _| {
+        key.contains("/db/app/t/")
+    });
+    commit(&db, round(2)).await.unwrap();
+    flushed(&db).await;
+    let waiting = async {
+        while gate.rules.lock().unwrap()[0].remaining > 995 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the merge reads its tables");
+    assert_eq!(ctx.io.merges.available_permits(), 1);
+    let (_other, _) = Db::open(ctx_with(gate.clone(), small_tables()), "app", None)
+        .await
+        .unwrap();
+    assert!(get(&db, b"k0001").await.is_err());
+    let freed = async {
+        while ctx.io.merges.available_permits() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3), freed)
+        .await
+        .expect("the merge gives its turn back");
 }
 
 /// A merge loads the index of a table by itself: it waits for a store that

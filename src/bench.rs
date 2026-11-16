@@ -284,15 +284,16 @@ pub async fn run(args: Bench) -> anyhow::Result<()> {
                     })
                     .collect();
                 let body = format!("{{\"writes\":[{}]}}", writes.join(","));
-                // A database that is flushing says so; wait as a client would.
-                let mut attempt = 0;
+                // A database that is flushing or merging says so; wait as a
+                // client would. Over a slow bucket a merge may hold writes
+                // back for as long as it takes to store a few tables.
+                let began = Instant::now();
                 loop {
-                    attempt += 1;
                     let status = shared.post(0, name, "commit", body.clone()).await?;
                     if status.is_success() {
                         break;
                     }
-                    if status != 503 || attempt >= 400 {
+                    if status != 503 || began.elapsed() > Duration::from_secs(600) {
                         bail!("loading {name}: {status}");
                     }
                     tokio::time::sleep(Duration::from_millis(25)).await;

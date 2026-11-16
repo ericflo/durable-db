@@ -289,9 +289,10 @@ pub struct Db {
     tx: mpsc::Sender<Cmd>,
     checks: Mutex<Checks>,
     closed: OnceLock<Error>,
-    /// A release or a deletion has begun. Shared with the reads of a
-    /// merge, which stop waiting for the store then.
-    closing: Arc<AtomicBool>,
+    closing: AtomicBool,
+    /// Set when a release or a deletion has begun, or the database has
+    /// closed: the reads of a merge stop waiting for the store then.
+    halt: Arc<AtomicBool>,
     flush_requested: AtomicBool,
     wake_writer: Notify,
     wake_maint: Notify,
@@ -761,7 +762,8 @@ impl Db {
             tx,
             checks: Mutex::default(),
             closed: OnceLock::new(),
-            closing: Arc::new(AtomicBool::new(false)),
+            closing: AtomicBool::new(false),
+            halt: Arc::new(AtomicBool::new(false)),
             flush_requested: AtomicBool::new(false),
             wake_writer: Notify::new(),
             wake_maint: Notify::new(),
@@ -815,6 +817,7 @@ impl Db {
 
     /// Stop serving. Nothing in flight will be acknowledged.
     fn poison(&self, error: Error) {
+        self.halt.store(true, Ordering::Release);
         if self.closed.set(error.clone()).is_ok() {
             tracing::info!(db = %self.tag, epoch = %self.epoch, %error, "database closed");
         }
@@ -1398,9 +1401,14 @@ impl Db {
         let Some(_turn) = turn.take() else {
             return Ok(false);
         };
-        let _merging = UnderWay::begin(&self.merging, runs(&tables[..count]).count());
         let began = Instant::now();
-        let Some(merged) = self.merge(maint, &tables, count, true).await? else {
+        let merged = {
+            // Only while it merges: once its result is published the runs
+            // are those of the tables listed.
+            let _merging = UnderWay::begin(&self.merging, runs(&tables[..count]).count());
+            self.merge(maint, &tables, count, true).await?
+        };
+        let Some(merged) = merged else {
             return Ok(false);
         };
         self.publish_merged(maint, &tables, count, &merged).await?;
@@ -1448,7 +1456,7 @@ impl Db {
             };
             let mut scans: Vec<RunScan> = runs(&tables[..count])
                 .filter_map(|run| {
-                    RunScan::over(io, run, &everything, Reader::Merge(self.closing.clone()))
+                    RunScan::over(io, run, &everything, Reader::Merge(self.halt.clone()))
                 })
                 .collect();
             let mut heads = Vec::with_capacity(scans.len());
@@ -1502,7 +1510,19 @@ impl Db {
                         let behind = behind.then_some((&mut spare, scans.as_mut_slice()));
                         let gave = self.give_way(maint, tables.len(), beside, behind).await;
                         maint.unpublished.extend(mine);
-                        gave?;
+                        match gave {
+                            Ok(()) => {}
+                            // A flush or a merge behind that the store
+                            // failed is asked for again at the next table,
+                            // as the maintenance loop asks for a flush
+                            // again: this merge waits out a store that
+                            // fails for a while, and one that failed would
+                            // be begun again from its start.
+                            Err(error @ Error::Unavailable(_)) => {
+                                report(&self.tag, "what a merge gave way to failed", &error);
+                            }
+                            Err(error) => return Err(error),
+                        }
                         // A release that began meanwhile has waited for
                         // that, and waits for no table more.
                         if self.closing() {
@@ -1763,6 +1783,7 @@ impl Db {
     /// manifest, and delete the claim so the next owner opens without
     /// revoking anyone or replaying anything.
     pub async fn close(self: &Arc<Self>) {
+        self.halt.store(true, Ordering::Release);
         if self.closing.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -1802,6 +1823,7 @@ impl Db {
     /// the next owner reads the bucket; repeating the request settles it.
     pub async fn destroy(self: &Arc<Self>) -> Result<()> {
         self.closing.store(true, Ordering::Release);
+        self.halt.store(true, Ordering::Release);
         self.leave.notify_waiters();
         let (done, stopped) = oneshot::channel();
         if self.tx.send(Cmd::Close(done)).await.is_ok() {
@@ -2029,7 +2051,8 @@ struct RunScan {
     lo: Bytes,
     hi: Bytes,
     reverse: bool,
-    /// Who reads: a merge keeps nothing of what it reads.
+    /// Who reads: a request, or a merge, which has no table fetched for the
+    /// disk cache and keeps no block it reads.
     reader: Reader,
     current: Option<TableScan>,
     /// The table `current` reads, and those read through before it.

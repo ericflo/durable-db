@@ -172,17 +172,22 @@ start "$@"
 echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $gib GiB, by $clients clients; $readers read it; a server's disk cache is $cache MiB"
 
 # Seconds since the start, the commit requests answered so far, and the
-# runs the database has, every ten seconds.
+# runs the database has, about every ten seconds; `-` for what could not be
+# read.
 began=$(date +%s)
 while sleep 10; do
-    echo "$(($(date +%s) - began)) $(metric 'durable_db_request_seconds_count{kind="commit"}') $(runs "$(info 2>/dev/null)")"
+    at=$(($(date +%s) - began))
+    answered=$(metric 'durable_db_request_seconds_count{kind="commit"}')
+    now=$(runs "$(info 2>/dev/null)")
+    echo "$at ${answered:--} ${now:--}"
 done >"$dir/commits" 2>/dev/null &
 sampler=$!
 bench --clients "$clients" --workload fill --max-bytes $((gib * 4 * 1073741824)) --value-bytes "$value" --random-values
 took=$(($(date +%s) - began))
 kill "$sampler"
 sampler=''
-awk -v took="$took" 'NF >= 2 { if (NR > 1) { d = $2 - last; if (low == "" || d < low) low = d; if (d > high) high = d } last = $2; if ($3 > most) most = $3 }
+awk -v took="$took" '$2 != "-" { if (seen) { d = ($2 - last) * 10 / ($1 - then); if (low == "" || d < low) low = d; if (d > high) high = d } seen = 1; last = $2; then = $1 }
+    $3 != "-" && $3 + 0 > most { most = $3 + 0 }
     END { printf "the fill took %d s; in ten seconds of it between %d and %d commit requests were answered, those told to wait among them; the database had %s runs at most\n", took, low, high, most == "" ? "?" : most }' "$dir/commits"
 held=$(info)
 filled=$(echo "$held" | field bytes)
@@ -234,8 +239,10 @@ reading --workload read
 reading --workload scan
 sent=$(metric durable_db_storage_sent_bytes_total)
 written=$(metric 'durable_db_request_seconds_count{kind="commit"}')
-bench --clients "$clients" --workload write --value-bytes "$value" --random-values --seconds $((seconds * 2))
-written=$((($(metric 'durable_db_request_seconds_count{kind="commit"}') - written) * value))
+bench --clients "$clients" --workload write --value-bytes "$value" --random-values --seconds $((seconds * 2)) | tee "$dir/write.out"
+# What was written is what was taken: those told to wait were answered too.
+waited=$(sed -nE 's/.*told to wait ([0-9]+).*/\1/p' "$dir/write.out")
+written=$((($(metric 'durable_db_request_seconds_count{kind="commit"}') - written - ${waited:-0}) * value))
 sent=$(($(metric durable_db_storage_sent_bytes_total) - sent))
 held=$(info)
 echo "after that the database holds $(mib "$(echo "$held" | field bytes)") MiB in $(tables "$held"); $(mib "$sent") MiB were sent to storage, $(awk -v s="$sent" -v w="$written" 'BEGIN { printf "%.1f", s / (w > 0 ? w : 1) }') times what was written"
