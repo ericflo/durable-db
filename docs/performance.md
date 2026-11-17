@@ -468,7 +468,22 @@ Three large databases of 2 GiB, so that one of them waits for a turn as well:
 
 With 2.1.9 two of them merged first, and their writes were taken after 24.5 and 25.3 seconds; the third waited for a turn, and was taken after 42.7. The small database had 16 runs by the time a turn came free. With 2.1.10 the three merged a table at a time, and their writes were taken after 37.7 to 38.6 seconds: the last four seconds sooner, the first two thirteen seconds later, and the three seven seconds later on average. The small database had 5 runs at most.
 
-On a bucket a merge of a large database takes as long as its link takes to carry the database twice over, so a database that waited for a turn with 2.1.9 waited minutes, and what a merge reads again when it goes on is a request to the bucket each time, and download. Neither has been measured on a bucket.
+On a bucket a merge of a large database takes as long as its link takes to carry the database twice over, so a database that waited for a turn with 2.1.9 waited minutes, and what a merge reads again when it goes on is a request to the bucket each time, and download. Neither has been measured on a bucket. Over a [slow link](#over-a-slow-link) to MinIO, the turns cost the large merges more than on a local directory:
+
+```sh
+DURABLE_DB=./durable-db SOAK_STORE=minio SOAK_LINK=8000000,16000000,40 SOAK_MIB=1024 scripts/soak-tenants.sh
+```
+
+Two databases of 1 GiB, 8 MB a second up and 16 down, 40 ms a round trip; one run of each release, one after another on the desktop, the evening after 2.1.10 was released, with nothing else running.
+
+| | 2.1.9 | 2.1.10 |
+| --- | ---: | ---: |
+| Each write at a quota waited | 457 s, 650 s | 909 s, 986 s |
+| The small database's most runs | 48 | 18 |
+| Read from storage and sent to it, until the last was taken | 2,879 MiB and 4,331 MiB | 4,445 MiB and 6,672 MiB |
+| The link carried, up and down, in the whole run | 14,992 MiB and 4,455 MiB | 17,133 MiB and 6,388 MiB |
+
+With 2.1.10 the small database had 18 runs at most where it had had 48, and the two merges took half as long again and more. It was written by 64 clients and flushed about every eight seconds, and had a merge due after almost every flush; so each large merge gave its turn up at almost every table, waited while the small one merged over the link, and read again what it had read ahead. Its strong reads were held to some 110 a second in both by the claim check each one waits for, a round trip over the link, and not by its runs, whose tables were in the server's disk cache.
 
 ### Over a slow link
 

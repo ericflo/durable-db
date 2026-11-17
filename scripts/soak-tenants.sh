@@ -25,8 +25,10 @@
 # One server with the flags of the Kubernetes manifest, in a systemd scope
 # limited to 1 GiB without swap and four CPUs, on a local directory, which
 # answers in a fraction of a millisecond: a merge of 4 GiB takes half a
-# minute here, and as long as its link takes to carry the database twice
-# over on a bucket.
+# minute there, and as long as its link takes to carry the database twice
+# over on a bucket. With SOAK_STORE=minio it is a community build of MinIO
+# in a container held to 4 GiB and four CPUs, and with SOAK_LINK a slow link
+# to it, as in scripts/soak-size.sh.
 #
 #   scripts/soak-tenants.sh
 #   DURABLE_DB          the binary (default durable-db)
@@ -34,6 +36,11 @@
 #   SOAK_GIB            the size of each, in GiB (default 4)
 #   SOAK_CLIENTS        clients that write the small database (default 64)
 #   SOAK_READ_CLIENTS   clients that read it (default 8)
+#   SOAK_MIB            the size of each large database in MiB, in the place of SOAK_GIB
+#   SOAK_STORE          minio (default: a local directory)
+#   SOAK_LINK           with minio, a slow link to it: UP,DOWN,RTT, bytes a second each way and a
+#                       round trip in ms (scripts/slow-link.py; default: none)
+#   STORE_PORT          the port MinIO is given (default 19320), and the link the next one
 #   SOAK_DIR            where to put the data (default: a temporary directory)
 #   SOAK_PORT           the server's port (default 17784)
 #
@@ -41,27 +48,69 @@
 set -eu
 bin=$(command -v "${DURABLE_DB:-durable-db}")
 large=${SOAK_LARGE:-2}
-gib=${SOAK_GIB:-4}
+mib=${SOAK_MIB:-$((${SOAK_GIB:-4} * 1024))}
 clients=${SOAK_CLIENTS:-64}
 readers=${SOAK_READ_CLIENTS:-8}
 value=4096
-keys=$((gib * 1073741824 / value))
+keys=$((mib * 1048576 / value))
 url="http://127.0.0.1:${SOAK_PORT:-17784}"
 dir=$(mktemp -d -p "${SOAK_DIR:-${TMPDIR:-/tmp}}" durable-db-tenants.XXXXXX)
-server='' sampler='' quotas=''
+server='' sampler='' quotas='' link=''
+endpoint="http://127.0.0.1:${STORE_PORT:-19320}"
+container=durable-db-tenants-$$
 cleanup() {
-    for pid in $sampler $quotas $server; do kill "$pid" 2>/dev/null || true; done
+    for pid in $sampler $quotas $server $link; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
+    [ "${SOAK_STORE:-}" != minio ] || docker rm -f -v "$container" >/dev/null 2>&1 || true
     rm -rf "$dir"
 }
 trap cleanup EXIT INT TERM
 
-od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$dir/admin.key"
+random() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
+random 32 >"$dir/admin.key"
 chmod 600 "$dir/admin.key"
-mkdir "$dir/data"
-cp "$dir/admin.key" "$dir/data/admin.key"
+where='a local directory'
+if [ "${SOAK_STORE:-}" = minio ]; then
+    where='MinIO'
+    access="local$(random 6)"
+    secret=$(random 20)
+    signed() {
+        curl -fsS -m 20 --aws-sigv4 "aws:amz:us-east-1:s3" --user "$access:$secret" "$@"
+    }
+    docker run -d --rm --name "$container" --memory 4g --cpus 4 -p "${endpoint#http://}:9000" \
+        -e MINIO_ROOT_USER="$access" -e MINIO_ROOT_PASSWORD="$secret" \
+        pgsty/minio:RELEASE.2026-08-04T00-00-00Z server /data >/dev/null
+    tries=0
+    until signed "$endpoint/" >/dev/null 2>&1; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 60 ] || { echo "the store did not start"; exit 1; }
+        sleep 0.5
+    done
+    signed -o /dev/null -X PUT "$endpoint/plain"
+    served=$endpoint
+    if [ -n "${SOAK_LINK:-}" ]; then
+        up=${SOAK_LINK%%,*} rtt=${SOAK_LINK##*,}
+        down=${SOAK_LINK#*,} down=${down%,*}
+        python3 "$(dirname "$0")/slow-link.py" $((${STORE_PORT:-19320} + 1)) "${endpoint#http://}" \
+            "$up" "$down" "$rtt" >"$dir/link" 2>&1 &
+        link=$!
+        until grep -q ready "$dir/link" 2>/dev/null; do
+            kill -0 "$link" 2>/dev/null || { cat "$dir/link"; exit 1; }
+            sleep 0.1
+        done
+        served="http://127.0.0.1:$((${STORE_PORT:-19320} + 1))"
+        where="MinIO over a link of $up bytes a second up and $down down, $rtt ms a round trip"
+    fi
+    export DURABLE_DB_BUCKET=plain DURABLE_DB_ENDPOINT="$served" DURABLE_DB_REGION=us-east-1 \
+        DURABLE_DB_PREFIX="soak-$(random 4)" AWS_ACCESS_KEY_ID="$access" AWS_SECRET_ACCESS_KEY="$secret"
+    set -- --key-file "$dir/admin.key"
+else
+    mkdir "$dir/data"
+    cp "$dir/admin.key" "$dir/data/admin.key"
+    set -- --data "$dir/data"
+fi
 systemd-run --user --scope -q -p MemoryMax=1G -p MemorySwapMax=0 -p CPUQuota=400% \
-    "$bin" serve --listen "${url#http://}" --data "$dir/data" \
+    "$bin" serve --listen "${url#http://}" "$@" \
     --cache-dir "$dir/cache" --cache-dir-bytes 1073741824 \
     --cache-bytes 201326592 --memtable-bytes 100663296 \
     --body-bytes 134217728 --result-bytes 134217728 --max-connections 1024 \
@@ -89,8 +138,8 @@ metric() { curl -fs "$url/metrics" | awk -v name="$1" '$1 == name { print int($2
 mib() { echo $(($1 / 1048576)); }
 
 names=$(seq -f 'big-%g' 0 $((large - 1)))
-echo "the server runs $("$bin" --version) on a local directory; $large databases are filled with $keys keys of $value bytes each, $gib GiB, by 64 clients; $clients clients write a small one and $readers read it"
-bench --database big --databases "$large" --keys "$keys" --clients 64 --workload fill --max-bytes $((gib * 4 * 1073741824))
+echo "the server runs $("$bin" --version) on $where; $large databases are filled with $keys keys of $value bytes each, $mib MiB, by 64 clients; $clients clients write a small one and $readers read it"
+bench --database big --databases "$large" --keys "$keys" --clients 64 --workload fill --max-bytes $((mib * 4 * 1048576))
 alive
 for name in $names; do
     info "$name" | field bytes >"$dir/$name.filled"
@@ -170,6 +219,12 @@ for name in $names; do
 done
 echo "until the last was taken, $(mib "$merged_fetched") MiB were read from storage and $(mib "$merged_sent") MiB sent to it"
 echo "the most runs the small database had: $(grep . "$dir/runs" | sort -n | tail -1)"
+if [ -n "$link" ]; then
+    kill -TERM "$link"
+    wait "$link" 2>/dev/null || true
+    link=''
+    awk '/^carried/ { printf "the link carried %d MiB up and %d MiB down\n", $2 / 1048576, $6 / 1048576 }' "$dir/link"
+fi
 kill "$server"
 wait "$server" 2>/dev/null || true
 server=''
