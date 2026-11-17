@@ -427,7 +427,7 @@ DURABLE_DB=./durable-db SOAK_STORE=bucket SOAK_GIB=1 SOAK_READ_CLIENTS=8 SOAK_SE
 | A write at a quota under that waited | 528 s | 282 s |
 | Requests to storage that failed and were made again | 24 | 11 |
 
-They did not. A database takes no more writes than it can flush, 32 MiB of them at most, and the writes of 256 clients were held to that, told to wait some 450,000 times, before the runs came to 24; the link carried 4.7 MB a second up that morning. The night before, over a link that carried 1.1 MiB a second, 2.1.8 had 32 runs with 64 clients ([above](#a-large-database)). The bound of 2.1.9 is shown by the tests of finding 45 and not by a run here. The reads after the first minute and the scans differ more than the fills. The server that opens the database begins a merge of the runs that are too many: 2.1.8's ended during its second minute of reads, and its scans found 12 runs; 2.1.9's had not ended when its scans did, and they found 19. Over a link that merge takes minutes, and when it ends is not the same from one run to the next.
+They did not. A database takes no more writes than it can flush, 32 MiB of them at most, and the writes of 256 clients were held to that, told to wait some 450,000 times, before the runs came to 24; the link carried 4.7 MB a second up that morning. The night before, over a link that carried 1.1 MiB a second, 2.1.8 had 32 runs with 64 clients ([above](#a-large-database)). The bound of 2.1.9 is shown by the tests of finding 45 and not by a run here; [over a slow link](#over-a-slow-link) it is set against other values. The reads after the first minute and the scans differ more than the fills. The server that opens the database begins a merge of the runs that are too many: 2.1.8's ended during its second minute of reads, and its scans found 12 runs; 2.1.9's had not ended when its scans did, and they found 19. Over a link that merge takes minutes, and when it ends is not the same from one run to the next.
 
 ### Several databases merging at once
 
@@ -469,6 +469,40 @@ Three large databases of 2 GiB, so that one of them waits for a turn as well:
 With 2.1.9 two of them merged first, and their writes were taken after 24.5 and 25.3 seconds; the third waited for a turn, and was taken after 42.7. The small database had 16 runs by the time a turn came free. With 2.1.10 the three merged a table at a time, and their writes were taken after 37.7 to 38.6 seconds: the last four seconds sooner, the first two thirteen seconds later, and the three seven seconds later on average. The small database had 5 runs at most.
 
 On a bucket a merge of a large database takes as long as its link takes to carry the database twice over, so a database that waited for a turn with 2.1.9 waited minutes, and what a merge reads again when it goes on is a request to the bucket each time, and download. Neither has been measured on a bucket.
+
+### Over a slow link
+
+```sh
+DURABLE_DB=./durable-db SOAK_STORE=minio SOAK_LINK=8000000,16000000,40 SOAK_MIB=2048 SOAK_READ_CLIENTS=8 SOAK_SECONDS=30 scripts/soak-size.sh
+```
+
+`SOAK_LINK` puts `scripts/slow-link.py` between the server and MinIO: what the server sends is carried at 8 MB a second and what it is sent at 16, each shared by all its connections as one link's is, and each byte arrives 20 ms after it left. The Backblaze figures above were measured over a link that carried 0.5 to 4.7 MB a second up and was not the same from one run to the next; this one is.
+
+**The bound on runs.** Since 2.1.9 a write waits while a merge would leave a database with more than twenty-four runs, the runs that merge takes counting as one (finding 45). The figure was chosen. The runs below set it against 12 and 48, with builds of 2.1.10 that differ from one another only in it: the factor of `max_runs` in `Db::crowded` in `src/db.rs`, 1, 2 as released, and 4, each built with `cargo build --release`. Two runs of 12 and of 24 and one of 48, one after another on the desktop, the evening after 2.1.10 was released, with nothing else running; a database of 2 GiB filled by 64 clients and read by 8.
+
+| Writes wait while a merge would leave more than | 12, first | 12, second | 24, first | 24, second | 48 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| The fill took | 2167 s | 1984 s | 1921 s | 1925 s | 1944 s |
+| Commits a second while it was filled | 242 (p50 252 ms, p99 312 ms) | 264 (p50 254 ms, p99 307 ms) | 273 (p50 253 ms, p99 315 ms) | 272 (p50 254 ms, p99 309 ms) | 270 (p50 254 ms, p99 317 ms) |
+| Commits that were told to wait | 212,248 | 44,023 | 0 | 0 | 0 |
+| Most runs while it was filled | 23 | 24 | 20 | 22 | 25 |
+| It then had | 70 tables in 14 runs | 76 tables in 23 runs | 72 tables in 18 runs | 75 tables in 22 runs | 76 tables in 25 runs |
+| Sent to storage while it was filled | 11,531 MiB, 5.6 times what was written | 10,593 MiB, 5.2 times what was written | 11,005 MiB, 5.4 times what was written | 10,444 MiB, 5.1 times what was written | 10,404 MiB, 5.1 times what was written |
+| The reads and scans looked in | 15, 12, 12 runs | 24, 24, 24 runs | 19, 19, 19 runs | 23, 23, 23 runs | 26, 26, 26 runs |
+| Strong reads a second, at first | 22 (p50 324 ms, p99 1.7 s) | 10 (p50 820 ms, p99 3.6 s) | 15 (p50 523 ms, p99 2.7 s) | 12 (p50 671 ms, p99 3.4 s) | 10 (p50 800 ms, p99 3.6 s) |
+| Strong reads a second, after that | 86 (p50 68 ms, p99 282 ms) | 19 (p50 447 ms, p99 841 ms) | 32 (p50 258 ms, p99 542 ms) | 23 (p50 368 ms, p99 769 ms) | 22 (p50 379 ms, p99 818 ms) |
+| Scans a second | 69 (p50 116 ms, p99 204 ms) | 20 (p50 381 ms, p99 743 ms) | 27 (p50 289 ms, p99 512 ms) | 19 (p50 440 ms, p99 676 ms) | 20 (p50 393 ms, p99 591 ms) |
+| Writes over it a second | 262 (p50 255 ms, p99 268 ms) | 110 (p50 254 ms, p99 268 ms) | 265 (p50 252 ms, p99 261 ms) | 255 (p50 257 ms, p99 298 ms) | 295 (p50 206 ms, p99 280 ms) |
+| Writes over it that were told to wait | 0 | 29,607 | 0 | 0 | 0 |
+| Runs after them | 4 | 16 | 23 | 15 | 15 |
+| A write at a quota under that waited | 511 s | 582 s | 520 s | 553 s | 565 s |
+| Most memory while it was filled | 260 MiB | 268 MiB | 260 MiB | 276 MiB | 278 MiB |
+| The link carried, up and down | 14,344 and 4,450 MiB | 13,770 and 4,053 MiB | 13,778 and 3,293 MiB | 13,495 and 3,785 MiB | 13,509 and 3,888 MiB |
+| Requests to storage that failed | 0 | 0 | 0 | 0 | 0 |
+
+Neither 24 nor 48 was reached: no write of those three runs was told to wait, and their fills took the same time, 1,921 to 1,944 s. Every commit waited for its log's upload over the link, a quarter of a second, which held the 64 clients to some 270 commits a second, and the merges kept up with that to within 20 to 25 runs. A bound of 12 was reached: 212,248 and 44,023 commits were told to wait, the fills took 12 and 3 per cent longer than those of 24 and 48, and it did not keep the runs down, 23 and 24 at most, since the runs a merge under way takes count as one. Each server that opened the database after the kill began a merge of the runs that were more than twelve; in the second run of 12 the writes over the database were told to wait while that merge ran, 29,607 times, and were taken at 110 a second where the others took 255 to 295. The reads and scans followed how many runs the database had when its server was killed, which the moment of the kill decides, and not the bound. A read of a key that neither cache holds asks the store for a block in each run, one after another, each a round trip over this link: with 15 runs and then 12, 22 and 86 reads a second; with 19 to 26 runs, 10 to 32. So twenty-four stays. Over this link it was not reached, and twelve held writes back without holding the runs down.
+
+A write at the quota waited 511 to 582 s. That is more than one merge of the database takes over the link, about 350 s for reading 1.2 GiB at 16 MB a second and writing 2 GiB at 8, since it waits as well for the end of a merge that the writes over the database had begun.
 
 ## What it costs in requests
 

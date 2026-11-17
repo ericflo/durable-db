@@ -45,12 +45,15 @@
 #   scripts/soak-size.sh
 #   DURABLE_DB         the binary (default durable-db)
 #   SOAK_GIB           the size to fill to, in GiB (default 4)
+#   SOAK_MIB           the size to fill to, in MiB, in the place of SOAK_GIB
 #   SOAK_VALUE_BYTES   bytes in a value (default 4096)
 #   SOAK_CLIENTS       clients that write (default 64)
 #   SOAK_READ_CLIENTS  clients that read and scan (default: as many)
 #   SOAK_SECONDS       how long it is read, and scanned; written over for twice that (default 60)
 #   SOAK_RUNS          runs the database is to have when the first server is killed (default: as the fill left it)
 #   SOAK_STORE         minio or bucket (default: a local directory)
+#   SOAK_LINK          with minio, a slow link to it: UP,DOWN,RTT, bytes a second each way and a
+#                      round trip in ms (scripts/slow-link.py; default: none)
 #   SOAK_CACHE_MIB     the servers' disk cache, in MiB (default 1024, the Kubernetes manifest's)
 #   SOAK_DIR           where to put the data (default: a temporary directory)
 #   STORE_PORT         the port MinIO is given (default 19310)
@@ -60,18 +63,18 @@
 # with SOAK_STORE=minio Docker and curl 7.75 or later.
 set -eu
 bin=$(command -v "${DURABLE_DB:-durable-db}")
-gib=${SOAK_GIB:-4}
+mib=${SOAK_MIB:-$((${SOAK_GIB:-4} * 1024))}
 value=${SOAK_VALUE_BYTES:-4096}
 clients=${SOAK_CLIENTS:-64}
 readers=${SOAK_READ_CLIENTS:-$clients}
 seconds=${SOAK_SECONDS:-60}
 cache=${SOAK_CACHE_MIB:-1024}
-keys=$((gib * 1073741824 / value))
+keys=$((mib * 1048576 / value))
 endpoint="http://127.0.0.1:${STORE_PORT:-19310}"
 url="http://127.0.0.1:${SOAK_PORT:-17783}"
 dir=$(mktemp -d -p "${SOAK_DIR:-${TMPDIR:-/tmp}}" durable-db-size.XXXXXX)
 container=durable-db-size-$$
-server='' sampler=''
+server='' sampler='' link=''
 cleanup() {
     status=$?
     # A run that failed on a bucket does not leave gigabytes in it.
@@ -79,7 +82,7 @@ cleanup() {
         "$bin" delete size-0 --url "$url" --key-file "$dir/admin.key" >/dev/null 2>&1 ||
             echo "what was written may be left under the prefix ${DURABLE_DB_PREFIX:-}" >&2
     fi
-    for pid in $sampler $server; do kill "$pid" 2>/dev/null || true; done
+    for pid in $sampler $server $link; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
     [ "${SOAK_STORE:-}" != minio ] || docker rm -f -v "$container" >/dev/null 2>&1 || true
     rm -rf "$dir"
@@ -106,7 +109,21 @@ if [ "${SOAK_STORE:-}" = minio ]; then
         sleep 0.5
     done
     signed -o /dev/null -X PUT "$endpoint/plain"
-    export DURABLE_DB_BUCKET=plain DURABLE_DB_ENDPOINT="$endpoint" DURABLE_DB_REGION=us-east-1 \
+    served=$endpoint
+    if [ -n "${SOAK_LINK:-}" ]; then
+        up=${SOAK_LINK%%,*} rtt=${SOAK_LINK##*,}
+        down=${SOAK_LINK#*,} down=${down%,*}
+        python3 "$(dirname "$0")/slow-link.py" $((${STORE_PORT:-19310} + 1)) "${endpoint#http://}" \
+            "$up" "$down" "$rtt" >"$dir/link" 2>&1 &
+        link=$!
+        until grep -q ready "$dir/link" 2>/dev/null; do
+            kill -0 "$link" 2>/dev/null || { cat "$dir/link"; exit 1; }
+            sleep 0.1
+        done
+        served="http://127.0.0.1:$((${STORE_PORT:-19310} + 1))"
+        where="MinIO over a link of $up bytes a second up and $down down, $rtt ms a round trip"
+    fi
+    export DURABLE_DB_BUCKET=plain DURABLE_DB_ENDPOINT="$served" DURABLE_DB_REGION=us-east-1 \
         DURABLE_DB_PREFIX="soak-$(random 4)" AWS_ACCESS_KEY_ID="$access" AWS_SECRET_ACCESS_KEY="$secret"
     set -- --key-file "$dir/admin.key"
 elif [ "${SOAK_STORE:-}" = bucket ]; then
@@ -169,7 +186,7 @@ peak() { awk '/^VmHWM/ { print int($2 / 1024) }' "/proc/$server/status"; }
 failures() { curl -fs "$url/metrics" | awk '/^durable_db_storage_failures_total/ { n += $2 } END { print n + 0 }'; }
 
 start "$@"
-echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $gib GiB, by $clients clients; $readers read it; a server's disk cache is $cache MiB"
+echo "the server runs $("$bin" --version) on $where; one database is filled with $keys keys of $value bytes, $mib MiB, by $clients clients; $readers read it; a server's disk cache is $cache MiB"
 
 # Seconds since the start, the commit requests answered so far, and the
 # runs the database has, about every ten seconds; `-` for what could not be
@@ -182,7 +199,7 @@ while sleep 10; do
     echo "$at ${answered:--} ${now:--}"
 done >"$dir/commits" 2>/dev/null &
 sampler=$!
-bench --clients "$clients" --workload fill --max-bytes $((gib * 4 * 1073741824)) --value-bytes "$value" --random-values
+bench --clients "$clients" --workload fill --max-bytes $((mib * 4 * 1048576)) --value-bytes "$value" --random-values
 took=$(($(date +%s) - began))
 kill "$sampler"
 sampler=''
@@ -290,6 +307,12 @@ from=$(date +%s%N)
 echo "the database was deleted in $((($(date +%s%N) - from) / 1000000)) ms"
 alive
 echo "requests to storage that failed: $((failed + $(failures))); the servers said $(grep -c 'the store refuses' "$dir/server.log") times that the store refuses"
+if [ -n "$link" ]; then
+    kill -TERM "$link"
+    wait "$link" 2>/dev/null || true
+    link=''
+    awk '/^carried/ { printf "the link carried %d MiB up and %d MiB down\n", $2 / 1048576, $6 / 1048576 }' "$dir/link"
+fi
 kill "$server"
 wait "$server" 2>/dev/null || true
 server=''
