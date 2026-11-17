@@ -17,7 +17,7 @@ use crate::{
     table::{Entry, Table, TableBuilder, TableMeta, TableScan},
 };
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt};
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use parking_lot::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1224,6 +1224,16 @@ impl Db {
             }
             let mut failed = false;
             loop {
+                // A turn granted while this flushed is this database's: were
+                // it to merge with another, the one it was granted would wait
+                // unused for that merge. While one is asked for and not yet
+                // granted, none is free to take: those given back go to the
+                // databases in line first.
+                if let Some(waiting) = queued.as_mut()
+                    && let Some(granted) = waiting.as_mut().now_or_never()
+                {
+                    (turn, queued) = (granted, None);
+                }
                 match self.compact(&mut maint, &mut turn).await {
                     Ok(true) => continue,
                     Ok(false) => break,

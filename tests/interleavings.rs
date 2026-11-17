@@ -3639,6 +3639,56 @@ async fn waiting_for_a_turn_in<F: Future<Output = Arc<Db>>>(
     [a, b, c]
 }
 
+/// A database whose turn to merge was granted while it flushed merges with
+/// that turn, and takes no other: the one it was granted would have waited
+/// unused for the whole merge, a turn kept from others. Its turn is granted
+/// while a flush of it is held, and the other is free when it comes to
+/// merge.
+#[tokio::test]
+async fn a_turn_granted_during_a_flush_is_the_one_a_merge_takes() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let ctx = ctx_with(gate.clone(), small_tables());
+    let first = ctx.io.merges.clone().try_acquire_owned().unwrap();
+    let second = ctx.io.merges.clone().try_acquire_owned().unwrap();
+    let (x, _) = Db::open(ctx.clone(), "x", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    for i in 1..=2 {
+        commit(&x, round(i)).await.unwrap();
+        flushed(&x).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(ctx.io.merge_waited_for(), "it waits for a turn");
+    hold_table(&gate, "x", 1);
+    commit(&x, round(3)).await.unwrap();
+    x.request_flush();
+    held_upload(&gate, 1).await;
+    drop(first);
+    drop(second);
+    assert_eq!(ctx.io.merges.available_permits(), 1);
+    hold_table(&gate, "x", 1);
+    gate.release(Op::Put);
+    held_upload(&gate, 2).await;
+    assert_eq!(
+        ctx.io.merges.available_permits(),
+        1,
+        "the merge took a turn beside the one it was granted"
+    );
+    gate.clear();
+    gate.release(Op::Put);
+    let merged = async {
+        while x.info().runs > 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), merged)
+        .await
+        .expect("the merge ends");
+    assert_eq!(ctx.io.merges.available_permits(), 2);
+    every_key_is_of(&x, 3).await;
+}
+
 /// A merge gives its turn to merge to a database that waits for one, between
 /// two of its tables, and waits for one again: a merge of a large database
 /// over a bucket holds its turn for many minutes, and a database that waits
