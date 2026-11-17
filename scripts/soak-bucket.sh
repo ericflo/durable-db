@@ -7,7 +7,8 @@
 # killed, and this script fails. One client for each database writes 1 KiB
 # values that do not compress. Then each database is deleted, one after
 # another. Printed: the load's result; the most memory the server used and
-# what it used from the third minute on; how many purges failed; how the
+# what it used from the third minute on, and in a run of an hour or more
+# the least and the most of each half hour; how many purges failed; how the
 # deletions went; and what the server logged of a store that refuses, with
 # how many requests it failed without sending them. The server may not
 # panic, and no round of its housekeeping may run for thirty seconds.
@@ -95,7 +96,20 @@ kill "$sampler"
 sampler=''
 awk -v most="$(awk '/^VmHWM/ { print int($2 / 1024) }' "/proc/$server/status")" '
     $1 >= 180 && NF == 2 { if (!low || $2 < low) low = $2; if ($2 > high) high = $2 }
-    END { printf "memory: %d MiB at most, and from the third minute between %d and %d MiB, under a limit of 1024 MiB\n", most, low, high }
+    NF == 2 {
+        w = int($1 / 1800)
+        if (!(w in wl) || $2 < wl[w]) wl[w] = $2
+        if ($2 > wh[w]) wh[w] = $2
+        if (w > last) last = w
+    }
+    END {
+        printf "memory: %d MiB at most, and from the third minute between %d and %d MiB, under a limit of 1024 MiB\n", most, low, high
+        if (last >= 2) {
+            printf "in each half hour, between:"
+            for (w = 0; w <= last; w++) printf "%s %d and %d", (w ? "," : ""), wl[w], wh[w]
+            printf " MiB\n"
+        }
+    }
 ' "$dir/memory"
 curl -fs "$url/metrics" | awk '
     /^durable_db_storage_seconds_count\{op="purge"\}/ { purges = $2 }
