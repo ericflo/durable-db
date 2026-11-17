@@ -22,6 +22,7 @@ CONSTANTS
   MaxTxn,                \* transactions ever proposed
   Deletion,              \* whether an owner may be asked to delete the database
   Requests,              \* whether clients send transactions again, and ones that are refused
+  LateDeletes,           \* whether a collection's DELETE may arrive at any later time
   \* Protocol rules.  The real protocol sets every one of these to TRUE.
   \* Each negative control sets exactly one to FALSE and must be refuted.
   CheckBeforeAck,        \* acknowledge only after a claim check that began after the frame PUT
@@ -49,6 +50,8 @@ VARIABLES
   sentM,      \* manifest PUTs (retried until success, so duplicates may arrive late)
   sentF,      \* frame PUTs (likewise)
   sentT,      \* whether a tombstone PUT was sent
+  sentDM,     \* manifests a collection sent a DELETE for (with LateDeletes)
+  sentDF,     \* frames likewise
   \* ---- writer-local state, lost on a crash ----
   pc, ep, st, nb, sent, conf, pm, todo, collect, rs,
   gen,        \* newest manifest generation sent (never reused, even after a failure)
@@ -62,7 +65,7 @@ VARIABLES
   gone        \* some writer has concluded that the database is deleted
 
 store == <<claims, manifests, frames, tomb>>
-wire  == <<sentC, sentM, sentF, sentT>>
+wire  == <<sentC, sentM, sentF, sentT, sentDM, sentDF>>
 local == <<pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans>>
 book  == <<lastN, nextTxn, acked, badRead, gone>>
 vars  == <<store, wire, local, book>>
@@ -98,6 +101,7 @@ Visible(w) == SubSeq(st[w], 1, nb[w] + conf[w])
 Init ==
   /\ claims = {} /\ manifests = {} /\ frames = {} /\ tomb = FALSE
   /\ sentC = {} /\ sentM = {} /\ sentF = {} /\ sentT = FALSE
+  /\ sentDM = {} /\ sentDF = {}
   /\ pc = [w \in Writers |-> "idle"]
   /\ ep = [w \in Writers |-> <<0, w>>]
   /\ st = [w \in Writers |-> <<>>]
@@ -158,8 +162,8 @@ PutClaim(w) ==
      \/ /\ sentC' = sentC \cup {ep[w]}
         /\ pc' = [pc EXCEPT ![w] = "idle"]
         /\ UNCHANGED claims
-  /\ UNCHANGED <<manifests, frames, tomb, sentM, sentF, sentT, ep, st, nb, sent, conf, gen,
-                 fc, cg, cc, pm, todo, collect, rs, dl, ans, book>>
+  /\ UNCHANGED <<manifests, frames, tomb, sentM, sentF, sentT, sentDM, sentDF, ep, st, nb, sent,
+                 conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans, book>>
 
 ListClaims(w) ==
   /\ pc[w] = "listc"
@@ -168,7 +172,8 @@ ListClaims(w) ==
             /\ UNCHANGED todo
        ELSE /\ todo' = [todo EXCEPT ![w] = {c \in claims : Less(c, ep[w])}]
             /\ pc' = [pc EXCEPT ![w] = IF RevokeBeforeRead THEN "revoke" ELSE "listm"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, collect, rs, dl, ans, book>>
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, collect, rs, dl, ans,
+                 book>>
 
 Revoke(w) ==
   /\ pc[w] = "revoke"
@@ -193,7 +198,8 @@ ListManifests(w) ==
               /\ UNCHANGED pm
          ELSE /\ pm' = [pm EXCEPT ![w] = IF lower = {} THEN Genesis ELSE Newest(lower)]
               /\ pc' = [pc EXCEPT ![w] = "getm"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, todo, collect, rs, dl, ans, book>>
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, todo, collect, rs, dl, ans,
+                 book>>
 
 \* GET the manifest and the frames after it.  A missing manifest means a
 \* higher epoch collected it, so this writer has already been revoked.
@@ -214,8 +220,8 @@ PutFirstManifest(w) ==
   /\ pc[w] = "putm"
   /\ sentM' = sentM \cup {Manifest(w, 0, 0)}
   /\ pc' = [pc EXCEPT ![w] = "waitm"]
-  /\ UNCHANGED <<store, sentC, sentF, sentT, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, ans, book>>
+  /\ UNCHANGED <<store, sentC, sentF, sentT, sentDM, sentDF, ep, st, nb, sent, conf, gen, fc, cg,
+                 cc, pm, todo, collect, rs, dl, ans, book>>
 
 \* The first manifest is stored. One claim check later, everything this
 \* writer recovered is permanent, including transactions its predecessor
@@ -257,8 +263,8 @@ GiveUp(w) ==
   /\ ~KeepClaimAfterRevoke
   /\ pc[w] \in {"revoke", "listm", "getm", "putm"}
   /\ pc' = [pc EXCEPT ![w] = "abort"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans,
-                 book>>
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
+                 ans, book>>
 
 (* ------------------------------- serving -------------------------------- *)
 
@@ -270,8 +276,8 @@ Commit(w) ==
   /\ sent' = [sent EXCEPT ![w] = @ + 1]
   /\ sentF' = sentF \cup {[e |-> ep[w], n |-> sent[w] + 1, txn |-> nextTxn]}
   /\ nextTxn' = nextTxn + 1
-  /\ UNCHANGED <<store, sentC, sentM, sentT, pc, ep, nb, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, ans, lastN, acked, badRead, gone>>
+  /\ UNCHANGED <<store, sentC, sentM, sentT, sentDM, sentDF, pc, ep, nb, conf, gen, fc, cg, cc, pm,
+                 todo, collect, rs, dl, ans, lastN, acked, badRead, gone>>
 
 \* The claim check: one HEAD that begins after frames conf+1..k are stored.
 \* It acknowledges those frames and answers every read that began before it,
@@ -299,8 +305,8 @@ Check(w) ==
 StartRead(w) ==
   /\ pc[w] = "active" /\ rs[w] = {} /\ acked # {}
   /\ rs' = [rs EXCEPT ![w] = acked]
-  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, dl, ans,
-                 book>>
+  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, dl,
+                 ans, book>>
 
 (* ------------------------ requests that store nothing ------------------- *)
 
@@ -319,8 +325,8 @@ Judge(w) ==
             /\ UNCHANGED acked
        ELSE /\ acked' = acked \cup {st[w]}
             /\ UNCHANGED ans
-  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
-                 lastN, nextTxn, badRead, gone>>
+  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs,
+                 dl, lastN, nextTxn, badRead, gone>>
 
 \* The transactions a writer recognizes a retry of: all it holds, those it
 \* recovered from the epochs before its own included.
@@ -340,8 +346,8 @@ Resend(w) ==
        /\ st' = [st EXCEPT ![w] = Append(@, t)]
        /\ sent' = [sent EXCEPT ![w] = @ + 1]
        /\ sentF' = sentF \cup {[e |-> ep[w], n |-> sent[w] + 1, txn |-> t]}
-  /\ UNCHANGED <<store, sentC, sentM, sentT, pc, ep, nb, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, ans, book>>
+  /\ UNCHANGED <<store, sentC, sentM, sentT, sentDM, sentDF, pc, ep, nb, conf, gen, fc, cg, cc, pm,
+                 todo, collect, rs, dl, ans, book>>
 
 (* --------------------------- checkpoint, collection --------------------- *)
 
@@ -351,8 +357,8 @@ Flush(w) ==
   /\ fc' = [fc EXCEPT ![w] = conf[w]]
   /\ sentM' = sentM \cup {Manifest(w, gen[w] + 1, conf[w])}
   /\ pc' = [pc EXCEPT ![w] = "flushing"]
-  /\ UNCHANGED <<store, sentC, sentF, sentT, ep, st, nb, sent, conf, cg, cc, pm, todo, collect, rs,
-                 dl, ans, book>>
+  /\ UNCHANGED <<store, sentC, sentF, sentT, sentDM, sentDF, ep, st, nb, sent, conf, cg, cc, pm,
+                 todo, collect, rs, dl, ans, book>>
 
 \* The claim check that follows a stored manifest. Only now may the writer
 \* delete what that manifest no longer references.
@@ -373,22 +379,30 @@ FlushCheck(w) ==
 FlushAbandon(w) ==
   /\ pc[w] = "flushing"
   /\ pc' = [pc EXCEPT ![w] = "active"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans,
-                 book>>
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
+                 ans, book>>
 
 \* Delete one object that the newest checked manifest no longer needs:
 \* anything of a lower epoch, own older manifests, own covered frames.
+\* With LateDeletes the DELETE is only sent, and arrives at any later time,
+\* any number of times, after its sender crashed, released, or was revoked
+\* (ArriveDelete): a collection or a sweep that gives way to a release
+\* leaves its requests on the wire, and so does one whose answer was lost.
 Collect(w) ==
   /\ pc[w] = "active" /\ collect[w]
   /\ \/ \E m \in manifests :
           /\ Less(m.e, ep[w]) \/ (m.e = ep[w] /\ m.g < cg[w])
-          /\ manifests' = manifests \ {m}
-          /\ UNCHANGED frames
+          /\ IF LateDeletes
+               THEN /\ sentDM' = sentDM \cup {m} /\ UNCHANGED manifests
+               ELSE /\ manifests' = manifests \ {m} /\ UNCHANGED sentDM
+          /\ UNCHANGED <<frames, sentDF>>
      \/ \E f \in frames :
           /\ Less(f.e, ep[w]) \/ (f.e = ep[w] /\ f.n <= cc[w])
-          /\ frames' = frames \ {f}
-          /\ UNCHANGED manifests
-  /\ UNCHANGED <<claims, tomb, wire, local, book>>
+          /\ IF LateDeletes
+               THEN /\ sentDF' = sentDF \cup {f} /\ UNCHANGED frames
+               ELSE /\ frames' = frames \ {f} /\ UNCHANGED sentDF
+          /\ UNCHANGED <<manifests, sentDM>>
+  /\ UNCHANGED <<claims, tomb, sentC, sentM, sentF, sentT, local, book>>
 
 (* -------------------------------- deletion ------------------------------ *)
 
@@ -412,7 +426,7 @@ Delete(w) ==
   /\ collect' = [collect EXCEPT ![w] = FALSE]
   /\ sentM' = sentM \cup {[e |-> ep[w], g |-> gen[w] + 1, state |-> <<>>, cov |-> 0, del |-> TRUE]}
   /\ pc' = [pc EXCEPT ![w] = "deleting"]
-  /\ UNCHANGED <<store, sentC, sentF, sentT, ep, pm, todo, book>>
+  /\ UNCHANGED <<store, sentC, sentF, sentT, sentDM, sentDF, ep, pm, todo, book>>
 
 \* The claim check that follows the stored manifest. If the claim stands,
 \* every later owner starts from that manifest, so the deletion is final.
@@ -434,8 +448,8 @@ PutTombstone(w) ==
   /\ pc[w] = "tomb"
   /\ sentT' = TRUE
   /\ pc' = [pc EXCEPT ![w] = "purge"]
-  /\ UNCHANGED <<store, sentC, sentM, sentF, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, ans, book>>
+  /\ UNCHANGED <<store, sentC, sentM, sentF, sentDM, sentDF, ep, st, nb, sent, conf, gen, fc, cg,
+                 cc, pm, todo, collect, rs, dl, ans, book>>
 
 \* Delete every object of the database except the tombstone. Uploads sent
 \* earlier may still arrive afterwards; the tombstone keeps them unread.
@@ -478,6 +492,15 @@ ArriveTombstone ==
   /\ sentT /\ ~tomb
   /\ tomb' = TRUE
   /\ UNCHANGED <<claims, manifests, frames, wire, local, book>>
+\* A collection's DELETE arrives, first or again: the object is gone, even
+\* one that a late PUT had stored again.
+ArriveDelete ==
+  \/ \E m \in sentDM \cap manifests :
+       /\ manifests' = manifests \ {m}
+       /\ UNCHANGED <<claims, frames, tomb, wire, local, book>>
+  \/ \E f \in sentDF \cap frames :
+       /\ frames' = frames \ {f}
+       /\ UNCHANGED <<claims, manifests, tomb, wire, local, book>>
 
 Next ==
   \/ \E w \in Writers :
@@ -487,7 +510,7 @@ Next ==
        \/ Flush(w) \/ FlushCheck(w) \/ FlushAbandon(w) \/ Collect(w)
        \/ Delete(w) \/ DeleteCheck(w) \/ PutTombstone(w) \/ Purge(w)
        \/ Release(w) \/ Crash(w)
-  \/ ArriveClaim \/ ArriveManifest \/ ArriveFrame \/ ArriveTombstone
+  \/ ArriveClaim \/ ArriveManifest \/ ArriveFrame \/ ArriveTombstone \/ ArriveDelete
 
 Spec == Init /\ [][Next]_vars
 
