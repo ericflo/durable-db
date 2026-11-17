@@ -4427,6 +4427,139 @@ async fn collecting(gate: &Arc<Gate>) -> Arc<Db> {
     db
 }
 
+/// A MinIO under load took a minute over each listing, and a collection
+/// held its database's next flush for as long. A collection goes on by
+/// itself after a few seconds now, and what comes due meanwhile it
+/// collects once the store has answered.
+#[tokio::test(start_paused = true)]
+async fn a_flush_does_not_wait_for_a_slow_collection() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let db = collecting(&gate).await;
+    commit(&db, put("key", "2")).await.unwrap();
+    db.request_flush();
+    let unflushed = async {
+        while db.mem_bytes() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), unflushed)
+        .await
+        .expect("the flush does not wait for the collection");
+    assert_eq!(gate.held().len(), 1);
+    let frames = || bucket.keys().iter().filter(|k| k.contains("/l/")).count();
+    assert_eq!(frames(), 2);
+    gate.clear();
+    gate.release(Op::Purge);
+    let collected = async {
+        while frames() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), collected)
+        .await
+        .expect("both flushes' frames are collected");
+    // And a flush after it is collected as well.
+    commit(&db, put("key", "3")).await.unwrap();
+    db.request_flush();
+    flushed(&db).await;
+    let collected = async {
+        while frames() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), collected)
+        .await
+        .expect("the next flush's frames are collected");
+    let found = get(&db, b"key").await.unwrap();
+    assert_eq!(found.map(|(_, value)| value).as_deref(), Some("3"));
+}
+
+/// The sweep of what an earlier owner left is one listing of the whole
+/// database, which a store under load takes minutes over: the new owner's
+/// flushes do not wait for it.
+#[tokio::test(start_paused = true)]
+async fn a_flush_does_not_wait_for_a_slow_sweep() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let db = sweeping(&gate).await;
+    commit(&db, put("key", "2")).await.unwrap();
+    db.request_flush();
+    let unflushed = async {
+        while db.mem_bytes() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(60), unflushed)
+        .await
+        .expect("the flush does not wait for the sweep");
+    assert_eq!(gate.held().len(), 1);
+}
+
+/// A deletion is final once its manifest is checked; removing the
+/// database's objects waits for the store seven minutes at most, and a
+/// deletion repeated afterwards finishes it.
+#[tokio::test(start_paused = true)]
+async fn a_deletion_waits_for_a_silent_store_seven_minutes_at_most() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("key", "1")).await.unwrap();
+    db.request_flush();
+    flushed(&db).await;
+    gate.rule(Op::Purge, Action::Hold, usize::MAX, |_, _| true);
+    let began = tokio::time::Instant::now();
+    let said = tokio::time::timeout(Duration::from_secs(900), db.destroy())
+        .await
+        .expect("the deletion ends")
+        .unwrap_err();
+    assert!(said.retryable(), "{said}");
+    assert!(
+        began.elapsed() <= Duration::from_secs(7 * 60 + 1),
+        "{:?}",
+        began.elapsed()
+    );
+    gate.clear();
+    gate.release(Op::Purge);
+    Db::erase(&ctx(gate.clone()), &Layout::new("root/", "app"))
+        .await
+        .unwrap();
+    assert_eq!(bucket.keys(), [TOMBSTONE]);
+}
+
+/// A release collects what it leaves, and removes the old versions of its
+/// claim, for half a minute at most each: a store that answers no purge
+/// leaves them to the next owner's sweep.
+#[tokio::test(start_paused = true)]
+async fn a_release_waits_for_its_collection_no_longer_than_half_a_minute() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&db, put("key", "1")).await.unwrap();
+    db.request_flush();
+    flushed(&db).await;
+    gate.rule(Op::Purge, Action::Hold, usize::MAX, |_, _| true);
+    let began = tokio::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(120), db.close())
+        .await
+        .expect("the release ends");
+    assert!(
+        began.elapsed() <= Duration::from_secs(61),
+        "{:?}",
+        began.elapsed()
+    );
+    assert_eq!(gate.held().len(), 2);
+    gate.clear();
+    gate.release(Op::Purge);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", None).await.unwrap();
+    let found = get(&db, b"key").await.unwrap();
+    assert_eq!(found.map(|(_, value)| value).as_deref(), Some("1"));
+}
+
 /// A MinIO took longer than twenty seconds over each listing, and a
 /// deletion waited seven minutes for a collection that waited for them.
 #[tokio::test]

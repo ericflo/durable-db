@@ -252,12 +252,37 @@ struct Maint {
     covered: u64,
     sealed: bool,
     next_table: u32,
-    /// Tables replaced by a merge, awaiting deletion.
-    garbage: Vec<String>,
     /// Tables uploaded since the last confirmed manifest. One whose manifest
     /// is never confirmed becomes garbage at the next that is.
     unpublished: Vec<String>,
 }
+
+/// What a collection deletes: this epoch's frames up to `covered`, its
+/// manifests before `checked`, and the tables in `garbage`. Whether one is
+/// under way, and whether more has come due since it began, are kept with
+/// them, so that what comes due as one ends is never left to neither.
+#[derive(Clone, Default)]
+struct Collectable {
+    covered: u64,
+    checked: u32,
+    garbage: Vec<String>,
+    running: bool,
+    again: bool,
+}
+
+/// How long maintenance waits for a collection or a sweep it begins. A
+/// store that answers promptly has finished it by then, and what it
+/// deleted is gone when the flush or merge that published returns, unless
+/// one was under way already. One that does not goes on by itself, and
+/// maintenance with the next flush.
+const COLLECT_WAIT: Duration = Duration::from_secs(5);
+/// How long a release waits for what it leaves to be collected. What is
+/// not, the next owner's sweep removes.
+const LAST_COLLECT: Duration = Duration::from_secs(30);
+/// How long a deletion waits for the store to remove the database's
+/// objects: as long as it could before a purge waited minutes for each
+/// answer. The deletion is final by then, and repeating it finishes this.
+const ERASE_WAIT: Duration = Duration::from_secs(7 * 60);
 
 #[derive(Default)]
 struct Checks {
@@ -309,6 +334,8 @@ pub struct Db {
     /// turns to merge; none when no merge is.
     merging: AtomicUsize,
     maint: tokio::sync::Mutex<Maint>,
+    /// What the newest checked manifest no longer needs, for a collection.
+    collectable: Mutex<Collectable>,
     started: Instant,
     last_used_ms: AtomicU64,
     last_commit_ms: AtomicU64,
@@ -794,9 +821,9 @@ impl Db {
                 covered: 0,
                 sealed: false,
                 next_table,
-                garbage: Vec::new(),
                 unpublished: Vec::new(),
             }),
+            collectable: Mutex::new(Collectable::default()),
             started: Instant::now(),
             last_used_ms: AtomicU64::new(0),
             last_commit_ms: AtomicU64::new(0),
@@ -1158,7 +1185,7 @@ impl Db {
         // holds the lock, and gives way to a release or a deletion.
         {
             let _maint = self.maint.lock().await;
-            self.sweep().await;
+            self.sweep_awhile().await;
         }
         // A merge may be due: one that the last owner was killed in, or
         // one for the table of what it had not flushed. It is not left to
@@ -1214,7 +1241,7 @@ impl Db {
             if sweep_now {
                 resweep = None;
                 if self.check().await.is_ok() {
-                    self.sweep().await;
+                    self.sweep_awhile().await;
                 }
             }
             unflushed = self.state.read().confirmed_frame > maint.covered;
@@ -1847,9 +1874,14 @@ impl Db {
         // the disk cache is what the tables in their place are read into.
         self.ctx.io.discard(&replaced).await;
         self.ctx.io.discard(&orphaned).await;
-        maint.garbage.extend(replaced);
-        maint.garbage.extend(orphaned);
-        self.collect(maint, false).await;
+        {
+            let mut collectable = self.collectable.lock();
+            collectable.covered = maint.covered;
+            collectable.checked = maint.checked;
+            collectable.garbage.extend(replaced);
+            collectable.garbage.extend(orphaned);
+        }
+        self.collect(false).await;
         Ok(())
     }
 
@@ -1858,23 +1890,41 @@ impl Db {
     /// owner's sweep.
     ///
     /// A store can take long over a purge: one that was slow to list held
-    /// a deletion up for seven minutes behind a collection. So a collection
-    /// gives way to a release or a deletion at once, in the middle of a
-    /// purge if it is in one. `last` is the collection a release makes of
-    /// what it leaves, which is the one made while the database is closing.
-    async fn collect(&self, maint: &mut Maint, last: bool) {
-        let purges = self.purge_garbage(maint);
-        let failed = if last {
-            purges.await
-        } else {
-            tokio::select! {
-                biased;
-                () = self.leaving() => return,
-                failed = purges => failed,
+    /// a deletion up for seven minutes behind a collection, and a MinIO
+    /// under the writes of 256 databases took a minute over each listing.
+    /// So a collection runs in a task of its own, one at a time for a
+    /// database, and maintenance waits for it no longer than `COLLECT_WAIT`;
+    /// what comes due meanwhile, the one under way collects after what it
+    /// began with. It gives way to a release or a deletion at once, in the
+    /// middle of a purge if it is in one: what it sent may still arrive,
+    /// and deletes only what no later epoch needs. `last` is the collection
+    /// a release makes of what it leaves, for `LAST_COLLECT` at most.
+    async fn collect(self: &Arc<Self>, last: bool) {
+        if last {
+            let failed = tokio::time::timeout(LAST_COLLECT, self.purge_garbage()).await;
+            if !matches!(failed, Ok(None)) {
+                tracing::debug!(db = %self.tag, "the release left some of its collection to the next owner");
             }
+            return;
+        }
+        {
+            let mut due = self.collectable.lock();
+            due.again = true;
+            // A release collects what it leaves itself.
+            if self.closing() || due.running {
+                return;
+            }
+            due.running = true;
+        }
+        let collecting = Collecting {
+            db: self.clone(),
+            ended: false,
         };
-        if let Some(error) = failed {
-            tracing::debug!(db = %self.tag, %error, "collection incomplete; will retry");
+        let collecting = tokio::spawn(collecting.run());
+        tokio::select! {
+            biased;
+            () = self.leaving() => {}
+            _ = tokio::time::timeout(COLLECT_WAIT, collecting) => {}
         }
     }
 
@@ -1882,16 +1932,17 @@ impl Db {
     /// it is not asked for the rest, which wait with that one. A purge that
     /// fails in another way has failed for its own keys, and the others are
     /// still made. A key leaves `garbage` when it is gone.
-    async fn purge_garbage(&self, maint: &mut Maint) -> Option<StoreError> {
+    async fn purge_garbage(&self) -> Option<StoreError> {
         let store = &*self.ctx.io.store;
         let all = |_: &str| true;
         let down = |error: &StoreError| matches!(error, StoreError::Unavailable(_));
+        let due = self.collectable.lock().clone();
         let frames = self.layout.epoch_frames(self.epoch);
-        let frames_end = self.layout.frame(self.epoch, maint.covered + 1);
+        let frames_end = self.layout.frame(self.epoch, due.covered + 1);
         let manifests = self.layout.epoch_manifests(self.epoch);
-        let manifests_end = self.layout.manifest(self.epoch, maint.checked);
+        let manifests_end = self.layout.manifest(self.epoch, due.checked);
         let mut failed = None;
-        if maint.covered > 0
+        if due.covered > 0
             && let Err(error) = store.purge(&frames, Some(&frames_end), &all).await
         {
             if down(&error) {
@@ -1905,17 +1956,27 @@ impl Db {
             }
             failed = Some(error);
         }
-        let mut at = maint.garbage.len();
-        while at > 0 {
-            at -= 1;
-            let key = maint.garbage[at].clone();
-            match store.purge(&key, None, &|candidate| candidate == key).await {
-                Ok(_) => drop(maint.garbage.swap_remove(at)),
+        for key in due.garbage.iter().rev() {
+            match store.purge(key, None, &|candidate| candidate == key).await {
+                Ok(_) => self.collectable.lock().garbage.retain(|left| left != key),
                 Err(error) if down(&error) => return Some(error),
                 Err(error) => failed = Some(error),
             }
         }
         failed
+    }
+
+    /// The sweep, in a task of its own, waited for no longer than a
+    /// collection: a store that takes minutes over a listing of the whole
+    /// database would hold this database's flushes for as long.
+    async fn sweep_awhile(self: &Arc<Self>) {
+        let this = self.clone();
+        let sweeping = tokio::spawn(async move { this.sweep().await });
+        tokio::select! {
+            biased;
+            () = self.leaving() => {}
+            _ = tokio::time::timeout(COLLECT_WAIT, sweeping) => {}
+        }
     }
 
     /// Delete everything lower epochs left that this epoch does not reference.
@@ -1971,12 +2032,12 @@ impl Db {
                     // Let them land, then collect once more, so that what
                     // is left is exactly the sealed manifest and its tables.
                     self.uploads.settle().await;
-                    self.collect(&mut maint, true).await;
+                    self.collect(true).await;
                     let store = &*self.ctx.io.store;
                     if retry(|| store.delete(&self.claim_key)).await.is_ok() {
-                        let _ = store
-                            .purge(&self.claim_key, None, &|key| key == self.claim_key)
-                            .await;
+                        let only = |key: &str| key == self.claim_key;
+                        let purge = store.purge(&self.claim_key, None, &only);
+                        let _ = tokio::time::timeout(LAST_COLLECT, purge).await;
                     }
                 }
                 Err(error) => report(&self.tag, "release without a sealed manifest", &error),
@@ -2039,8 +2100,58 @@ impl Db {
         let tombstone = layout.tombstone();
         retry(|| store.put(&tombstone, Bytes::from_static(b"{}"))).await?;
         let doomed = |key: &str| key != tombstone;
-        retry(|| store.purge(layout.everything(), None, &doomed)).await?;
-        Ok(())
+        let purged = retry(|| store.purge(layout.everything(), None, &doomed));
+        match tokio::time::timeout(ERASE_WAIT, purged).await {
+            Ok(purged) => purged.map(drop),
+            Err(_) => Err(Error::Unavailable(
+                "the store has not removed everything of the database yet; repeat the deletion"
+                    .into(),
+            )),
+        }
+    }
+}
+
+/// A database's collection, under way until it has made what came due, the
+/// store has not answered, or the database is leaving. However it ends, a
+/// panic included, the next flush may begin another.
+struct Collecting {
+    db: Arc<Db>,
+    ended: bool,
+}
+
+impl Collecting {
+    async fn run(mut self) {
+        loop {
+            {
+                // Under the lock a flush takes to ask for a collection: it
+                // sees this one under way, or this one sees what it asked.
+                let mut due = self.db.collectable.lock();
+                if !due.again {
+                    due.running = false;
+                    self.ended = true;
+                    return;
+                }
+                due.again = false;
+            }
+            let failed = tokio::select! {
+                biased;
+                () = self.db.leaving() => return,
+                failed = self.db.purge_garbage() => failed,
+            };
+            // What is left waits for the next flush.
+            if let Some(error) = failed {
+                tracing::debug!(db = %self.db.tag, %error, "collection incomplete; will retry");
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for Collecting {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.db.collectable.lock().running = false;
+        }
     }
 }
 

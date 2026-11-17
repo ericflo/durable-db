@@ -301,6 +301,14 @@ fn network(error: reqwest::Error) -> StoreError {
 /// How long to wait for the first byte of an answer, and for each further
 /// part of it. A second in this file's tests, one of which waits it out.
 const PATIENCE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 20 });
+/// How long a request of a purge waits for its answer, to its first byte.
+/// A client waits for no purge but a deletion's, which bounds its own wait,
+/// and a store may take longer over one than over anything else:
+/// a MinIO under the writes of 256 databases took from 23 to 84 s over each
+/// listing of a thousand versions, every purge gave up on its requests at
+/// twenty seconds and sent them again, and none was made until the writes
+/// ended.
+const PURGE_PATIENCE: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 120 });
 /// How often a purge sends one of its requests again.
 const PURGE_AGAIN: u32 = 2;
 /// How many versions one request may remove, by the S3 API.
@@ -583,11 +591,14 @@ impl S3Store {
         range: Option<(u64, u64)>,
         body: Bytes,
     ) -> StoreResult<Reply> {
-        self.exchange(method, key, query, range, body, None).await
+        self.exchange(method, key, query, range, body, None, PATIENCE)
+            .await
     }
 
     /// `send`, and the request also carries the header `also`, signed with
-    /// the others. Not sent to a store that is refusing requests.
+    /// the others, and is waited for with `patience`. Not sent to a store
+    /// that is refusing requests.
+    #[allow(clippy::too_many_arguments)]
     async fn exchange(
         &self,
         method: Method,
@@ -596,6 +607,7 @@ impl S3Store {
         range: Option<(u64, u64)>,
         body: Bytes,
         also: Option<(&'static str, &str)>,
+        patience: Duration,
     ) -> StoreResult<Reply> {
         // The bucket itself is read only to list it.
         let gate = if method == Method::GET && key.is_empty() {
@@ -607,7 +619,7 @@ impl S3Store {
         };
         let pass = gate.enter(Instant::now())?;
         let answer = self
-            .request(&pass, method, key, query, range, body, also)
+            .request(&pass, method, key, query, range, body, also, patience)
             .await;
         gate.answered(pass, &answer, Instant::now());
         answer
@@ -623,6 +635,7 @@ impl S3Store {
         range: Option<(u64, u64)>,
         body: Bytes,
         also: Option<(&'static str, &str)>,
+        patience: Duration,
     ) -> StoreResult<Reply> {
         let path = if key.is_empty() {
             format!("/{}", self.config.bucket)
@@ -681,7 +694,7 @@ impl S3Store {
         };
         // Generous for a large upload, short enough that a stalled request
         // is abandoned and retried or hedged.
-        let patience = PATIENCE + Duration::from_secs(body.len() as u64 / (256 << 10));
+        let patience = patience + Duration::from_secs(body.len() as u64 / (256 << 10));
         let mut request = self
             .client
             .request(method, url)
@@ -730,6 +743,7 @@ impl S3Store {
         dirs: bool,
         cursor: &Cursor,
         most: usize,
+        patience: Duration,
     ) -> StoreResult<String> {
         let most = most.min(1000).to_string();
         let mut query = vec![
@@ -746,7 +760,7 @@ impl S3Store {
             Cursor::Token(token) => query.push(("continuation-token", token)),
         }
         let reply = self
-            .send(Method::GET, "", &query, None, Bytes::new())
+            .exchange(Method::GET, "", &query, None, Bytes::new(), None, patience)
             .await?;
         if !reply.status.is_success() {
             return Err(self.refused("LIST", &reply));
@@ -772,7 +786,7 @@ impl S3Store {
         let mut removed = 0;
         let mut cursor = Cursor::After(None);
         loop {
-            let xml = again(|| self.page(prefix, false, &cursor, 1000)).await?;
+            let xml = again(|| self.page(prefix, false, &cursor, 1000, PURGE_PATIENCE)).await?;
             let mut chosen = Vec::new();
             let mut last = None;
             let mut past_end = false;
@@ -814,7 +828,11 @@ impl S3Store {
         query: &[(&str, &str)],
         also: Option<(&'static str, &str)>,
     ) -> StoreResult<Reply> {
-        again(|| self.exchange(method.clone(), key, query, None, Bytes::new(), also)).await
+        again(|| {
+            let body = Bytes::new();
+            self.exchange(method.clone(), key, query, None, body, also, PURGE_PATIENCE)
+        })
+        .await
     }
 
     /// Remove these exact versions. One with no name is a key on a bucket
@@ -874,7 +892,8 @@ impl S3Store {
         again(|| async {
             let query = [("delete", "")];
             let checksum = Some(("content-md5", md5.as_str()));
-            let sent = self.exchange(Method::POST, "", &query, None, body.clone(), checksum);
+            let (body, patience) = (body.clone(), PURGE_PATIENCE);
+            let sent = self.exchange(Method::POST, "", &query, None, body, checksum, patience);
             let reply = sent.await?;
             let text = String::from_utf8_lossy(&reply.body);
             if !reply.status.is_success() || !text.contains("<DeleteResult") {
@@ -1398,7 +1417,7 @@ impl ObjectStore for S3Store {
         let mut out = Vec::new();
         let mut cursor = Cursor::After(after.map(str::to_owned));
         while out.len() < limit {
-            let xml = self.page(prefix, false, &cursor, limit - out.len()).await?;
+            let xml = (self.page(prefix, false, &cursor, limit - out.len(), PATIENCE)).await?;
             let before = out.len();
             for item in tags(&xml, "Contents") {
                 let (Some(key), Some(size)) = (tag(item, "Key"), tag(item, "Size")) else {
@@ -1429,7 +1448,7 @@ impl ObjectStore for S3Store {
         let past = |dir: &str| format!("{prefix}{dir}0");
         let mut cursor = Cursor::After(after.map(past));
         while out.len() < limit {
-            let xml = self.page(prefix, true, &cursor, limit - out.len()).await?;
+            let xml = (self.page(prefix, true, &cursor, limit - out.len(), PATIENCE)).await?;
             let before = out.len();
             for group in tags(&xml, "CommonPrefixes") {
                 let dir = tag(group, "Prefix").map(unescape).and_then(|full| {
@@ -2031,6 +2050,47 @@ mod tests {
         }
         assert_eq!(store.get("db/key").await.unwrap().unwrap(), "value");
         assert!(store.exists("db/key").await.unwrap());
+    }
+
+    /// A purge waits longer for its answer than a client's request does: a
+    /// MinIO under load answered its listings after a minute.
+    #[tokio::test]
+    async fn a_purge_waits_longer_than_a_listing_for_its_answer() {
+        use axum::{Router, extract::Request, routing::get};
+        let list = |request: Request| async move {
+            tokio::time::sleep(PATIENCE + (PURGE_PATIENCE - PATIENCE) / 2).await;
+            let query = request.uri().query().unwrap_or("").to_owned();
+            if query
+                .split('&')
+                .any(|pair| pair == "versions" || pair == "versions=")
+            {
+                "<ListVersionsResult><IsTruncated>false</IsTruncated></ListVersionsResult>"
+            } else {
+                "<ListBucketResult><Contents><Key>db/x</Key></Contents>\
+                 <IsTruncated>false</IsTruncated></ListBucketResult>"
+            }
+        };
+        let remove = || async {
+            tokio::time::sleep(PATIENCE + (PURGE_PATIENCE - PATIENCE) / 2).await;
+            "<DeleteResult></DeleteResult>"
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/bucket", get(list).post(remove));
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let store = S3Store::new(S3Config {
+            endpoint: format!("http://{address}"),
+            region: "us-east-1".into(),
+            bucket: "bucket".into(),
+            access_key_id: "id".into(),
+            secret_access_key: "secret".into(),
+        })
+        .unwrap();
+        let said = store.list("db/", None, 10).await.unwrap_err().to_string();
+        assert!(said.ends_with("a storage request stalled"), "{said}");
+        assert_eq!(store.purge("db/", None, &|_| true).await.unwrap(), 0);
+        store.versions.store(false, Ordering::Relaxed);
+        assert_eq!(store.purge("db/", None, &|_| true).await.unwrap(), 1);
     }
 
     /// Backblaze's API as far as an upload needs it: a call that names a
