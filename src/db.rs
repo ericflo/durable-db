@@ -324,6 +324,10 @@ pub struct Db {
 /// A turn at merging tables: one of the few that run at once on a server.
 type Turn = tokio::sync::OwnedSemaphorePermit;
 
+/// A database's place in line for a turn, which it holds until the turn
+/// is granted.
+type Queued = Pin<Box<dyn Future<Output = Option<Turn>> + Send>>;
+
 /// What a merge under way tells the disk cache with a table that is
 /// stored meanwhile: the tables it has read through, and those it has yet
 /// to read through or has stored itself. Both are empty outside a merge.
@@ -1167,7 +1171,7 @@ impl Db {
         // Merges take turns across the server. This database's place in
         // the queue, and its turn once that has come: it goes on flushing
         // while it waits.
-        let mut queued: Option<Pin<Box<dyn Future<Output = Option<Turn>> + Send>>> = None;
+        let mut queued: Option<Queued> = None;
         let mut turn: Option<Turn> = None;
         loop {
             // An idle database with nothing to flush sleeps until it is used.
@@ -1224,17 +1228,7 @@ impl Db {
             }
             let mut failed = false;
             loop {
-                // A turn granted while this flushed is this database's: were
-                // it to merge with another, the one it was granted would wait
-                // unused for that merge. While one is asked for and not yet
-                // granted, none is free to take: those given back go to the
-                // databases in line first.
-                if let Some(waiting) = queued.as_mut()
-                    && let Some(granted) = waiting.as_mut().now_or_never()
-                {
-                    (turn, queued) = (granted, None);
-                }
-                match self.compact(&mut maint, &mut turn).await {
+                match self.compact(&mut maint, &mut turn, &mut queued).await {
                     Ok(true) => continue,
                     Ok(false) => break,
                     Err(error) => {
@@ -1445,7 +1439,12 @@ impl Db {
 
     /// Merge the newest tables when they have grown comparable to the next,
     /// and this database has a turn or can take one. Returns whether it did.
-    async fn compact(self: &Arc<Self>, maint: &mut Maint, turn: &mut Option<Turn>) -> Result<bool> {
+    async fn compact(
+        self: &Arc<Self>,
+        maint: &mut Maint,
+        turn: &mut Option<Turn>,
+        queued: &mut Option<Queued>,
+    ) -> Result<bool> {
         // A merge for the quota is of everything that has been written:
         // what is not in a table yet is put in one first. Without it, a
         // value that was written over a moment ago would be kept.
@@ -1466,9 +1465,18 @@ impl Db {
             return Ok(false);
         };
         // A merge holds one table of its output in memory; only a few run
-        // at once.
+        // at once. A turn granted while this flushed, here or before, is
+        // this database's: were it to merge with another, the one it was
+        // granted would wait unused for that merge, and count it as one
+        // that waits. So while it is in line it takes no other.
         if turn.is_none() {
-            *turn = self.ctx.io.merges.clone().try_acquire_owned().ok();
+            match queued.take() {
+                Some(mut waiting) => match waiting.as_mut().now_or_never() {
+                    Some(granted) => *turn = granted,
+                    None => *queued = Some(waiting),
+                },
+                None => *turn = self.ctx.io.merges.clone().try_acquire_owned().ok(),
+            }
         }
         let mut held = turn.take();
         if held.is_none() {
