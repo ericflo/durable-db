@@ -1765,7 +1765,16 @@ impl Db {
         result.extend(tables[count..].iter().cloned());
         let (revision, covered, sealed) = (maint.revision, maint.covered, maint.sealed);
         self.publish(maint, result, revision, covered, sealed, None)
-            .await
+            .await?;
+        let size = |tables: &[Arc<Table>]| tables.iter().map(|t| t.meta.size).sum::<u64>();
+        tracing::debug!(
+            db = %self.tag,
+            runs = runs(&tables[..count]).count(),
+            read = size(&tables[..count]),
+            stored = size(merged),
+            "merge published"
+        );
+        Ok(())
     }
 
     /// Store the next manifest, confirm ownership, switch readers to its
