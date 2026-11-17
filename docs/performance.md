@@ -388,6 +388,28 @@ With a cache that holds the database, the server read 13,450 MiB from its store 
 
 The local directory answers in a fraction of a millisecond and MinIO here is one process on the desktop that loads it, so the rates in those columns are not those of a provider's bucket. What ran beside what, on a desktop of 32 cores: the local runs one after another, beside the run on Backblaze, which waited on its link; during the first three local runs, those of 4 GiB of 2.1.8 and of 2.1.7, the test suite forty-two times and its engine tests forty, each held to between 0.4 and 2.3 processors; and during the second half of the run with `SOAK_RUNS`, `scripts/soak-bucket.sh` on MinIO, 256 databases written through another server.
 
+
+### Sizing the disk cache
+
+```sh
+DURABLE_DB=./durable-db SOAK_GIB=2 SOAK_CACHE_MIB=512 SOAK_SECONDS=30 scripts/soak-size.sh
+```
+
+One database of 2 GiB, 2,015 MiB once filled, read and merged through disk caches of a quarter of it, a half, its size and twice its size (`SOAK_CACHE_MIB` 512, 1024, 2048 and 4096). Release 2.1.10 on a local directory, one run of each, one after another on the desktop, the night after 2.1.10 was released. Other measurements ran on the machine meanwhile, so reads a second are not given here; what the cache changes is what the server asks its store for, which they do not change.
+
+| Disk cache | 512 MiB | 1,024 MiB | 2,048 MiB | 4,096 MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Read back from storage while it was filled | 2,661 MiB | 949 MiB | 32 MiB | 0 MiB |
+| Requests to the store for each strong read, first half minute | 0.74 | 0.51 | 0.18 | 0.11 |
+| The same, second half minute | 0.73 | 0.49 | 0 | 0 |
+| Read from storage for each strong read, first and second | 23.5 and 23.1 KiB | 17.2 and 15.4 KiB | 7.8 and 0 KiB | 6.5 and 0 KiB |
+| Requests to the store for each scan of 20 keys | 2.01 | 1.29 | 0 | 0 |
+| Read from storage for the merge of everything at a quota | 2,053 MiB | 1,536 MiB | 287 MiB | 0 MiB |
+
+The reads here are spread evenly over the keys, which is the worst case for a cache: reads that keep to some keys more than others miss it less. Read so, a read that the cache misses is one request to the store, for the block of 32 KiB that holds its key, and they were as many as the share of the database the cache does not hold: three quarters with a quarter, a half with a half. With a cache as large as the database, the tables were fetched into it whole as reads came to them, and after half a minute no read asked the store for anything. Merges read what they merge whole, whatever the reads keep to: with a cache smaller than the database, the fill read back more than the database with a quarter and half of it with a half, and the merge of everything at the quota read three quarters of it again. With a cache of its size the tables that merge stored put out some of those it had yet to read, 287 MiB; with twice its size it read nothing.
+
+So, on a bucket, where each of those requests is a round trip and each byte download: give a server a disk cache of twice the databases it serves for merges to read nothing back, and of their size for reads to ask for nothing once the cache is warm. Below that, each read the cache misses costs a request and 32 KiB, and each merge reads back what the cache does not hold.
+
 ### When merges fall behind
 
 Release 2.1.9 tells a write to wait while a merge would leave more than twenty-four runs, and keeps a merge going through a store that fails for a while (finding 45). The script above, with 2.1.8 and then 2.1.9 the morning 2.1.9 was released, one run of each, on a local directory at 4 GiB and on Backblaze at 1 GiB; the runs on Backblaze beside the local ones and the release's other checks:
@@ -544,4 +566,5 @@ A database committing as fast as B2 allows from one location runs about ten grou
 - A server in the same region as its bucket.
 - Many hours of sustained load.
 - Several databases merging at once on a bucket, where a merge takes minutes and what a merge that gave its turn up reads again is download ([above](#several-databases-merging-at-once)).
-- A database larger than 1 GiB on a provider's bucket, or larger than 16 GiB anywhere. A database larger than its server's disk cache on a bucket, where what [a large database](#a-large-database) shows of the disk cache would be paid for.
+- A database larger than 1 GiB on a provider's bucket, or larger than 16 GiB anywhere. A database larger than its server's disk cache on a bucket, where what [sizing the disk cache](#sizing-the-disk-cache) shows would be paid for.
+- Reads that keep to some keys more than others, which miss a cache smaller than the database less than the even reads measured here.
