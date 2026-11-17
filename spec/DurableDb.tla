@@ -21,6 +21,7 @@ CONSTANTS
   MaxEpoch,              \* epoch numbers range over 1..MaxEpoch
   MaxTxn,                \* transactions ever proposed
   Deletion,              \* whether an owner may be asked to delete the database
+  Requests,              \* whether clients send transactions again, and ones that are refused
   \* Protocol rules.  The real protocol sets every one of these to TRUE.
   \* Each negative control sets exactly one to FALSE and must be refuted.
   CheckBeforeAck,        \* acknowledge only after a claim check that began after the frame PUT
@@ -33,7 +34,9 @@ CONSTANTS
   KeepClaimAfterRevoke,  \* after revoking, give the claim back only if a higher epoch outranks this one
   CheckBeforeServing,    \* expose recovered state only after a claim check that follows the first manifest
   CheckBeforeTombstone,  \* write the tombstone only after a claim check that began after a manifest marked deleted was stored
-  TombstoneBeforePurge   \* delete a deleted database's objects only once the tombstone is stored
+  TombstoneBeforePurge,  \* delete a deleted database's objects only once the tombstone is stored
+  AnswerAfterAck,        \* answer a request that stored nothing only once all it was judged against is acknowledged
+  RetryAgainstAll        \* recognize a retry against the whole state, transactions recovered from others included
 
 VARIABLES
   \* ---- the object store ----
@@ -52,6 +55,7 @@ VARIABLES
   fc,         \* frames covered by that manifest
   cg, cc,     \* generation and coverage of the newest manifest stored AND checked
   dl,         \* whether the state this writer holds is "the database is deleted"
+  ans,        \* lengths of the states that requests storing nothing were judged against
   \* ---- bookkeeping ----
   lastN,      \* a writer never reuses an epoch id (fresh random nonce)
   nextTxn, acked, badRead,
@@ -59,7 +63,7 @@ VARIABLES
 
 store == <<claims, manifests, frames, tomb>>
 wire  == <<sentC, sentM, sentF, sentT>>
-local == <<pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl>>
+local == <<pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans>>
 book  == <<lastN, nextTxn, acked, badRead, gone>>
 vars  == <<store, wire, local, book>>
 
@@ -109,6 +113,7 @@ Init ==
   /\ collect = [w \in Writers |-> FALSE]
   /\ rs = [w \in Writers |-> {}]
   /\ dl = [w \in Writers |-> FALSE]
+  /\ ans = [w \in Writers |-> {}]
   /\ lastN = [w \in Writers |-> 0]
   /\ nextTxn = 1 /\ acked = {} /\ badRead = FALSE /\ gone = FALSE
 
@@ -127,6 +132,7 @@ Reset(w) ==
   /\ collect' = [collect EXCEPT ![w] = FALSE]
   /\ rs' = [rs EXCEPT ![w] = {}]
   /\ dl' = [dl EXCEPT ![w] = FALSE]
+  /\ ans' = [ans EXCEPT ![w] = {}]
   /\ UNCHANGED ep
 
 (* ------------------------------ activation ------------------------------ *)
@@ -140,7 +146,7 @@ Start(w) ==
        /\ ep' = [ep EXCEPT ![w] = <<n, w>>]
        /\ lastN' = [lastN EXCEPT ![w] = n]
   /\ pc' = [pc EXCEPT ![w] = "claim"]
-  /\ UNCHANGED <<store, wire, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
+  /\ UNCHANGED <<store, wire, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans,
                  nextTxn, acked, badRead, gone>>
 
 \* One PUT attempt.  Acknowledged: proceed.  Otherwise: abandon this id.
@@ -153,7 +159,7 @@ PutClaim(w) ==
         /\ pc' = [pc EXCEPT ![w] = "idle"]
         /\ UNCHANGED claims
   /\ UNCHANGED <<manifests, frames, tomb, sentM, sentF, sentT, ep, st, nb, sent, conf, gen,
-                 fc, cg, cc, pm, todo, collect, rs, dl, book>>
+                 fc, cg, cc, pm, todo, collect, rs, dl, ans, book>>
 
 ListClaims(w) ==
   /\ pc[w] = "listc"
@@ -162,7 +168,7 @@ ListClaims(w) ==
             /\ UNCHANGED todo
        ELSE /\ todo' = [todo EXCEPT ![w] = {c \in claims : Less(c, ep[w])}]
             /\ pc' = [pc EXCEPT ![w] = IF RevokeBeforeRead THEN "revoke" ELSE "listm"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, collect, rs, dl, book>>
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, collect, rs, dl, ans, book>>
 
 Revoke(w) ==
   /\ pc[w] = "revoke"
@@ -174,7 +180,7 @@ Revoke(w) ==
               /\ todo' = [todo EXCEPT ![w] = @ \ {c}]
               /\ UNCHANGED pc
   /\ UNCHANGED <<manifests, frames, tomb, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm,
-                 collect, rs, dl, book>>
+                 collect, rs, dl, ans, book>>
 
 \* The tombstone is listed with the manifests. With no manifest at all the
 \* database does not exist, and this writer creates it. (A writer that was
@@ -187,7 +193,7 @@ ListManifests(w) ==
               /\ UNCHANGED pm
          ELSE /\ pm' = [pm EXCEPT ![w] = IF lower = {} THEN Genesis ELSE Newest(lower)]
               /\ pc' = [pc EXCEPT ![w] = "getm"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, todo, collect, rs, dl, book>>
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, todo, collect, rs, dl, ans, book>>
 
 \* GET the manifest and the frames after it.  A missing manifest means a
 \* higher epoch collected it, so this writer has already been revoked.
@@ -201,15 +207,15 @@ ReadState(w) ==
             /\ dl' = [dl EXCEPT ![w] = pm[w].del]
             /\ pc' = [pc EXCEPT ![w] = IF RevokeBeforeRead THEN "putm" ELSE "revoke"]
        ELSE /\ pc' = [pc EXCEPT ![w] = "abort"]
-            /\ UNCHANGED <<st, nb, dl>>
-  /\ UNCHANGED <<store, wire, ep, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, book>>
+            /\ UNCHANGED <<st, nb, dl, ans>>
+  /\ UNCHANGED <<store, wire, ep, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, ans, book>>
 
 PutFirstManifest(w) ==
   /\ pc[w] = "putm"
   /\ sentM' = sentM \cup {Manifest(w, 0, 0)}
   /\ pc' = [pc EXCEPT ![w] = "waitm"]
   /\ UNCHANGED <<store, sentC, sentF, sentT, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, book>>
+                 collect, rs, dl, ans, book>>
 
 \* The first manifest is stored. One claim check later, everything this
 \* writer recovered is permanent, including transactions its predecessor
@@ -224,11 +230,11 @@ Activate(w) ==
               THEN /\ pc' = [pc EXCEPT ![w] = "tomb"]
                    /\ gone' = TRUE
                    /\ UNCHANGED <<acked, st, nb, sent, conf, gen, fc, cg, cc, pm, todo,
-                                  collect, rs, dl>>
+                                  collect, rs, dl, ans>>
               ELSE /\ pc' = [pc EXCEPT ![w] = "active"]
                    /\ acked' = acked \cup {st[w]}
                    /\ collect' = [collect EXCEPT ![w] = ep[w] \in claims \/ ~CheckBeforeCollect]
-                   /\ UNCHANGED <<gone, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, rs, dl>>
+                   /\ UNCHANGED <<gone, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, rs, dl, ans>>
        ELSE /\ Reset(w)
             /\ UNCHANGED <<acked, gone>>
   /\ UNCHANGED <<store, wire, ep, lastN, nextTxn, badRead>>
@@ -251,7 +257,7 @@ GiveUp(w) ==
   /\ ~KeepClaimAfterRevoke
   /\ pc[w] \in {"revoke", "listm", "getm", "putm"}
   /\ pc' = [pc EXCEPT ![w] = "abort"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans,
                  book>>
 
 (* ------------------------------- serving -------------------------------- *)
@@ -265,20 +271,24 @@ Commit(w) ==
   /\ sentF' = sentF \cup {[e |-> ep[w], n |-> sent[w] + 1, txn |-> nextTxn]}
   /\ nextTxn' = nextTxn + 1
   /\ UNCHANGED <<store, sentC, sentM, sentT, pc, ep, nb, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, lastN, acked, badRead, gone>>
+                 collect, rs, dl, ans, lastN, acked, badRead, gone>>
 
 \* The claim check: one HEAD that begins after frames conf+1..k are stored.
-\* It acknowledges those frames and answers every read that began before it.
+\* It acknowledges those frames and answers every read that began before it,
+\* and every request that stored nothing whose state is now acknowledged.
 Check(w) ==
   /\ pc[w] = "active"
   /\ \E k \in conf[w]..sent[w] :
        /\ \A i \in (conf[w] + 1)..k : \E f \in frames : f.e = ep[w] /\ f.n = i
-       /\ (k > conf[w] \/ rs[w] # {})
+       /\ (k > conf[w] \/ rs[w] # {} \/ ans[w] # {})
        /\ IF ep[w] \in claims \/ ~CheckBeforeAck
-            THEN /\ conf' = [conf EXCEPT ![w] = k]
+            THEN LET due == {a \in ans[w] : a <= nb[w] + k} IN
+                 /\ conf' = [conf EXCEPT ![w] = k]
                  /\ acked' = acked \cup {SubSeq(st[w], 1, nb[w] + i) : i \in (conf[w] + 1)..k}
+                                    \cup {SubSeq(st[w], 1, a) : a \in due}
                  /\ badRead' = (badRead \/ \E p \in rs[w] : ~IsPrefix(p, SubSeq(st[w], 1, nb[w] + k)))
                  /\ rs' = [rs EXCEPT ![w] = {}]
+                 /\ ans' = [ans EXCEPT ![w] = @ \ due]
                  /\ collect' = [collect EXCEPT ![w] = @ \/ ep[w] \in claims]
                  /\ UNCHANGED <<pc, st, nb, sent, gen, fc, cg, cc, pm, todo, dl>>
             ELSE /\ Reset(w)                     \* revoked: forget everything
@@ -289,8 +299,49 @@ Check(w) ==
 StartRead(w) ==
   /\ pc[w] = "active" /\ rs[w] = {} /\ acked # {}
   /\ rs' = [rs EXCEPT ![w] = acked]
-  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, dl,
+  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, dl, ans,
                  book>>
+
+(* ------------------------ requests that store nothing ------------------- *)
+
+\* A transaction refused by a check against the writer's state (a version,
+\* a range, the revision), or the retry of one the writer already holds.
+\* Either answer says what the database is, writes still on their way
+\* included, so it is given only once all of that is acknowledged, after a
+\* claim check of its own (Check). A writer has one such answer pending at
+\* a time here: more would not fail differently. Judged against a state it
+\* has acknowledged all of, a request is answered with what is acknowledged
+\* already, so only one with writes still on their way is modelled.
+Judge(w) ==
+  /\ Requests /\ pc[w] = "active" /\ ans[w] = {} /\ Len(st[w]) > nb[w] + conf[w]
+  /\ IF AnswerAfterAck
+       THEN /\ ans' = [ans EXCEPT ![w] = {Len(st[w])}]
+            /\ UNCHANGED acked
+       ELSE /\ acked' = acked \cup {st[w]}
+            /\ UNCHANGED ans
+  /\ UNCHANGED <<store, wire, pc, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
+                 lastN, nextTxn, badRead, gone>>
+
+\* The transactions a writer recognizes a retry of: all it holds, those it
+\* recovered from the epochs before its own included.
+Held(w) == {st[w][i] : i \in (IF RetryAgainstAll THEN 1 ELSE nb[w] + 1)..Len(st[w])}
+
+\* A client that does not know whether its transaction committed sends it
+\* again, to whichever writer serves. One the writer holds is answered as a
+\* request that stores nothing (Judge); one it does not is applied as new,
+\* as a transaction that was never stored, or whose frame arrived only
+\* after this writer read the store, which no later owner reads.
+Resend(w) ==
+  /\ Requests /\ pc[w] = "active"
+  \* With the rules, a writer holds fewer than MaxTxn whenever there is one to
+  \* send again; the bound keeps a writer that breaks them to one too many.
+  /\ Len(st[w]) <= MaxTxn
+  /\ \E t \in (1..(nextTxn - 1)) \ Held(w) :
+       /\ st' = [st EXCEPT ![w] = Append(@, t)]
+       /\ sent' = [sent EXCEPT ![w] = @ + 1]
+       /\ sentF' = sentF \cup {[e |-> ep[w], n |-> sent[w] + 1, txn |-> t]}
+  /\ UNCHANGED <<store, sentC, sentM, sentT, pc, ep, nb, conf, gen, fc, cg, cc, pm, todo,
+                 collect, rs, dl, ans, book>>
 
 (* --------------------------- checkpoint, collection --------------------- *)
 
@@ -301,7 +352,7 @@ Flush(w) ==
   /\ sentM' = sentM \cup {Manifest(w, gen[w] + 1, conf[w])}
   /\ pc' = [pc EXCEPT ![w] = "flushing"]
   /\ UNCHANGED <<store, sentC, sentF, sentT, ep, st, nb, sent, conf, cg, cc, pm, todo, collect, rs,
-                 dl, book>>
+                 dl, ans, book>>
 
 \* The claim check that follows a stored manifest. Only now may the writer
 \* delete what that manifest no longer references.
@@ -313,7 +364,7 @@ FlushCheck(w) ==
             /\ cg' = [cg EXCEPT ![w] = gen[w]]
             /\ cc' = [cc EXCEPT ![w] = fc[w]]
             /\ collect' = [collect EXCEPT ![w] = TRUE]
-            /\ UNCHANGED <<st, nb, sent, conf, gen, fc, pm, todo, rs, dl>>
+            /\ UNCHANGED <<st, nb, sent, conf, gen, fc, pm, todo, rs, dl, ans>>
        ELSE Reset(w)
   /\ UNCHANGED <<store, wire, ep, book>>
 
@@ -322,7 +373,7 @@ FlushCheck(w) ==
 FlushAbandon(w) ==
   /\ pc[w] = "flushing"
   /\ pc' = [pc EXCEPT ![w] = "active"]
-  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl,
+  /\ UNCHANGED <<store, wire, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans,
                  book>>
 
 \* Delete one object that the newest checked manifest no longer needs:
@@ -357,6 +408,7 @@ Delete(w) ==
   /\ cg' = [cg EXCEPT ![w] = 0]
   /\ cc' = [cc EXCEPT ![w] = 0]
   /\ rs' = [rs EXCEPT ![w] = {}]
+  /\ ans' = [ans EXCEPT ![w] = {}]
   /\ collect' = [collect EXCEPT ![w] = FALSE]
   /\ sentM' = sentM \cup {[e |-> ep[w], g |-> gen[w] + 1, state |-> <<>>, cov |-> 0, del |-> TRUE]}
   /\ pc' = [pc EXCEPT ![w] = "deleting"]
@@ -371,7 +423,7 @@ DeleteCheck(w) ==
   /\ IF ep[w] \in claims \/ ~CheckBeforeTombstone
        THEN /\ pc' = [pc EXCEPT ![w] = "tomb"]
             /\ gone' = TRUE
-            /\ UNCHANGED <<st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl>>
+            /\ UNCHANGED <<st, nb, sent, conf, gen, fc, cg, cc, pm, todo, collect, rs, dl, ans>>
        ELSE /\ Reset(w)
             /\ UNCHANGED gone
   /\ UNCHANGED <<store, wire, ep, lastN, nextTxn, acked, badRead>>
@@ -383,7 +435,7 @@ PutTombstone(w) ==
   /\ sentT' = TRUE
   /\ pc' = [pc EXCEPT ![w] = "purge"]
   /\ UNCHANGED <<store, sentC, sentM, sentF, ep, st, nb, sent, conf, gen, fc, cg, cc, pm, todo,
-                 collect, rs, dl, book>>
+                 collect, rs, dl, ans, book>>
 
 \* Delete every object of the database except the tombstone. Uploads sent
 \* earlier may still arrive afterwards; the tombstone keeps them unread.
@@ -431,7 +483,7 @@ Next ==
   \/ \E w \in Writers :
        \/ Start(w) \/ PutClaim(w) \/ ListClaims(w) \/ Revoke(w) \/ ListManifests(w)
        \/ ReadState(w) \/ PutFirstManifest(w) \/ Activate(w) \/ Abort(w) \/ GiveUp(w)
-       \/ Commit(w) \/ Check(w) \/ StartRead(w)
+       \/ Commit(w) \/ Check(w) \/ StartRead(w) \/ Judge(w) \/ Resend(w)
        \/ Flush(w) \/ FlushCheck(w) \/ FlushAbandon(w) \/ Collect(w)
        \/ Delete(w) \/ DeleteCheck(w) \/ PutTombstone(w) \/ Purge(w)
        \/ Release(w) \/ Crash(w)
@@ -457,6 +509,14 @@ FreshReads == ~badRead
 \* Nobody collects the manifest of an owner whose claim still stands.
 OwnerIntact == \A w \in Writers :
   (pc[w] \in {"active", "flushing"} /\ ep[w] \in claims) => Checked(w) \in manifests
+
+\* A transaction sent more than once is in the database once: in what any
+\* writer holds, and in what a reader reconstructs from the store.
+NoRepeat(s) == \A i, j \in 1..Len(s) : i < j => s[i] # s[j]
+Once ==
+  /\ \A w \in Writers : NoRepeat(st[w])
+  /\ manifests # {} =>
+       LET h == Newest(manifests) IN h.del \/ NoRepeat(h.state \o Run(frames, h.e, h.cov))
 
 \* Deletion is final: once any writer has concluded that the database is
 \* deleted, no writer holds it, so nothing is acknowledged or read again.

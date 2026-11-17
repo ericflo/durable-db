@@ -21,9 +21,9 @@ For one database, under the storage assumptions below:
 
 ## The model
 
-[`spec/DurableDb.tla`](../spec/DurableDb.tla) specifies creating a database, taking ownership, committing, linearizable reads, checkpointing, collection and deletion for one database, as atomic steps on a store of claims, manifests, frames and the tombstone. The store starts empty. Writers crash at any step. Any upload ever sent may arrive at any later time, any number of times, including after its object was collected.
+[`spec/DurableDb.tla`](../spec/DurableDb.tla) specifies creating a database, taking ownership, committing, linearizable reads, requests that store nothing (a transaction refused by a check, and the retry of one already applied), checkpointing, collection and deletion for one database, as atomic steps on a store of claims, manifests, frames and the tombstone. The store starts empty. Writers crash at any step. Any upload ever sent may arrive at any later time, any number of times, including after its object was collected.
 
-Four invariants are checked in every reachable state:
+Five invariants are checked in every reachable state:
 
 | Invariant | Meaning |
 | --- | --- |
@@ -31,20 +31,22 @@ Four invariants are checked in every reachable state:
 | `FreshReads` | No checked read missed a transaction acknowledged before it began. |
 | `OwnerIntact` | The newest checked manifest of a writer whose claim still stands has not been deleted. |
 | `Final` | Once a writer has concluded that the database is deleted, no writer is serving with a claim that stands. |
+| `Once` | A transaction that a client sent more than once is in the database once: in what any writer holds, and in what a reader reconstructs from the store. |
 
 ```sh
 scripts/check-model.sh        # about three minutes; capped at 2 GiB heap, four workers and ten minutes a configuration
 ```
 
-**Results** (TLC 2.19, 2026-11-14), each an exhaustive search with no violation:
+**Results** (TLC 2.19; the first three 2026-11-14, and again with the same counts on 2026-11-17, when the model gained requests that store nothing; `Retries` 2026-11-17), each an exhaustive search with no violation:
 
 | Configuration | Bounds | States generated | Distinct states | Depth |
 | --- | --- | --- | --- | --- |
 | `DurableDb` | 2 writers, epoch numbers up to 2, 2 transactions, no deletion | 27,663,022 | 3,585,296 | 61 |
 | `Deletion` | 2 writers, epoch numbers up to 2, 1 transaction, deletion at any time | 23,717,105 | 4,110,075 | 67 |
 | `DeepDeletion` | 2 writers, epoch numbers up to 2, 2 transactions, deletion at any time | 479,947,461 | 67,082,438 | 74 |
+| `Retries` | 2 writers, epoch numbers up to 2, 1 transaction sent again and refused at any time, no deletion | 5,194,549 | 658,613 | 60 |
 
-The first two configurations exist because deletion with two transactions is a much larger state space. `spec/DeepDeletion.cfg` is that combination. It is not part of the default run, because it takes nineteen minutes where the others take three together:
+The configurations of one transaction exist because deletion, or requests sent again, with two transactions is a much larger state space. `spec/DeepDeletion.cfg` is the first combination; `spec/DeepRetries.cfg`, two transactions sent again and refused, is the second, and is not part of the default run either. Both negative controls of requests fail at the bounds of `Retries`. It is not part of the default run, because it takes nineteen minutes where the others take three together:
 
 ```sh
 TLC_TIMEOUT=3600 scripts/check-model.sh DeepDeletion
@@ -56,7 +58,7 @@ The epoch number a writer chooses is unconstrained in the model (any unused numb
 
 ### Negative controls
 
-Each protocol rule is a switch in the model. Turning one off must produce a counterexample; if it did not, the model would not be testing that rule. All eleven are refuted:
+Each protocol rule is a switch in the model. Turning one off must produce a counterexample; if it did not, the model would not be testing that rule. All thirteen are refuted:
 
 | Rule turned off | Configuration | Violated |
 | --- | --- | --- |
@@ -71,11 +73,13 @@ Each protocol rule is a switch in the model. Turning one off must produce a coun
 | Expose recovered state only after a claim check that follows the first manifest | `UnsafeServeBeforeCheck` | `Durable` |
 | Write the tombstone only after a claim check that began after a manifest marked deleted was stored | `UnsafeTombstoneWithoutCheck` | `Final` |
 | Remove a deleted database's objects only once the tombstone is stored | `UnsafePurgeBeforeTombstone` | `Final` |
+| Answer a request that stored nothing only once all it was judged against is acknowledged | `UnsafeAnswerBeforeAck` | `Durable` |
+| Recognize a retry against all the writer holds, transactions recovered from earlier epochs included | `UnsafeRetryAgainstOwn` | `Once` |
 
 ### What the model leaves out
 
 - **Tables** are folded into the manifest's state. Their collection follows the same rule as superseded manifests, which is modelled, with one exception that is not: the table a merge was uploading when its database was released, deleted or closed is deleted by that upload once it ends, whatever claim its server holds then (since 2.1.10). No manifest lists such a table or can come to: only one of its own epoch could, and its merge has ended. So no state the model holds refers to it, and deleting it removes nothing a reader could be sent to.
-- **Transactions are unconditional.** Version checks, range checks and idempotency keys are not modelled. A refusal is treated by the implementation as a read: it is reported only after a claim check of its own.
+- **Checks and retries are abstract.** A transaction refused by a check, and the retry of one already applied, are modelled as a request that stores nothing and is judged against the writer's whole state, writes on their way included, as the implementation judges them; what the check compares, a version, a range or the revision, is not. A retry is recognized against all the writer holds, as the implementation's receipts are part of the database; that it forgets a receipt after `receipt_window` revisions, after which a retry is applied again, is not modelled. A writer has one such answer pending at a time, and only one judged against writes still on its way is modelled: an answer about a state acknowledged already says nothing new.
 - **Deletes are atomic steps.** A delete request that takes effect long after its sender gave up is not modelled. The argument that it is harmless is informal: a delete is sent only for an object the sender was entitled to remove for good, and the only object whose reappearance would matter, a claim, is uploaded once. The chaos test does inject such deletes.
 - **Only safety** is checked. That some server eventually makes progress is not.
 - **The bounds are small.** Two writers, two epochs and one or two transactions cover every interleaving of one takeover with commits, a flush, collection, a deletion and late uploads, not longer chains.
@@ -371,7 +375,7 @@ What Amazon S3 and Google Cloud Storage answer to listings without an account ha
 - A store that is slow holds up more than the request that waits for it. A collection holds its database's next flush for as long as one purge takes to fail, which is a minute when a listing is not answered; and the sweep of what an earlier owner left, one listing of the whole database, does not give way to a release as a collection does (finding 40).
 - Which tables a disk cache smaller than what its server reads should hold. It keeps those that were read in the last five minutes, whichever came first, and does not count how often each is read; a server that writes much through such a cache fetches again what its writes put out. Neither has been measured under a load that changes.
 - One database larger than 1 GiB on a provider's bucket, larger than 16 GiB anywhere, or larger than its server's disk cache on a bucket. What a write at the quota waits for, a merge of everything, has been timed over one desktop's uplink only.
-- Model conditional transactions with idempotent retries, and a delete request that arrives late.
+- Model a delete request that arrives late, and the receipt window after which a retry is applied again.
 - Check a liveness property: with one correct server and working storage, a request is eventually answered.
 - Make the chaos test repeatable from its seed alone, by giving the engine the simulated clock for its deadlines, and run it routinely under CPU pressure as well as without.
 - The rule for choosing storage pods on Backblaze B2 was measured from one desktop on Wi-Fi, for minutes at a time. A server in a data centre, and hours of load, have not been measured.
