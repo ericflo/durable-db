@@ -1150,8 +1150,8 @@ impl Db {
     async fn maintain(self: Arc<Self>) {
         let _fuse = Fuse(self.clone());
         // Activation ended with a claim check after this epoch's manifest
-        // was stored, so what earlier epochs left behind can go. Holding the
-        // lock makes a release wait for the sweep.
+        // was stored, so what earlier epochs left behind can go. The sweep
+        // holds the lock, and gives way to a release or a deletion.
         {
             let _maint = self.maint.lock().await;
             self.sweep().await;
@@ -1927,8 +1927,18 @@ impl Db {
                 .epoch_of(key)
                 .is_some_and(|epoch| epoch < self.epoch && !referenced.contains(key))
         };
-        if let Err(error) = store.purge(self.layout.everything(), None, &doomed).await {
-            tracing::debug!(db = %self.tag, %error, "sweep incomplete");
+        // It gives way to a release or a deletion, as a collection does:
+        // what it does not delete, the next owner's sweep or the deletion
+        // does, and a request of it that arrives late deletes only what
+        // every later epoch would.
+        tokio::select! {
+            biased;
+            () = self.leaving() => {}
+            swept = store.purge(self.layout.everything(), None, &doomed) => {
+                if let Err(error) = swept {
+                    tracing::debug!(db = %self.tag, %error, "sweep incomplete");
+                }
+            }
         }
     }
 

@@ -4419,6 +4419,54 @@ async fn a_release_does_not_wait_for_a_collection() {
     assert_eq!(found.map(|(_, value)| value).as_deref(), Some("1"));
 }
 
+/// A database that a second owner opens after the first released it, with
+/// the sweep of what the first left held back, as by a store that is slow
+/// to list a whole database.
+async fn sweeping(gate: &Arc<Gate>) -> Arc<Db> {
+    let (first, _) = Db::open(ctx(gate.clone()), "app", Some(DbConfig::default()))
+        .await
+        .unwrap();
+    commit(&first, put("key", "1")).await.unwrap();
+    first.close().await;
+    gate.rule(Op::Purge, Action::Hold, 1, |prefix, _| {
+        prefix.ends_with("/db/app/")
+    });
+    let (db, _) = Db::open(ctx(gate.clone()), "app", None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_held(Op::Purge))
+        .await
+        .expect("the new owner sweeps");
+    db
+}
+
+/// The sweep is one listing of the whole database, and a deletion waited
+/// for it as one once waited for a collection.
+#[tokio::test]
+async fn a_deletion_does_not_wait_for_a_sweep() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let db = sweeping(&gate).await;
+    tokio::time::timeout(Duration::from_secs(5), db.destroy())
+        .await
+        .expect("the deletion does not wait for the sweep")
+        .unwrap();
+    assert_eq!(gate.held().len(), 1);
+    assert_eq!(bucket.keys(), [TOMBSTONE]);
+}
+
+#[tokio::test]
+async fn a_release_does_not_wait_for_a_sweep() {
+    let bucket = Arc::new(MemoryStore::new());
+    let gate = Gate::new(&bucket);
+    let db = sweeping(&gate).await;
+    tokio::time::timeout(Duration::from_secs(5), db.close())
+        .await
+        .expect("the release does not wait for the sweep");
+    assert_eq!(gate.held().len(), 1);
+    let (db, _) = Db::open(ctx(gate.clone()), "app", None).await.unwrap();
+    let found = get(&db, b"key").await.unwrap();
+    assert_eq!(found.map(|(_, value)| value).as_deref(), Some("1"));
+}
+
 /// A store that does not answer one purge of a collection is not asked for
 /// the rest of them. What is left is collected after the next flush, or by
 /// the next owner.
