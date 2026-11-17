@@ -271,7 +271,9 @@ DURABLE_DB=./durable-db scripts/soak-bucket.sh
 
 With 2.1.6: 2,110 commits a second, of which none failed; 582 MiB at most, and between 416 and 581 MiB from the third minute to the twentieth; the 256 deletions took 257 s. MinIO took longer than twenty seconds over some of its listings: 1,148 of 17,593 purges failed and were made again later, and the slowest deletion took 143 s. The commit rate is that of one MinIO process on the desktop's disk, and says nothing of a provider's bucket.
 
-This is minutes, thirty at the most, on a local directory and on a store on the same desktop. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a provider's bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
+With 2.1.10 for an hour (`SOAK_SECONDS=3600`), from ten past two in the morning on the 17th, Pacific time, while model checks ran beside it on four of the desktop's 32 cores: 1,554 commits a second, of which none failed; 587 MiB at most, and between 414 and 579 MiB from the third minute to the sixtieth, as in twenty minutes. Collection did not keep up with that store: 10,059 of 14,549 purges failed, and 57 minutes into the deletions, when the run was stopped, they had not ended.
+
+This is minutes, and an hour once, on a local directory and on a store on the same desktop. It says that the limits in [deployment](deployment.md#on-kubernetes) hold under these loads with this allocator, not what many hours or a provider's bucket would show; on a bucket an upload is in memory for as long as the bucket takes to store it.
 
 ## A large database
 
