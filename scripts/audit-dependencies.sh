@@ -10,7 +10,10 @@ esac
 report=${1:-.tools/dependency-audit.json}
 mkdir -p "$(dirname -- "$report")"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 asset=cargo-audit-x86_64-unknown-linux-musl-v0.22.2
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
   --connect-timeout 10 --max-time 120 \

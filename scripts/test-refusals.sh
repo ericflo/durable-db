@@ -35,7 +35,9 @@ cleanup() {
     docker rm -f -v "$container-proxy" "$container" >/dev/null 2>&1 || true
     rm -rf "$dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 random() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 access="local$(random 6)"

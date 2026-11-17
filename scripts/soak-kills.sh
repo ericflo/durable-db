@@ -27,7 +27,9 @@ cleanup() {
     wait 2>/dev/null || true
     rm -rf "$dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start() { # server number
     port=$((base + $1))

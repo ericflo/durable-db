@@ -6,7 +6,10 @@ source_dir=$(CDPATH= cd -- "${1:-.site}" && pwd)
 case "$CI_COMMIT_SHA" in *[!0-9a-f]*|'') echo 'Invalid source commit' >&2; exit 2 ;; esac
 [ "${#CI_COMMIT_SHA}" -eq 40 ] || { echo 'Invalid source commit length' >&2; exit 2; }
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 umask 077
 printf '%s\n' "$DOCS_DEPLOY_KEY" > "$tmp/key"
 unset DOCS_DEPLOY_KEY

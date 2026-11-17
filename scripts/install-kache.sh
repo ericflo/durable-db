@@ -9,7 +9,10 @@ case "$(uname -s)-$(uname -m)" in
   *) echo 'Unsupported kache platform; install the pinned v2.0.0 client and engine manually.' >&2; exit 1 ;;
 esac
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 curl --proto '=https' --tlsv1.2 -fLsS "https://github.com/kunobi-ninja/kache/releases/download/v2.0.0/kache-$target.tar.gz" -o "$tmp/kache.tar.gz"
 if command -v sha256sum >/dev/null; then actual=$(sha256sum "$tmp/kache.tar.gz" | cut -d ' ' -f1); else actual=$(shasum -a 256 "$tmp/kache.tar.gz" | cut -d ' ' -f1); fi
 [ "$actual" = "$hash" ] || { echo 'kache checksum mismatch' >&2; exit 1; }

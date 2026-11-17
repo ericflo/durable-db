@@ -32,7 +32,9 @@ cleanup() {
   rm -rf "$work"
   exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 say() { printf '\n== %s\n' "$*"; }
 k() { kubectl -n "$ns" "$@"; }
 replicas() { k get deployment durable-db -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0; }

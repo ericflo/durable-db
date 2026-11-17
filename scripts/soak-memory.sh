@@ -21,7 +21,9 @@ stop() {
     [ -z "$server" ] || wait "$server" 2>/dev/null || true
     rm -rf "$dir"
 }
-trap stop EXIT INT TERM
+trap stop EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start() {
     systemd-run --user --scope -q -p MemoryMax=1G -p MemorySwapMax=0 -p CPUQuota=400% \
