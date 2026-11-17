@@ -40,6 +40,9 @@
 #   SOAK_STORE          minio (default: a local directory)
 #   SOAK_LINK           with minio, a slow link to it: UP,DOWN,RTT, bytes a second each way and a
 #                       round trip in ms (scripts/slow-link.py; default: none)
+#   SOAK_CACHE_MIB      the server's disk cache, in MiB (default 1024, the Kubernetes manifest's)
+#   SOAK_LOG            a file to keep the server's log in; with RUST_LOG=durable_db=debug it
+#                       has a line for each merge published (default: not kept)
 #   STORE_PORT          the port MinIO is given (default 19320), and the link the next one
 #   SOAK_DIR            where to put the data (default: a temporary directory)
 #   SOAK_PORT           the server's port (default 17784)
@@ -62,6 +65,7 @@ cleanup() {
     for pid in $sampler $quotas $server $link; do kill "$pid" 2>/dev/null || true; done
     wait 2>/dev/null || true
     [ "${SOAK_STORE:-}" != minio ] || docker rm -f -v "$container" >/dev/null 2>&1 || true
+    [ -z "${SOAK_LOG:-}" ] || cp "$dir/server.log" "$SOAK_LOG" 2>/dev/null || true
     rm -rf "$dir"
 }
 trap cleanup EXIT INT TERM
@@ -111,7 +115,7 @@ else
 fi
 systemd-run --user --scope -q -p MemoryMax=1G -p MemorySwapMax=0 -p CPUQuota=400% \
     "$bin" serve --listen "${url#http://}" "$@" \
-    --cache-dir "$dir/cache" --cache-dir-bytes 1073741824 \
+    --cache-dir "$dir/cache" --cache-dir-bytes $((${SOAK_CACHE_MIB:-1024} * 1048576)) \
     --cache-bytes 201326592 --memtable-bytes 100663296 \
     --body-bytes 134217728 --result-bytes 134217728 --max-connections 1024 \
     >>"$dir/server.log" 2>&1 &
@@ -138,7 +142,7 @@ metric() { curl -fs "$url/metrics" | awk -v name="$1" '$1 == name { print int($2
 mib() { echo $(($1 / 1048576)); }
 
 names=$(seq -f 'big-%g' 0 $((large - 1)))
-echo "the server runs $("$bin" --version) on $where; $large databases are filled with $keys keys of $value bytes each, $mib MiB, by 64 clients; $clients clients write a small one and $readers read it"
+echo "the server runs $("$bin" --version) on $where; $large databases are filled with $keys keys of $value bytes each, $mib MiB, by 64 clients; $clients clients write a small one and $readers read it; a server's disk cache is ${SOAK_CACHE_MIB:-1024} MiB"
 bench --database big --databases "$large" --keys "$keys" --clients 64 --workload fill --max-bytes $((mib * 4 * 1048576))
 alive
 for name in $names; do

@@ -505,7 +505,20 @@ Two databases of 1 GiB, 8 MB a second up and 16 down, 40 ms a round trip; one ru
 | Read from storage and sent to it, until the last was taken | 2,879 MiB and 4,331 MiB | 4,445 MiB and 6,672 MiB |
 | The link carried, up and down, in the whole run | 14,992 MiB and 4,455 MiB | 17,133 MiB and 6,388 MiB |
 
-With 2.1.10 the small database had 18 runs at most where it had had 48, and the two merges took half as long again and more. It was written by 64 clients and flushed about every eight seconds, and had a merge due after almost every flush; so each large merge gave its turn up at almost every table, waited while the small one merged over the link, and read again what it had read ahead. Its strong reads were held to some 110 a second in both by the claim check each one waits for, a round trip over the link, and not by its runs, whose tables were in the server's disk cache.
+With 2.1.10 the small database had 18 runs at most where it had had 48, and the two merges took half as long again and more. It was written by 64 clients and flushed about every eight seconds, and had a merge due after almost every flush; so each large merge gave its turn up at almost every table, waited while the small one merged over the link, and read again what it had read ahead. That is one run of each. At a quarter of the size, with a disk cache of 256 MiB, two runs of the code on `main` after 2.1.10 differed from each other as much as these releases do:
+
+```sh
+RUST_LOG=durable_db=debug SOAK_LOG=server.log DURABLE_DB=./durable-db SOAK_STORE=minio SOAK_LINK=8000000,16000000,40 SOAK_MIB=256 SOAK_CACHE_MIB=256 scripts/soak-tenants.sh
+```
+
+| | 2.1.9 | `main` after 2.1.10, first run | second run |
+| --- | ---: | ---: | ---: |
+| Each write at a quota waited | 128 s, 127 s | 154 s, 210 s | 131 s, 109 s |
+| The small database's most runs | 12 | 9 | 4 |
+| Read from storage and sent to it, until the last was taken | 463 MiB and 723 MiB | 826 MiB and 1,337 MiB | 408 MiB and 821 MiB |
+| What the small database's merges stored meanwhile, by the server's log | | 244 MiB | 89 MiB |
+
+The runs were made the night after 2.1.10 was released, on the desktop, each while other measurements ran beside it; over this link the link is the limit, not the processors. Both costs of turns show in them, what the small database's merges send and what the large merges read again, and neither in the same proportion twice. Its strong reads were held to some 110 a second in both by the claim check each one waits for, a round trip over the link, and not by its runs, whose tables were in the server's disk cache.
 
 ### Over a slow link
 
