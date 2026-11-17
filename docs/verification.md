@@ -372,6 +372,8 @@ The limits were then tested instead of added up: one server with the flags of th
 
     The soak with a build of this change before those three, with nothing else running but a reader of the server's counters and, for two minutes, a build at the lowest priority: 1,229 commits a second and none failed; 533 MiB at most; 8,385 purges while the databases were written and none failed, the last of them taking up to two minutes each; and the 256 deletions took 131 s, the slowest 93 s, where with 2.1.11 they took 1,179 and 268 s. That run of 2.1.11 made 1,580 commits a second, and two others the same morning 1,246 and 1,286: whether collecting while writing costs that store some of its writes was not settled.
 
+    The soak with the binary of 2.1.12: 1,230 commits a second and none failed; 517 MiB at most; no purge failed until the thirteenth minute, and then MinIO took longer than two minutes over some listings: no purge was made from then until the writes ended, 256 of 5,976 failed after six minutes each, and the 256 deletions took 363 s, the slowest 286 s. Collection went on six minutes longer into the load than with 2.1.11, and in the run before throughout it; a store slower than two minutes still stops it.
+
 ### What has been run where
 
 | Storage | Unit, engine, chaos | HTTP, cluster | Bucket tests | Benchmarks | Kubernetes |
