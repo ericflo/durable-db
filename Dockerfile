@@ -1,14 +1,16 @@
 # syntax=docker/dockerfile:1
 # One build verifies and produces everything: the model check, the Rust and
 # client tests, a static binary, the website, and a scratch runtime image.
-FROM docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4 AS node
+FROM docker.io/library/node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS node
 
-FROM docker.io/library/rust:1.90-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207 AS tools
-RUN apt-get update && apt-get install -y --no-install-recommends musl-tools openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/* \
+FROM docker.io/library/rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS tools
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends musl-tools openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl && rustup component add clippy rustfmt
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+ADD --checksum=sha256:fa0711dd513fa1386bbad3962a292cb813461cb57dedf07d6eb7efe76dffe897 https://registry.npmjs.org/npm/-/npm-12.2.3.tgz /tmp/npm.tgz
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && npm install --global --offline --ignore-scripts /tmp/npm.tgz && rm /tmp/npm.tgz
 WORKDIR /src
 COPY scripts/install-kache.sh scripts/install-kache.sh
 RUN scripts/install-kache.sh /usr/local/bin

@@ -5,7 +5,7 @@ when:
 
 steps:
   - name: dependency-audit
-    image: docker.io/library/rust:1.90-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207
+    image: docker.io/library/buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
     commands:
       - scripts/audit-dependencies.sh
     backend_options:
@@ -23,11 +23,9 @@ steps:
           seccompProfile: {type: RuntimeDefault}
 
   - name: javascript-audit
-    image: docker.io/library/node:24-bookworm-slim@sha256:c0a93797ee78814ae6d32fcca2561fdbbe423149c3f5389aad32d86e9fd85bd4
+    image: docker.io/library/buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
     commands:
-      - npm --prefix clients/javascript audit
-      - npm --prefix examples/web-app audit
-      - npm --prefix site audit
+      - scripts/audit-javascript.sh
     backend_options:
       kubernetes:
         resources:
@@ -44,7 +42,7 @@ steps:
 
   - name: verify-and-build
     depends_on: [dependency-audit, javascript-audit]
-    image: docker.io/moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1
+    image: docker.io/moby/buildkit:v0.35.0-rootless@sha256:5987568f92dafbfb679879de59c1cd8d26597f5f6635c314e166164e2615870c
     commands:
       # A clean copy of the commit with stable permissions, so the build
       # cache does not depend on how the checkout volume was mounted. It is
@@ -102,7 +100,7 @@ steps:
           seccompProfile: {type: RuntimeDefault}
 
   - name: publish-docs
-    image: docker.io/library/rust:1.90-bookworm@sha256:3f6e6f8d8725a65a2db964bb828850f888d430c68784d661f753144e5d787207
+    image: docker.io/library/buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
     depends_on: [verify-and-build]
     when:
       - evaluate: 'CI_COMMIT_BRANCH == CI_REPO_DEFAULT_BRANCH && CI_PIPELINE_EVENT != "tag"'
