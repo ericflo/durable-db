@@ -8,17 +8,17 @@ const root = new URL('../', import.meta.url);
 const out = new URL('.site/', root);
 const repository = 'https://github.com/ericflo/durable-db';
 
-// The explicit public whitelist, in reading order: [page, label, source, summary].
+// The explicit public whitelist, in reading order: [page, label, tag, source, summary].
 // Only these documents are published.
 const pages = [
-  ['deployment', 'Deployment', 'docs/deployment.md', 'Install, run on one machine, on a bucket and on Kubernetes. Configuration, tokens and operations.'],
-  ['api', 'HTTP API', 'docs/api.md', 'Reads, scans, commits, checks, idempotency keys, errors and limits.'],
-  ['clients', 'TypeScript SDK', 'clients/javascript/README.md', 'The typed client: reads, transactions, checks, errors and retries. The pi-durable storage adapter.'],
-  ['architecture', 'Architecture', 'docs/architecture.md', 'The objects in the bucket, taking ownership, committing, reading, collection and failures.'],
-  ['performance', 'Performance', 'docs/performance.md', 'Benchmark tables and the commands that reproduce them.'],
-  ['verification', 'Verification', 'docs/verification.md', 'What is claimed, the assumptions, the TLA+ model, the tests and what remains unchecked.'],
-  ['development', 'Development', 'docs/development.md', 'Build from source, run the checks, repository layout, releases and CI.'],
-].map(([name, label, source, summary]) => ({ name, label, source, summary }));
+  ['deployment', 'Deployment', 'Operations', 'docs/deployment.md', 'Install the static binary and run it on a laptop, a bucket, or Kubernetes. Configuration, tenant limits, and metrics.'],
+  ['api', 'HTTP API', 'Reference', 'docs/api.md', 'Transactions, checks, ordered scans, read consistency levels, idempotency keys, errors, and limits.'],
+  ['clients', 'TypeScript SDK', 'Client', 'clients/javascript/README.md', 'Zero-dependency typed client with retries and revision tracking, plus the pi-durable agent storage adapter.'],
+  ['architecture', 'Architecture', 'Protocol', 'docs/architecture.md', 'Bucket object layout, taking ownership, commits, reads, compaction, collection, and failure modes.'],
+  ['performance', 'Performance', 'Benchmarks', 'docs/performance.md', 'Local NVMe, Backblaze B2, large-database, disk-cache, and Kubernetes measurements with commands to reproduce them.'],
+  ['verification', 'Verification', 'Correctness', 'docs/verification.md', 'Claims, assumptions, the TLA+ model, 13 negative controls, chaos tests, all 47 findings, and remaining obligations.'],
+  ['development', 'Development', 'Source', 'docs/development.md', 'Build from source with kache, run every check and soak script, repository layout, releases, and CI.'],
+].map(([name, label, tag, source, summary]) => ({ name, label, tag, source, summary }));
 
 // Files published unchanged at the site root: [published name, source].
 const copies = [
@@ -61,6 +61,15 @@ function resolve(href, page) {
 
 const md = new MarkdownIt({ html: false });
 const escape = md.utils.escapeHtml;
+
+// Wrap Markdown tables so they preserve natural table layout while scrolling on narrow screens.
+const defaultTableOpen = md.renderer.rules.table_open || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+const defaultTableClose = md.renderer.rules.table_close || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.table_open = (tokens, idx, options, env, self) =>
+  `<div class="table-wrap">${defaultTableOpen(tokens, idx, options, env, self)}`;
+md.renderer.rules.table_close = (tokens, idx, options, env, self) =>
+  `${defaultTableClose(tokens, idx, options, env, self)}</div>`;
+
 // Give every heading an id and an anchor, collect the table of contents, rewrite links.
 md.core.ruler.push('site', (state) => {
   const { page, toc, ids } = state.env;
@@ -89,10 +98,10 @@ md.core.ruler.push('site', (state) => {
 const layout = await read('site/layout.html');
 const site = new Map(); // published name -> contents
 // Wrap a page body in the shared layout and mark links to the page itself as current.
-const publish = (name, title, description, body) =>
+const publish = (name, title, description, pageClass, body) =>
   site.set(
     `${name}.html`,
-    fill(layout, { title: escape(title), description: escape(description), version, body })
+    fill(layout, { title: escape(title), description: escape(description), version, pageClass, body })
       .replaceAll(`href="${name}.html"`, `href="${name}.html" aria-current="page"`),
   );
 
@@ -107,21 +116,22 @@ for (const [index, page] of pages.entries()) {
   const pager = [['previous', 'Previous', pages[index - 1]], ['next', 'Next', pages[index + 1]]]
     .map(([side, text, other]) => other ? `<a class="${side}" href="${other.name}.html"><span>${text}</span>${other.label}</a>` : '')
     .join('');
-  publish(page.name, `${env.title} · durable-db`, page.summary, `
+  publish(page.name, `${env.title} · durable-db`, page.summary, 'page-docs', `
 <div class="docs wrap">
 <details class="docs-nav" open><summary>Documentation</summary><nav aria-label="Documentation"><ul>${sidebar}</ul></nav></details>
-<main id="main"><article>${content}</article><nav class="pager" aria-label="Previous and next page">${pager}</nav></main>
+<main id="main"><article><p class="doc-kicker">${escape(page.tag)} · ${version}</p>${content}</article><nav class="pager" aria-label="Previous and next page">${pager}</nav></main>
 ${toc}
 </div>`);
 }
 
 const directory = pages
-  .map((page) => `<li><a href="${page.name}.html"><strong>${page.label}</strong><span>${page.summary}</span></a></li>`)
+  .map((page) => `<li><a href="${page.name}.html"><span class="dir-tag">${escape(page.tag)}</span><strong>${page.label}</strong><span class="dir-summary">${page.summary}</span><span class="dir-arrow" aria-hidden="true">→</span></a></li>`)
   .join('');
 publish(
   'index',
-  'durable-db · A transactional key-value database stored in a bucket',
-  'A transactional, ordered key-value database in one static Rust binary. The data is immutable objects in Backblaze B2, an S3-compatible bucket or a local directory, so servers keep no state.',
+  'durable-db · A transactional database whose only state is a bucket',
+  'One static Rust binary serving atomic transactions and ordered JSON scans over HTTP. All state lives as immutable objects in Backblaze B2, S3-compatible storage, or a local directory.',
+  'page-home',
   fill(await read('site/home.html'), { version, directory }),
 );
 for (const [name, source] of copies) site.set(name, await read(source, null));
