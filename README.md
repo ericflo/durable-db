@@ -2,7 +2,7 @@
 
 **A transactional database whose only state is a bucket.**
 
-durable-db is one static binary that serves atomic transactions and ordered scans over HTTP. Everything it stores lives in a Backblaze B2 or S3 bucket, or in a directory on your laptop. Servers keep nothing that matters, so you run them like a stateless web service: add them, remove them, or kill all of them, and the database is still there.
+`durable-db` is one static Rust binary (~8 MB) that serves strictly serializable transactions and ordered JSON scans over HTTP. Everything lives as immutable objects in Backblaze B2, an S3-compatible bucket, or a local directory. Give every user, tenant, or agent its own isolated database—an idle one is 146 bytes in the bucket. Servers hold no durable state: add them, remove them, or kill every one, and nothing is lost.
 
 ```sh
 curl -fsSL https://ericflo.github.io/durable-db-site/install.sh | sh
@@ -13,22 +13,25 @@ curl -X PUT localhost:7654/v1/databases/demo/keys/greeting -H "Authorization: Be
 curl localhost:7654/v1/databases/demo/keys/greeting -H "Authorization: Bearer $TOKEN"     # "hello"
 ```
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Performance](#performance) · [Kubernetes](#on-kubernetes) · [Verification](#verification) · [Limits](#limits-and-status) · [Docs](#documentation)
+> **New here?** Watch the [14-minute narrated explainer](https://durable-db.neuralcolumn.com/) (also embedded with chapters and a quality switcher on the [website](https://ericflo.github.io/durable-db-site/#watch)) covering per-agent databases, the claim protocol, fault injection, and group commit.
+
+[Website](https://ericflo.github.io/durable-db-site/) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Performance](#performance) · [Kubernetes](#on-kubernetes) · [Verification](#verification) · [Limits](#limits-and-status) · [Docs](#documentation)
 
 ## Why
 
-- **It scales like a web server.** A Kubernetes Deployment with no volumes and an ordinary autoscaler. No consensus cluster, no leader election service, no leases, no synchronized clocks.
-- **It needs almost nothing from storage.** PUT, GET, LIST and DELETE with read-after-write consistency. No conditional writes, which Backblaze B2 does not have, so B2 and S3 run the same algorithm.
-- **It is small enough to read.** About 10,000 lines of Rust, one TLA+ model, and a protocol you can hold in your head: immutable objects, one writer per database holding a claim, and a check of that claim before every acknowledgement.
+- **Scales like a stateless web server.** A Kubernetes `Deployment` with no persistent volumes and an ordinary autoscaler. No consensus cluster, no leader-election service, no leases, no synchronized clocks.
+- **Needs almost nothing from storage.** Only `PUT`, `GET`, `HEAD`, `LIST`, and `DELETE` with read-after-write consistency. No conditional writes (`If-Match`, `If-None-Match`), which Backblaze B2 rejects—so B2 and S3 run the same algorithm.
+- **Built for many isolated databases.** Create a thousand databases in seconds, each with its own signed token, byte quota, and request rate limit. Idle databases cost zero server memory and one 146-byte manifest in the bucket.
+- **Small enough to read.** Under 14,000 lines of Rust, one TLA+ model, and a protocol you can hold in your head: immutable objects, one writer per database holding a claim, and a claim check before every acknowledgement.
 
 ## Quick start
 
 ```sh
 durable-db serve --data ./data          # listens on 127.0.0.1:7654
-durable-db create my-app                # prints a token for the new database
+durable-db create my-app                # prints a write token for the new database
 ```
 
-From TypeScript:
+### TypeScript SDK
 
 ```ts
 import { Database } from '@durable-db/client';
@@ -38,8 +41,8 @@ const db = new Database({ url: 'http://127.0.0.1:7654', database: 'my-app', toke
 await db.set('users/ada', { name: 'Ada', logins: 1 });
 const ada = await db.get<{ name: string }>('users/ada');
 
-// Read, decide and write as one atomic step. If anything the callback read
-// changes first, nothing is written and the callback runs again.
+// Read, decide, and write as one atomic step. If anything read changes first,
+// nothing is written and the callback runs again.
 await db.transaction(async (tx) => {
   const from = (await tx.get<number>('accounts/a')) ?? 0;
   const to = (await tx.get<number>('accounts/b')) ?? 0;
@@ -48,12 +51,12 @@ await db.transaction(async (tx) => {
   tx.set('accounts/b', to + 30);
 });
 
-// Ordered keys: one page, or everything.
+// Ordered prefix scan: one page, or iterate everything.
 const page = await db.list({ prefix: 'users/', limit: 20 });
 for await (const user of db.scan({ prefix: 'users/' })) console.log(user.key);
 ```
 
-Or plain HTTP, with JSON values and no encoding step:
+### Plain HTTP
 
 ```sh
 curl localhost:7654/v1/databases/my-app/commit -H "Authorization: Bearer $TOKEN" -d '{
@@ -64,56 +67,62 @@ curl localhost:7654/v1/databases/my-app/commit -H "Authorization: Bearer $TOKEN"
 }'
 ```
 
-The [TypeScript client](clients/javascript/README.md) retries safely, tracks revisions and types errors. The [task board example](examples/web-app/README.md) is a 44-line storage module, four routes and tests. The same package contains a storage adapter for [pi-durable](clients/javascript/README.md#pi-durable-storage) 1.5.2 that passes its complete storage conformance suite.
+- [TypeScript client](clients/javascript/README.md) — zero runtime dependencies, automatic retries, revision tracking, and typed errors.
+- [Task board example](examples/web-app/README.md) — a Hono web app with a 44-line storage module, four routes, and tests.
+- [pi-durable storage adapter](clients/javascript/README.md#pi-durable-storage) — ships in the same package for `pi-durable` 1.5.2 and passes its complete storage conformance suite.
 
 ## What you get
 
-- **Atomic transactions** within a database, strictly serializable, conditional on the versions of the keys and ranges you read.
-- **Ordered scans** by prefix or range, forwards or backwards, paginated.
-- **Durable acknowledgements.** A commit is acknowledged only once it is in the bucket (or flushed to disk, locally).
-- **Two read levels.** `strong` reads are linearizable and cost one storage round trip, shared by concurrent reads. `session` reads come from memory and still never go backwards or miss your own writes.
-- **Safe retries.** Repeat a commit with the same idempotency key and it applies once.
-- **Many tenants.** One deployment serves many databases, each with its own tokens, storage quota and request budget.
-- **Nothing to operate.** Flushing, merging and deleting obsolete objects are done by whichever server holds a database.
+- **Atomic transactions** — strictly serializable within a database, conditional on key versions and key ranges.
+- **Ordered scans** — UTF-8 byte order by prefix or range, forward or reverse, cursor-paginated, all keys and scans in one request at one revision.
+- **Durable acknowledgements** — a commit is acknowledged only after its bytes are stored in the bucket (or flushed to disk locally).
+- **Two read levels** — `strong` (default) is linearizable at one storage round trip, shared across concurrent reads; `session` answers from memory and never goes backwards or misses your own writes.
+- **Safe retries** — repeat a commit with the same `idempotency_key` and it applies once (remembered for 100,000 revisions).
+- **Multi-tenant isolation** — per-database tokens verified before reading request bodies, byte quotas, request rate limits, and one-call revocation.
+- **Self-cleaning storage** — flushing, compaction, and batch deletion of obsolete objects and versions are handled automatically by the owning server.
 
 ## How it works
 
-```
+```text
 your app ──HTTP──▶ any server ──▶ the server holding the database ──▶ bucket
                    (stateless)     (in memory, with a claim object)    (all the state)
 ```
 
-1. **A database is a set of immutable objects**: frames of committed transactions, sorted tables, and small manifests that list them. Every object is written by exactly one server under a name only it uses, so no write is ever conditional.
-2. **One server at a time holds a database.** It proves it with a *claim* object. Another server takes over by deleting that claim, and only then reads what the previous holder wrote.
-3. **Every acknowledgement waits for a claim check.** A commit is one upload, then one HEAD to confirm the claim still exists. If it does, no one has taken over, and no one can have missed the upload. If it does not, nothing is acknowledged.
-4. **The same check guards reads and cleanup.** A linearizable read and a deletion of old objects each wait for a claim check too.
-5. **Servers only route.** They find each other through DNS and relay each request to the server that should hold the database. If they disagree, the claim decides; membership is never trusted for correctness.
+1. **Every object is immutable.** A database is frames of committed transactions, sorted LZ4-compressed tables, small manifests, a claim, and (if deleted) a tombstone. Every key lives under an epoch name with fresh random digits, so two servers never write the same key and no write needs to be conditional.
+2. **One server at a time holds a database.** To take ownership, a server lists claims, picks a higher epoch, and `PUT`s its own claim. If a higher claim exists, it withdraws.
+3. **A successor revokes before it reads.** The new owner deletes every lower claim first, and only then lists and reads the newest manifest and trailing frames. Nothing the prior owner acknowledges afterwards can be missed.
+4. **Every acknowledgement waits for a `HEAD` on the claim.** A commit is one frame upload followed by one `HEAD`. If the claim still stands, the frame was stored before any successor began reading. If not, nothing is acknowledged and the client retries safely with its idempotency key.
+5. **The same check guards reads, cleanup, and deletion.** Linearizable reads, garbage collection, and final database deletion each wait for a claim check begun after the state they depend on was stored.
+6. **Servers only route.** Peers discover each other via DNS and relay requests to the database's owner. If they disagree, the claim decides; membership is never a correctness dependency.
 
-[Architecture](docs/architecture.md) explains each step and what happens when servers crash, stall or race.
+Read [Architecture](docs/architecture.md) for every step and failure mode, or watch the [14-minute explainer](https://durable-db.neuralcolumn.com/).
 
 ## Performance
 
-Measured with the built-in `durable-db bench`, 256-byte values, one server. [Full tables, conditions and how to reproduce them.](docs/performance.md)
+Measured 2026-11-14 with `durable-db bench` (release `2.1.1` static binary, 256-byte JSON values, one server on a 32-core desktop with consumer NVMe; Backblaze B2 `us-west-002` reached over residential Wi-Fi, 22 ms away). See [docs/performance.md](docs/performance.md) for full tables, large-database runs, and reproduction commands.
 
-| | Local directory, fsync on | Backblaze B2, 22 ms away over Wi-Fi |
+| Workload | Local directory, fsync on | Backblaze B2, 22 ms over Wi-Fi |
 | --- | ---: | ---: |
-| One commit | 6.0 ms | 77 ms |
+| One commit (1 client, median) | 6.0 ms | 77 ms |
 | Commits/s, 256 clients on one database | 16,541 | 1,881 |
 | Commits/s, 64 clients over 64 databases | 4,936 | 534 |
-| Strong reads/s, 256 clients | 378,213 | 6,480 (37 ms each) |
-| Session reads/s, 32 clients | 297,289 | 276,223 (0.10 ms each) |
+| Strong reads/s, 256 clients | 378,213 | 6,480 (37 ms p50) |
+| Session reads/s, 32 clients | 297,289 | 276,223 (0.10 ms p50) |
 
-On a bucket, a commit costs one upload and one HEAD, so the provider's upload time is the floor. B2's upload time varies by a factor of two between hours and far more between its storage pods; durable-db keeps the pods that prove fast, sends each upload to the fastest one that is free, and races an identical upload on another pod when one can be spared. Many clients share each upload, which is why throughput rises with load while latency does not. Many databases committing at once share nothing: 64 of them need 64 uploads at a time, and with them one commit in a hundred took over half a second.
+- **Storage latency is the floor; group commit drives throughput.** Every transaction arriving while an upload is in flight joins the next frame, so throughput rises with concurrency while median latency stays flat.
+- **B2 variance and pod racing.** B2 upload times vary ~2× between hours (118 ms earlier the same day) and far more across storage pods. `durable-db` ranks pods by observed speed, routes primary uploads to the fastest free pod, and races an identical upload when a pod can be spared.
+- **Many concurrent databases share nothing.** 64 databases committing together require 64 concurrent uploads; in that run, 1% of commits exceeded 500 ms.
+- **Memory stays bounded as databases grow.** Measured with release `2.1.8` under a 1 GiB limit, servers peaked at 232–534 MiB for databases up to 16 GiB, and reopened a 16 GiB database after a kill in 50 ms locally ([details](docs/performance.md#a-large-database)).
 
 ## On a bucket
 
 ```sh
-openssl rand -hex 32 > admin.key
+openssl rand -hex 32 > admin.key && chmod 600 admin.key
 export AWS_ACCESS_KEY_ID=<keyID> AWS_SECRET_ACCESS_KEY=<applicationKey>
 durable-db serve --bucket my-bucket --endpoint https://s3.us-west-002.backblazeb2.com --key-file admin.key
 ```
 
-Run as many servers as you like with the same bucket and key file. [Deployment](docs/deployment.md) covers B2, S3, configuration, tenants and metrics.
+Run as many servers as you want against the same bucket and signing key. See [Deployment](docs/deployment.md) for B2, S3-compatible stores, configuration flags, tenant limits, and Prometheus metrics.
 
 ## On Kubernetes
 
@@ -123,39 +132,67 @@ kubectl -n durable-db create secret generic durable-db-storage --from-literal=DU
 kubectl -n durable-db apply -k deploy/kubernetes
 ```
 
-A Deployment, two Services, an autoscaler and a disruption budget. A pod that is told to stop hands its databases over before it exits; a pod that is killed loses nothing. `scripts/test-kubernetes.sh` checks this on a kind cluster against your bucket: in each of seventeen recorded runs the autoscaler went from 2 to 5 pods and back, one pod was force-deleted, and the ledger balanced exactly: between 12,026 and 23,679 transfers, by how fast the bucket answered at that hour. A read load without retries ran alongside: of its 9 to 13 million reads, between none and 110 failed, with a pod deleted under them.
+[`deploy/kubernetes`](deploy/kubernetes) ships a stateless `Deployment` (no persistent volumes; disposable `emptyDir` disk cache), two `Service`s, a `HorizontalPodAutoscaler`, and a `PodDisruptionBudget`. Stopping pods hand databases over gracefully; killed pods lose nothing.
+
+`scripts/test-kubernetes.sh` verifies this on a three-node `kind` cluster backed by Backblaze B2: across **18 recorded runs**, the autoscaler scaled `2 → 5 → 2` while one pod was force-deleted mid-load, and every ledger balanced (**12,026 to 25,965 transfers**, varying with bucket latency at that hour). Alongside each run, 9–13 million unretried session reads ran with **0 to 110** failures across the forced kill.
 
 ## Verification
 
-- **A TLA+ model** of creating a database, taking ownership, committing, linearizable reads, checkpoints, collection and deleting the database. TLC explores it exhaustively at two writers and two epochs: 3.59 million states with two transactions, and 4.11 million with deletion and one transaction. It checks, too, that a transaction a client sends again is applied once, that a refusal or the answer to a retry describes only what is acknowledged, and that a collection's deletes may arrive any time later, after their sender has crashed or released the database. Each of the thirteen protocol rules has a negative control: turning the rule off must, and does, produce a counterexample.
-- **Fault injection.** Three nodes on storage that delays, drops, half-applies and belatedly applies requests, with crashes and stale owners; 200 random schedules pass. This test found three real bugs in the first implementation. An adversarial review of release 2.0.0 found more, in deletion, in a failed takeover and in cleanup on a versioned bucket. All are fixed, each with a model control or a test that fails on the old code.
-- **Real servers and a real bucket.** The HTTP contract, multi-node takeover and handover, the storage contract on B2, and the Kubernetes run above.
+- **TLA+ model (`spec/DurableDb.tla`).** Exhaustive TLC checks at 2 writers and 2 epochs with zero invariant violations: **3.59M** distinct states (`DurableDb`), **4.11M** (`Deletion`), **67.1M** (`DeepDeletion`, 2 transactions + deletion), **659k** (`Retries`, idempotent retries and check refusals), and **967k** (`LateDeletes`, collection deletes arriving arbitrarily late). All **13 protocol rules** have negative controls in TLC; turning off any rule produces a counterexample.
+- **Fault injection & kill soaks.** Three nodes on a store that delays, drops, half-applies, and late-applies requests with crashes and stale owners pass **200 random seeds** (`tests/chaos.rs`), alongside **74 targeted interleaving tests** (`tests/interleavings.rs`) and a 30-minute kill soak (**157 stops, 118 kills, 1,939,925 ledger transfers balanced**).
+- **Real servers & buckets.** HTTP, multi-node cluster, and bucket contract suites on Backblaze B2, plus containerized MinIO, RustFS, and Garage, and the 18 Kubernetes failover runs above.
 
-Bounded model checking is not a proof of the implementation. [Verification](docs/verification.md) lists the assumptions, what is checked, and what is not.
+> Bounded model checking is evidence about a model—not a proof of the Rust implementation or of every deployment. See [Verification](docs/verification.md) for every assumption, what the model leaves out, all 47 findings caught by tests and reviews, and remaining obligations.
 
 ## Limits and status
 
-Release 2.0.0 was a complete rewrite; earlier releases used a different design and storage format. Release 2.1.0 keeps the format, fixes what a review of 2.0.0 found, and limits what one caller or one database can cost a server. Release 2.1.1 changes how uploads are spread over Backblaze B2's storage pods, which was what made many databases committing at once slow there. Release 2.1.2 removes what a database no longer needs with one request for up to a thousand versions instead of one for each, which was what failed when many databases cleaned up at once. Release 2.1.3 runs on S3 stores that keep no versions, such as Garage, which earlier releases refused when they started. Release 2.1.4 fixes a defect of every release before it: a server with more than twenty databases open sooner or later stopped its housekeeping, within 90 seconds when 64 were in use, and from then on followed no change of its peers, handed no database over, released none that fell idle and kept to neither memory budget, while it went on answering. Upgrade from any earlier release; [verification](docs/verification.md#what-these-checks-found), finding 36, has the account. 2.1.4 also sends two requests in the form Amazon S3 and Google Cloud Storage ask for. Release 2.1.5 holds back from a store that refuses requests: a server of 2.1.4 whose every upload Backblaze refused sent it 800 more a second, and a server now sends one request at a time until one is taken ([verification](docs/verification.md#what-these-checks-found), finding 38). Release 2.1.6 no longer takes a store that is slow to answer for one that refuses: 2.1.5 on a MinIO that took twenty seconds over its listings stopped sending it reads that it would have answered (finding 39). Nor does a slow store hold up a deletion, a release or a server's housekeeping behind a collection (finding 40). Release 2.1.7 fixes what a database did at its quota in every release before it: one that was written over, or emptied, went on counting what it no longer held, and once it reached its quota it refused every write from then on, deletions excepted, however little it still held. It now merges that away first (finding 41). 2.1.7 is also the first release measured with one database of more than a gigabyte: [performance](docs/performance.md#a-large-database). Release 2.1.8 fixes what that measurement found: a server that read more than its disk cache held fetched whole tables over and over in each other's place. A table is now fetched once reads have had a sixteenth of it, never in the place of one in use, and a merge or a scan asks the store for many blocks at once (finding 43). It also keeps down the runs of tables that a read looks in, of which a database written during a long merge gained one for every flush: one of 16 GiB that a kill had left with 27 runs was read four to five times slower than with seven (finding 44). Release 2.1.9 holds writes back while a merge would leave a database with far more runs than it may, and keeps a merge going through a store that fails for a while, where it had been begun again from its start (finding 45). Release 2.1.10 gives a merge's turn, between two of its tables, to a database that waits for one: while two merges of 4 GiB held a server's two turns, a small database written meanwhile went from 2 runs to 27 with 2.1.9 and had 5 at most with 2.1.10. A release or a deletion no longer waits for the upload of a merge's table (finding 46). Release 2.1.11 has a database in line for a turn take the one it is granted and no other, where a turn granted during a flush could be left unused while the database merged with the other; lets a new owner's sweep of what earlier owners left give way to a release or a deletion; and its model checks that a transaction a client sends again is applied once. Release 2.1.12 waits up to two minutes for each request of a purge, where a MinIO under load answered after a minute and every purge had failed at twenty seconds, and collects outside its database's maintenance, so that a slow store no longer holds flushes (finding 47). The read figures published with 2.0.0 were not those of the binary it shipped: [performance](docs/performance.md) has the correction.
+Release `2.0.0` was a complete rewrite; every release from `2.0.0` through `2.1.12` shares the same storage format. **Upgrade from any release earlier than `2.1.4`** (servers with >20 open databases could stall background housekeeping; [finding 36](docs/verification.md#what-these-checks-found)). The read figures originally published with `2.0.0` were measured against a glibc build rather than the shipped static binary; [docs/performance.md](docs/performance.md) records the correction.
 
-- One server writes a database at a time. Spread load over databases, not over servers per database.
-- Transactions do not span databases. There are no historical reads and no point-in-time restore.
-- A deleted database's name cannot be reused.
-- A database is rewritten in full each time it grows by half, and once more when it reaches its quota holding what was written over: a write then waits for as long as that takes. The default quota is 1 GiB. Databases of 4 and 16 GiB have been measured on a local directory, of 4 GiB on MinIO and of 1 GiB on Backblaze B2 ([performance](docs/performance.md#a-large-database)).
-- A read of a key looks in one table of each run of tables, newest first. A database written faster than its merges can be made gains runs; while a merge would leave more than twenty-four, writes are told to wait. While more databases have a merge to make than a server has turns, two, their merges take turns a table at a time, and each takes longer than it would have with a turn to itself: two merges of 4 GiB took a tenth longer with a small database waiting, and of three merges of 2 GiB the first two ended thirteen seconds later, on a local directory; over a link of 8 MB a second two merges of 1 GiB took half as long again and more, in one run of each, and runs a quarter that size differed from one to the next as much ([performance](docs/performance.md#several-databases-merging-at-once)).
-- A read that finds its table in neither cache costs a request to the store for each run of tables it looks in. A server that reads databases larger than its disk cache keeps the tables it has there and reads the others so. Where reads must be fast, or are paid for as download, give a server a disk cache as large as the databases it serves, and twice that for their merges to read nothing back ([performance](docs/performance.md#sizing-the-disk-cache)).
-- Among cloud stores only Backblaze B2 has been exercised. Amazon S3, Google Cloud Storage, Cloudflare R2 and others share the code but have not been run; what the first two answer without an account has been read, and two requests were changed to suit it. Three S3 servers have been run in containers on one machine: a community build of MinIO, RustFS and Garage.
-- Backblaze limits an account's requests, by its documentation to 500 a second unless you ask for more, and a server keeps itself under no rate. The figures for many databases on B2 are above that limit, and the same load run for twenty minutes had every upload refused for five and a half of them. A server that is refused holds back until the store takes a request again; that has been seen on stand-ins and behind a proxy, not on Backblaze.
-- Every B2 figure was measured from one desktop over Wi-Fi, a link that itself stalled for a second or two about once a minute; the slowest commits in those tables are such moments, and every commit that shares a stalled request waits with it. A server in a data centre, on a wired link, has not been measured.
-- Memory was measured for minutes: under a limit on a local directory, where it was level through ten minutes of each load, for twenty minutes of 256 databases on MinIO on the same desktop and once for an hour, where it was level as well, and for five minutes on Backblaze B2, where it was still rising within what the flags allow. Not for many hours.
-- Collection falls behind a store that takes more than two minutes to answer a purge: what is left is collected once it answers in time, and nothing bounds it meanwhile. On a MinIO under load that took a minute over each listing, 2.1.11 gave up at twenty seconds and collected nothing until the writes ended, while what the store kept grew threefold; 2.1.12 collected throughout in one run, and in another until the thirteenth minute, when that MinIO took longer than two minutes ([verification](docs/verification.md), finding 47). No soak of many hours on a real multi-node cluster yet, and no independent review.
-- The prebuilt binary is Linux x86_64.
+### By design
+
+- **One writer per database at a time.** Scale write throughput across more databases, not more servers per database.
+- **Single-database transactions, current state only.** Transactions do not span databases; there are no historical reads or point-in-time restore.
+- **Deleted database names cannot be reused.** A permanent tombstone prevents late uploads from a prior owner from ever reviving deleted data.
+- **Full rewrites on growth and quota pressure.** Merging the oldest table rewrites the database each time it grows by half, and once more if it hits its quota holding overwritten data; writes wait while that merge runs. Default quota is 1 GiB; databases up to 16 GiB (local), 4 GiB (MinIO), and 1 GiB (B2) have been measured ([details](docs/performance.md#a-large-database)).
+- **Run count and merge turns.** A point lookup checks one table per run, newest first. Writes wait with `503` while a merge would leave >24 runs. A server runs two merges at a time; when more databases need merges, they share turns one table at a time, extending individual merges on slow links ([details](docs/performance.md#several-databases-merging-at-once)).
+- **Disk cache sizing.** Reads missing both caches cost one bucket request per run searched. Where reads must stay fast or egress is billed, size `--cache-dir-bytes` to the databases a server serves—and 2× for zero-download merges ([details](docs/performance.md#sizing-the-disk-cache)).
+
+### Not done yet
+
+- **Only Backblaze B2 exercised among cloud stores.** Amazon S3, Google Cloud Storage, and Cloudflare R2 share the S3 code path (except B2's native upload) but have not been run live; MinIO, RustFS, and Garage pass in single-host containers.
+- **No self-imposed provider rate cap.** Backblaze documents a default limit of 500 req/s per account; pushing past it for 20 minutes triggered 5.5 minutes of `503` refusals. Since `2.1.5` servers back off after 8 consecutive refusals of a request kind (tested on stand-ins and a proxy, not yet observed live on B2).
+- **B2 measured only over residential Wi-Fi.** Every B2 figure comes from one desktop whose Wi-Fi stalled for 1–2 s about once a minute; a server in a data centre on a wired link has not been measured.
+- **No multi-hour soak on a real multi-node cluster.** Memory stayed level across 10-minute local loads and 20-minute and 1-hour MinIO runs of 256 databases, and was still rising within configured flags after 5–11 minutes on B2—not yet measured for many hours.
+- **Collection lag on very slow stores.** Purges wait up to 2 minutes per request; if a store takes longer, collection falls behind until it recovers ([finding 47](docs/verification.md#what-these-checks-found)).
+- **Linux x86_64 prebuilt binary only.** Other platforms [build from source](docs/development.md).
+- **No independent external review yet.** Reviews so far were automated and commissioned by the project.
+
+<details>
+<summary>Release history (2.0.0 – 2.1.12)</summary>
+
+- **2.1.12** — Purge requests wait up to 2 minutes (from 20 s) so slow stores don't fail every purge; collection runs outside database maintenance so slow stores don't block flushes; TLA+ models late collection deletes ([finding 47](docs/verification.md#what-these-checks-found)).
+- **2.1.11** — Queued databases take only their granted merge turn; new-owner leftover sweeps yield to release/deletion; TLA+ models idempotent retry deduplication (`Once`) and check refusals.
+- **2.1.10** — Competing merges share turns one table at a time so small databases stay fast alongside large merges; release/deletion no longer wait for in-flight merge table uploads ([finding 46](docs/verification.md#what-these-checks-found)).
+- **2.1.9** — Back-pressures writes with `503` while a merge would leave >24 runs; merges survive transient store failures without restarting from scratch ([finding 45](docs/verification.md#what-these-checks-found)).
+- **2.1.8** — Fixes disk-cache thrashing when databases exceed cache size (tables fetched only after 1/16 read, never evicting active tables; multi-block read-ahead for scans/merges) and keeps run counts bounded during long merges ([findings 43–44](docs/verification.md#what-these-checks-found)).
+- **2.1.7** — Databases hitting quota while holding overwritten/deleted data now compact before returning `507` ([finding 41](docs/verification.md#what-these-checks-found)); first >1 GiB measurements ([performance](docs/performance.md#a-large-database)).
+- **2.1.6** — Slow listings no longer trigger read back-off ([finding 39](docs/verification.md#what-these-checks-found)); slow stores no longer block deletion, release, or housekeeping behind collection ([finding 40](docs/verification.md#what-these-checks-found)).
+- **2.1.5** — Backs off to one probe request at a time after 8 consecutive store refusals of a request kind ([finding 38](docs/verification.md#what-these-checks-found)).
+- **2.1.4** — Fixes housekeeping stall with >20 open databases ([finding 36](docs/verification.md#what-these-checks-found)); adjusts two listing requests for Amazon S3 and Google Cloud Storage compatibility.
+- **2.1.3** — Supports unversioned S3 stores without version-listing APIs (such as Garage).
+- **2.1.2** — Batch-deletes up to 1,000 object versions per purge request instead of one per version ([finding 32](docs/verification.md#what-these-checks-found)).
+- **2.1.1** — Ranks and reuses fast Backblaze B2 storage pods instead of opening new pods on every commit ([finding 27](docs/verification.md#what-these-checks-found)).
+- **2.1.0** — Fixes all findings from the `2.0.0` adversarial review, embeds jemalloc in the static binary, and enforces per-caller and per-database memory budgets.
+- **2.0.0** — Complete rewrite around the immutable-object claim protocol.
+
+</details>
 
 ## Documentation
 
-| | |
+| Document | Contents |
 | --- | --- |
-| [HTTP API](docs/api.md) | Endpoints, consistency, errors and limits |
-| [TypeScript client](clients/javascript/README.md) | The SDK and the pi-durable storage adapter |
+| [HTTP API](docs/api.md) | Endpoints, consistency, errors, and limits |
+| [TypeScript client](clients/javascript/README.md) | The SDK and the `pi-durable` storage adapter |
 | [Example](examples/web-app/README.md) | A task board on Hono |
 | [Deployment](docs/deployment.md) | One machine, a bucket, Kubernetes, tenants, metrics |
 | [Architecture](docs/architecture.md) | The protocol, step by step |
