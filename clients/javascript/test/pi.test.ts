@@ -398,7 +398,7 @@ describe('sizes', () => {
       () => {},
       context,
     );
-    expect(result).toEqual({ stored: 6 });
+    expect(result).toEqual({ kind: 'stored', stored: 6 });
     const stored = await storage.entry(ids[2]!, context);
     expect((stored!.entry.data as { text: string }).text).toBe(text(ids[2]!));
     const page = await storage.scanEntries(

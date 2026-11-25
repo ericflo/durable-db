@@ -38,8 +38,8 @@
     "format:check": "prettier --config .prettierrc.json --check \"*.ts\" \"{src,test,bench}/**/*.ts\" \"../../examples/web-app/*.ts\""
   },
   "peerDependencies": {
-    "@earendil-works/chord": "1.5.2",
-    "@earendil-works/pi-durable": "1.5.2"
+    "@earendil-works/chord": "1.6.1",
+    "@earendil-works/pi-durable": "1.6.1"
   },
   "peerDependenciesMeta": {
     "@earendil-works/chord": {
@@ -50,9 +50,9 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/chord": "1.5.2",
-    "@earendil-works/pi-ai": "1.5.2",
-    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/chord": "1.6.1",
+    "@earendil-works/pi-ai": "1.6.1",
+    "@earendil-works/pi-durable": "1.6.1",
     "@types/node": "24.19.2",
     "prettier": "3.9.10",
     "typescript": "7.0.2",

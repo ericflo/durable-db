@@ -7,8 +7,23 @@ import {
   fauxProvider,
   fauxToolCall,
 } from '@earendil-works/pi-ai/providers/faux';
-import { Harness, createRegistry, defineExtension, defineTool } from '@earendil-works/pi-durable';
-import type { Conversation, EntryRecord, Report } from '@earendil-works/pi-durable';
+import {
+  Harness,
+  createRegistry,
+  defineExtension,
+  defineSignal,
+  defineTool,
+} from '@earendil-works/pi-durable';
+import type {
+  Conversation,
+  EntryRecord,
+  Report,
+  TaskId,
+  ToolExecutionApi,
+  ToolExecutionResult,
+  ToolPark,
+  Wake,
+} from '@earendil-works/pi-durable';
 import type { Database } from '../src/index.ts';
 import { openPiStorage } from '../src/pi/index.ts';
 import { createDatabase } from './fixture.ts';
@@ -27,8 +42,13 @@ async function openHarness(
   options: {
     takeover?: boolean;
     responses?: Parameters<ReturnType<typeof fauxProvider>['setResponses']>[0];
-    execute?: (args: { value: string }, callContext: typeof context) => Promise<string>;
+    execute?: (
+      args: { value: string },
+      api: ToolExecutionApi,
+      callContext: typeof context,
+    ) => Promise<ToolExecutionResult | ToolPark | string>;
     onReport?: (report: Report) => void;
+    onWake?: (wake: Wake) => void;
   } = {},
 ) {
   const faux = fauxProvider();
@@ -45,21 +65,22 @@ async function openHarness(
       required: ['value'],
       additionalProperties: false,
     },
-    execute: async (args: { value: string }, _api, callContext) => ({
-      output: [
-        {
-          type: 'text',
-          text: await (options.execute ?? (async (a) => a.value))(args, callContext),
-        },
-      ],
-    }),
+    execute: async (args: { value: string }, api, callContext) => {
+      const result = await (options.execute ?? (async (a) => a.value))(args, api, callContext);
+      return typeof result === 'string' ? { output: [{ type: 'text', text: result }] } : result;
+    },
   });
   const registry = createRegistry();
   registry.install(defineExtension({ name: 'test', tools: [tool] }));
   const storage = await openPiStorage(db, { takeover: options.takeover });
   const harness = await Harness.open(
     storage,
-    { models, registry, onReport: options.onReport ?? (() => {}) },
+    {
+      models,
+      registry,
+      onReport: options.onReport ?? (() => {}),
+      ...(options.onWake === undefined ? {} : { onWake: options.onWake }),
+    },
     context,
   );
   const model = faux.getModel();
@@ -118,7 +139,7 @@ it('fences a Harness that is still running a tool when another host takes over',
   const storageFailed = new Promise<void>((resolve) => (failed = resolve));
   const old = await openHarness(db, {
     responses: [toolCall()],
-    execute: async (args, callContext) => {
+    execute: async (args, _api, callContext) => {
       entered();
       await awaitWithContext(blocked, callContext);
       return args.value;
@@ -146,4 +167,79 @@ it('fences a Harness that is still running a tool when another host takes over',
   expect(kinds(entries, 'pi.tool-result')).toHaveLength(1);
   await old.harness.close(context);
   await next.harness.close(context);
+});
+
+it('parks a tool on a signal across reopen and wakes it when the signal arrives', async () => {
+  const Answer = defineSignal({
+    name: 'test.answer',
+    version: 1,
+    schema: {
+      type: 'object',
+      properties: { text: { type: 'string' } },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  });
+  const { db } = await createDatabase();
+  let parkedTaskId!: (id: TaskId) => void;
+  let parkedReady!: () => void;
+  const parked = new Promise<TaskId>((resolve) => (parkedTaskId = resolve));
+  const inactive = new Promise<void>((resolve) => (parkedReady = resolve));
+  let sawPark = false;
+  const execute = async (
+    args: { value: string },
+    api: ToolExecutionApi,
+    callContext: typeof context,
+  ): Promise<ToolExecutionResult | ToolPark> => {
+    const state = await api.readSignal(Answer, 'reply', callContext);
+    if (state?.kind === 'value') {
+      const value = state.value as { text: string };
+      const checkpoint = api.checkpoint as { prompt: string } | undefined;
+      return {
+        output: [
+          {
+            type: 'text',
+            text: `${checkpoint?.prompt ?? ''}:${api.wake?.reason ?? ''}:${value.text}`,
+          },
+        ],
+      };
+    }
+    sawPark = true;
+    parkedTaskId(api.taskId);
+    return {
+      kind: 'sleep',
+      checkpoint: { prompt: args.value },
+      signals: [Answer.key('reply')],
+    };
+  };
+
+  const first = await openHarness(db, {
+    responses: [toolCall()],
+    execute,
+    onWake: (wake) => {
+      if (sawPark && !wake.active) parkedReady();
+    },
+  });
+  const submission = await first.root.submit(input(crypto.randomUUID()), context);
+  const taskId = await parked;
+  await inactive;
+  expect(first.harness.wake()).toEqual({ active: false });
+  expect((await first.harness.getTask(taskId, context))?.state).toMatchObject({
+    status: 'sleeping',
+    signals: [Answer.key('reply')],
+  });
+  await first.harness.close(context);
+
+  const second = await openHarness(db, { responses: [fauxAssistantMessage('woken')], execute });
+  expect(await second.harness.signal(taskId, Answer, 'reply', { text: 'approved' }, context)).toBe(
+    'delivered',
+  );
+  const reopened = await second.harness.submission(submission.id, context);
+  expect((await reopened!.wait(context)).status).toBe('done');
+  const entries = await history(second.root);
+  expect(kinds(entries, 'pi.tool-result')[0]!.model![0]).toMatchObject({
+    content: [{ type: 'text', text: 'from the tool:signal:approved' }],
+    isError: false,
+  });
+  await second.harness.close(context);
 });

@@ -195,7 +195,7 @@ The [task board example](../../examples/web-app/README.md) uses it.
 
 ## pi-durable storage
 
-`@durable-db/client/pi` implements the `Storage` interface of [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.5.2 on one database, so a pi-durable Session or Harness keeps its conversations, tasks and documents in durable-db. Install pi-durable 1.5.2 in the application; this package lists it as an optional peer dependency.
+`@durable-db/client/pi` implements the `Storage` interface of [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.6.1 on one database, so a pi-durable Session or Harness keeps its conversations, tasks and documents in durable-db. Install pi-durable 1.6.1 in the application; this package lists it as an optional peer dependency.
 
 ```ts
 import { Database } from '@durable-db/client';

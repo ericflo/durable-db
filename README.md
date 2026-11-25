@@ -69,7 +69,7 @@ curl localhost:7654/v1/databases/my-app/commit -H "Authorization: Bearer $TOKEN"
 
 - [TypeScript client](clients/javascript/README.md) — zero runtime dependencies, automatic retries, revision tracking, and typed errors.
 - [Task board example](examples/web-app/README.md) — a Hono web app with a 44-line storage module, four routes, and tests.
-- [pi-durable storage adapter](clients/javascript/README.md#pi-durable-storage) — ships in the same package for `pi-durable` 1.5.2 and passes its complete storage conformance suite.
+- [pi-durable storage adapter](clients/javascript/README.md#pi-durable-storage) — ships in the same package for `pi-durable` 1.6.1 and passes its complete storage conformance suite.
 
 ## What you get
 

@@ -14,7 +14,7 @@ let opened = 0;
 
 registerStorageConformance(
   { describe, expect, it },
-  'pi-durable 1.5.2 storage conformance',
+  'pi-durable 1.6.1 storage conformance',
   async (use) => {
     const storage = await openPiStorage(db, { prefix: `case-${++opened}/` });
     try {
@@ -25,7 +25,7 @@ registerStorageConformance(
   },
 );
 
-it('registered all 32 upstream cases', () => {
+it('registered all 33 upstream cases', () => {
   const cases = createStorageConformance({ assertions: {} as never, withStorage: async () => {} });
-  expect(cases).toHaveLength(32);
+  expect(cases).toHaveLength(33);
 });

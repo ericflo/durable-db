@@ -1,5 +1,5 @@
 /**
- * pi-durable 1.5.2 `Storage` on one durable-db database.
+ * pi-durable 1.6.1 `Storage` on one durable-db database.
  *
  * Keys under the storage's prefix:
  *
@@ -306,7 +306,9 @@ class PiStorage implements Storage {
         throw failure instanceof DatabaseError && !failure.outcomeUnknown
           ? failure
           : this.#fail(failure);
-      return refused === undefined ? { stored } : { stored, refused };
+      return refused === undefined
+        ? { kind: 'stored', stored }
+        : { kind: 'refused', stored, refused };
     });
   }
 
