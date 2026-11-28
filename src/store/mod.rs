@@ -103,7 +103,7 @@ pub trait ObjectStore: Send + Sync + 'static {
 /// The order in which `list_dirs` yields names: that of the keys below them,
 /// so each name is compared with its `/` appended.
 pub fn dir_order(a: &str, b: &str) -> std::cmp::Ordering {
-    a.bytes().chain([b'/']).cmp(b.bytes().chain([b'/']))
+    a.bytes().chain(*b"/").cmp(b.bytes().chain(*b"/"))
 }
 
 /// Every key below `prefix`, in order.

@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 # One build verifies and produces everything: the model check, the Rust and
 # client tests, a static binary, the website, and a scratch runtime image.
-FROM docker.io/library/node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS node
+FROM docker.io/library/node:24.22.3-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530 AS node
 
-FROM docker.io/library/rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS tools
+FROM docker.io/library/rust:1.99.1-bookworm@sha256:e6f2cff35d0f309acf8433b4f05878ed77092602c5065cc81801177da0bb3a9c AS tools
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends musl-tools openjdk-17-jre-headless && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl && rustup component add clippy rustfmt
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
