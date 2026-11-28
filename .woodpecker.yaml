@@ -5,7 +5,7 @@ when:
 
 steps:
   - name: dependency-audit
-    image: docker.io/library/buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
+    image: localhost:32000/epsilon-ci-buildpack:main-20261128010825-1bc545742cc7@sha256:9f94d9d6ed8a9630ee38a019fc6a9785aa53ad2afe27c6b3474074da2a2a1fe7
     commands:
       - scripts/audit-dependencies.sh
     backend_options:
@@ -23,7 +23,7 @@ steps:
           seccompProfile: {type: RuntimeDefault}
 
   - name: javascript-audit
-    image: docker.io/library/buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
+    image: localhost:32000/epsilon-ci-buildpack:main-20261128010825-1bc545742cc7@sha256:9f94d9d6ed8a9630ee38a019fc6a9785aa53ad2afe27c6b3474074da2a2a1fe7
     commands:
       - scripts/audit-javascript.sh
     backend_options:
@@ -42,7 +42,7 @@ steps:
 
   - name: verify-and-build
     depends_on: [dependency-audit, javascript-audit]
-    image: docker.io/moby/buildkit:v0.35.0-rootless@sha256:5987568f92dafbfb679879de59c1cd8d26597f5f6635c314e166164e2615870c
+    image: localhost:32000/epsilon-buildkit:main-20261128010825-1bc545742cc7@sha256:36b2e87404bfc2253c02e54ece0e3ed3eb72aa89f0dfa701d065064a28915ac5
     commands:
       # A clean copy of the commit with stable permissions, so the build
       # cache does not depend on how the checkout volume was mounted. It is
@@ -100,7 +100,7 @@ steps:
           seccompProfile: {type: RuntimeDefault}
 
   - name: publish-docs
-    image: docker.io/library/buildpack-deps:bookworm-scm@sha256:5bac6b3020afcf0358de87990605d5dc4c3f060629381912266b9b9278375af3
+    image: localhost:32000/epsilon-ci-buildpack:main-20261128010825-1bc545742cc7@sha256:9f94d9d6ed8a9630ee38a019fc6a9785aa53ad2afe27c6b3474074da2a2a1fe7
     depends_on: [verify-and-build]
     when:
       - evaluate: 'CI_COMMIT_BRANCH == CI_REPO_DEFAULT_BRANCH && CI_PIPELINE_EVENT != "tag"'
